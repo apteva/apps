@@ -133,3 +133,137 @@ selects the exact file in Clips4Sale's picker and retains the authorization and
 duplicate-request checks. For a replacement it checks the picker before confirming
 Replace File, then verifies the saved filename and performer cards after
 reloading the same draft. Publishing remains separate.
+
+## Draft previews and thumbnails
+
+Use `set_clip_thumbnail` for a JPG or PNG and `set_clip_preview_video` for an
+MP4 preview. Pass `visibility: sfw` or `visibility: nsfw` explicitly. Each run
+sets one slot on an existing draft, so separate SFW and NSFW assets can be
+assigned independently. If the SFW slot currently copies NSFW, set the separate
+SFW asset first.
+
+Supply the saved browser context, exact store ID and name, clip ID, title, and
+saved main filename. Also supply the asset filename, HTTPS source URL and
+SHA-256, `preview_upload_authorized: true`, and a unique `request_id` for the
+intended change. Clips4Sale expects 16:9 assets, with a 5 MB limit for thumbnails
+and a 100 MB and 60-second limit for previews. The native uploader validates the
+file.
+
+The operation stages the supplied bytes before opening the upload control. It
+checks the other slot, saves and exits, then reopens the draft to verify the
+saved asset. For thumbnails it compares the uploaded filename with the exact
+SFW or NSFW field in the saved clip record because the editor may display a
+resized or aliased image URL. If an upload or save reports an uncertain outcome,
+inspect the draft before issuing another request.
+
+## Previews and thumbnails on active clips
+
+The Clips4Sale Creator actor contains the draft and active-clip operations
+for all store contexts. Deploy the complete definition with Actors v0.3.5 or
+later, which supports definitions up to 2 MiB.
+
+Use `preflight_live_clip_thumbnail` or `preflight_live_clip_preview_video`
+to check the exact published clip and selected SFW or NSFW slot. The
+preflight requires an active listing that is up to date, so edits already in
+progress or awaiting review are left for the operator to resolve.
+
+Run `set_live_clip_thumbnail` or `set_live_clip_preview_video` with the
+same identity and asset inputs as for a draft, plus
+`live_edit_authorized: true`. The actor uses Save and Exit, then confirms
+Publish changes if the versioning dialog appears. It reads the resulting
+publication and review states and verifies that the same clip remains active
+with the original main filename, price and publication timestamp. The
+receipt includes the staged asset evidence and the approved and pending
+asset fields returned by Clips4Sale.
+
+## Daily traffic
+
+Use `get_daily_traffic` with an explicit `date` in `YYYY-MM-DD` format and
+the saved context, expected store ID, and expected store name. Dates follow
+Clips4Sale’s New York reporting timezone. Run once per store and date. The
+audience report provides unique visitors. The traffic source report provides
+impressions by source, purchases, and creator income.
+
+## Creator Support tickets
+
+`prepare_creator_support_ticket` opens the public Creator Support form in a
+fresh browser and checks the email, store numbers, payable name, subject,
+and description after filling them. Provide one store number or a list
+separated by commas. Review each separate request before sending.
+
+`submit_creator_support_ticket` requires explicit
+`ticket_send_authorized: true` and a stable `request_id` for each approved
+request. It submits once and waits for the portal acknowledgment. If the
+portal does not confirm submission, check for the confirmation email
+before retrying.
+
+## Payouts
+
+Use `get_payout_verification_status` to check the email verification prompt
+and payout tabs before onboarding. Use `send_account_verification_email` with
+explicit send authorization and a unique request ID. Match the incoming
+verification email to the recipient shown in the actor receipt.
+
+Use `get_payout_settings` for the Creator Workspace setup and disabled tabs,
+`get_payout_method` for the method shown after onboarding, and
+`get_payout_history` for payment and adjustment rows. The method report reads
+only the method and destination type fields. Payout history follows the
+workspace's pagination and preserves displayed signs and currency.
+
+Use `set_payout_account_type` for initial EU registered-business onboarding.
+Supply the legal and payable names, context-bound secret references for the
+VAT ID and registration number, and a temporary HTTPS proof-of-address
+source with its filename and SHA-256. The tax classification selected is
+EU business. Use `set_payout_sole_trader_account_type` for the separate EU
+sole trader classification. It takes the names, VAT ID reference and proof
+of address. Both Account Type writes verify the expected profile country
+before opening the tax form. Use `set_payout_method` separately after Account
+Type is saved.
+It supports Spanish SEPA and takes the bank account type (`C` for checking
+or `S` for savings) and context-bound secret references for the bank name,
+IBAN, and BIC.
+
+Both writes require `payout_setup_authorized: true`, a unique `request_id`,
+and the exact store identity. Each clicks Save at most once per request.
+If an OTP prompt appears, the run records a confirmation-code marker and
+stops. Check the store's payout status before retrying any uncertain save.
+
+Use `preflight_payout_minimum` to verify the editable USD threshold.
+`set_payout_minimum` requires the exact expected current amount, an explicit
+new amount, `payout_minimum_change_authorized: true`, and a unique
+`request_id`. The actor verifies the saved value after a reload. Complete
+account verification and banking onboarding in Creator Workspace. For
+changes to banking details on file, use Clips4Sale's secure change form.
+
+
+### Delete a clip and reconcile deletion
+
+The shared actor provides `preflight_delete_clip`, `delete_clip`, and
+`verify_deleted_clip`. Runtime inputs bind the context, store ID, store name,
+clip ID and exact title, with no production IDs embedded in the operations.
+The write also requires `expected_status`, a native `library_tab` (`Drafts` or
+`Review` for the bulk control; `All` for the row control), and boolean
+`delete_authorized: true`.
+
+Preflight checks the signed-in store and the native clip ID, title and status,
+selects exactly one clip, opens the native confirmation, and stops. Only
+`delete_clip` confirms it. It checks the exact selected ID before opening the
+confirmation, then checks that the modal confirms exactly one reversible
+deletion. The modal hides the background table from accessibility extraction.
+The write reserves `c4s:<store>:clip:<clip>:delete` in the context scope and requires
+positive evidence of the same clip in Deleted. This uses the normal reversible
+delete, not permanent trash purging.
+
+After an ambiguous delete attempt, run `verify_deleted_clip` using the same
+context/store/clip/title. Do not replay the write. Verification never selects
+clips or clicks Delete, Restore or Force Delete. A completed preflight is not a
+deletion receipt.
+
+`preflight_delete_clip_from_row` and `delete_clip_from_row` use the per-row menu
+for inventories where the bulk menu omits Delete, including the All tab. They
+share the same store/clip guards, deletion reservation and verification steps.
+
+Verification reads every page of Deleted and checks the native `trash` status,
+clip ID and title. It does not depend on a search box or an ephemeral success
+notification. `get_store_launch_status` reads owner verification, payout setup,
+store and performer pages without changing settings.
