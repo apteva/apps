@@ -287,7 +287,7 @@ func uploadTikTokChunks(ctx *sdk.AppCtx, target int64, prepared *preparedVideo, 
 		}
 		last := first + count - 1
 		requestCtx, cancelRequest := context.WithCancel(context.Background())
-		request, err := http.NewRequestWithContext(requestCtx, http.MethodPut, uploadURL, io.NewSectionReader(prepared.File, first, count))
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodPut, uploadURL, io.NewSectionReader(prepared.readerAt(), first, count))
 		if err != nil {
 			cancelRequest()
 			return err
@@ -318,6 +318,9 @@ func uploadTikTokChunks(ctx *sdk.AppCtx, target int64, prepared *preparedVideo, 
 			outcome.Result = "transport_error"
 			outcome.ResponseExcerpt = deliveryExcerpt([]byte(err.Error()))
 			_ = d.uploadOutcome(ctx, target, outcome)
+			if sourceErr := prepared.sourceReadError(); sourceErr != nil {
+				return sourceErr
+			}
 			return errors.New("TikTok upload interrupted")
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<10))

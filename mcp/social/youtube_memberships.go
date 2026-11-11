@@ -1,13 +1,10 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -127,11 +124,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 		return "", "", err
 	}
 	defer prepared.Close()
-	file, total := prepared.File, prepared.Size
-	digest := sha256.New()
-	if _, err = io.Copy(digest, io.NewSectionReader(file, 0, total)); err != nil {
-		return "", "", err
-	}
+	file, total := prepared.readerAt(), prepared.Size
 	title := strOption(j.options, "title")
 	if title == "" {
 		title = firstChars(strings.TrimSpace(j.body), 80)
@@ -153,11 +146,9 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 		mime = "video/mp4"
 	}
 	input := map[string]any{"snippet": snippet, "status": map[string]any{"privacyStatus": "unlisted", "selfDeclaredMadeForKids": false}, "upload_content_type": mime, "upload_content_length": total}
-	metadata, _ := json.Marshal(input)
-	fmt.Fprintf(digest, "\n%d\n%s", j.connID, metadata)
-	actualFingerprint := hex.EncodeToString(digest.Sum(nil))
-	if session != "" && (fingerprint != actualFingerprint || !validYouTubeSession(session)) {
-		return "", "", errors.New("stored upload does not match this video or connection; verify the remote outcome before creating another post")
+	actualFingerprint, err := prepareYouTubeFingerprint(ctx, j, prepared, input, session, fingerprint)
+	if err != nil {
+		return "", "", err
 	}
 	d := prepared.Diagnostics
 	offset := int64(0)
