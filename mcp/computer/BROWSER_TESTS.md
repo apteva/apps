@@ -41,3 +41,8 @@ The real-browser test drives text, password, selection, checkbox, upload and
 click inputs, checks fresh storage, captures a masked PNG and cancels a command.
 It attempts foreign fetches, management/other-runtime URLs, frames, images,
 WebSockets, service workers and redirects and verifies none reach the servers.
+
+If interrupted test-browser recovery fails, Computer keeps its existing tools
+available and reports browser testing as unavailable. Test session actions fail
+closed until the recovery problem is corrected and the app restarts. Pending
+leases remain reserved; saved contexts and normal sessions are unaffected.

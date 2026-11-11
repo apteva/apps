@@ -62,7 +62,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.9.0
+version: 0.9.1
 description: |
   v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
@@ -284,7 +284,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.0
+    ref: computer/v0.9.1
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -543,7 +543,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("computer requires a db block")
 	}
 	if err := a.recoverBrowserTests(ctx); err != nil {
-		return err
+		a.browserTests.recoveryErr = err
+		ctx.Logger().Warn("browser test recovery failed; browser testing disabled", "error", err.Error())
 	}
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx

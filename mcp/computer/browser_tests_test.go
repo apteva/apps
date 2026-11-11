@@ -80,3 +80,41 @@ func TestBrowserTestRecoveryRestrictsOwnedProfiles(t *testing.T) {
 		t.Fatal("unowned profile accepted")
 	}
 }
+
+func TestBrowserRecoveryFailureKeepsExistingComputerAvailable(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("one")
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "computer.db"))
+	t.Setenv("CHROME_BIN", filepath.Join(t.TempDir(), "missing-chrome"))
+	// A moved data directory or damaged test lease must not disable ordinary Computer.
+	_, err := ctx.AppDB().Exec(`INSERT INTO computer_contexts(id,name,backend,project_id,created_at,updated_at) VALUES('legacy','Saved browser','browserbase','one','now','now'); INSERT INTO computer_test_sessions(id,project_id,owner_install_id,state,profile,expires_at,created_at) VALUES('bt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','one',1,'active','/outside-owned-root/profile-invalid','future','now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{}
+	if err = a.OnMount(ctx); err != nil {
+		t.Fatalf("optional browser recovery disabled Computer: %v", err)
+	}
+	t.Cleanup(func() { a.OnUnmount(ctx); globalCtx = nil })
+	if _, err = a.toolContextList(ctx, map[string]any{"backend": "all"}); err != nil {
+		t.Fatal("saved contexts unavailable", err)
+	}
+	var name string
+	if err = ctx.AppDB().QueryRow(`SELECT name FROM computer_contexts WHERE id='legacy'`).Scan(&name); err != nil || name != "Saved browser" {
+		t.Fatal("saved context changed", name, err)
+	}
+	call := sdk.WithCaller(context.Background(), &sdk.Caller{AppName: "tests", AppInstallID: 1, ProjectID: "one"})
+	for _, tool := range a.browserTestTools() {
+		out, err := tool.HandlerCtx(call, ctx, map[string]any{})
+		if tool.Name == "browser_test_capabilities" {
+			if err != nil || out.(map[string]any)["available"] != false {
+				t.Fatal("failed recovery advertised testing as available", out, err)
+			}
+		} else if err == nil {
+			t.Fatalf("%s accepted work after failed recovery", tool.Name)
+		}
+	}
+	var state string
+	if err = ctx.AppDB().QueryRow(`SELECT state FROM computer_test_sessions`).Scan(&state); err != nil || state != "active" {
+		t.Fatal("unresolved lease was released", state, err)
+	}
+}
