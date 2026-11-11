@@ -62,8 +62,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.9.1
+version: 0.9.2
 description: |
+  v0.9.2 adds structured Browserbase navigation diagnostics and one bounded
+  fresh-page retry for explicitly read-only navigation. Exhausted reads and
+  uncertain input outcomes require inspection before further writes.
   v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
   Mobile startup retries preparation within a bounded window
@@ -284,7 +287,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.1
+    ref: computer/v0.9.2
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -336,6 +339,8 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
+	navigationBlocked    bool
+	inputUncertain       bool
 	projectID            string
 	actionMu             sessionLock
 	preparedUpload       *preparedUpload
@@ -723,6 +728,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
+				"For explicitly read-only navigation, set read_only=true to allow one bounded Browserbase fresh-page retry on transient network failure. Never use it to replay or recover an uncertain write. Navigation failures return structured diagnostics and block subsequent writes until a successful read-only navigation or an explicit context reopen after inspection. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
 				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. Set observation=som_delta for other compact refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
 				"Scroll regions include bounded content_hints naming controls in each panel, including below the viewport; use those hints to choose which panel to scroll. Snapshots include checked (true/false), indeterminate for mixed checkboxes, and current_value for ordinary form fields including time inputs. Use these values to verify configuration without repeating input; password values are omitted. " +
@@ -730,6 +736,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
+				"read_only":  map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
 				"action":     map[string]any{"type": "string", "enum": []string{"swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
@@ -785,8 +792,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
 				"include_som": map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
-			Handler:    a.toolComputerUse,
-			HandlerCtx: a.toolComputerUseCaller,
+			Handler:    a.toolComputerUseNative,
+			HandlerCtx: a.toolComputerUseMCP,
 		},
 		{
 			Name:        "browser_download",
@@ -2656,6 +2663,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	if err := validateBackendAction(sess.comp, args); err != nil {
 		return nil, err
 	}
+	if out := navigationActionGuard(id, sess, args); out != nil {
+		return out, nil
+	}
 	if action == "prepare_upload" {
 		return sess.prepareUpload(args, ctx.DataDir())
 	}
@@ -2739,8 +2749,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 
 	act := backends.Action{
-		Type: action,
-		ToX:  intArg(args, "to_x"), ToY: intArg(args, "to_y"), AppID: stringArg(args, "app_id"),
+		ReadOnly: boolArgDefault(args, "read_only", false),
+		Type:     action,
+		ToX:      intArg(args, "to_x"), ToY: intArg(args, "to_y"), AppID: stringArg(args, "app_id"),
 		Label:              intArg(args, "label"),
 		Selector:           stringArg(args, "selector"),
 		Text:               stringArg(args, "text"),
@@ -2941,6 +2952,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		screenshotSkipped = true
 	}
 	if err != nil {
+		if out := a.navigationFailure(ctx, id, sess, action, err); out != nil {
+			return out, nil
+		}
 		if isSessionUnhealthyError(err) {
 			return nil, a.closeUnhealthySession(ctx, id, sess, action, err)
 		}
@@ -3028,6 +3042,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 			emitEvent(ctx, "session.action", out)
 			return out, nil
 		}
+		if navigationMayWrite(action) && !strings.Contains(err.Error(), "click rejected:") {
+			sess.inputUncertain = true
+		}
 		if isActionTimeoutError(err) {
 			return nil, computerUseFailure("action_timeout", id, sess, action,
 				"browser action timed out",
@@ -3102,6 +3119,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 			fmt.Sprintf("browser remained at %q", afterURL),
 			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
 	}
+	if action == "navigate" && act.ReadOnly {
+		sess.navigationBlocked = false
+	}
 	a.recordSessionNavigation(ctx, id, sess)
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
@@ -3150,6 +3170,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
+	mergeNavigationDiagnostics(payload, sess, action)
 	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
 	if waitResult != nil {
 		mergeWaitResultPayload(payload, *waitResult)
@@ -3176,6 +3197,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		out["width"] = disp.Width
 		out["height"] = disp.Height
 	}
+	mergeNavigationDiagnostics(out, sess, action)
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
 	if action == "navigate" && !slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "url") {
 		delete(out, "url_changed")
@@ -3442,6 +3464,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 				out["steps"] = completed
 				emitEvent(ctx, "session.action", out)
 				return out, nil
+			}
+			if navigationMayWrite(action) && !strings.Contains(err.Error(), "click rejected:") {
+				sess.inputUncertain = true
 			}
 			code := "batch_step_failed"
 			if strings.Contains(err.Error(), "click rejected:") {

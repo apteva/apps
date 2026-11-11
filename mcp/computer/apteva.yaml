@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.9.1
+version: 0.9.2
 description: |
+  v0.9.2 adds structured Browserbase navigation diagnostics and one bounded
+  fresh-page retry for explicitly read-only navigation. Exhausted reads and
+  uncertain input outcomes require inspection before further writes.
   v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
   Mobile startup retries preparation within a bounded window
@@ -139,6 +142,9 @@ provides:
         proxy_mode=direct to explicitly disable proxies.
     - name: computer_use
       description: |
+        For explicitly read-only navigation, pass read_only=true to allow one
+        Browserbase fresh-page retry. Failed navigation returns structured
+        diagnostics and incomplete coverage. Never replay uncertain writes.
         Drive an app-owned session. Mobile uses screenshots and pixel
         coordinates, swipe with to_x/to_y, home, key=home|enter (Android also
         back), launch_app/stop_app with app_id, type, scroll and navigate.
@@ -559,7 +565,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.1
+    ref: computer/v0.9.2
     entry: mcp/computer
   port: 8080
   health_check: /health

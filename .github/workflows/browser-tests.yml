@@ -35,3 +35,5 @@ jobs:
         id: chrome
       - if: matrix.app == 'computer'
         run: RUN_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 ./internal/browser/testbrowser
+      - if: matrix.app == 'computer'
+        run: RUN_NAVIGATION_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 ./internal/browser/browserbase ./internal/browser/navigation

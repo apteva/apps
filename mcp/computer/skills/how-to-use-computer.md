@@ -446,3 +446,19 @@ dismiss any share/success modal before reading the final URL.
 - **Persistent dashboards.** Belong in the operator panel.
 - **Replace a tool call.** Always run the tool first; the component
   summarises what the tool already did.
+
+### Read-only navigation recovery
+
+For a known read-only page load, use `computer_use(action="navigate", url=...,
+read_only=true)`. Browserbase captures top-frame redirects and network errors,
+and can retry a transient failure once in a new page in the same browser
+context and provider session. A new page does not guarantee a new HTTP/2
+connection. URLs in diagnostics omit credentials, query values and fragments;
+CDP does not expose raw HTTP/2 reset/GOAWAY frames.
+
+On `navigation_failed`, coverage is incomplete. Do not infer absence or create
+content. Inspect diagnostics and a screenshot. Subsequent writes are blocked
+until a successful explicit read-only navigation or an explicit context reopen
+after inspection. An uncertain upload, Save or input is never replayed; inspect
+its outcome and reopen explicitly before proceeding. `read_only` is an assertion
+about the workflow, never a way to acknowledge an uncertain write.

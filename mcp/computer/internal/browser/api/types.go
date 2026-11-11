@@ -13,6 +13,7 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
+	ReadOnly     bool            `json:"read_only,omitempty"` // Explicit assertion for navigate only; never permits input replay.
 	ToX          int             `json:"to_x,omitempty"`
 	ToY          int             `json:"to_y,omitempty"`
 	AppID        string          `json:"app_id,omitempty"`
