@@ -223,7 +223,7 @@ func (a *App) toolPostDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if currentStatus != "draft" && currentStatus != "rejected" && currentStatus != "approved" {
-		return mcpError("only draft, rejected, or approved posts can be updated"), nil
+		return mcpError("only draft, rejected, or approved posts can be updated; use post_target_options_update for a failed target on a partially published post"), nil
 	}
 	if revision != expectedRevision {
 		return mcpError(fmt.Sprintf("revision conflict: current revision is %d", revision)), nil

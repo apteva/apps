@@ -65,6 +65,9 @@ func classifyPublishFailure(err error) publishFailure {
 		return failure
 	}
 	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "choose a valid tiktok privacy_level") {
+		return publishFailure{Code: "validation_error", Retryable: false}
+	}
 	if mediaValidationError(lower) {
 		failure.Code = "validation_error"
 		failure.Retryable = false
