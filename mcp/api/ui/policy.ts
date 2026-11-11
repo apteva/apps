@@ -45,14 +45,31 @@ export async function fetchPanelRows(fetcher: typeof fetch, url: string, field: 
   return data[field] || [];
 }
 
-export function updatedAuth(kind: string, settings: Record<string, unknown>) {
+export function authAlternativeMethods(settings: Record<string, unknown>): [Record<string, unknown>, Record<string, unknown>] {
+  const methods = Array.isArray(settings.methods)
+    ? settings.methods.filter((value): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value))
+    : [];
+  return [
+    methods.find(method => method.kind === "auth_jwt" || method.kind === "authorizer") || { kind: "auth_jwt" },
+    methods.find(method => method.kind === "api_key") || { kind: "api_key" },
+  ];
+}
+
+export function updatedAuth(kind: string, settings: Record<string, unknown>): Record<string, unknown> {
   if (kind === "default") return {};
-  if (kind !== "authorizer" && kind !== "auth_jwt" && kind !== "api_key") return { kind };
+  if (kind !== "authorizer" && kind !== "auth_jwt" && kind !== "api_key" && kind !== "any_of") return { kind };
   const ids = Array.isArray(settings.function_ids) ? settings.function_ids.filter(v => String(v).trim() !== "").map(v => {
     const id = Number(v);
     return /^\d+$/.test(String(v).trim()) && Number.isSafeInteger(id) && id > 0 ? id : v;
   }) : [];
   const scope = ids.length ? { function_ids: ids } : {};
+  if (kind === "any_of") {
+    const methods = authAlternativeMethods(settings).map(method => {
+      const { function_ids, ...policy } = updatedAuth(String(method.kind), method);
+      return policy;
+    });
+    return { kind, ...scope, methods };
+  }
   if (kind === "api_key") {
     const requiredScopes = Array.isArray(settings.required_scopes)
       ? settings.required_scopes.filter((v): v is string => typeof v === "string" && !!v.trim()).map(v => v.trim())

@@ -3,6 +3,15 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Alternative authentication methods (0.12.0)
+
+An API or route can use `auth.kind: any_of` to accept either a bearer session
+or a scoped API key. One request selects one verifier by credential location
+and reaches the same backend with its verified identity. The dashboard exposes
+this policy as **Bearer session or API key**. See
+[the authentication configuration](AUTHORIZATION.md#alternative-authentication-methods)
+for method settings and credential carriers.
+
 ## Generic API credentials (0.10.0)
 
 API keys remain API-scoped opaque secrets, but may now carry an optional
@@ -130,7 +139,7 @@ Coalescing is keyed by the rendered output. If several allowed resources change
 inside one window, each resource receives one invalidation in AppBus sequence
 order; repeated changes to the same resource collapse into one frame. Topic
 patterns can be exact, `prefix.*`, or `*`. Streams require `api_key`,
-`auth_jwt`, or `authorizer`; public event routes are rejected. Clients can reconnect with
+`auth_jwt`, `authorizer`, or `any_of`; public event routes are rejected. Clients can reconnect with
 `Last-Event-ID` or `since`, and the endpoint sends 15-second heartbeat comments.
 
 API Gateway shares one internal AppBus connection per project and source app,

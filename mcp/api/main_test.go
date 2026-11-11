@@ -93,8 +93,8 @@ func TestManifest(t *testing.T) {
 	if m.Name != "api" {
 		t.Fatalf("name = %q, want api", m.Name)
 	}
-	if m.Version != "0.11.0" {
-		t.Fatalf("version = %q, want 0.11.0", m.Version)
+	if m.Version != "0.12.0" {
+		t.Fatalf("version = %q, want 0.12.0", m.Version)
 	}
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "api/v"+m.Version {
 		t.Fatalf("source must be pinned to api/v%s", m.Version)

@@ -27,16 +27,17 @@ type Principal struct {
 }
 
 type authorizerPolicy struct {
-	FunctionIDs    []int64  `json:"function_ids,omitempty"`
-	RequiredScopes []string `json:"required_scopes,omitempty"`
-	Kind           string   `json:"kind"`
-	Provider       string   `json:"provider,omitempty"`
-	App            string   `json:"app,omitempty"`
-	Path           string   `json:"path,omitempty"`
-	Tool           string   `json:"tool,omitempty"`
-	Issuer         string   `json:"issuer,omitempty"`
-	TenantID       string   `json:"tenant_id,omitempty"`
-	Claims         []string `json:"claims,omitempty"`
+	FunctionIDs    []int64           `json:"function_ids,omitempty"`
+	RequiredScopes []string          `json:"required_scopes,omitempty"`
+	Kind           string            `json:"kind"`
+	Provider       string            `json:"provider,omitempty"`
+	App            string            `json:"app,omitempty"`
+	Path           string            `json:"path,omitempty"`
+	Tool           string            `json:"tool,omitempty"`
+	Issuer         string            `json:"issuer,omitempty"`
+	TenantID       string            `json:"tenant_id,omitempty"`
+	Claims         []string          `json:"claims,omitempty"`
+	Methods        []json.RawMessage `json:"methods,omitempty"`
 }
 
 var authorizerName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
@@ -58,7 +59,7 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	}
 	for name, value := range obj {
 		switch name {
-		case "kind", "provider", "app", "path", "tool", "issuer", "tenant_id", "claims", "function_ids", "required_scopes":
+		case "kind", "provider", "app", "path", "tool", "issuer", "tenant_id", "claims", "function_ids", "required_scopes", "methods":
 		default:
 			return policy, errors.New("unsupported auth field: " + name)
 		}
@@ -68,6 +69,9 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	}
 	if len(obj) > 0 && obj["kind"] == nil {
 		return policy, errors.New("auth.kind is required")
+	}
+	if _, ok := obj["methods"]; ok && policy.Kind != "any_of" {
+		return policy, errors.New("auth.methods is only valid for any_of")
 	}
 	if len(policy.FunctionIDs) > 100 {
 		return policy, errors.New("auth.function_ids accepts at most 100 Function IDs")
@@ -80,6 +84,40 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 		seenIDs[id] = true
 	}
 	switch policy.Kind {
+	case "any_of":
+		for key := range obj {
+			if key != "kind" && key != "methods" && key != "function_ids" {
+				return policy, errors.New("any_of accepts only kind, methods, and function_ids")
+			}
+		}
+		if len(policy.Methods) != 2 {
+			return policy, errors.New("any_of requires one bearer verifier and one api_key method")
+		}
+		seen := map[string]bool{}
+		for _, rawMethod := range policy.Methods {
+			methodObject, err := policyObject(string(rawMethod))
+			if err != nil {
+				return policy, err
+			}
+			family := "bearer"
+			switch methodObject["kind"] {
+			case "api_key":
+				family = "api_key"
+			case "authorizer", "auth_jwt":
+			default:
+				return policy, errors.New("any_of methods must be api_key, auth_jwt, or authorizer")
+			}
+			if seen[family] {
+				return policy, errors.New("any_of methods must use distinct credential carriers")
+			}
+			seen[family] = true
+			if _, ok := methodObject["function_ids"]; ok {
+				return policy, errors.New("any_of function_ids must be configured on the outer policy")
+			}
+			if _, err := parseAuthPolicy(string(rawMethod)); err != nil {
+				return policy, err
+			}
+		}
 	case "api_key":
 		for key := range obj {
 			if key != "kind" && key != "function_ids" && key != "required_scopes" {
@@ -150,7 +188,7 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 			seen[name] = true
 		}
 	default:
-		return policy, errors.New("auth.kind must be public, api_key, auth_jwt, or authorizer")
+		return policy, errors.New("auth.kind must be public, api_key, auth_jwt, authorizer, or any_of")
 	}
 	return policy, nil
 }
@@ -382,7 +420,7 @@ func invalidAuthorizerResponse() error {
 	return authFailure(502, "invalid authentication service response", nil)
 }
 
-func authPolicySchema() map[string]any {
+func authMethodSchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"description": "Empty route auth inherits API auth; otherwise replaces the full policy. An app authorizer requires exactly one of path or tool. Claims are an explicit allowlist; no claims by default.",
@@ -399,4 +437,19 @@ func authPolicySchema() map[string]any {
 			"claims":          map[string]any{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]any{"type": "string"}},
 		},
 	}
+}
+
+func authPolicySchema() map[string]any {
+	schema := authMethodSchema()
+	properties := schema["properties"].(map[string]any)
+	properties["kind"] = map[string]any{"type": "string", "enum": []string{"public", "api_key", "auth_jwt", "authorizer", "any_of"}}
+	method := authMethodSchema()
+	methodProperties := method["properties"].(map[string]any)
+	delete(methodProperties, "function_ids")
+	methodProperties["kind"] = map[string]any{"type": "string", "enum": []string{"api_key", "auth_jwt", "authorizer"}}
+	properties["methods"] = map[string]any{
+		"type": "array", "minItems": 2, "maxItems": 2, "items": method,
+		"description": "For any_of, one bearer verifier (auth_jwt or authorizer) and one api_key policy. Bearer uses Authorization; API keys use X-API-Key or api_key query. Exactly one client credential must be present. Configure function_ids on the outer policy.",
+	}
+	return schema
 }

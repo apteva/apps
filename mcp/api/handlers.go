@@ -438,8 +438,13 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 		return authContext{}, authFailure(500, "invalid authentication configuration", err)
 	}
 	if route.TargetKind == "app_events" && (kind == "" || kind == "public") {
-		return authContext{Kind: "public"}, authFailure(401, "app_events routes require api_key, auth_jwt, or authorizer authentication", nil)
+		return authContext{Kind: "public"}, authFailure(401, "app_events routes require authentication", nil)
 	}
+	policy, r, err = selectAuthMethod(r, policy)
+	if err != nil {
+		return authContext{Kind: kind}, err
+	}
+	kind = policy.Kind
 	switch kind {
 	case "", "public":
 		return authContext{Kind: "public"}, nil

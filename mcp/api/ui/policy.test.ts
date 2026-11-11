@@ -58,3 +58,26 @@ test("Function scope editing preserves exact IDs and clears scope on public rout
   expect(updatedAuth("public", settings)).toEqual({ kind: "public" });
   expect(updatedAuth("authorizer", { function_ids: ["9007199254740993"] })).toMatchObject({ function_ids: ["9007199254740993"] });
 });
+
+test("alternative authentication preserves method settings and the shared Function scope", async () => {
+  const { updatedAuth } = await import("./policy");
+  const settings = {
+    function_ids: ["12", "34"],
+    methods: [
+      { kind: "api_key", required_scopes: ["records:read", ""], function_ids: [999] },
+      { kind: "authorizer", provider: "app", app: "auth", tool: "auth_verify_session", issuer: "expected-issuer", claims: ["permissions", ""], tenant_id: "tenant-a" },
+    ],
+  };
+  const policy = updatedAuth("any_of", settings);
+  expect(policy).toEqual({
+    kind: "any_of", function_ids: [12, 34],
+    methods: [
+      { kind: "authorizer", provider: "app", app: "auth", tool: "auth_verify_session", issuer: "expected-issuer", claims: ["permissions"], tenant_id: "tenant-a" },
+      { kind: "api_key", required_scopes: ["records:read"] },
+    ],
+  });
+  expect(updatedAuth("any_of", policy)).toEqual(policy);
+  expect(updatedAuth("public", settings)).toEqual({ kind: "public" });
+  expect(updatedAuth("api_key", settings)).toEqual({ kind: "api_key", function_ids: [12, 34] });
+  expect(updatedAuth("any_of", {})).toEqual({ kind: "any_of", methods: [{ kind: "auth_jwt", claims: [] }, { kind: "api_key" }] });
+});

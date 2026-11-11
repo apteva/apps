@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.11.0
+version: 0.12.0
 description: |
+  v0.12.0 Adds opt-in any_of authentication for routes accepting either a bearer
+  session or an API key. Credential carriers select one verifier before
+  validation; ambiguous requests fail closed. Both methods retain their verified
+  identities, permissions, deadlines, and API-key usage controls.
+
   v0.11.0 Adds MCP tool authorizers for bound apps alongside HTTP authorizers.
   Gateway scopes tool calls to the API project, honors the request deadline,
   and applies the same principal checks to both transports. Uses app-sdk v0.115.1.
@@ -170,7 +175,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.11.0
+    ref: api/v0.12.0
     entry: mcp/api
   port: 8080
   health_check: /health

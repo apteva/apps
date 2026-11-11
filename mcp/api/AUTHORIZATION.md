@@ -74,6 +74,50 @@ A route chooses its Function independently:
 }
 ```
 
+## Alternative authentication methods
+
+Use `any_of` when one route should accept either a bearer session or an API key.
+Configure one bearer verifier (`auth_jwt` or `authorizer`) and one `api_key`
+method. Each method keeps its own tenant, claim, or scope settings.
+
+```json
+{
+  "kind": "any_of",
+  "function_ids": [12, 34],
+  "methods": [
+    {
+      "kind": "auth_jwt",
+      "tenant_id": "tenant-a",
+      "claims": ["roles", "permissions"]
+    },
+    {
+      "kind": "api_key",
+      "required_scopes": ["records:read"]
+    }
+  ]
+}
+```
+
+Send the session in `Authorization: Bearer <session>`, or the API key in
+`X-API-Key: <key>`. An API key can also use the `api_key` query parameter for
+EventSource clients. Supply exactly one client credential. Missing or invalid
+credentials are rejected with 401, and ambiguous or repeated credential
+carriers are rejected with 400. A failed selected verifier ends the request.
+The Gateway recognizes its own platform-injected app token as internal.
+
+The bearer method can use any configured HTTP or MCP tool authorizer, including
+Auth's `auth_verify_session` tool through `provider: app`. Both methods dispatch
+to the route's same backend with their respective verified principals. API keys
+retain their scopes, expiration, revocation, usage plans, and stream cancellation.
+Functions must trust the expected issuer of each method and enforce the caller's
+access to tenant data. The Gateway keeps API-key scopes and user permissions as
+their respective verified claims.
+
+Set shared `function_ids` on the outer policy. Methods cannot contain their own
+Function IDs. An empty route auth object inherits the complete API policy; a
+nonempty route policy replaces it. Public methods, nested alternatives, and
+multiple verifiers for the same credential carrier are rejected.
+
 ## Other authorizers
 
 Bind an installed app through API's `authorizer` integration (or another existing

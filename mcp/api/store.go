@@ -743,7 +743,9 @@ func scanAPIKey(scanner interface{ Scan(...any) error }) (*APIKey, error) {
 		&k.LastUsedAt, &k.CreatedAt, &k.RevokedAt); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(claimsJSON), &k.Claims); err != nil || k.Claims == nil {
+	claims := json.NewDecoder(strings.NewReader(claimsJSON))
+	claims.UseNumber()
+	if !json.Valid([]byte(claimsJSON)) || claims.Decode(&k.Claims) != nil || k.Claims == nil {
 		return nil, errors.New("invalid stored API key claims")
 	}
 	if err := json.Unmarshal([]byte(scopesJSON), &k.Scopes); err != nil || k.Scopes == nil {
@@ -888,7 +890,9 @@ func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (*APIKey,
 			return nil, false, nil
 		}
 	}
-	if err := json.Unmarshal([]byte(claimsJSON), &k.Claims); err != nil || k.Claims == nil {
+	claims := json.NewDecoder(strings.NewReader(claimsJSON))
+	claims.UseNumber()
+	if !json.Valid([]byte(claimsJSON)) || claims.Decode(&k.Claims) != nil || k.Claims == nil {
 		return nil, false, errors.New("invalid stored API key claims")
 	}
 	if err := json.Unmarshal([]byte(scopesJSON), &k.Scopes); err != nil || k.Scopes == nil {

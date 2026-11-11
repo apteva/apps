@@ -165,7 +165,7 @@ func TestSidecarToolAuthorizer(t *testing.T) {
 				t.Error(err)
 			}
 			principal := call.Input.Principal
-			if principal.Subject != "person-123" || principal.ProjectID != testProject ||
+			if (principal.Subject != "person-123" && !strings.HasPrefix(principal.Subject, "api_key:")) || principal.ProjectID != testProject ||
 				principal.Claims["account_number"] != json.Number(largeClaim) || principal.Claims["role"] != nil {
 				t.Errorf("incorrect forwarded principal: %+v", principal)
 			}
@@ -214,6 +214,44 @@ func TestSidecarToolAuthorizer(t *testing.T) {
 	}
 	if n := dispatches.Load(); n != 2 {
 		t.Fatalf("expected only the two authorized requests to dispatch, got %d", n)
+	}
+	update := gateway.POST("/tools/call?project_id="+url.QueryEscape(testProject), map[string]any{
+		"tool": "api_update", "args": map[string]any{"slug": "tool-auth", "auth": map[string]any{
+			"kind": "any_of", "function_ids": []int{12}, "methods": []any{
+				map[string]any{"kind": "authorizer", "provider": "app", "app": "identity", "tool": "verify_bearer", "issuer": "example", "tenant_id": "tenant-a", "claims": []string{"account_number"}},
+				map[string]any{"kind": "api_key", "required_scopes": []string{"records:read"}},
+			},
+		}},
+	}, nil)
+	if update.Status != http.StatusOK {
+		t.Fatalf("configure alternatives: %d %s", update.Status, update.Body)
+	}
+	var created struct {
+		Secret string `json:"secret"`
+	}
+	issue := gateway.POST("/tools/call?project_id="+url.QueryEscape(testProject), map[string]any{
+		"tool": "api_key_create", "args": map[string]any{"api_slug": "tool-auth", "name": "client", "scopes": []string{"records:read"}, "claims": map[string]any{"account_number": json.Number(largeClaim)}},
+	}, &created)
+	if issue.Status != http.StatusOK || created.Secret == "" {
+		t.Fatalf("issue alternative key: %d %s", issue.Status, issue.Body)
+	}
+	for _, credential := range []struct{ header, value string }{{"Authorization", "Bearer direct"}, {"X-API-Key", created.Secret}} {
+		req, err := http.NewRequest(http.MethodGet, gateway.URL()+"/gw/tool-auth/test?project_id="+url.QueryEscape(testProject), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(credential.header, credential.value)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("alternative %s status=%d", credential.header, resp.StatusCode)
+		}
+	}
+	if n := dispatches.Load(); n != 4 {
+		t.Fatalf("expected both alternatives to reach the same Function, got %d total calls", n)
 	}
 }
 
