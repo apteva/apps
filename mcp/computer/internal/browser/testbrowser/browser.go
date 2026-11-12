@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
@@ -29,6 +30,7 @@ type Browser struct {
 	boundary        *boundary
 	options         Options
 	mu              sync.Mutex
+	closeOnce       sync.Once
 	stateMu         sync.Mutex
 	errors          []string
 	secrets         []string
@@ -125,9 +127,17 @@ func (b *Browser) PID() int {
 }
 func (b *Browser) Engine() string { return b.engine }
 func (b *Browser) Close() {
-	b.cancel()
-	b.allocatorCancel()
-	b.boundary.close()
+	b.closeOnce.Do(func() {
+		// Chromium's helpers must finish profile writes before the owner can
+		// delete this ephemeral profile. Fall back to forced cancellation if
+		// graceful shutdown is unavailable or exceeds the close budget.
+		ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+		_ = chromedp.Cancel(ctx)
+		cancel()
+		b.cancel()
+		b.allocatorCancel()
+		b.boundary.close()
+	})
 }
 func (b *Browser) addError(text string) {
 	b.stateMu.Lock()
@@ -186,8 +196,12 @@ func (b *Browser) Do(ctx context.Context, command Command) (Result, error) {
 		return Result{}, ctx.Err()
 	}
 	result := Result{}
+	value := ""
+	if command.Value != nil {
+		value = *command.Value
+	}
 	if command.Sensitive {
-		b.RegisterSecret(command.Value)
+		b.RegisterSecret(value)
 	}
 	const selector = `[data-apteva-test-target="active"]`
 	var observation struct {
@@ -236,13 +250,13 @@ func (b *Browser) Do(ctx context.Context, command Command) (Result, error) {
 		err = chromedp.Run(op, chromedp.Click(selector, chromedp.ByQuery))
 	case "fill":
 		if observation.Sensitive {
-			b.RegisterSecret(command.Value)
+			b.RegisterSecret(value)
 		}
 		result.Dispatched = true
-		_, err = textinput.Set(op, textinput.Target{Selector: selector}, textinput.SetRequest{Text: command.Value, Mode: "replace"})
+		_, err = textinput.Set(op, textinput.Target{Selector: selector}, textinput.SetRequest{Text: value, Mode: "replace"})
 	case "select":
 		result.Dispatched = true
-		_, err = selectinput.Select(op, selectinput.Target{Selector: selector}, selectinput.Request{Value: command.Value})
+		_, err = selectinput.Select(op, selectinput.Target{Selector: selector}, selectinput.Request{Values: []string{value}})
 	case "check":
 		result.Dispatched = true
 		_, err = checkedinput.Set(op, checkedinput.Target{Selector: selector}, checkedinput.Request{Checked: command.Checked})

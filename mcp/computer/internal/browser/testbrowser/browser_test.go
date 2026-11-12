@@ -118,13 +118,13 @@ func TestLocalBrowserIsolationInputAndCancellation(t *testing.T) {
 		return result
 	}
 	run(browser, Command{Action: "navigate", Target: "frontend", Path: "/"})
-	run(browser, Command{Action: "fill", Locator: Locator{TestID: "email"}, Value: "operator@fixture.invalid"})
-	run(browser, Command{Action: "fill", Locator: Locator{TestID: "password"}, Value: "synthetic-password", Sensitive: true})
+	run(browser, Command{Action: "fill", Locator: Locator{TestID: "email"}, Value: testValue("operator@fixture.invalid")})
+	run(browser, Command{Action: "fill", Locator: Locator{TestID: "password"}, Value: testValue("synthetic-password"), Sensitive: true})
 	observed := run(browser, Command{Action: "observe", Locator: Locator{TestID: "password"}})
 	if observed.Observation.Value != nil {
 		t.Fatal("password value was exposed")
 	}
-	run(browser, Command{Action: "select", Locator: Locator{TestID: "choice"}, Value: "b"})
+	run(browser, Command{Action: "select", Locator: Locator{TestID: "choice"}, Value: testValue("b")})
 	run(browser, Command{Action: "check", Locator: Locator{TestID: "checked"}, Checked: true})
 	run(browser, Command{Action: "upload", Locator: Locator{TestID: "file"}, File: &FixtureFile{Name: "fixture.txt", MIME: "text/plain", Base64: "bG9jYWwgZml4dHVyZQ=="}})
 	run(browser, Command{Action: "click", Locator: Locator{Role: "button", Name: "Save"}})

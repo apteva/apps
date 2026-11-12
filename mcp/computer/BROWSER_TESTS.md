@@ -32,6 +32,14 @@ input/contenteditable fields, marked sensitive elements and registered secrets;
 PNG bytes are returned immediately for Tests-owned storage. No recordings are
 produced. Structured diagnostics exclude headers, bodies, queries and values.
 
+For `command.action=select`, `command.value` must be an explicit string.
+`"value": ""` selects the option with an exactly empty value; omitted or null
+selection values fail before input dispatch. Exact matching, disabled-option
+checks, ambiguity rejection and application-reconciliation checks still apply.
+Non-sensitive observations retain `"value": ""` after an empty selection.
+For `fill`, explicit empty text still clears the field, as does its legacy
+omitted value; sensitive values remain redacted.
+
 ```sh
 GOWORK=off go test -race ./...
 RUN_BROWSER_TESTS=1 GOWORK=off go test -race -count=1 ./internal/browser/testbrowser

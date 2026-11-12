@@ -62,8 +62,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.9.2
+version: 0.9.3
 description: |
+  v0.9.3 preserves explicit empty option values in the isolated browser test
+  selection adapter. Missing or null selections are rejected before dispatch;
+  text clearing and secret redaction retain their existing behavior.
   v0.9.2 adds structured Browserbase navigation diagnostics and one bounded
   fresh-page retry for explicitly read-only navigation. Exhausted reads and
   uncertain input outcomes require inspection before further writes.
@@ -287,7 +290,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.2
+    ref: computer/v0.9.3
     entry: mcp/computer
   port: 8080
   health_check: /health

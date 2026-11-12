@@ -54,7 +54,15 @@ func TestObservedNavigationRedirectsAndRedaction(t *testing.T) {
 	alloc, stop := chromedp.NewExecAllocator(context.Background(), options...)
 	defer stop()
 	ctx, cancel := chromedp.NewContext(alloc)
-	defer cancel()
+	defer func() {
+		// Let Chromium finish profile writes before TempDir cleanup.
+		closing, stopClosing := context.WithTimeout(ctx, 5*time.Second)
+		defer stopClosing()
+		if err := chromedp.Cancel(closing); err != nil {
+			t.Errorf("close Chromium: %v", err)
+		}
+		cancel()
+	}()
 	if err := chromedp.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
