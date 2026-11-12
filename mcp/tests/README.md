@@ -1,7 +1,7 @@
 # Tests
 
 Apteva sidecar for project test suites, multi-step scenarios, durable run
-history, and a native Tests panel. Version 0.3.0 uses app-sdk v0.115.1.
+history, and a native Tests panel. Version 0.3.1 uses app-sdk v0.115.1.
 
 Standalone suites keep the original HTTP and Function checks. Scenario checks
 can chain steps and capture values. An isolated release suite binds an
@@ -285,7 +285,7 @@ are stored in this repository.
 
 ## Browser checks (0.3.0)
 
-Bind optional **Computer >=0.9.0** and **Environments >=0.9.0** to Tests.
+Bind optional **Computer >=0.9.3** and **Environments >=0.9.0** to Tests.
 Computer needs Chromium/Chrome installed on its host (`CHROME_BIN` can select
 an executable). The initial backend runs local headless Chromium, one check
 at a time, with a fresh profile per check. Evidence includes the actual browser
@@ -373,3 +373,14 @@ The server checkout needs runtime public proxy authorization preservation
 (server commit `4cf671114d0b2d935ee1fb5a211913bb21398289` or newer). The script
 uses a temporary Go overlay and temporary server/app databases; it does not
 connect to a running instance.
+
+### Explicit browser values (0.3.1)
+
+A `select` action requires exactly one literal `value` string or valid
+`value_ref`. `"value":""` selects the empty-valued option and is retained when
+checks are saved, loaded and copied into run snapshots. Missing, null,
+non-string and literal-plus-reference selections are rejected. Runtime browser
+value references may resolve to the empty string; values are expanded and
+forwarded without trimming or fallback. Credential and candidate digest probes
+still reject empty results. An omitted `fill` value retains its existing clear
+behavior. Browser suites require Computer 0.9.3 or newer for empty selection.

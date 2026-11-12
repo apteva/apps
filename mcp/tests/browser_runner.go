@@ -117,19 +117,25 @@ func (a *App) executeBrowserStep(ctx context.Context, step Step, values map[stri
 	if err != nil {
 		return nil, err
 	}
-	action.Value, err = expand(action.Value, values, nil)
-	if err != nil {
-		return nil, err
+	if action.Value != nil {
+		value, err := expand(*action.Value, values, nil)
+		if err != nil {
+			return nil, err
+		}
+		action.Value = &value
 	}
 	if action.ValueRef != "" {
 		value, ok := app.release.browserValues[action.ValueRef]
 		if !ok {
 			return nil, errors.New("browser value reference is unavailable")
 		}
-		action.Value, action.Sensitive = value, true
+		action.Value, action.Sensitive = &value, true
 	}
 	command := map[string]any{"action": action.Action, "target": action.Target, "path": action.Path,
-		"locator": action.Locator, "value": action.Value, "sensitive": action.Sensitive, "checked": action.Checked}
+		"locator": action.Locator, "sensitive": action.Sensitive, "checked": action.Checked}
+	if action.Value != nil {
+		command["value"] = *action.Value
+	}
 	if action.UploadRef != "" {
 		command["file"] = app.release.config.Browser.Uploads[action.UploadRef]
 	}
