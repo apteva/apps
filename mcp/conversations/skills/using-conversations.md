@@ -108,10 +108,11 @@ return the task to the original conversation thread. Do not supply, copy or gues
 user IDs to make the call succeed. If the original thread also fails, report the
 blocker through the normal escalation path without claiming the work succeeded.
 
-The agent's main thread owns conversation discovery and creation, global
-reports, and autonomous alerts. A conversation thread owns the visible reply,
-history, approvals, and urgent local alerts for the conversation named in its
-context. Main never writes an ordinary chat reply directly: it sends the result
+The agent's main thread owns conversation discovery and creation. A conversation
+thread owns the visible reply, history, reports, approvals, questions, forms,
+and urgent local alerts for the conversation named in its context.
+Main preserves the originating conversation_id when coordinating work or
+handling an escalation. Main never writes an ordinary chat reply directly: it sends the result
 to the originating conversation thread, which communicates with the person.
 
 Generic workers never publish through Conversations. When spawning a worker,
@@ -120,39 +121,43 @@ the domain tools it needs for work that does not require the visitor's identity
 (for example, analysing already-authorized, non-sensitive data), and require it to report milestones, blockers, and
 its final result to its parent. If a worker needs approval, it reports the exact
 blocked decision to its parent; the parent requests approval and returns the
-verdict. This is the same capability-ownership pattern used by Tasks.
+verdict. Pass the originating conversation_id in delegated instructions and
+retain it with results, milestones, and escalations so the parent publishes in
+the conversation that owns the work. Supply the same id when a sibling app
+accepts a conversation_id for related notifications.
+This is the same capability-ownership pattern used by Tasks.
 
 ## Where inbox items live: list, reuse, create
 
-Every alert, report, and approval needs a `conversation_id` — there is
-no default bucket. The flow:
+Every alert, report, approval, question, and form belongs to the conversation
+that owns its work. The Inbox surfaces that same message for attention.
 
-1. **Reuse first.** If the item belongs to work an existing
-   conversation asked for, use that conversation's id. Otherwise
-   search your own conversations: `conversations_list` with `query`
-   ("reports", "infra").
-2. **Create deliberately.** No fit? `conversations_create` with a
-   short, stable topic title: "Reports", "Infra monitoring", an
-   incident name like "Certificate renewal — shop.example.com".
-   Creation is title-idempotent: the same title always returns the
-   same conversation, so reusing a title is safe and correct. If the list
-   is empty, create one now; do not stop or substitute a thread id such as
-   `main` for a conversation id.
-3. **Titles name ongoing topics, never events.** Do not put
-   timestamps, ids, counters, or per-item detail in a title —
-   "Alert 2026-08-19" creates junk; "Infra monitoring" accumulates a
-   history. One topic, one conversation, forever.
+1. **Use the origin.** If work started in an operator conversation, use that
+   exact conversation_id for its reports, alerts, approvals, questions, and
+   forms. A conversation thread already has this id. Main uses it when
+   handling related delegated results or escalations.
+2. **Search by work topic.** For autonomous or scheduled work without a known
+   origin, main uses `conversations_list` with a query for the article,
+   content plan, service, or incident. Reuse a relevant existing operator
+   conversation. Periodic reports about the same work stay there too.
+3. **Create only for a new topic.** If no relevant conversation exists, main
+   calls `conversations_create` with a meaningful work title such as
+   "November content plan" or "Backup recovery". Creation is title-idempotent.
+   Titles identify work and omit per-message dates, counters, or identifiers.
 
-Keep one standing "Reports" conversation for periodic reports.
-Incidents get their own named conversation so the operator can reply
-into it and the dialogue stays on-topic.
+Use work topics for new conversations. Existing conversations keep their work
+context even if they have a legacy generic title. For example,
+publishing an article requested in "AI Agent Operating Brief" produces its
+publication report and any related approval or blocker alert in that conversation.
+A new incident gets its own conversation only when none of the existing
+operator conversations fits.
 
 ## The inbox kinds — one global output surface
 
-Alerts and reports are the agent's single operator-output surface. Main owns
-global and autonomous alerts and every report. A conversation thread may raise
-an urgent alert caused by work originating in that conversation, and main or
-the originating conversation thread may request approval for work it owns.
+Main and operator conversation threads can file Inbox items about work they
+own. Conversation threads use their own exact conversation_id, including for
+reports. Main selects the relevant operator conversation for autonomous work
+and preserves the originating destination for work received from a conversation.
 Generic workers always report the condition or blocked decision to their
 parent instead. The approval verdict returns to the asking main/conversation
 thread. (Agent status lives in the status app, not here.)
@@ -248,7 +253,7 @@ escalation containing the public conversation id, requested decision, and
 reply thread. Main finds or creates an OPERATOR conversation and raises the
 approval there, then sends the decision back to the originating thread.
 If `conversations_list` finds no suitable operator conversation, main must
-call `conversations_create` with a stable topic title such as "Refund approvals"
+call `conversations_create` with a work topic title such as "Order 12345 refund"
 and use the returned id for the approval or alert. An empty list is not a
 blocker, and a public conversation is never a fallback destination. Main is
 the coordinator itself; it must not try to send an escalation to `main`.

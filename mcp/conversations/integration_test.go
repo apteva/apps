@@ -272,6 +272,7 @@ func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testi
 	for tool, args := range map[string]map[string]any{
 		"send":    {"conversation_id": targetID, "text": "escape"},
 		"alert":   {"conversation_id": targetID, "text": "escape", "severity": "error"},
+		"report":  {"conversation_id": targetID, "title": "Escape", "summary": "Wrong conversation"},
 		"history": {"conversation_id": targetID},
 	} {
 		msg := mcpErrAsThread(t, sc, tool, args, 41, threadID)
@@ -282,7 +283,6 @@ func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testi
 	for tool, args := range map[string]map[string]any{
 		"create": {"title": "Forbidden"},
 		"list":   {},
-		"report": {"conversation_id": ownedID, "title": "Forbidden", "summary": "Wrong owner"},
 	} {
 		msg := mcpErrAsThread(t, sc, tool, args, 41, threadID)
 		if !strings.Contains(msg, "parent/main") {
@@ -291,6 +291,21 @@ func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testi
 	}
 
 	var targetTranscript []map[string]any
+	var rpc struct {
+		Error any
+	}
+	resp := sc.RequestWithHeaders("POST", "/mcp", map[string]any{
+		"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+		"params": map[string]any{"name": "report", "arguments": map[string]any{
+			"conversation_id": ownedID, "title": "Work complete", "summary": "The requested work is complete.",
+		}},
+	}, &rpc, map[string]string{
+		"Authorization": "Bearer " + sc.Token(), "X-Apteva-Caller-Agent": "41",
+		"X-Apteva-Caller-Thread": threadID, "X-Apteva-Project-ID": itProject,
+	})
+	if resp.Status != http.StatusOK || rpc.Error != nil {
+		t.Fatalf("bound report: %d %s", resp.Status, resp.Body)
+	}
 	if resp := itHTTP(sc, "GET", "/messages?chat_id="+targetID, nil, &targetTranscript); resp.Status != http.StatusOK {
 		t.Fatalf("target transcript: %d %s", resp.Status, resp.Body)
 	}

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.25.3
+version: 0.25.4
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, questions, and forms). Inbox items are messages — an
@@ -19,8 +19,8 @@ description: |
   Telegram response feedback supports native live drafts in private
   chats, typing-only feedback, or an operator-controlled off mode. Queued
   follow-ups release one turn at a time. Single-choice questions show
-  one-click answers, reports have clearer writing guidance, and Inbox
-  headlines have room to wrap on narrow screens.
+  one-click answers. Reports, alerts, approvals, questions and forms stay
+  in the operator conversation that owns the work.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -149,11 +149,13 @@ provides:
   mcp_tools:
     - { name: resolve_thread_identity, exposure: app_only, description: "Resolve the external principal bound to an agent thread. Restricted to configured trusted sibling app installations and the authenticated project." }
     - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Optionally attach one next user-message draft to a final reply using components=[{app:conversations,name:reply-suggestions,props:{items:[{id:next,text:USER_MESSAGE}]}}]. Suggestions only prepare a user draft; never execute them, add an interaction, or send an extra message to propose one. Omit for routine exchanges. Args: conversation_id, text?, phase? (acknowledgement|progress|final), components?, attachments?. Interactive question-card/form-card components use interaction fields/actions; blocking defaults false and inbox defaults true. Continue using a stated assumption and finish without waiting for optional answers. Blocking widgets require phase=final, then pace; answers return asynchronously as component.result to the requesting thread. Widgets never replace approval authorization. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Acknowledge before work. For a confirmation followed only by Core pace/timed waiting, use phase=final before pace; the later timer wake is a fresh response. Do not use acknowledgement/progress just to keep a future follow-up open. For short flows, including several related tool calls, keep working through to the final outcome without a progress update. Tool count or a routine stage boundary alone is not a reason to send an update. For longer work, complete a substantial batch before sending a concise progress update, and only when meaningful work remains. Combine nearby milestones; normally leave about a minute between updates unless the user needs to know about a blocker, material plan change, or decision sooner. Do not narrate individual tool calls, routine retries, or unchanged waits. If completion is near, finish and send the final outcome instead. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
-    - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread, using that conversation's exact id. Generic workers report the blocked decision to their parent instead. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny; custom entries require id, label, optional style primary/secondary/danger). The card itself explains the decision; request it directly without a separate send announcing approval. The verdict returns to the asking thread as approval.result." }
+    - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread. Use the operator conversation that owns the work and preserve its conversation_id through delegation and escalation. For autonomous work, search for the relevant work topic first and create one only when none fits. Generic workers report the blocked decision to their parent. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny; custom entries require id, label, optional style primary/secondary/danger). Request the card directly. The verdict returns to the asking thread as approval.result." }
     - name: report
       description: >-
-        Main-thread global output only. File a substantive report into an operator conversation.
-        Conversation threads and generic workers report results to their parent/main instead.
+        File a substantive report in the operator conversation that owns the work. Conversation
+        threads use their own exact conversation_id. Main preserves that id through delegation
+        and escalation. For autonomous work, search relevant existing work topics first and
+        create one only when none fits. Generic workers report results to their parent.
         Refused in public conversations. Name what happened in the title. In summary, use
         one or two plain-text sentences with the outcome and its impact. Aim for 25 words.
         When using sections, write one sentence about the current state. Put causes, recovery
@@ -164,13 +166,15 @@ provides:
       description: >-
         Raise a global alert from main, or a conversation-local urgent alert from the
         originating conversation thread using its exact id. Generic workers report problems
-        to their parent. Refused in public conversations. Set severity explicitly to error
+        to their parent. Keep the alert in the conversation that owns the work. Main preserves
+        the originating conversation_id and searches work topics before creating a conversation
+        for autonomous work. Refused in public conversations. Set severity explicitly to error
         for failures, warn for degradation, or info for advisories. Omission defaults to info.
         Args: conversation_id, text, severity?
-    - { name: create,           description: "Main-thread conversation management only: create a conversation led by this agent. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
-    - { name: list,             description: "Main-thread conversation management only: list conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
+    - { name: create,           description: "Main-thread conversation management only. Reuse the originating conversation or search existing work topics first. Create only when none fits, using a meaningful work title such as November content plan or Backup recovery. Avoid generic Reports, Alerts, or Approvals buckets. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
+    - { name: list,             description: "Main-thread conversation management only. Use a known originating conversation_id directly; otherwise search for the work topic before creating a conversation. List conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
     - { name: history,          description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation thread may read only its own exact conversation; generic workers are not granted this tool. Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?, client_message_id? (reuse for identical retries). When callback_tool is set, actions call back into the posting app." }
+    - { name: inbox_post, exposure: app_only, description: "INTERNAL sibling-app entry point via CallAppResult. Pass conversation_id for work originating in an existing operator conversation in the authenticated project. Calls without conversation context use the legacy app inbox conversation. Agent calls are refused. Args: kind (report|alert|approval), title, conversation_id?, body?, severity?, actions?, callback_tool?, agent_id?, client_message_id? (reuse for identical retries). When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
       label: Conversations
@@ -307,7 +311,7 @@ provides:
       description: |
         Reply discipline (acknowledge, selective progress, one final outcome), where
         inbox items live (list, reuse, create with stable topic
-        titles), alert/report cadence, readable report writing, main-thread output ownership,
+        work titles), Inbox destinations, readable report writing, conversation ownership,
         the approval round-trip, Telegram onboarding and routing, and room etiquette. Load before
         messaging people or raising inbox items.
       metadata:
@@ -316,7 +320,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.25.3, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.25.4, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

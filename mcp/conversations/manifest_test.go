@@ -252,7 +252,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.25.3"
+	const releaseVersion = "0.25.4"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -294,7 +294,7 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 	wants := map[string][]string{
 		"send":             {"originating conversation thread", "generic workers report to their parent", "For short flows", "meaningful", "Do not narrate individual tool calls"},
 		"request_approval": {"owned by main or by the originating conversation", "Generic workers report"},
-		"report":           {"Main-thread global output only", "generic workers report results"},
+		"report":           {"operator conversation that owns the work", "own exact conversation_id", "Generic workers report results"},
 		"alert":            {"global alert from main", "conversation-local urgent alert", "Generic workers report"},
 		"create":           {"Main-thread conversation management only", "generic workers do not create"},
 		"list":             {"Main-thread conversation management only", "generic workers report"},

@@ -454,13 +454,27 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	if projectID == "" {
 		return nil, errors.New("project context required")
 	}
-	conv, err := a.store.CreateConversation(CreateConversationInput{
-		ProjectID:       projectID,
-		LeadAgentID:     agentID,
-		Title:           "Inbox: " + sourceApp,
-		Origin:          "app",
-		ConversationKey: inboxConversationKey(sourceApp),
-	})
+	var conv *Conversation
+	var err error
+	if conversationID := strings.TrimSpace(stringArg(args, "conversation_id")); conversationID != "" {
+		conv, err = a.store.GetConversation(conversationID)
+		if err != nil || conv.ProjectID != projectID {
+			return nil, errors.New("operator conversation not found in authenticated project")
+		}
+		if err := requireOperatorAudience(conv, kind); err != nil {
+			return nil, err
+		}
+	} else {
+		// Older sibling apps have no conversation context. Their stable source
+		// conversation remains the compatibility path for those calls.
+		conv, err = a.store.CreateConversation(CreateConversationInput{
+			ProjectID:       projectID,
+			LeadAgentID:     agentID,
+			Title:           "Inbox: " + sourceApp,
+			Origin:          "app",
+			ConversationKey: inboxConversationKey(sourceApp),
+		})
+	}
 	if err != nil {
 		return nil, err
 	}

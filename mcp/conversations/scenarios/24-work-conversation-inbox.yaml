@@ -1,0 +1,21 @@
+name: conversations-work-conversation-inbox
+description: Reports, alerts and approvals stay with the originating work, and main reuses that conversation for a scheduled follow-up.
+timeout: 12m
+max_iterations: 110
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_WorkConversationInbox$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are a concise operations assistant. Follow the Conversations skill for
+  user requests and scheduler events. All work in this test uses supplied,
+  isolated facts. Keep related work together and request approval before
+  destructive actions.
+budget:
+  total_tokens: 700000
+trajectory_assert:
+  - tool_called: conversations_report
+  - tool_called: conversations_alert
+  - tool_called: conversations_request_approval
+  - tool_not_called: conversations_create

@@ -218,7 +218,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
 				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
 				"asking thread as approval.result. The card itself asks the question: call this directly, without a separate conversations_send announcing the approval. " +
-				"Main must use an operator conversation id from conversations_list or create one with conversations_create if none exists; main is a thread id, not a conversation id. " +
+				"Keep the approval in the operator conversation that owns the work. Main preserves the originating conversation_id on escalations and delegated results. For autonomous work, search for a relevant operator conversation first and create a topic only when none fits. " +
 				"Omit actions for Approve/Deny defaults. Custom actions require id and label (not value); style is optional.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
@@ -230,9 +230,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "report",
-			Description: "Main-thread global output only: file a substantive report into an operator conversation. " +
-				"Conversation threads and generic workers report results to their parent/main instead. Keep one " +
-				"standing Reports conversation and reuse it. Name what happened in the title, such as 'Help center update published'. " +
+			Description: "File a substantive report in the operator conversation that owns the work. " +
+				"Conversation threads report into their own exact conversation_id. Main preserves the originating conversation_id " +
+				"from delegated work or escalations. For autonomous work, search for a relevant existing conversation first; " +
+				"create a meaningful work topic only when none fits. Generic workers report results to their parent. " +
+				"Name what happened in the title, such as 'Help center update published'. " +
 				"Use summary as the Inbox preview: one or two plain-text sentences about the outcome. Aim for 25 words. " +
 				"When using sections, write one sentence about the current state. Keep incident causes, recovery steps, " +
 				"measurements, and verification details in optional sections ({title, body}). Use short paragraphs or bullets " +
@@ -250,7 +252,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "alert",
 			Description: "Raise a global alert from main, or a conversation-local urgent alert from the originating " +
 				"conversation thread using its exact id. Generic workers report problems to their parent. Alerts are " +
-				"severity-ranked in the inbox. Set severity explicitly: error for failures, warn for degraded operation, " +
+				"severity-ranked in the inbox. Use the conversation that owns the work; main preserves the originating conversation_id " +
+				"and searches relevant existing topics before creating a conversation for autonomous work. Set severity explicitly: error for failures, warn for degraded operation, " +
 				"and info for advisories. Omitting severity creates an info alert.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
@@ -261,11 +264,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "create",
-			Description: "Main-thread conversation management only. Create a conversation you lead, for an ongoing topic (\"Reports\", " +
-				"\"Infra monitoring\", an incident name). Title-idempotent: if you already have a conversation " +
+			Description: "Main-thread conversation management only. Reuse the originating conversation or search existing work topics first. " +
+				"Create a conversation only for work with no relevant existing conversation. Name the work, such as " +
+				"\"November content plan\" or \"Backup recovery\". Title-idempotent: if you already have a conversation " +
 				"with this title it is returned with created=false, so reusing a stable title never duplicates. " +
-				"Conversation threads and generic workers do not create conversations. Titles name ongoing topics — " +
-				"never put timestamps, ids, or per-item detail in them.",
+				"Conversation threads and generic workers do not create conversations. Avoid generic Reports, Alerts, or Approvals buckets. Titles name ongoing topics — " +
+				"omit per-notification timestamps, counters, or generic item types.",
 			InputSchema: schemaObject(map[string]any{
 				"title": map[string]any{"type": "string"},
 			}, []string{"title"}),
@@ -274,6 +278,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "list",
 			Description: "Main-thread conversation management only. List conversations this agent participates in. " +
+				"Use a known originating conversation_id directly; otherwise search for the work topic before creating a conversation. " +
 				"Discovery does not grant ownership of their Core threads: never update, rename, kill or replace them. " +
 				"Conversation threads already have their exact id; generic workers report to their parent. Pass query " +
 				"to filter by title (case-insensitive substring) — search before creating.",
@@ -301,9 +306,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"refused. Agents raise items with conversations_alert, conversations_report, or " +
 				"conversations_request_approval into a conversation (conversations_list to find one, " +
 				"conversations_create to make one). With callback_tool set, inbox actions call back into the " +
-				"posting app.",
+				"posting app. Pass conversation_id to keep the item in the existing operator conversation that owns " +
+				"the work in the authenticated project. Calls without conversation context use the legacy app inbox conversation.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":              map[string]any{"type": "string", "enum": []string{"report", "alert", "approval"}},
+				"conversation_id":   map[string]any{"type": "string", "description": "The existing operator conversation that owns the work, in the authenticated project. Supply it when posting about work originating in a conversation."},
 				"title":             map[string]any{"type": "string"},
 				"body":              map[string]any{"type": "string"},
 				"severity":          map[string]any{"type": "string"},
@@ -359,7 +366,7 @@ func (a *App) boundConversation(from *callIdentity) (*Conversation, error) {
 	return a.store.ConversationForAgentThread(from.ProjectID, from.AgentID, from.ThreadID)
 }
 
-// requireGlobalCaller refuses management/global-output tools from a thread
+// requireGlobalCaller refuses conversation-management tools from a thread
 // that Conversations itself created for a particular conversation. Other
 // opaque threads are intentionally not classified; as in Tasks, parents keep
 // global mutation tools away from generic workers when spawning them.
@@ -369,7 +376,7 @@ func (a *App) requireGlobalCaller(from *callIdentity, tool string) error {
 		return err
 	}
 	if bound != nil {
-		return fmt.Errorf("%s is not available from conversation %s; report global work to the parent/main thread", tool, bound.ID)
+		return fmt.Errorf("%s is not available from conversation %s; conversation management belongs to the parent/main thread", tool, bound.ID)
 	}
 	return nil
 }
@@ -567,9 +574,6 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	if err := a.requireGlobalCaller(from, "conversations_report"); err != nil {
-		return nil, err
-	}
 	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
 		return nil, err
@@ -647,11 +651,8 @@ func toolClientID(from *callIdentity, explicit string) string {
 	return ""
 }
 
-// toolCreate is the deliberate conversation-creation surface — the
-// replacement for the removed hardcoded activity bucket. It is
-// title-idempotent per agent so the laziest calling pattern
-// (create("Reports") before every report) converges on one
-// conversation instead of sprawling.
+// toolCreate is title-idempotent per agent. The model chooses a meaningful
+// work topic after checking whether a relevant conversation already exists.
 func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.25.4 — 2026-11-12
+
+- Keep reports, alerts, approvals, questions and forms in the operator conversation that owns the work.
+- Let conversation threads file their own reports, with the same participation and audience checks as other Inbox cards.
+- Teach main to preserve the originating conversation through delegation and escalation, search relevant work topics for autonomous work, and create a topic only when none fits.
+- Allow sibling apps to target an existing operator conversation through inbox_post.
+
 ## 0.25.3 — 2026-11-10
 
 - Answer single-choice questions with one click. Skip stays available, and custom answers send with Enter.

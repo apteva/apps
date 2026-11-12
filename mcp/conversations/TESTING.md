@@ -50,6 +50,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Alert | Agent-created, titled operator conversation and warning/error inbox card |
 | Approval round trip | Advertised action accepted, card updated in place, verdict acknowledged |
 | Report | Same report present in inbox and transcript |
+| Work conversation Inbox | Local reports, alerts and approvals stay in the originating conversation; a scheduled follow-up reuses it without creating a generic topic |
 | Public escalation | Visitor reply with no inbox leakage; escalation in operator chat |
 | Public self-service | Reply without escalating during a settle period |
 | Public refusal | Reply without escalating during a settle period |

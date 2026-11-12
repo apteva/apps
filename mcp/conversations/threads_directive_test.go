@@ -24,3 +24,12 @@ func TestConversationThreadDirectiveAcknowledgesEveryToolBackedRequest(t *testin
 		}
 	}
 }
+
+func TestPublicConversationDirectiveEscalatesInternalInboxItems(t *testing.T) {
+	text := conversationThreadDirective(&Conversation{ID: "public-conv", Title: "Customer", Audience: "public"})
+	if strings.Contains(text, "Use conversations_report for") ||
+		!strings.Contains(text, "Escalate internal reports, alerts and approval requests to parent/main") ||
+		!strings.Contains(text, "originating conversation_id") {
+		t.Fatalf("public conversation directive has incorrect Inbox routing: %s", text)
+	}
+}

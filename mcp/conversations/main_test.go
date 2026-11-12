@@ -335,6 +335,11 @@ func TestBoundConversationThreadCanOperateOnlyOnItsConversation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("approval in own conversation: %v", err)
 	}
+	if _, err := app.toolReport(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Work completed", "summary": "The requested work is complete.",
+	}); err != nil {
+		t.Fatalf("report in own conversation: %v", err)
+	}
 	if _, err := app.toolHistory(from, ctx, map[string]any{"conversation_id": conv.ID}); err != nil {
 		t.Fatalf("history for own conversation: %v", err)
 	}
@@ -345,10 +350,6 @@ func TestBoundConversationThreadCanOperateOnlyOnItsConversation(t *testing.T) {
 		},
 		"list": func() (any, error) {
 			return app.toolList(from, ctx, nil)
-		},
-		"report": func() (any, error) {
-			return app.toolReport(from, ctx, map[string]any{
-				"conversation_id": conv.ID, "title": "Global", "summary": "Wrong owner"})
 		},
 	} {
 		if _, err := call(); err == nil || !strings.Contains(err.Error(), "parent/main") {
@@ -364,6 +365,10 @@ func TestBoundConversationThreadCannotCrossConversation(t *testing.T) {
 	from := boundConversationCaller(t, app, owned, 41)
 
 	calls := map[string]func() (any, error){
+		"report": func() (any, error) {
+			return app.toolReport(from, ctx, map[string]any{
+				"conversation_id": target.ID, "title": "Escape", "summary": "Wrong destination"})
+		},
 		"send": func() (any, error) {
 			return app.toolSend(from, ctx, map[string]any{"conversation_id": target.ID, "text": "escape"})
 		},
@@ -966,12 +971,15 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	if got, want := strings.Join(ensure.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
 		t.Fatalf("conversation tool preload=%q want=%q", got, want)
 	}
-	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_report", "conversations_inbox_post"} {
+	if !slices.Contains(ensure.Tools, "conversations_report") {
+		t.Fatal("conversation profile is missing its report capability")
+	}
+	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_inbox_post"} {
 		if slices.Contains(ensure.Tools, forbidden) {
 			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, ensure.Tools)
 		}
 	}
-	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools", "A [chat soft break] is an advisory user event"} {
+	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, report, approve, or alert against another conversation id", "Do not grant the child Conversations tools", "A [chat soft break] is an advisory user event", "Use conversations_report"} {
 		if !strings.Contains(ensure.DirectiveSuffix, required) {
 			t.Fatalf("conversation directive missing %q: %s", required, ensure.DirectiveSuffix)
 		}
@@ -1132,10 +1140,50 @@ func TestToolCallIdentityDeduplicatesLifecycleMessage(t *testing.T) {
 	if _, err := app.toolSend(callerCtxCall(41, "main", "call-10"), ctx, args); err == nil {
 		t.Fatal("main thread ordinary reply was allowed")
 	}
-	if _, err := app.toolReport(call, ctx, map[string]any{
+	if _, err := app.toolReport(callerCtxCall(41, conversationThreadID(conv.ID), "call-11"), ctx, map[string]any{
 		"conversation_id": conv.ID, "title": "Report", "summary": "Done",
-	}); err == nil {
-		t.Fatal("conversation thread report was allowed")
+	}); err != nil {
+		t.Fatalf("conversation thread report: %v", err)
+	}
+}
+
+func TestInboxPostTargetsExistingWorkConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	for _, kind := range []string{kindReport, kindAlert, kindApproval} {
+		out, err := app.toolInboxPost(appCallerCtx("editorial"), ctx, map[string]any{
+			"kind": kind, "conversation_id": conv.ID, "title": "Article publication",
+			"body": "Publication needs attention.",
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if out.(map[string]any)["conversation_id"] != conv.ID {
+			t.Fatalf("%s wrote to another conversation: %v", kind, out)
+		}
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 20)
+	if len(transcript) != 3 {
+		t.Fatalf("work transcript has %d items, want 3", len(transcript))
+	}
+}
+
+func TestInboxPostRejectsInvalidWorkConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	public := mkConversation(t, app, 41)
+	foreign := mkConversation(t, app, 41)
+	if _, err := app.store.db.Exec("UPDATE conversations SET audience='public' WHERE id=?", public.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.db.Exec("UPDATE conversations SET project_id='other-project' WHERE id=?", foreign.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{public.ID, foreign.ID, "missing"} {
+		if _, err := app.toolInboxPost(appCallerCtx("editorial"), ctx, map[string]any{
+			"kind": kindReport, "conversation_id": id, "title": "Private report",
+		}); err == nil {
+			t.Fatalf("allowed an invalid operator destination %s", id)
+		}
 	}
 }
 
