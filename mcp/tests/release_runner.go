@@ -121,13 +121,17 @@ func (s *releaseSession) invoke(ctx context.Context, app, tool string, input map
 }
 
 func (s *releaseSession) probe(ctx context.Context, p ToolProbe) (string, error) {
+	return s.probeString(ctx, p, false)
+}
+
+func (s *releaseSession) probeString(ctx context.Context, p ToolProbe, allowEmpty bool) (string, error) {
 	value, err := s.invoke(ctx, p.App, p.Tool, p.Input)
 	if err != nil {
 		return "", err
 	}
 	got, _ := pointer(value, p.Path)
 	text, ok := got.(string)
-	if !ok || text == "" || len(text) > 8192 || strings.ContainsAny(text, "\r\n") {
+	if !ok || (!allowEmpty && text == "") || len(text) > 8192 || strings.ContainsAny(text, "\r\n") {
 		return "", errors.New("runtime probe did not return a usable string")
 	}
 	return text, nil
@@ -248,7 +252,7 @@ func (a *App) prepareRelease(ctx context.Context, s store, r *Run, env environme
 		session.targets = resolved.Targets
 		session.browserValues = map[string]string{}
 		for name, probe := range frozen.Config.Browser.ValueRefs {
-			value, err := session.probe(ctx, probe)
+			value, err := session.probeString(ctx, probe, true)
 			if err != nil {
 				return nil, errors.New("could not resolve a browser value reference")
 			}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -33,12 +34,39 @@ type BrowserAction struct {
 	Target    string         `json:"target,omitempty"`
 	Path      string         `json:"path,omitempty"`
 	Locator   BrowserLocator `json:"locator,omitempty"`
-	Value     string         `json:"value,omitempty"`
+	Value     *string        `json:"value,omitempty"`
 	ValueRef  string         `json:"value_ref,omitempty"`
 	UploadRef string         `json:"upload_ref,omitempty"`
 	Sensitive bool           `json:"sensitive,omitempty"`
 	Checked   bool           `json:"checked,omitempty"`
 }
+
+// UnmarshalJSON keeps omitted and empty values distinct while rejecting null.
+func (b *BrowserAction) UnmarshalJSON(data []byte) error {
+	type action BrowserAction
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key, raw := range fields {
+		if strings.EqualFold(key, "value") && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("browser value must be a string; null is not allowed")
+		}
+		if strings.EqualFold(key, "value_ref") {
+			var ref string
+			if err := json.Unmarshal(raw, &ref); err != nil || !browserRef.MatchString(ref) {
+				return errors.New("invalid browser value_ref")
+			}
+		}
+	}
+	var decoded action
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*b = BrowserAction(decoded)
+	return nil
+}
+
 type BrowserDiagnostics struct {
 	Errors         []string          `json:"errors"`
 	Requests       []json.RawMessage `json:"requests"`
@@ -118,8 +146,11 @@ func (s *Step) validateBrowser() error {
 			return errors.New("browser locator requires one test ID, role/name or text")
 		}
 	}
-	if b.ValueRef != "" && (!browserRef.MatchString(b.ValueRef) || b.Value != "") {
+	if b.ValueRef != "" && (!browserRef.MatchString(b.ValueRef) || b.Value != nil) {
 		return errors.New("use a browser value or a value_ref")
+	}
+	if b.Action == "select" && b.Value == nil && b.ValueRef == "" {
+		return errors.New("browser select requires exactly one value or value_ref")
 	}
 	if b.Action == "upload" && !slugPattern.MatchString(b.UploadRef) {
 		return errors.New("browser upload requires upload_ref")
