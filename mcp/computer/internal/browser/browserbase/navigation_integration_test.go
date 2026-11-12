@@ -139,7 +139,15 @@ func TestBrowserbaseHTTP2ReadOnlyRecovery(t *testing.T) {
 			alloc, stop := chromedp.NewExecAllocator(context.Background(), options...)
 			defer stop()
 			ctx, cancel := chromedp.NewContext(alloc)
-			defer cancel()
+			defer func() {
+				// Let Chromium finish profile writes before TempDir cleanup.
+				closing, stopClosing := context.WithTimeout(ctx, 5*time.Second)
+				defer stopClosing()
+				if err := chromedp.Cancel(closing); err != nil {
+					t.Errorf("close Chromium: %v", err)
+				}
+				cancel()
+			}()
 			if err := chromedp.Run(ctx, chromedp.Navigate(endpoint+"/seed"), chromedp.Evaluate(`localStorage.setItem('session-proof','preserved');document.cookie='context=preserved;path=/'`, nil)); err != nil {
 				t.Fatal(err)
 			}
