@@ -161,6 +161,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodPost, Pattern: "/webhooks/ses-inbound", Handler: a.handleInboundWebhook, NoAuth: true},
 		{Method: http.MethodPost, Pattern: "/webhooks/twilio-inbound", Handler: a.handleTwilioInboundWebhook, NoAuth: true},
 		{Method: http.MethodPost, Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook, NoAuth: true},
+		{Method: http.MethodPost, Pattern: "/webhooks/telnyx-inbound", Handler: a.handleTelnyxWebhook, NoAuth: true},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
 		{Method: http.MethodGet, Pattern: "/mobile/conversations", Handler: a.handleMobileConversations},
@@ -225,7 +226,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"reply_all":              map[string]any{"type": "boolean", "description": "Email reply mode only: include original To/Cc participants, excluding own mailboxes. Defaults to false."},
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
-				"connection_id":          map[string]any{"type": "integer", "description": "Optional bound email connection. Registered sender connection always takes precedence."},
+				"connection_id":          map[string]any{"type": "integer", "description": "Optional bound provider connection; must match the registered email or phone sender."},
 				"from_name":              map[string]any{"type": "string", "description": "Email-only friendly From display name. Composes \"Name\" <addr>. Defaults to sender.display_name when unset."},
 				"to":                     map[string]any{},
 				"body":                   map[string]any{"type": "string"},
@@ -448,26 +449,29 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "senders_create",
 			Description: "Register a sender with a bound SES or Gmail email connection, or Twilio phone connection. Gmail adopts verified send-as aliases; SES also supports domains and inbound bootstrap. " +
-				"SES mailboxes use verify_email; SES domains use DKIM/SPF/DMARC and optional inbound bootstrap. Gmail addresses must already be verified send-as aliases. Phone addresses adopt Twilio SMS or WhatsApp senders. " +
+				"SES mailboxes use verify_email; SES domains use DKIM/SPF/DMARC and optional inbound bootstrap. Gmail addresses must already be verified send-as aliases. SMS numbers adopt a selected Twilio or Telnyx connection; WhatsApp retains the legacy Twilio binding. receive_only disables sending and automatic routing while keeping the inbox active. " +
 				"Args: address (required), channel? (email|sms|whatsapp), connection_id? (bound email account), inbound? (SES), publish_dns? (SES), spf?, dmarc?, mail_from?, mail_from_sub?, region?, bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default?. " +
 				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
-				"address":       map[string]any{"type": "string"},
-				"connection_id": map[string]any{"type": "integer"},
-				"channel":       map[string]any{"type": "string"},
-				"inbound":       map[string]any{"type": "string"},
-				"publish_dns":   map[string]any{"type": "boolean"},
-				"spf":           map[string]any{"type": "boolean"},
-				"dmarc":         map[string]any{"type": "boolean"},
-				"mail_from":     map[string]any{"type": "boolean"},
-				"mail_from_sub": map[string]any{"type": "string"},
-				"region":        map[string]any{"type": "string"},
-				"bucket_name":   map[string]any{"type": "string"},
-				"topic_name":    map[string]any{"type": "string"},
-				"rule_set_name": map[string]any{"type": "string"},
-				"rule_name":     map[string]any{"type": "string"},
-				"display_name":  map[string]any{"type": "string"},
-				"set_default":   map[string]any{"type": "boolean"},
+				"receive_only":         map[string]any{"type": "boolean", "description": "Disable outbound sends and automatic inbound routing for this number; refresh preserves the setting."},
+				"messaging_profile_id": map[string]any{"type": "string"},
+				"allow_shared_profile": map[string]any{"type": "boolean", "description": "Explicitly allow reconfiguring a Telnyx profile shared with other numbers."},
+				"address":              map[string]any{"type": "string"},
+				"connection_id":        map[string]any{"type": "integer"},
+				"channel":              map[string]any{"type": "string"},
+				"inbound":              map[string]any{"type": "string"},
+				"publish_dns":          map[string]any{"type": "boolean"},
+				"spf":                  map[string]any{"type": "boolean"},
+				"dmarc":                map[string]any{"type": "boolean"},
+				"mail_from":            map[string]any{"type": "boolean"},
+				"mail_from_sub":        map[string]any{"type": "string"},
+				"region":               map[string]any{"type": "string"},
+				"bucket_name":          map[string]any{"type": "string"},
+				"topic_name":           map[string]any{"type": "string"},
+				"rule_set_name":        map[string]any{"type": "string"},
+				"rule_name":            map[string]any{"type": "string"},
+				"display_name":         map[string]any{"type": "string"},
+				"set_default":          map[string]any{"type": "boolean"},
 			}, []string{"address"}),
 			Handler: a.toolSendersCreate,
 		},
@@ -829,6 +833,7 @@ type DeliveryEvent struct {
 }
 
 type providerEvent struct {
+	ConnectionID      int64
 	ProviderEventID   string
 	Provider          string
 	ProviderMessageID string
@@ -1005,6 +1010,23 @@ func (a *App) sendMessage(ctx *sdk.AppCtx, args map[string]any, replyToMessageID
 		}
 		if emailBound.AppSlug == "gmail" && sender == nil {
 			return nil, errors.New("Gmail From address must be registered with senders_create")
+		}
+	}
+	if channel != channelEmail {
+		if sender == nil && int64Arg(args, "connection_id") == 0 && ctx.IntegrationFor("phone_provider") != nil {
+			emailBound = ctx.IntegrationFor("phone_provider")
+		} else {
+			emailBound, err = choosePhoneBinding(ctx, int64Arg(args, "connection_id"), sender, channel)
+		}
+		if err != nil && (len(phoneBindings(ctx, channel)) > 0 || sender != nil || int64Arg(args, "connection_id") > 0) {
+			return nil, err
+		}
+		legacyPhone := ctx.IntegrationFor("phone_provider")
+		if sender == nil && len(ctx.IntegrationsFor("sms_provider")) > 0 && (legacyPhone == nil || emailBound == nil || emailBound.ConnectionID != legacyPhone.ConnectionID) {
+			return nil, errors.New("SMS From must be registered to this project")
+		}
+		if emailBound != nil && emailBound.AppSlug == "telnyx" && contentSid != "" {
+			return nil, errors.New("Twilio ContentSid templates cannot be sent through Telnyx; use a local template")
 		}
 	}
 	// Compose RFC 5322 friendly-form From for email: "Display Name"
@@ -1185,7 +1207,7 @@ func (a *App) sendMessage(ctx *sdk.AppCtx, args map[string]any, replyToMessageID
 	case channelEmail:
 		providerMessageID, providerThreadID, providerErr = sendViaEmailProvider(ctx, emailBound, in)
 	case channelSMS, channelWhatsApp:
-		providerMessageID, providerErr = sendViaTwilio(ctx, in)
+		providerMessageID, providerErr = sendViaPhoneProvider(ctx, emailBound, in)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if providerErr != nil {
@@ -1242,6 +1264,9 @@ func validateOutboundSender(db *sql.DB, pid, channel, address string, requireReg
 			return nil, fmt.Errorf("from %q is not registered to project %q", address, pid)
 		}
 		return nil, nil
+	}
+	if !sender.OutboundEnabled {
+		return nil, fmt.Errorf("from %q is configured to receive only", address)
 	}
 	if !sender.Verified || !sender.SendingEnabled {
 		return nil, fmt.Errorf("from %q is not verified and enabled for project %q", address, pid)
@@ -1678,7 +1703,10 @@ func looksLikeSESConfigSetMissing(body string) bool {
 // both From and To. We add that prefix here so messaging callers and
 // stored rows stay scheme-free.
 func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
-	bound := ctx.IntegrationFor("phone_provider")
+	return sendViaTwilioConnection(ctx, ctx.IntegrationFor("phone_provider"), in)
+}
+
+func sendViaTwilioConnection(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, in providerSendInput) (string, error) {
 	if bound == nil {
 		return "", errors.New("no phone_provider bound — install/select a Twilio connection for SMS/WhatsApp")
 	}
@@ -1721,7 +1749,7 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 			"From": prefix + in.From,
 			"To":   prefix + to,
 		}
-		if cb := twilioWebhookURL(ctx, "/webhooks/twilio-status", in.ProjectID); cb != "" {
+		if cb := twilioPhoneWebhookURL(ctx, "/webhooks/twilio-status", in.ProjectID, bound.ConnectionID); cb != "" {
 			payload["StatusCallback"] = cb
 		}
 		if in.ContentSid != "" {
@@ -2821,7 +2849,7 @@ func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, senderRowToMap(r))
+		out = append(out, senderMapWithHealth(ctx, r))
 	}
 	return map[string]any{"senders": out, "count": len(out)}, nil
 }
@@ -2868,7 +2896,7 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if local == nil {
 		return nil, fmt.Errorf("sender %s not found in project %s", addr, pid)
 	}
-	return senderRowToMap(local), nil
+	return senderMapWithHealth(ctx, local), nil
 }
 
 // refreshOneSESIdentity probes SES for a single identity and upserts
@@ -2982,16 +3010,19 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 // refreshOneTwilioNumber probes Twilio for a single phone number and
 // upserts the local row.
 func (a *App) refreshOneTwilioNumber(ctx *sdk.AppCtx, pid, channel, addr string) error {
-	bound := ctx.IntegrationFor("phone_provider")
-	if bound == nil {
-		return errors.New("phone_provider not bound")
-	}
 	local, err := dbFindSender(ctx.AppDB(), pid, channel, addr)
 	if err != nil {
 		return err
 	}
 	if local == nil || local.DeletedAt != nil {
 		return errors.New("sender not registered")
+	}
+	bound, err := choosePhoneBinding(ctx, 0, local, channel)
+	if err != nil {
+		return err
+	}
+	if bound.AppSlug == "telnyx" {
+		return a.refreshTelnyxNumbers(ctx, pid, bound)
 	}
 	return a.refreshTwilioChannel(ctx, pid, bound.ConnectionID, channel)
 }
@@ -3120,13 +3151,18 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 				}
 			}
 		}
+	case "telnyx":
+		// Unassign locally: profile webhooks may serve other numbers.
 	case "twilio":
 		// Releasing a Twilio number stops billing for it but is destructive
 		// (the number goes back to the pool). For now we just clear the
 		// SmsUrl webhook + soft-delete locally — operators who want to
 		// fully release the number do it via twilio.release_phone_number.
 		if local != nil && local.ProviderIdentityID != "" && owners == 0 {
-			phoneBound := ctx.IntegrationFor("phone_provider")
+			phoneBound, bindErr := choosePhoneBinding(ctx, 0, local, channel)
+			if bindErr != nil {
+				return nil, bindErr
+			}
 			if phoneBound != nil {
 				tool := "update_phone_number"
 				payload := map[string]any{"PhoneNumberSid": local.ProviderIdentityID, "SmsUrl": ""}
@@ -3594,37 +3630,17 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	}
 	form := r.PostForm
 
-	bound := globalCtx.IntegrationFor("phone_provider")
-	if bound == nil {
-		// Without a bound provider we can't even verify the signature.
-		// Refuse rather than risk persisting unverified inbound.
-		httpErr(w, http.StatusServiceUnavailable, "no phone_provider bound")
+	if len(phoneBindings(globalCtx, channelSMS)) == 0 {
+		httpErr(w, 503, "no phone provider bound")
 		return
 	}
-	conn, err := globalCtx.PlatformAPI().GetConnection(bound.ConnectionID)
-	if err != nil || conn == nil {
-		httpErr(w, http.StatusServiceUnavailable, "lookup phone_provider connection: "+errString(err))
-		return
-	}
-
-	// Twilio's signature URL needs to be exactly what they sent the
-	// request to — including scheme, host, path, and query. Behind the
-	// platform's reverse proxy we rebuild it from X-Forwarded-* headers.
-	signedURL := reconstructPublicURL(r)
-	gotSig := r.Header.Get("X-Twilio-Signature")
-
-	// Auth token is in the bound connection's credentials. Today
-	// PlatformClient.GetConnection doesn't expose plaintext credentials —
-	// we'd need a separate helper to fetch one for signing. v0.5 keeps
-	// the verification structure in place; if the runner can't return
-	// the auth_token, signature check is skipped with a logged warning.
-	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
-	if authToken == "" {
-		httpErr(w, http.StatusServiceUnavailable, "twilio signature verification unavailable")
-		return
-	}
-	if !verifyTwilioSignature(signedURL, form, authToken, gotSig) {
-		httpErr(w, http.StatusForbidden, "twilio signature failed")
+	bound, err := verifiedTwilioConnection(globalCtx, r, form)
+	if err != nil {
+		code := 403
+		if strings.Contains(err.Error(), "credentials unavailable") {
+			code = 503
+		}
+		httpErr(w, code, err.Error())
 		return
 	}
 
@@ -3663,6 +3679,17 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	owner, ownerErr := phoneOwner(globalCtx, "twilio", bound.ConnectionID, channel, to)
+	if ownerErr == nil {
+		if owner.ProjectID != pid {
+			httpErr(w, 403, "destination project mismatch")
+			return
+		}
+	} else if !legacyUnassignedPhoneAllowed(globalCtx, bound, channel, to) {
+		httpErr(w, 403, ownerErr.Error())
+		return
+	}
+
 	toJSON, _ := json.Marshal([]string{to})
 	hdrs := map[string]string{
 		"X-Twilio-Message-Sid":      messageSid,
@@ -3680,14 +3707,13 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
 			 status, route_status, received_at, last_event_at,
-			 provider_message_id, verdicts)
-		 VALUES (?, ?, 'in', ?, ?, '[]', '', ?, '', ?, ?, '', '[]',
-		         'received', 'pending', ?, ?, ?, '{}')`,
+			 provider_message_id, verdicts, provider_slug, provider_connection_id)
+		 VALUES (?, ?, 'in', ?, ?, '[]', '', ?, '', ?, NULL, '', '[]',
+		         'received', 'pending', ?, ?, ?, '{}', 'twilio', ?)`,
 		pid, channel, from, string(toJSON),
 		body, string(hdrJSON),
-		messageSid,
 		now, now,
-		messageSid,
+		messageSid, bound.ConnectionID,
 	)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
@@ -3706,7 +3732,12 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		globalCtx.Logger().Info("auto-suppressed on STOP keyword", "channel", channel, "address", canonical)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
-		existing, lookupErr := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSid)
+		var existing *Message
+		var existingID int64
+		lookupErr := globalCtx.AppDB().QueryRow(`SELECT id FROM messages WHERE project_id=? AND provider_slug='twilio' AND provider_connection_id=? AND provider_message_id=? AND direction='in'`, pid, bound.ConnectionID, messageSid).Scan(&existingID)
+		if lookupErr == nil {
+			existing, lookupErr = dbMessageGet(globalCtx.AppDB(), pid, existingID)
+		}
 		if lookupErr != nil {
 			httpErr(w, 500, lookupErr.Error())
 			return
@@ -3741,24 +3772,17 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 	form := r.PostForm
 
-	bound := globalCtx.IntegrationFor("phone_provider")
-	if bound == nil {
-		httpErr(w, http.StatusServiceUnavailable, "no phone_provider bound")
+	if len(phoneBindings(globalCtx, channelSMS)) == 0 {
+		httpErr(w, 503, "no phone provider bound")
 		return
 	}
-	conn, err := globalCtx.PlatformAPI().GetConnection(bound.ConnectionID)
-	if err != nil || conn == nil {
-		httpErr(w, http.StatusServiceUnavailable, "lookup phone_provider connection: "+errString(err))
-		return
-	}
-	signedURL := reconstructPublicURL(r)
-	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
-	if authToken == "" {
-		httpErr(w, http.StatusServiceUnavailable, "twilio signature verification unavailable")
-		return
-	}
-	if !verifyTwilioSignature(signedURL, form, authToken, r.Header.Get("X-Twilio-Signature")) {
-		httpErr(w, http.StatusForbidden, "twilio signature failed")
+	bound, err := verifiedTwilioConnection(globalCtx, r, form)
+	if err != nil {
+		code := 403
+		if strings.Contains(err.Error(), "credentials unavailable") {
+			code = 503
+		}
+		httpErr(w, code, err.Error())
 		return
 	}
 
@@ -3781,9 +3805,13 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	pid, _ := resolveProjectFromRequest(r)
-	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSID)
+	msg, err := providerMessageForAccount(globalCtx, "", "twilio", bound.ConnectionID, messageSID)
 	if err != nil {
 		httpErr(w, 500, err.Error())
+		return
+	}
+	if msg != nil && pid != "" && msg.ProjectID != pid {
+		httpErr(w, 403, "message project mismatch")
 		return
 	}
 	raw, _ := json.Marshal(form)
@@ -3795,6 +3823,7 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 		reason = strings.TrimSpace(reason + " " + msgText)
 	}
 	ev := providerEvent{
+		ConnectionID:      bound.ConnectionID,
 		ProviderEventID:   "twilio:" + messageSID + ":" + status,
 		Provider:          "twilio",
 		ProviderMessageID: messageSID,
@@ -4741,6 +4770,12 @@ func isPermanentBounce(raw map[string]json.RawMessage) bool {
 func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) (bool, error) {
 	if ctx == nil || msg == nil {
 		return false, errors.New("messaging context and message are required")
+	}
+	if ev.ConnectionID > 0 && (msg.ProviderConnectionID != ev.ConnectionID || msg.ProviderSlug != ev.Provider) {
+		legacy := ctx.IntegrationFor("phone_provider")
+		if ev.Provider != "twilio" || msg.ProviderSlug != "" || msg.ProviderConnectionID != 0 || legacy == nil || legacy.ConnectionID != ev.ConnectionID {
+			return false, errors.New("provider event account does not match message")
+		}
 	}
 	raw := ev.Raw
 	if len(ev.Metadata) > 0 {
@@ -5805,12 +5840,14 @@ func (a *App) handleSendersDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 type providerSenderOption struct {
-	Channel    string `json:"channel"`
-	Address    string `json:"address"`
-	Label      string `json:"label,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	ProviderID string `json:"provider_id,omitempty"`
-	Status     string `json:"status,omitempty"`
+	Provider     string `json:"provider"`
+	ConnectionID int64  `json:"connection_id"`
+	Channel      string `json:"channel"`
+	Address      string `json:"address"`
+	Label        string `json:"label,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	ProviderID   string `json:"provider_id,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 // handleSendersProviderOptions lists upstream phone senders from the
@@ -5819,40 +5856,50 @@ type providerSenderOption struct {
 // agents still manage senders through senders_create/list/get.
 func (a *App) handleSendersProviderOptions(w http.ResponseWriter, r *http.Request) {
 	if _, err := resolveProjectFromRequest(r); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	bound := globalCtx.IntegrationFor("phone_provider")
-	if bound == nil {
-		httpJSON(w, map[string]any{"available": false, "options": []any{}, "error": "no phone_provider bound"})
+		httpErr(w, 400, err.Error())
 		return
 	}
 	channel := strings.TrimSpace(r.URL.Query().Get("channel"))
 	if channel != "" && channel != channelSMS && channel != channelWhatsApp {
-		httpErr(w, http.StatusBadRequest, "channel must be sms or whatsapp")
+		httpErr(w, 400, "channel must be sms or whatsapp")
 		return
 	}
 	options := []providerSenderOption{}
-	errorsOut := []string{}
-	if channel == "" || channel == channelSMS {
-		sms, err := listTwilioPhoneSenderOptions(globalCtx, bound.ConnectionID)
-		if err != nil {
-			errorsOut = append(errorsOut, err.Error())
-		} else {
-			options = append(options, sms...)
+	failures := []string{}
+	available := false
+	for _, ch := range []string{channelSMS, channelWhatsApp} {
+		if channel != "" && channel != ch {
+			continue
+		}
+		for _, bound := range phoneBindings(globalCtx, ch) {
+			available = true
+			var rows []providerSenderOption
+			var err error
+			if bound.AppSlug == "telnyx" {
+				var numbers []telnyxNumber
+				numbers, err = telnyxListNumbers(globalCtx, bound.ConnectionID, "list_phone_numbers", nil)
+				for _, n := range numbers {
+					rows = append(rows, providerSenderOption{Channel: channelSMS, Address: n.PhoneNumber, ProviderID: n.ID, Kind: "phone", Status: n.Status})
+				}
+			} else if ch == channelWhatsApp {
+				rows, err = listTwilioWhatsAppSenderOptions(globalCtx, bound.ConnectionID)
+			} else {
+				rows, err = listTwilioPhoneSenderOptions(globalCtx, bound.ConnectionID)
+			}
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s connection %d: %v", bound.AppSlug, bound.ConnectionID, err))
+				continue
+			}
+			for i := range rows {
+				rows[i].Provider = bound.AppSlug
+				rows[i].ConnectionID = bound.ConnectionID
+			}
+			options = append(options, rows...)
 		}
 	}
-	if channel == "" || channel == channelWhatsApp {
-		wa, err := listTwilioWhatsAppSenderOptions(globalCtx, bound.ConnectionID)
-		if err != nil {
-			errorsOut = append(errorsOut, err.Error())
-		} else {
-			options = append(options, wa...)
-		}
-	}
-	out := map[string]any{"available": true, "options": options}
-	if len(errorsOut) > 0 {
-		out["error"] = strings.Join(errorsOut, "; ")
+	out := map[string]any{"available": available, "options": options}
+	if len(failures) > 0 {
+		out["error"] = strings.Join(failures, "; ")
 	}
 	httpJSON(w, out)
 }

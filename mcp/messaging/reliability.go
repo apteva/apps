@@ -100,9 +100,9 @@ func processInboundJob(ctx *sdk.AppCtx, pid string, id int64, force bool) error 
 				"channel": message.Channel, "direction": "out", "status": message.Status,
 				"kind": "synced", "provider": "gmail", "attachment_count": messageAttachmentCount(message)})
 		}
-		if message != nil && message.Direction == "in" && message.RouteStatus == "ok" && message.MatchedRecipient != "" {
+		if message != nil && message.Direction == "in" && (message.RouteStatus == "ok" || message.RouteStatus == "inbox_only") && message.MatchedRecipient != "" {
 			payload := map[string]any{"id": id, "message_id": id, "channel": message.Channel, "direction": "in",
-				"route_status": "ok", "matched_recipient": message.MatchedRecipient, "receiving_identity": message.ReceivingIdentity,
+				"route_status": message.RouteStatus, "matched_recipient": message.MatchedRecipient, "receiving_identity": message.ReceivingIdentity,
 				"envelope_recipients": message.EnvelopeRecipients, "from": message.From,
 				"idempotency_key": fmt.Sprintf("messaging:%s:%d", pid, id), "attachment_count": messageAttachmentCount(message)}
 			if message.Channel == channelEmail {
@@ -164,7 +164,7 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	}
 	var inputs []providerAttachment
 	switch kind {
-	case "email", "gmail-sent":
+	case "email", "gmail-sent", "telnyx":
 		if source != "{}" {
 			if err := json.Unmarshal([]byte(source), &inputs); err != nil {
 				return err
@@ -176,11 +176,21 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 			return err
 		}
 		if len(form) > 0 {
-			bound := ctx.IntegrationFor("phone_provider")
-			if bound == nil {
+			var sender *senderRow
+			if len(m.To) > 0 {
+				sender, _ = dbFindSender(ctx.AppDB(), pid, m.Channel, m.To[0])
+			}
+			connectionID := m.ProviderConnectionID
+			if connectionID == 0 {
+				if legacy := ctx.IntegrationFor("phone_provider"); legacy != nil {
+					connectionID = legacy.ConnectionID
+				}
+			}
+			bound, bindErr := choosePhoneBinding(ctx, connectionID, sender, m.Channel)
+			if bindErr != nil || bound == nil {
 				return errors.New("phone provider missing")
 			}
-			token := lookupConnectionCredential(ctx, bound.ConnectionID, "auth_token")
+			token := phoneCredential(ctx, bound.ConnectionID, "auth_token")
 			if token == "" {
 				return errors.New("Twilio credentials unavailable")
 			}
@@ -214,6 +224,9 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	}
 	if kind == "gmail-sent" {
 		_, err = ctx.AppDB().Exec(`UPDATE messages SET route_status='not_applicable',route_error='' WHERE id=? AND project_id=?`, id, pid)
+		return err
+	}
+	if inboxOnly, err := phoneInboxOnly(ctx, m); inboxOnly || err != nil {
 		return err
 	}
 	return dispatchInbound(ctx, pid, m)
@@ -298,7 +311,19 @@ func replayProviderEvents(ctx *sdk.AppCtx) error {
 		if err := json.Unmarshal([]byte(p.raw), &ev); err != nil {
 			return err
 		}
-		m, err := dbMessageByProviderID(ctx.AppDB(), p.pid, ev.ProviderMessageID)
+		var m *Message
+		var err error
+		if ev.ConnectionID > 0 {
+			m, err = providerMessageForAccount(ctx, p.pid, ev.Provider, ev.ConnectionID, ev.ProviderMessageID)
+		} else if ev.Provider == "twilio" {
+			legacy := ctx.IntegrationFor("phone_provider")
+			if legacy == nil {
+				continue
+			}
+			m, err = providerMessageForAccount(ctx, p.pid, "twilio", legacy.ConnectionID, ev.ProviderMessageID)
+		} else {
+			m, err = dbMessageByProviderID(ctx.AppDB(), p.pid, ev.ProviderMessageID)
+		}
 		if err != nil {
 			return err
 		}

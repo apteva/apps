@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.15.0
+version: 0.16.0
 description: |
+  Multi-provider SMS through Twilio and Telnyx with account-pinned numbers,
+  verified durable inbound webhooks, delivery tracking and receive-only mode.
+  Legacy Twilio phone_provider bindings remain supported. Requires the
+  Telnyx messaging tools from integrations 0.55.0 or newer.
+
   Reply to an existing message with send_message(reply_to_message_id): derives addressing and
   preserves RFC/Gmail threading, subject ticket tokens, tagged reply addresses,
   and validated X-Ticket-ID/X-Ticket-Number headers. Explicit reply-all excludes
@@ -64,6 +69,16 @@ requires:
       required: false
       label: "Email providers (AWS SES or Gmail)"
       hint: "Select one or more email accounts and a default. Sender addresses determine the connection used for each message."
+    - role: sms_provider
+      kind: integration
+      mode: multiple
+      compatible_slugs: [twilio, telnyx]
+      capabilities: [sms.send, sms.receive]
+      tools:
+        sms.send: send_sms
+      required: false
+      label: "SMS providers (Twilio or Telnyx)"
+      hint: "Select one or more accounts. Each registered number owns its connection. Existing phone_provider setups continue working."
     - role: phone_provider
       kind: integration
       compatible_slugs: [twilio]
@@ -118,9 +133,10 @@ provides:
     - { prefix: /webhooks/ses-inbound, method: POST, no_auth: true }
     - { prefix: /webhooks/twilio-inbound, method: POST, no_auth: true }
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
+    - { prefix: /webhooks/telnyx-inbound, method: POST, no_auth: true }
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a new message with channel and to, or reply with reply_to_message_id and new content. Reply mode derives addressing, subject and RFC/Gmail threading from the project-owned original, preserves ticket tokens, tagged reply addresses and validated X-Ticket-ID/X-Ticket-Number, and rejects addressing/threading overrides. reply_all is explicit and email-only; Bcc and original attachments are never copied. Retry keys are scoped to the original. reply_to sets an email response address and is distinct from reply_to_message_id. Email routes through its registered sender's SES or Gmail connection; optional connection_id must match. Args: reply_to_message_id? (reply mode, omit channel/to/from/subject/threading), reply_all?, channel? (email|sms|whatsapp; required for new sends), to? (address or address[]; required for new sends), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns provider_message_id (opaque provider ID) separately from message_id_header (RFC email Message-ID when known; use this for threading), plus normalized attachment metadata and never base64. Channel is explicit for new sends and derived for replies. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
+    - { name: send_message,           description: "Send a new message with channel and to, or reply with reply_to_message_id and new content. Reply mode derives addressing, subject and RFC/Gmail threading from the project-owned original, preserves ticket tokens, tagged reply addresses and validated X-Ticket-ID/X-Ticket-Number, and rejects addressing/threading overrides. reply_all is explicit and email-only; Bcc and original attachments are never copied. Retry keys are scoped to the original. reply_to sets an email response address and is distinct from reply_to_message_id. Email routes through its registered SES/Gmail sender; SMS through its registered Twilio/Telnyx number. Optional connection_id must match. Existing legacy Twilio calls remain supported. Args: reply_to_message_id? (reply mode, omit channel/to/from/subject/threading), reply_all?, channel? (email|sms|whatsapp; required for new sends), to? (address or address[]; required for new sends), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns provider_message_id (opaque provider ID) separately from message_id_header (RFC email Message-ID when known; use this for threading), plus normalized attachment metadata and never base64. Channel is explicit for new sends and derived for replies. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events, and normalized attachment metadata without raw bytes." }
     - { name: message_list,           description: "List messages with normalized attachment metadata. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
@@ -145,7 +161,7 @@ provides:
     - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
     - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
-    - { name: senders_create,         description: "Register a sender using a bound SES or Gmail connection (optional connection_id). SES supports mailbox/domain verification and inbound bootstrap; Gmail adopts only verified send-as aliases and syncs inbound mailbox history. Phone addresses adopt Twilio SMS/WhatsApp senders. Args: address (required), channel?, connection_id?, inbound?, display_name?, set_default?." }
+    - { name: senders_create,         description: "Register a sender using a bound SES or Gmail connection (optional connection_id). SES supports mailbox/domain verification and inbound bootstrap; Gmail adopts only verified send-as aliases and syncs inbound mailbox history. SMS numbers adopt Twilio or Telnyx with pinned connection ownership; WhatsApp retains the legacy Twilio binding. receive_only keeps reception enabled and disables sending and automatic routing. Args: address (required), channel?, connection_id?, inbound?, receive_only?, messaging_profile_id?, allow_shared_profile?, display_name?, set_default?." }
     - { name: senders_refresh,        description: "Refresh verification/DKIM + sending status for locally-tracked senders by re-listing each bound provider. Does NOT import unknown upstream identities — use senders_create to add. Soft-deletes locals missing upstream. Returns {refreshed, count}." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender. send_message uses the default when 'from' is omitted. Args: address, channel? (auto-detected if blank)." }
     - { name: senders_update,         description: "Patch local-mutable fields on a sender — display_name (used as friendly From: \"Name\" <addr>) and notes. No provider round-trip. For verification / DKIM / inbound state use senders_create or senders_refresh; for the default flag use senders_set_default. Args: address (req), channel?, display_name?, notes?. Empty values preserve existing." }
@@ -201,7 +217,7 @@ runtime:
   startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
-    ref: messaging/v0.15.0
+    ref: messaging/v0.16.0
     entry: mcp/messaging
   port: 8080
   health_check: /health

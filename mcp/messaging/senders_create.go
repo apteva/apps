@@ -42,23 +42,26 @@ import (
 )
 
 type sendersCreateReq struct {
-	Address      string `json:"address"`       // required: email | domain | E.164 phone
-	Channel      string `json:"channel"`       // optional: 'email' | 'sms' | 'whatsapp'. Auto-detected if blank.
-	Inbound      string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
-	PublishDNS   *bool  `json:"publish_dns"`   // domain only; default true
-	SPF          *bool  `json:"spf"`           // domain only; default true
-	DMARC        *bool  `json:"dmarc"`         // domain only; default true
-	MailFrom     *bool  `json:"mail_from"`     // domain only; default true
-	Region       string `json:"region"`        // default eu-west-1 (inbound only)
-	MailFromSub  string `json:"mail_from_sub"` // default "mail"
-	BucketName   string `json:"bucket_name"`   // auto-named if blank
-	TopicName    string `json:"topic_name"`    // auto-named if blank
-	RuleSetName  string `json:"rule_set_name"` // default "apteva-default"
-	RuleName     string `json:"rule_name"`     // default "messaging-inbound"
-	DisplayName  string `json:"display_name"`  // optional friendly name persisted on the local row
-	SetDefault   bool   `json:"set_default"`   // make this the default sender for (project, channel)
-	ConnectionID int64  `json:"connection_id"` // bound email connection; default binding when omitted
-	ProjectID    string `json:"-"`             // resolved from args / env; not user-supplied
+	ReceiveOnly        *bool  `json:"receive_only"`
+	MessagingProfileID string `json:"messaging_profile_id"`
+	AllowSharedProfile bool   `json:"allow_shared_profile"`
+	Address            string `json:"address"`       // required: email | domain | E.164 phone
+	Channel            string `json:"channel"`       // optional: 'email' | 'sms' | 'whatsapp'. Auto-detected if blank.
+	Inbound            string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
+	PublishDNS         *bool  `json:"publish_dns"`   // domain only; default true
+	SPF                *bool  `json:"spf"`           // domain only; default true
+	DMARC              *bool  `json:"dmarc"`         // domain only; default true
+	MailFrom           *bool  `json:"mail_from"`     // domain only; default true
+	Region             string `json:"region"`        // default eu-west-1 (inbound only)
+	MailFromSub        string `json:"mail_from_sub"` // default "mail"
+	BucketName         string `json:"bucket_name"`   // auto-named if blank
+	TopicName          string `json:"topic_name"`    // auto-named if blank
+	RuleSetName        string `json:"rule_set_name"` // default "apteva-default"
+	RuleName           string `json:"rule_name"`     // default "messaging-inbound"
+	DisplayName        string `json:"display_name"`  // optional friendly name persisted on the local row
+	SetDefault         bool   `json:"set_default"`   // make this the default sender for (project, channel)
+	ConnectionID       int64  `json:"connection_id"` // bound provider connection; default binding when omitted
+	ProjectID          string `json:"-"`             // resolved from args / env; not user-supplied
 }
 
 type bootstrapStep struct {
@@ -127,6 +130,13 @@ func (a *App) handleSendersCreate(w http.ResponseWriter, r *http.Request) {
 
 // MCP entry point — args mirror sendersCreateReq.
 func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	for _, key := range []string{"receive_only", "allow_shared_profile"} {
+		if value, present := args[key]; present {
+			if _, ok := value.(bool); !ok {
+				return nil, fmt.Errorf("%s must be a boolean", key)
+			}
+		}
+	}
 	body := sendersCreateReq{
 		Address:      strArg(args, "address"),
 		Channel:      strArg(args, "channel"),
@@ -139,6 +149,11 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		RuleName:     strArg(args, "rule_name"),
 		DisplayName:  strArg(args, "display_name"),
 		ConnectionID: int64Arg(args, "connection_id"),
+	}
+	body.MessagingProfileID = strArg(args, "messaging_profile_id")
+	body.AllowSharedProfile = boolArg(args, "allow_shared_profile", false)
+	if v, ok := args["receive_only"].(bool); ok {
+		body.ReceiveOnly = &v
 	}
 	if v, ok := args["publish_dns"].(bool); ok {
 		body.PublishDNS = &v
@@ -1001,12 +1016,29 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 	if addr == "" || !strings.HasPrefix(addr, "+") || !allDigits(addr[1:]) {
 		return nil, fmt.Errorf("phone address must be E.164 (e.g. +15551234567), got %q", addr)
 	}
-	phoneBound := ctx.IntegrationFor("phone_provider")
-	if phoneBound == nil {
-		return nil, errors.New("phone_provider (twilio) not bound")
+	existing, err := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.DeletedAt != nil {
+		existing = nil
+	}
+	phoneBound, err := choosePhoneBinding(ctx, req.ConnectionID, existing, channel)
+	if err != nil {
+		return nil, err
+	}
+	if phoneBound.AppSlug == "telnyx" {
+		return a.sendersCreateTelnyx(ctx, pid, addr, req, phoneBound)
 	}
 	if channel == "whatsapp" {
-		return a.sendersCreateWhatsApp(ctx, pid, addr, req, phoneBound.ConnectionID)
+		resp, err := a.sendersCreateWhatsApp(ctx, pid, addr, req, phoneBound.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		if err := setReceiveOnly(ctx, pid, channel, addr, req.ReceiveOnly); err != nil {
+			return nil, err
+		}
+		return resp, nil
 	}
 
 	resp := &sendersCreateResp{
@@ -1098,7 +1130,7 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 
 	// 3. Set the SMS webhook URL on the phone number (if requested).
 	if doInbound {
-		webhookURL := twilioWebhookURL(ctx, "/webhooks/twilio-inbound", pid)
+		webhookURL := twilioPhoneWebhookURL(ctx, "/webhooks/twilio-inbound", pid, phoneBound.ConnectionID)
 		if match.SmsURL == webhookURL && strings.EqualFold(match.SmsMethod, "POST") {
 			resp.Steps = append(resp.Steps, bootstrapStep{
 				Step: "twilio_update_phone_number", OK: true,
@@ -1138,21 +1170,25 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 		}
 	}
 	a.persistSenderRow(ctx, pid, &senderUpsert{
-		ProjectID:           pid,
-		Channel:             channel,
-		Address:             addr,
-		Kind:                "phone",
-		DisplayName:         req.DisplayName,
-		Provider:            "twilio",
-		ProviderIdentityID:  match.SID,
-		Verified:            true, // Twilio phones are usable from the moment of purchase.
-		VerificationStatus:  "verified",
-		SendingEnabled:      true,
-		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
-		InboundConfig:       inboundCfg,
-		MarkSyncedNow:       true,
+		ProjectID:            pid,
+		Channel:              channel,
+		Address:              addr,
+		Kind:                 "phone",
+		DisplayName:          req.DisplayName,
+		Provider:             "twilio",
+		ProviderConnectionID: phoneBound.ConnectionID,
+		ProviderIdentityID:   match.SID,
+		Verified:             true, // Twilio phones are usable from the moment of purchase.
+		VerificationStatus:   "verified",
+		SendingEnabled:       true,
+		InboundBootstrapped:  resp.Inbound != nil && resp.Inbound.Bootstrapped,
+		InboundConfig:        inboundCfg,
+		MarkSyncedNow:        true,
 	}, resp)
 
+	if err := setReceiveOnly(ctx, pid, channel, addr, req.ReceiveOnly); err != nil {
+		return nil, err
+	}
 	if doInbound {
 		resp.NextStep = "Phone " + addr + " is ready to send + receive SMS via messaging."
 	} else {
@@ -1265,19 +1301,20 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 	}
 
 	a.persistSenderRow(ctx, pid, &senderUpsert{
-		ProjectID:           pid,
-		Channel:             "whatsapp",
-		Address:             addr,
-		Kind:                "phone",
-		DisplayName:         req.DisplayName,
-		Provider:            "twilio",
-		ProviderIdentityID:  sender.SID,
-		Verified:            verified,
-		VerificationStatus:  twilioWhatsAppVerificationStatus(sender.Status),
-		SendingEnabled:      verified,
-		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
-		InboundConfig:       inboundCfg,
-		MarkSyncedNow:       true,
+		ProjectID:            pid,
+		Channel:              "whatsapp",
+		Address:              addr,
+		Kind:                 "phone",
+		DisplayName:          req.DisplayName,
+		Provider:             "twilio",
+		ProviderConnectionID: connID,
+		ProviderIdentityID:   sender.SID,
+		Verified:             verified,
+		VerificationStatus:   twilioWhatsAppVerificationStatus(sender.Status),
+		SendingEnabled:       verified,
+		InboundBootstrapped:  resp.Inbound != nil && resp.Inbound.Bootstrapped,
+		InboundConfig:        inboundCfg,
+		MarkSyncedNow:        true,
 	}, resp)
 	if verified {
 		if doInbound {

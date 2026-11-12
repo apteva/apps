@@ -200,6 +200,10 @@ interface IdentityRow {
 }
 
 interface SenderRow {
+  provider_connection_id?: number;
+  outbound_enabled?: boolean;
+  inbound_config?: Record<string, unknown>;
+  last_received_at?: string;
   id?: number;
   channel: "email" | "sms" | "whatsapp";
   address: string;
@@ -217,6 +221,8 @@ interface SenderRow {
   last_synced_at?: string;
 }
 interface ProviderSenderOption {
+  provider?: string;
+  connection_id?: number;
   channel: "sms" | "whatsapp";
   address: string;
   label?: string;
@@ -596,7 +602,7 @@ function MessagingWorkspace({ projectId, installId }: NativePanelProps) {
     senders: senders.length,
   }), [outboxCount, inboxCount, templates, routes, suppressionTotal, senders]);
 
-  const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
+  const verifiedSenders = useMemo(() => senders.filter((s) => s.verified && s.outbound_enabled !== false && s.sending_enabled !== false), [senders]);
 
   const replyToMessage = useCallback((m: MessageRow) => {
     const draft = composeDraftFromMessage(m, verifiedSenders);
@@ -916,7 +922,7 @@ function MessageDetail({ m, events, onReply, onClose, api, reload }: { api: <T,>
       <DL label="Subject" value={m.subject || "(no subject)"} />
       <DL label="Status" value={<StatusPill status={m.status} />} />
       {m.status_reason && <DL label="Reason" value={m.status_reason} />}
-      {m.direction === "out" && m.provider_message_id && <DL label="SES id" value={<code className="text-xs">{m.provider_message_id}</code>} />}
+      {m.direction === "out" && m.provider_message_id && <DL label="Provider id" value={<code className="text-xs">{m.provider_message_id}</code>} />}
       {m.direction === "in" && m.route_status && (
         <>
           <DL label="Route" value={
@@ -1305,7 +1311,7 @@ export function ComposeView({
   // expose the full address as the value; domain rows expose just
   // the domain — when picked, a local-part input appears so the
   // operator can compose addr@domain explicitly.
-  const verified = useMemo(() => senders.filter((s) => s.verified), [senders]);
+  const verified = useMemo(() => senders.filter((s) => s.verified && s.outbound_enabled !== false && s.sending_enabled !== false), [senders]);
 
   // selectedAddress is what's chosen in the dropdown — either a full
   // email or a bare domain. selectedKind tracks which (drives the
@@ -2030,6 +2036,10 @@ function SendersView({
   const [providerOptionsError, setProviderOptionsError] = useState("");
   const [providerPickerMode, setProviderPickerMode] = useState(true);
   const [pickedProviderAddress, setPickedProviderAddress] = useState("");
+  const [phoneConnectionID, setPhoneConnectionID] = useState(0);
+  const [receiveOnly, setReceiveOnly] = useState(false);
+  const [messagingProfileID, setMessagingProfileID] = useState("");
+  const [allowSharedProfile, setAllowSharedProfile] = useState(false);
 
   useEffect(() => {
     api<{ available: boolean; domains: { name: string }[] }>("GET", "/senders/domains")
@@ -2073,14 +2083,20 @@ function SendersView({
   useEffect(() => {
     if (senderChannel === "email") return;
     if (!providerPickerMode) return;
-    setAddr(pickedProviderAddress);
-  }, [senderChannel, providerPickerMode, pickedProviderAddress]);
+    const selected = providerOptions.find(o => `${o.connection_id || 0}:${o.address}` === pickedProviderAddress);
+    setAddr(selected?.address || "");
+    setPhoneConnectionID(selected?.connection_id || 0);
+  }, [senderChannel, providerPickerMode, pickedProviderAddress, providerOptions]);
 
   useEffect(() => {
     setAddr("");
     setLocalPart("");
     setPickedDomain("");
     setPickedProviderAddress("");
+    setPhoneConnectionID(0);
+    setReceiveOnly(false);
+    setMessagingProfileID("");
+    setAllowSharedProfile(false);
     setAdvanced(false);
     setErr("");
   }, [senderChannel]);
@@ -2094,6 +2110,12 @@ function SendersView({
       const args: Record<string, unknown> = { address: addr };
       if (senderChannel !== "email") {
         args.channel = senderChannel;
+        if (phoneConnectionID) args.connection_id = phoneConnectionID;
+        if (senderChannel === "sms") {
+          args.receive_only = receiveOnly;
+          if (messagingProfileID.trim()) args.messaging_profile_id = messagingProfileID.trim();
+          args.allow_shared_profile = allowSharedProfile;
+        }
       }
       if (addressIsDomain) {
         args.inbound = inbound;
@@ -2253,8 +2275,8 @@ function SendersView({
             </>
           ) : senderChannel !== "email" && providerPickerMode && channelProviderOptions.length > 0 ? (
             <Field
-              label={senderChannel === "whatsapp" ? "WhatsApp sender" : "Twilio number"}
-              hint="loaded from the bound Twilio connection"
+              label={senderChannel === "whatsapp" ? "WhatsApp sender" : "SMS number"}
+              hint="loaded from connected provider accounts"
             >
               <select
                 className={inputCls + " w-80"}
@@ -2272,8 +2294,8 @@ function SendersView({
               >
                 <option value="">— pick a sender —</option>
                 {channelProviderOptions.map((o) => (
-                  <option key={`${o.channel}:${o.address}:${o.provider_id || ""}`} value={o.address}>
-                    {o.address}{o.label ? ` · ${o.label}` : ""}{o.status ? ` · ${o.status}` : ""}
+                  <option key={`${o.connection_id || 0}:${o.channel}:${o.address}`} value={`${o.connection_id || 0}:${o.address}`}>
+                    {o.address}{o.provider ? ` · ${o.provider}` : ""}{o.connection_id ? ` #${o.connection_id}` : ""}{o.label ? ` · ${o.label}` : ""}{o.status ? ` · ${o.status}` : ""}
                   </option>
                 ))}
                 <option value="__manual__">Other / type manually…</option>
@@ -2289,7 +2311,7 @@ function SendersView({
                     ? "alice@acme.com (one mailbox) or acme.com (whole domain)"
                     : senderChannel === "whatsapp"
                       ? "E.164 WhatsApp sender from Twilio, e.g. +14155238886"
-                      : "E.164 Twilio SMS number, e.g. +14155238886"
+                      : "E.164 SMS number, e.g. +14155238886"
               }
             >
               <input
@@ -2301,6 +2323,12 @@ function SendersView({
               />
             </Field>
           )}
+          {senderChannel === "sms" && <>
+            {!providerPickerMode && <Field label="Connection ID" hint="Choose the provider account that owns this number"><input type="number" min="1" className={inputCls + " w-32"} value={phoneConnectionID || ""} onChange={e => setPhoneConnectionID(Number(e.target.value))} /></Field>}
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={receiveOnly} onChange={e => setReceiveOnly(e.target.checked)} />Receive only — inbox messages without sending or automatic routing</label>
+            <Field label="Telnyx messaging profile (optional)" hint="Uses the number's existing profile when empty"><input className={inputCls + " w-72"} value={messagingProfileID} onChange={e => setMessagingProfileID(e.target.value)} /></Field>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={allowSharedProfile} onChange={e => setAllowSharedProfile(e.target.checked)} />Allow updating a shared Telnyx profile's webhook for all its numbers</label>
+          </>}
           <Field label="Display name (optional)" hint='shown as "Name" <addr> in From'>
             <input
               className={inputCls + " w-48"}
@@ -2533,11 +2561,15 @@ function SenderSetupCell({ sender }: { sender: SenderRow }) {
       parts.push(<span key="inbound" className="text-green-400">inbound wired</span>);
     }
   } else {
-    parts.push(<span key="provider">{sender.provider || "twilio"}</span>);
+    if (sender.outbound_enabled === false) parts.push(<span key="receive-only">receive only</span>);
+    if (sender.last_received_at) parts.push(<span key="last-received">last received: {new Date(sender.last_received_at).toLocaleString()}</span>);
+    const callback = sender.inbound_config?.webhook_url || sender.inbound_config?.sms_url;
+    if (typeof callback === "string" && callback) parts.push(<span key="webhook" title={callback}>webhook: {callback}</span>);
+    parts.push(<span key="provider">{sender.provider || "twilio"}{sender.provider_connection_id ? ` #${sender.provider_connection_id}` : ""}</span>);
     if (sender.inbound_bootstrapped) {
       parts.push(
         <span key="inbound" className="text-green-400">
-          {sender.channel === "whatsapp" ? "callback wired" : "SmsUrl wired"}
+          {sender.channel === "whatsapp" ? "callback wired" : "inbound webhook ready"}
         </span>,
       );
     } else {

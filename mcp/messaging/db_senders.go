@@ -25,6 +25,7 @@ import (
 // fields the DB allows NULL on so we can distinguish "unknown" from
 // "empty string".
 type senderRow struct {
+	OutboundEnabled      bool
 	ID                   int64
 	ProjectID            string
 	Channel              string
@@ -87,7 +88,7 @@ type senderUpsert struct {
 const senderColumns = `id, project_id, channel, address, kind,
 	COALESCE(display_name,''),
 	provider, COALESCE(provider_connection_id,0), COALESCE(provider_identity_id,''),
-	verified, COALESCE(verification_status,''), sending_enabled,
+	verified, COALESCE(verification_status,''), sending_enabled, outbound_enabled,
 	COALESCE(dkim_status,''),
 	inbound_bootstrapped, COALESCE(inbound_config,''),
 	is_default, COALESCE(notes,''), COALESCE(metadata,''),
@@ -106,7 +107,7 @@ func scanSender(row interface {
 		&s.ID, &s.ProjectID, &s.Channel, &s.Address, &s.Kind,
 		&s.DisplayName,
 		&s.Provider, &s.ProviderConnectionID, &s.ProviderIdentityID,
-		&s.Verified, &s.VerificationStatus, &s.SendingEnabled,
+		&s.Verified, &s.VerificationStatus, &s.SendingEnabled, &s.OutboundEnabled,
 		&s.DkimStatus,
 		&s.InboundBootstrapped, &s.InboundConfig,
 		&s.IsDefault, &s.Notes, &s.Metadata,
@@ -501,6 +502,7 @@ func senderRowToMap(s *senderRow) map[string]any {
 		"provider_identity_id":   s.ProviderIdentityID,
 		"verified":               s.Verified,
 		"verification_status":    s.VerificationStatus,
+		"outbound_enabled":       s.OutboundEnabled,
 		"sending_enabled":        s.SendingEnabled,
 		"dkim_status":            s.DkimStatus,
 		"inbound_bootstrapped":   s.InboundBootstrapped,

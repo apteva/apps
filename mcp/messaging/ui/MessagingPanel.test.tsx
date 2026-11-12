@@ -80,3 +80,11 @@ test("attachment-only compose submits a valid empty body",async()=>{
  expect(container.querySelector("textarea")!.required).toBe(false);
  await submit();expect(args.attachments).toHaveLength(1);expect(args.body).toBe("");
 });
+test("receive-only numbers are excluded from compose senders",async()=>{
+ const receiver={...sender,channel:"sms",address:"+15550000001",outbound_enabled:false};
+ const outbound={...sender,channel:"sms",address:"+15550000002",outbound_enabled:true};
+ await render({...base,draft:null,senders:[receiver,outbound]});
+ const options=[...container.querySelectorAll("select option")].map(o=>o.getAttribute("value"));
+ expect(options.some(v=>v?.includes(receiver.address))).toBe(false);
+ expect(options.some(v=>v?.includes(outbound.address))).toBe(true);
+});
