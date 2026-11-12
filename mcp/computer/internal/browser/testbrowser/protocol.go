@@ -37,7 +37,7 @@ type Command struct {
 	Target    string       `json:"target,omitempty"`
 	Path      string       `json:"path,omitempty"`
 	Locator   Locator      `json:"locator,omitempty"`
-	Value     string       `json:"value,omitempty"`
+	Value     *string      `json:"value,omitempty"`
 	Sensitive bool         `json:"sensitive,omitempty"`
 	Checked   bool         `json:"checked,omitempty"`
 	File      *FixtureFile `json:"file,omitempty"`
@@ -156,6 +156,9 @@ func (c Command) Validate() error {
 	case "navigate", "reload", "observe", "click", "fill", "select", "check", "upload":
 	default:
 		return errors.New("unsupported browser test action")
+	}
+	if c.Action == "select" && c.Value == nil {
+		return errors.New("select requires value; an empty string is allowed")
 	}
 	if c.Action == "navigate" {
 		return nil

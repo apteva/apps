@@ -186,8 +186,12 @@ func (b *Browser) Do(ctx context.Context, command Command) (Result, error) {
 		return Result{}, ctx.Err()
 	}
 	result := Result{}
+	value := ""
+	if command.Value != nil {
+		value = *command.Value
+	}
 	if command.Sensitive {
-		b.RegisterSecret(command.Value)
+		b.RegisterSecret(value)
 	}
 	const selector = `[data-apteva-test-target="active"]`
 	var observation struct {
@@ -236,13 +240,13 @@ func (b *Browser) Do(ctx context.Context, command Command) (Result, error) {
 		err = chromedp.Run(op, chromedp.Click(selector, chromedp.ByQuery))
 	case "fill":
 		if observation.Sensitive {
-			b.RegisterSecret(command.Value)
+			b.RegisterSecret(value)
 		}
 		result.Dispatched = true
-		_, err = textinput.Set(op, textinput.Target{Selector: selector}, textinput.SetRequest{Text: command.Value, Mode: "replace"})
+		_, err = textinput.Set(op, textinput.Target{Selector: selector}, textinput.SetRequest{Text: value, Mode: "replace"})
 	case "select":
 		result.Dispatched = true
-		_, err = selectinput.Select(op, selectinput.Target{Selector: selector}, selectinput.Request{Value: command.Value})
+		_, err = selectinput.Select(op, selectinput.Target{Selector: selector}, selectinput.Request{Values: []string{value}})
 	case "check":
 		result.Dispatched = true
 		_, err = checkedinput.Set(op, checkedinput.Target{Selector: selector}, checkedinput.Request{Checked: command.Checked})
