@@ -113,6 +113,7 @@ func TestProviderWebhookRoutesArePublic(t *testing.T) {
 		"/webhooks/ses-inbound":    false,
 		"/webhooks/twilio-inbound": false,
 		"/webhooks/twilio-status":  false,
+		"/webhooks/telnyx-inbound": false,
 	}
 	for _, route := range (&App{}).HTTPRoutes() {
 		if _, ok := expected[route.Pattern]; !ok {

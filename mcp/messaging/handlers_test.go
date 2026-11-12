@@ -28,6 +28,8 @@ import (
 // and returns a canned response. Only the methods we actually use in
 // tests are non-nil; everything else panics so failures are loud.
 type stubPlatform struct {
+	connectionSlugs     map[int64]string
+	repliesByConnection map[int64]map[string]*sdk.ExecuteResult
 	tk.BasePlatformClient
 	mu                 sync.Mutex
 	executeCalls       []executeCall
@@ -79,6 +81,11 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	priorCalls = s.toolCallCounts[tool]
 	s.toolCallCounts[tool] = priorCalls + 1
 	s.mu.Unlock()
+	if perAccount := s.repliesByConnection[connID]; perAccount != nil {
+		if result := perAccount[tool]; result != nil {
+			return result, nil
+		}
+	}
 	if s.executeErr != nil {
 		return nil, s.executeErr
 	}
@@ -376,6 +383,9 @@ func TestSuppression_DomainBlocksOutboundAndRequiresForceForCommonDomains(t *tes
 // Unused PlatformClient methods — return zero values; tests that hit
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if slug := s.connectionSlugs[id]; slug != "" {
+		return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
+	}
 	slug := "aws-ses"
 	if id == 2 {
 		slug = "twilio"

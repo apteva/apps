@@ -155,6 +155,9 @@ func (a *App) sendReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			}
 		}
 	}
+	if m.Channel != channelEmail && m.ProviderConnectionID > 0 {
+		send["connection_id"] = m.ProviderConnectionID
+	}
 	if m.Channel == channelEmail {
 		// Keep Gmail replies on the receiving account, and outbound follow-ups
 		// on their original account even if a sender was deleted/re-registered.

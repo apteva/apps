@@ -53,8 +53,14 @@ func (a *App) refreshSendersFromProviders(ctx *sdk.AppCtx, pid string) error {
 			firstErr = err
 		}
 	}
-	if bound := ctx.IntegrationFor("phone_provider"); bound != nil {
-		if err := a.refreshTwilioNumbers(ctx, pid, bound.ConnectionID); err != nil && firstErr == nil {
+	for _, bound := range phoneBindings(ctx, channelSMS) {
+		var err error
+		if bound.AppSlug == "telnyx" {
+			err = a.refreshTelnyxNumbers(ctx, pid, bound)
+		} else {
+			err = a.refreshTwilioNumbers(ctx, pid, bound.ConnectionID)
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -305,7 +311,7 @@ func (a *App) refreshTwilioChannel(ctx *sdk.AppCtx, pid string, connID int64, ch
 	}
 	hasTwilio := false
 	for _, r := range known {
-		if r.Provider == "twilio" {
+		if phoneSenderOnConnection(ctx, r, connID) {
 			hasTwilio = true
 		}
 	}
@@ -321,7 +327,7 @@ func (a *App) refreshTwilioChannel(ctx *sdk.AppCtx, pid string, connID int64, ch
 		byAddress[stripScheme(firstStringField(r, "phone_number", "sender_id"))] = r
 	}
 	for _, r := range known {
-		if r.Provider != "twilio" {
+		if !phoneSenderOnConnection(ctx, r, connID) {
 			continue
 		}
 		v, ok := byAddress[r.Address]
@@ -336,7 +342,7 @@ func (a *App) refreshTwilioChannel(ctx *sdk.AppCtx, pid string, connID int64, ch
 			verified = twilioWhatsAppSenderVerified(firstStringField(v, "status"))
 			status = twilioWhatsAppVerificationStatus(firstStringField(v, "status"))
 		}
-		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: channel, Address: r.Address, Kind: r.Kind, Provider: "twilio", ProviderIdentityID: firstStringField(v, "sid"), Verified: verified, VerificationStatus: status, SendingEnabled: verified, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: channel, Address: r.Address, Kind: r.Kind, Provider: "twilio", ProviderConnectionID: connID, ProviderIdentityID: firstStringField(v, "sid"), Verified: verified, VerificationStatus: status, SendingEnabled: verified, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
 			return err
 		}
 	}
