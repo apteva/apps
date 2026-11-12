@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
@@ -29,6 +30,7 @@ type Browser struct {
 	boundary        *boundary
 	options         Options
 	mu              sync.Mutex
+	closeOnce       sync.Once
 	stateMu         sync.Mutex
 	errors          []string
 	secrets         []string
@@ -125,9 +127,17 @@ func (b *Browser) PID() int {
 }
 func (b *Browser) Engine() string { return b.engine }
 func (b *Browser) Close() {
-	b.cancel()
-	b.allocatorCancel()
-	b.boundary.close()
+	b.closeOnce.Do(func() {
+		// Chromium's helpers must finish profile writes before the owner can
+		// delete this ephemeral profile. Fall back to forced cancellation if
+		// graceful shutdown is unavailable or exceeds the close budget.
+		ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+		_ = chromedp.Cancel(ctx)
+		cancel()
+		b.cancel()
+		b.allocatorCancel()
+		b.boundary.close()
+	})
 }
 func (b *Browser) addError(text string) {
 	b.stateMu.Lock()
