@@ -1,0 +1,68 @@
+{
+  "version": "0.19.0",
+  "date": "2026-11-13",
+  "environment": "Local macOS test process. GOMAXPROCS=2 and GOMEMLIMIT=4GiB. In-memory SQLite. Runs overlapped other local verification.",
+  "limitations": [
+    "Not measured on the shared 2 vCPU / 4 GB test host.",
+    "Cold means the first measured batch, not a forced filesystem-cache flush.",
+    "Database transaction metrics apply to mutations. Reads report SQLite pool wait and total request latency."
+  ],
+  "batches": [
+    {
+      "operation": "grants_get",
+      "warm": false,
+      "requests": 32,
+      "concurrency": 8,
+      "p50_ms": 0.215,
+      "p95_ms": 0.691,
+      "errors": 0,
+      "db_pool_wait_ms": 9.164,
+      "transaction_queue_p95_ms": 0.0,
+      "database_transaction_p95_ms": 0.0,
+      "allocated_bytes": 275616,
+      "heap_bytes": 3443624
+    },
+    {
+      "operation": "grants_get",
+      "warm": true,
+      "requests": 32,
+      "concurrency": 8,
+      "p50_ms": 0.248,
+      "p95_ms": 0.462,
+      "errors": 0,
+      "db_pool_wait_ms": 7.341,
+      "transaction_queue_p95_ms": 0.0,
+      "database_transaction_p95_ms": 0.0,
+      "allocated_bytes": 270824,
+      "heap_bytes": 3783992
+    },
+    {
+      "operation": "grants_upsert",
+      "warm": false,
+      "requests": 32,
+      "concurrency": 8,
+      "p50_ms": 1.737,
+      "p95_ms": 2.703,
+      "errors": 0,
+      "db_pool_wait_ms": 50.732,
+      "transaction_queue_p95_ms": 0.785,
+      "database_transaction_p95_ms": 0.187,
+      "allocated_bytes": 1370976,
+      "heap_bytes": 5157376
+    },
+    {
+      "operation": "grants_upsert",
+      "warm": true,
+      "requests": 32,
+      "concurrency": 8,
+      "p50_ms": 1.591,
+      "p95_ms": 3.104,
+      "errors": 0,
+      "db_pool_wait_ms": 50.625,
+      "transaction_queue_p95_ms": 0.73,
+      "database_transaction_p95_ms": 0.214,
+      "allocated_bytes": 1345792,
+      "heap_bytes": 4049448
+    }
+  ]
+}

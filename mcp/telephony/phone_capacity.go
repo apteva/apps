@@ -110,7 +110,7 @@ func (a *App) validateDecisionDestination(project string, dest *routingDestinati
 		return errors.New("decision targets require individual capacity configuration")
 	}
 	p, err := a.phonePrincipal(project, c.Identity)
-	if err != nil || !p.Destinations[dest.ID] {
+	if err != nil || !p.forAction("call.answer").Destinations[dest.ID] {
 		return fmt.Errorf("destination %s identity must have enabled Telephony access", dest.ID)
 	}
 	return nil
@@ -122,7 +122,7 @@ func (a *App) destinationAllowsIdentity(project, dest string, identity phoneIden
 		return false
 	}
 	c, err := readDestinationCapacity(row.ConfigJSON)
-	return err == nil && (c.Limit == 0 || c.Identity == identity)
+	return row.Enabled && err == nil && (c.Limit == 0 || c.Identity == identity)
 }
 
 // Recheck mutable permissions under the same lock that commits the reservation.
@@ -146,28 +146,13 @@ func validateDecisionTargetTx(tx *sql.Tx, project, dest string, identity phoneId
 	if e = json.Unmarshal([]byte(raw), &policy); e != nil {
 		return e
 	}
-	allowed := func(g phoneGrant) bool {
-		for _, id := range g.Destinations {
-			if id == dest {
-				return true
-			}
-		}
-		return false
+	policy.resourceGrants, e = loadPhoneResourceGrants(tx, project)
+	if e != nil {
+		return e
 	}
-	for _, u := range policy.Users {
-		if u.Identity != identity || !u.Enabled {
-			continue
-		}
-		if allowed(u.phoneGrant) {
-			return nil
-		}
-		for _, group := range policy.Groups {
-			for _, id := range u.Groups {
-				if id == group.ID && allowed(group.phoneGrant) {
-					return nil
-				}
-			}
-		}
+	p, e := phonePrincipalFromPolicy(project, identity, policy)
+	if e != nil || !p.forAction("call.answer").Destinations[dest] {
+		return errors.New("destination access revoked")
 	}
-	return errors.New("destination access revoked")
+	return nil
 }

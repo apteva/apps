@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	bench "github.com/apteva/apps/mcp/telephony/benchmarks/softphone"
 	"github.com/gobwas/ws/wsutil"
@@ -166,14 +167,18 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			}
 			return result
 		}
-		destination := request("POST", "/routing/destinations/save", map[string]any{"name": "User desk", "kind": "browser", "config": map[string]any{}, "enabled": true})["id"].(string)
+		identity := phoneIdentity{"auth", "11", "user", fmt.Sprint(user["id"]), fmt.Sprint(user["organization_id"])}
+		request("PUT", "/access/policy", phonePolicy{
+			Providers:   []phoneAuthProvider{{ID: "browser-login", IssuerApp: identity.IssuerApp, IssuerInstallID: identity.IssuerInstallID, URL: platform.serveAuth(t, authSidecar.URL()) + "/me?project_id=" + tier2Project, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
+			Delegations: []phoneDelegation{{AppInstallID: 91, AppName: "functions", Permissions: append([]string{}, phoneAdminPermissions...), DestinationPrefixes: []string{"desk-"}, Authorities: []phoneAuthority{{identity.IssuerApp, identity.IssuerInstallID, identity.OrganizationID, "user"}}, Actions: append([]string{}, ordinaryPhoneActions...)}},
+		})
+		destination := "desk-browser-user"
+		tier2ResourceAdmin(t, sc, "destinations_upsert", map[string]any{"id": destination, "name": "User desk", "kind": "browser", "config": map[string]any{"capacity": destinationCapacity{Identity: identity, Limit: 1}}, "enabled": true, "expected_revision": nil, "idempotency_key": "browser-desk"})
+		tier2ResourceAdmin(t, sc, "grants_upsert", map[string]any{"id": "browser-grant", "principal": identity, "resource": phoneResource{"destination", destination}, "actions": []string{"call.read", "call.answer", "call.attach", "call.hangup"}, "enabled": true, "expected_revision": nil, "idempotency_key": "browser-grant"})
 		flow := request("POST", "/routing/flows/save", map[string]any{"name": "User routing", "draft": map[string]any{"entry": "desk", "nodes": []any{map[string]any{"id": "desk", "type": "destination", "config": map[string]any{"destination_id": destination}}}}})
 		request("POST", "/routing/flows/publish", map[string]any{"id": flow["id"]})
 		request("POST", "/routing/routes/assign", map[string]any{"flow_id": flow["id"], "route_id": route["id"]})
-		request("PUT", "/access/policy", phonePolicy{
-			Users:     []phoneUser{{Identity: phoneIdentity{"auth", "11", "user", fmt.Sprint(user["id"]), fmt.Sprint(user["organization_id"])}, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{destination}}}},
-			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: platform.serveAuth(t, authSidecar.URL()) + "/me?project_id=" + tier2Project, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
-		})
+
 	}
 
 	incoming, _ := json.Marshal(map[string]any{"data": map[string]any{
@@ -457,4 +462,28 @@ func (w *phoneSocketRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		w.onHijack(c)
 	}
 	return c, r, err
+}
+
+// The local gateway fixture supplies the same server-owned service identity
+// that reaches the target SDK in production. The browser never has this token.
+func tier2ResourceAdmin(t *testing.T, sc *tk.Sidecar, operation string, args map[string]any) map[string]any {
+	t.Helper()
+	payload := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "telephony_" + operation, "arguments": args}}
+	var response struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	status, raw := tier2Request(t, sc, "POST", "/mcp", payload, &response, map[string]string{sdk.HeaderBoundCallerInstallID: "91", sdk.HeaderBoundCallerAppName: "functions", "X-Apteva-Project-ID": tier2Project, "X-Apteva-Subject-Type": "user", "X-Apteva-Subject-ID": "business-manager"})
+	if status != 200 || response.Error != nil || len(response.Result.Content) != 1 {
+		t.Fatalf("resource tool %s: %d %s", operation, status, raw)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(response.Result.Content[0].Text), &result); err != nil {
+		t.Fatal(err)
+	}
+	return adminData(t, result)
 }

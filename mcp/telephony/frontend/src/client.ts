@@ -118,6 +118,8 @@ export interface OutboundNumbersResult {
  warnings: Array<{ provider: string; carrier_connection_id: number; code: string; message: string }>;
 }
 export interface DialRequest {
+  /** Required when a provisioned user has several permitted outbound destinations. */
+  destination_id?: string;
   to: string;
   from?: string;
   timeout_sec?: number;

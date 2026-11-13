@@ -184,7 +184,7 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 				_ = send(`{"type":"access.revoked"}`)
 				return
 			}
-			checked = withPhonePrincipal(r, fresh)
+			checked = withPhonePrincipal(r, fresh.forAction("call.read"))
 		}
 		snapshot, e := a.callNotificationSnapshot(checked, project)
 		if e != nil {
