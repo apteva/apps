@@ -8,15 +8,18 @@ import type { CardComponent, InteractionField, Message } from "./types";
 export interface ConversationComponentProps {
  message:Message;
  component:CardComponent;
+ projectId?:string;
  submit:(action:string,values?:Record<string,unknown>)=>Promise<Message>;
 }
 export type ConversationComponentRenderer = ComponentType<ConversationComponentProps>;
 export type ConversationComponentRenderers = Record<string,ConversationComponentRenderer>;
 const Registry=createContext<ConversationComponentRenderers>({});
+const AppRenderer=createContext<ConversationComponentRenderer|undefined>(undefined);
 /** Hosts can add installed-app renderers by "app/name". Lifecycle and actions
  * remain owned by Conversations regardless of the renderer. */
-export function ConversationComponentProvider({renderers,children}:{renderers:ConversationComponentRenderers;children:ReactNode}) {
- const inherited=useContext(Registry);return <Registry.Provider value={{...inherited,...renderers}}>{children}</Registry.Provider>;
+export function ConversationComponentProvider({renderers={},appRenderer,children}:{renderers?:ConversationComponentRenderers;appRenderer?:ConversationComponentRenderer;children:ReactNode}) {
+ const inherited=useContext(Registry);const inheritedApp=useContext(AppRenderer);
+ return <Registry.Provider value={{...inherited,...renderers}}><AppRenderer.Provider value={appRenderer??inheritedApp}>{children}</AppRenderer.Provider></Registry.Provider>;
 }
 
 function QuestionChoices({field, value, custom, onChange, onAnswer}: {
@@ -119,7 +122,7 @@ function InteractionCard({message,component,submit}:ConversationComponentProps) 
  </section>;
 }
 export function MessageComponents({message,onApprovalAction,onChanged,projectId}:{message:Message;onApprovalAction?:(id:number,action:string,note:string)=>Promise<void>;onChanged?:(message:Message)=>void;projectId?:string}) {
- const renderers=useContext(Registry);const {apiPost}=useConversationAPI();const {t}=useConversationLocalization();
+ const renderers=useContext(Registry);const InstalledRenderer=useContext(AppRenderer);const {apiPost,conversationsClient}=useConversationAPI();const {t}=useConversationLocalization();
  const components=(message.components??[]).filter(c=>!isReplySuggestion(c));
  if(!components.length)return null;
  return <div className="flex min-w-0 flex-col gap-2">{components.map((component,index)=>{
@@ -130,8 +133,8 @@ export function MessageComponents({message,onApprovalAction,onChanged,projectId}
   if(component.app==="conversations"&&component.name==="approval-card")return <ApprovalCard key={key} message={single} onAction={onApprovalAction??(async(id,action,note)=>{const result=await apiPost<{message:Message}>("/message-action",{message_id:id,action_id:action,note},projectId);onChanged?.(result.message)})}/>;
   if(component.app==="conversations"&&component.name==="report-card")return <ReportCard key={key} message={single}/>;
   if(component.app==="conversations"&&component.name==="alert-card")return <AlertCard key={key} message={single}/>;
-  const Renderer=renderers[`${component.app}/${component.name}`]??(component.interaction?InteractionCard:undefined);
-  if(Renderer)return <Renderer key={key} message={message} component={component} submit={submit}/>;
-  return <details key={key} className="rounded border border-border p-2"><summary>{component.app}: {component.name}</summary><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(component.props,null,2)}</pre></details>;
+  const Renderer=renderers[`${component.app}/${component.name}`]??(component.interaction?InteractionCard:InstalledRenderer);
+  if(Renderer)return <Renderer key={key} message={message} component={component} submit={submit} projectId={projectId??conversationsClient.projectId}/>;
+  return <p key={key} role="status" className="rounded border border-border p-3 text-sm text-text-muted">{t("component.previewUnavailable")}</p>;
  })}</div>;
 }

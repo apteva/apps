@@ -1,0 +1,26 @@
+name: conversations-installed-app-cards
+description: Real Codex browsing produces a Computer browser-view and a Tasks card; Chromium renders actual installed modules across Conversations surfaces.
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  apps:
+    - path: ../computer
+      spawnable: true
+    - path: ../tasks
+      spawnable: true
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_InstalledAppCardsBrowser$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are a concise operations assistant. Use Computer for webpage inspection,
+  Tasks for task records, and Conversations for user-visible replies. Follow the
+  installed skills. This is isolated local test work. Use the local browser
+  backend. Do not contact external services, start draft tasks, or change other
+  records. When finished inspecting a page, close the browser and include its
+  resulting view in the same final reply as the outcome.
+budget:
+  total_tokens: 700000
+trajectory_assert:
+  - tool_called: computer_browser_session
+  - tool_called: conversations_send

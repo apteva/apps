@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.5 — 2026-11-13
+
+- Render installed-app message cards using existing SDK declarations across dashboard chats, agent/project widgets and Inbox details.
+- Load only declared message components with trusted project/install context, versioned modules, shared caching and refresh on app changes.
+- Show readable loading/unavailable states with retry and isolate renderer failures from the conversation.
+- Expose optional component adapters for exported React hosts.
+- Add real Codex / Sol 6.1 and Chromium coverage with Computer browser previews and Tasks cards.
+
 ## 0.25.4 — 2026-11-12
 
 - Keep reports, alerts, approvals, questions and forms in the operator conversation that owns the work.

@@ -50,6 +50,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Alert | Agent-created, titled operator conversation and warning/error inbox card |
 | Approval round trip | Advertised action accepted, card updated in place, verdict acknowledged |
 | Report | Same report present in inbox and transcript |
+| Installed app cards | Real Codex opens a local Computer browser session and attaches Computer/Tasks cards; Chromium loads actual installed modules, a durable final screenshot and working task details across widget/panel/project/Inbox surfaces; review preserves the operator draft |
 | Work conversation Inbox | Local reports, alerts and approvals stay in the originating conversation; a scheduled follow-up reuses it without creating a generic topic |
 | Public escalation | Visitor reply with no inbox leakage; escalation in operator chat |
 | Public self-service | Reply without escalating during a settle period |
@@ -68,6 +69,15 @@ Storage binding. Tickets is a test peer, not a production dependency of
 Conversations. `spawnable: true` makes the selected apps available to the
 app-owned conversation thread. No preconfigured live install or Tickets agent
 is required.
+
+Scenario 25 also provisions real Computer and Tasks peers. It requires local
+Chrome for Computer, Playwright Chromium, and the workspace's sibling `ui-kit`
+source to build a dashboard-like test host with one shared React runtime. The
+model opens/closes a real local webpage, attaches both app cards, and then adds
+an optional Inbox question alongside those same cards. Browser assertions use
+the real runner APIs and installed UI modules without mocking producer data.
+The deterministic browser suite separately covers unavailable apps/imports,
+retry, project scope in a global Inbox, and narrow layouts.
 
 The image test uses the uploaded-attachment path used by the composer. It does
 not prove that legacy `data_url`-only submissions without an attachment ID are

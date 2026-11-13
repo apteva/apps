@@ -26,6 +26,9 @@ export const catalog = {
   "thread.restoreConfirm": ["Restore “{title}” to active conversations?", "Restaurer « {title} » dans les conversations actives ?", "¿Restaurar «{title}» en las conversaciones activas?"],
 
   "component.question": ["Question", "Question", "Pregunta"],
+  "component.loadingPreview": ["Loading preview…", "Chargement de l’aperçu…", "Cargando vista previa…"],
+  "component.previewUnavailable": ["This preview is unavailable.", "Cet aperçu est indisponible.", "Esta vista previa no está disponible."],
+  "component.retryPreview": ["Retry", "Réessayer", "Reintentar"],
   "component.form": ["Form", "Formulaire", "Formulario"],
   "inbox.answerNeeded": ["Answer needed", "Réponse requise", "Respuesta necesaria"],
   "inbox.optional": ["Optional", "Facultatif", "Opcional"],

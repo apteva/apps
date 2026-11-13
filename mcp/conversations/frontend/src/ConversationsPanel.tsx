@@ -280,8 +280,8 @@ function PublicTag() {
 
 // ─── typed cards ─────────────────────────────────────────────────────
 
-function MessageCards({message,onAction}: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
- return <MessageComponents message={message} onApprovalAction={onAction}/>;
+function MessageCards({message,onAction,projectId}: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>;projectId?:string}) {
+ return <MessageComponents message={message} onApprovalAction={onAction} projectId={projectId}/>;
 }
 
 // ─── streaming bubble + thinking (dashboard ChatPanel visuals) ───────
@@ -1871,7 +1871,7 @@ function InboxTab({
                   </span>
                 </div>
                 <div className="p-2">
-                  <MessageCards message={item.message} onAction={act} />
+                  <MessageCards message={item.message} onAction={act} projectId={item.project_id??projectId} />
                 </div>
               </div>
             );

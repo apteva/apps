@@ -66,6 +66,25 @@ a stable `client_message_id`; preserve the entire request when retrying an
 uncertain response. REST change pages own the durable replay cursor. SSE stream
 frames remain ephemeral and cannot advance that cursor or suppress later edits.
 
+## Installed app message cards
+
+Dashboard chat, agent/project widgets and Inbox details resolve message cards
+from the existing `provides.ui_components` catalog. The declared component must
+allow `chat.message_attachment`. Modules load through the authenticated app
+proxy using the installation version and the message's project, including items
+opened from a global Inbox. Project and installation context override message
+props. Missing declarations and failed modules show an unavailable state; Retry
+reloads the catalog and module. `apteva:apps-changed` refreshes mounted cards.
+
+Exported React surfaces accept `componentRenderers` for explicit local exports,
+or an optional `appComponentLoader` with `catalog(projectId)` and
+`loadModule(url)` methods. These are trusted host inputs. The same adapters are
+available as `ConversationComponentProvider` and `InstalledAppComponentProvider`
+in the React package. External hosts do not automatically execute code from
+other apps. Hosts opting into module loading must supply the app modules' shared
+React/UI-kit runtime and authorized API access. Native/external-channel rendering
+continues to depend on that host's supported renderer or fallback.
+
 ## Localization and host wording
 
 All eight exported surfaces accept optional `locale`, `timeZone`, and `messages`

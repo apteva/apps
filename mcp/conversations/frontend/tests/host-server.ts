@@ -1,5 +1,7 @@
 import { join } from "node:path";
+import {buildAppCardAssets,appCardHTML} from "./app-card-assets";
 const root=join(import.meta.dir,"..");
+const cardAssets=await buildAppCardAssets(join(root,".example/app-cards"));
 const result=await Bun.build({entrypoints:[join(root,"example/main.tsx"),join(root,"example/dashboard.tsx"),join(root,"example/package.tsx")],outdir:join(root,".example"),target:"browser",format:"esm",define:{"process.env.NODE_ENV":'"development"'},plugins:process.env.APTEVA_SDK_ENTRY?[{name:"sdk-candidate",setup(build){build.onResolve({filter:/^@apteva\/web-sdk$/},()=>({path:process.env.APTEVA_SDK_ENTRY!}));}}]:[]});
 if(!result.success)throw new AggregateError(result.logs,"example build");
 const voice=await Bun.build({entrypoints:[join(root,"src/voiceAudio.ts")],outdir:join(root,".example"),target:"browser",format:"esm"});
@@ -25,6 +27,8 @@ const approval=(user:string)=>({id:92,conversation_id:`chat-${user}`,role:"agent
 const conversation=(user:string)=>({id:`chat-${user}`,project_id:"project",lead_agent_id:41,lead_agent_name:"Assistant",title:"Support chat",kind:room?"room":"direct",origin:"web",audience:"public",created_at:"",updated_at:""});
 Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
+ if(url.pathname==="/__app-card-test")return new Response(appCardHTML.replace('<script type="module"', '<script>window.APP_CARD_TEST={projectId:"project",installId:7,agentId:41}</script><script type="module"'),{headers:{"Content-Type":"text/html","Set-Cookie":"host_session=fixture; SameSite=Lax; Path=/"}});
+ if(url.pathname.startsWith("/__card-assets/")){const file=cardAssets.get(url.pathname);return file?new Response(file,{headers:{"Content-Type":"text/javascript"}}):new Response("missing",{status:404});}
  if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();responseFrames.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
  if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();publishActivity();return Response.json({ok:true});}
@@ -71,6 +75,8 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const user=req.headers.get("authorization")==="Bearer fixture-visitor-a"?"visitor-a":req.headers.get("cookie")?.includes("host_session=fixture")?"operator":"";
  if(!user)return new Response("unauthorized",{status:401});
  calls.push({path:url.pathname,query:Object.fromEntries(url.searchParams),bearer:Boolean(req.headers.get("authorization")),cookie:Boolean(req.headers.get("cookie")),method:req.method});
+ const module=url.pathname.match(/^\/api\/apps\/(computer|tasks)\/ui\/([A-Za-z0-9_-]+\.mjs)$/);
+ if(module)return new Response(Bun.file(join(root,"../../",module[1],"ui",module[2])),{headers:{"Content-Type":"text/javascript"}});
  if(url.searchParams.get("project_id")!=="project"||url.searchParams.get("install_id")!=="7")return new Response("scope missing",{status:403});
  const path=url.pathname.replace("/api/apps/conversations","");
  if(path==="/ui/frontend.json")return new Response(Bun.file(join(root,"../ui/frontend.json")),{headers:{"Content-Type":"application/json"}});

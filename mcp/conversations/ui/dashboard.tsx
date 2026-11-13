@@ -5,6 +5,20 @@ import { useMemo, type ReactNode } from "react";
 import { AptevaClient } from "@apteva/web-sdk";
 import { conversationsExtension } from "../frontend/src/client";
 import { ConversationsProvider } from "../frontend/src/context";
+import { InstalledAppComponentProvider, type AppComponentLoader } from "../frontend/src/appComponents";
+
+// Desktop already supplies the shared React/UI-kit import map and session.
+// Only execute renderer modules declared by an accessible installed app.
+const appComponentLoader: AppComponentLoader = {
+  async catalog(projectId) {
+    const response = await fetch(`/api/apps?project_id=${encodeURIComponent(projectId)}`, {credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(15000)});
+    if (!response.ok) throw new Error("Unable to load installed components");
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error("Invalid installed component catalog");
+    return rows;
+  },
+  loadModule: url => import(/* @vite-ignore */ url),
+};
 
 /** Dashboard supplies cookies and routing; shared components own behavior. */
 export function DashboardConversations({ projectId, installId, dashboardScope = "project", children, ...localization }: ConversationLocalization & { composer?:ComposerOptions; projectId?: string; installId?: number; dashboardScope?: "project" | "global"; children: ReactNode }) {
@@ -12,5 +26,5 @@ export function DashboardConversations({ projectId, installId, dashboardScope = 
   const conversations = useMemo(() => new AptevaClient({ baseURL: "" }).use(
     conversationsExtension({ storageKey: "dashboard", global }), { projectId: global ? undefined : projectId, installId },
   ), [global, projectId, installId]);
-  return <ConversationsProvider key={`${dashboardScope}:${projectId ?? ""}:${installId ?? ""}`} legacyDrafts conversations={conversations} {...localization}><ConversationLocaleRegion><style href={conversationStyleId} precedence="apteva-app">{conversationStyles}</style>{children}</ConversationLocaleRegion></ConversationsProvider>;
+  return <ConversationsProvider key={`${dashboardScope}:${projectId ?? ""}:${installId ?? ""}`} legacyDrafts conversations={conversations} {...localization}><ConversationLocaleRegion><style href={conversationStyleId} precedence="apteva-app">{conversationStyles}</style><InstalledAppComponentProvider loader={appComponentLoader}>{children}</InstalledAppComponentProvider></ConversationLocaleRegion></ConversationsProvider>;
 }
