@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.18.2
+version: 0.19.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -117,6 +117,11 @@ requires:
       hint: "Bind TURN 0.3.0 or newer to enable temporary browser relay credentials. Project and adviser policies control usage; unbound installations retain their existing ICE configuration."
 
 provides:
+  permissions:
+    - { name: telephony.destinations.read, description: "Read delegated phone destinations." }
+    - { name: telephony.destinations.write, description: "Provision delegated browser destinations." }
+    - { name: telephony.grants.read, description: "Read delegated phone-resource grants." }
+    - { name: telephony.grants.write, description: "Manage delegated ordinary call grants." }
   http_routes:
     - { prefix: /_apteva/runtime/app/ }
     - { prefix: /runtime-endpoints }
@@ -170,6 +175,12 @@ provides:
     - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
     - { name: telephony_flows_publish, description: "Publish an immutable routing-flow version." }
     - { name: telephony_flows_simulate, description: "Simulate a routing flow without placing a call." }
+    - { name: telephony_destinations_get, exposure: app_only, requires: telephony.destinations.read, description: "Read a delegated browser destination." }
+    - { name: telephony_destinations_upsert, exposure: app_only, requires: telephony.destinations.write, description: "Create or revise a delegated browser destination idempotently." }
+    - { name: telephony_grants_get, exposure: app_only, requires: telephony.grants.read, description: "Read a delegated phone-resource grant." }
+    - { name: telephony_grants_list, exposure: app_only, requires: telephony.grants.read, description: "List scoped phone-resource grants." }
+    - { name: telephony_grants_upsert, exposure: app_only, requires: telephony.grants.write, description: "Create or revise an ordinary call grant idempotently." }
+    - { name: telephony_grants_delete, exposure: app_only, requires: telephony.grants.write, description: "Revoke an independently managed phone-resource grant." }
     - { name: telephony_destinations_create, description: "Create a reusable routing destination." }
     - { name: telephony_destinations_list, description: "List reusable routing destinations." }
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
@@ -411,7 +422,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.18.2
+    ref: telephony/v0.19.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -936,7 +947,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "telephony_flows_publish", Description: "Validate and publish an immutable routing-flow version.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsPublish},
 		{Name: "telephony_flows_simulate", Description: "Simulate a draft routing flow without placing a call.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "caller": map[string]any{"type": "string"}, "called": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsSimulate},
 		{Name: "telephony_destinations_create", Description: "Create a browser, agent, AI, PSTN, SIP, or voicemail routing destination.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"browser", "agent", "ai", "pstn", "sip", "voicemail"}}, "config": map[string]any{"type": "object"}}, []string{"name", "kind"}), HandlerCtx: a.toolDestinationsCreate},
-		{Name: "telephony_destinations_list", Description: "List reusable routing destinations.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolDestinationsList},
+		{Name: "telephony_destinations_list", Description: "List reusable routing destinations. Bound apps receive only delegated browser resources, with stable-ID pagination.", InputSchema: schemaObject(map[string]any{"kind": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "cursor": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolDestinationsList},
 		{Name: "telephony_ring_groups_create", Description: "Create a ring group from reusable destinations.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string", "enum": []string{"simultaneous", "sequential", "round_robin", "priority"}}, "timeout_sec": map[string]any{"type": "integer"}, "members": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"name", "members"}), HandlerCtx: a.toolRingGroupsCreate},
 		{Name: "telephony_ring_groups_list", Description: "List ring groups and ordered members.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolRingGroupsList},
 		{Name: "telephony_routes_set_flow", Description: "Assign a published routing flow to an inbound number after provider capability validation.", InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "flow_id": map[string]any{"type": "string"}}, []string{"route_id", "flow_id"}), HandlerCtx: a.toolRoutesSetFlow},
@@ -1349,8 +1360,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	for i := range tools {
 		if tools[i].HandlerCtx != nil {
-			tools[i].HandlerCtx = operatorPhoneTool(a.runtimeTool(tools[i].Name, tools[i].HandlerCtx))
+			tools[i].HandlerCtx = a.administrativeToolBoundary(tools[i].Name, operatorPhoneTool(a.runtimeTool(tools[i].Name, tools[i].HandlerCtx)))
 		}
+	}
+	for _, tool := range a.resourceAdminTools() {
+		tool.HandlerCtx = a.runtimeTool(tool.Name, tool.HandlerCtx)
+		tools = append(tools, tool)
 	}
 	return tools
 }

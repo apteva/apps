@@ -1277,6 +1277,7 @@ func (a *App) softphoneMediaURL(callID, token string) string {
 
 func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project string) {
 	var body struct {
+		DestinationID  string `json:"destination_id"`
 		To             string `json:"to"`
 		From           string `json:"from"`
 		Recording      *bool  `json:"recording"`
@@ -1297,6 +1298,11 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		return
 	}
 	p := phoneUserFrom(r)
+	destination, permissionErr := p.outboundDestination(body.DestinationID, body.From)
+	if permissionErr != nil {
+		http.Error(w, permissionErr.Error(), 403)
+		return
+	}
 	if p != nil {
 		if !p.Numbers[body.From] {
 			http.Error(w, "outbound number not allowed; explicit from required", 403)
@@ -1335,7 +1341,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 			http.Error(w, "call ownership conflict", 409)
 			return
 		}
-		if e = a.setPhoneOwner(row, p, ""); e != nil {
+		if e = a.setPhoneOwner(row, p, destination); e != nil {
 			http.Error(w, "call ownership unavailable", 500)
 			return
 		}

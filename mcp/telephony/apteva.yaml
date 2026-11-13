@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.18.2
+version: 0.19.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -70,6 +70,11 @@ requires:
       hint: "Bind TURN 0.3.0 or newer to enable temporary browser relay credentials. Project and adviser policies control usage; unbound installations retain their existing ICE configuration."
 
 provides:
+  permissions:
+    - { name: telephony.destinations.read, description: "Read delegated phone destinations." }
+    - { name: telephony.destinations.write, description: "Provision delegated browser destinations." }
+    - { name: telephony.grants.read, description: "Read delegated phone-resource grants." }
+    - { name: telephony.grants.write, description: "Manage delegated ordinary call grants." }
   http_routes:
     - { prefix: /_apteva/runtime/app/ }
     - { prefix: /runtime-endpoints }
@@ -123,6 +128,12 @@ provides:
     - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
     - { name: telephony_flows_publish, description: "Publish an immutable routing-flow version." }
     - { name: telephony_flows_simulate, description: "Simulate a routing flow without placing a call." }
+    - { name: telephony_destinations_get, exposure: app_only, requires: telephony.destinations.read, description: "Read a delegated browser destination." }
+    - { name: telephony_destinations_upsert, exposure: app_only, requires: telephony.destinations.write, description: "Create or revise a delegated browser destination idempotently." }
+    - { name: telephony_grants_get, exposure: app_only, requires: telephony.grants.read, description: "Read a delegated phone-resource grant." }
+    - { name: telephony_grants_list, exposure: app_only, requires: telephony.grants.read, description: "List scoped phone-resource grants." }
+    - { name: telephony_grants_upsert, exposure: app_only, requires: telephony.grants.write, description: "Create or revise an ordinary call grant idempotently." }
+    - { name: telephony_grants_delete, exposure: app_only, requires: telephony.grants.write, description: "Revoke an independently managed phone-resource grant." }
     - { name: telephony_destinations_create, description: "Create a reusable routing destination." }
     - { name: telephony_destinations_list, description: "List reusable routing destinations." }
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
@@ -364,7 +375,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.18.2
+    ref: telephony/v0.19.0
     entry: mcp/telephony
   port: 8080
   health_check: /health

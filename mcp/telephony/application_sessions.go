@@ -232,6 +232,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if e != nil {
 		return nil, 403, errors.New("Telephony access denied")
 	}
+	p = p.forAction(action)
 	p.AuthProvider = provider
 	for _, v := range provider.Actions {
 		p.ListenScope = p.ListenScope || v == "call.listen"

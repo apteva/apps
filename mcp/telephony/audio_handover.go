@@ -43,7 +43,7 @@ func (a *App) issuePendingPhoneSession(ctx context.Context, row *callRow, p *pho
 		if _, _, err = a.phoneOwner(row.ID); err != nil {
 			return nil, err
 		}
-		if !a.phoneCallAllowed(fresh, row, false) {
+		if !a.phoneCallAllowed(fresh.forAction("call.attach"), row, false) {
 			return nil, errPhoneAccessDenied
 		}
 		principal = p.Identity.key()

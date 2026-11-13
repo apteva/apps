@@ -50,12 +50,19 @@ type phoneGroup struct {
 	phoneGrant
 }
 type phonePolicy struct {
+	Delegations    []phoneDelegation `json:"delegations"`
+	resourceGrants []phoneResourceGrant
+
 	Providers []phoneAuthProvider `json:"providers,omitempty"`
 	Revision  int64               `json:"revision"`
 	Users     []phoneUser         `json:"users"`
 	Groups    []phoneGroup        `json:"groups"`
 }
 type phonePrincipal struct {
+	resourceActions    map[string]map[string]bool
+	legacyDestinations map[string]bool
+	legacyNumbers      map[string]bool
+
 	readPermissions *phoneReadPermissions // only attached to read requests; never answer/control requests
 	Identity        phoneIdentity
 	Project         string
@@ -113,21 +120,54 @@ func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy pho
 			p.Numbers[v] = true
 		}
 	}
+	legacy := false
 	for _, u := range policy.Users {
-		if u.Identity == identity && u.Enabled {
-			add(u.phoneGrant)
-			for _, id := range u.Groups {
-				for _, g := range policy.Groups {
-					if g.ID == id {
-						add(g.phoneGrant)
-					}
+		if u.Identity != identity {
+			continue
+		}
+		// An explicit operator disable overrides every independently managed grant.
+		if !u.Enabled {
+			return nil, errPhoneAccessDenied
+		}
+		legacy = true
+		add(u.phoneGrant)
+		for _, id := range u.Groups {
+			for _, g := range policy.Groups {
+				if g.ID == id {
+					add(g.phoneGrant)
 				}
 			}
-			return p, nil
 		}
 	}
-	return nil, errPhoneAccessDenied
+	p.legacyDestinations = p.Destinations
+	p.legacyNumbers = make(map[string]bool, len(p.Numbers))
+	for number, allowed := range p.Numbers {
+		p.legacyNumbers[number] = allowed
+	}
+	p.resourceActions = map[string]map[string]bool{}
+	found := false
+	for _, g := range policy.resourceGrants {
+		if g.Principal != identity || !g.Enabled || g.Deleted {
+			continue
+		}
+		found = true
+		if g.Resource.Kind == "outbound_number" {
+			p.Numbers[g.Resource.ID] = true
+			continue
+		}
+		for _, action := range g.Actions {
+			if p.resourceActions[action] == nil {
+				p.resourceActions[action] = map[string]bool{}
+			}
+			p.resourceActions[action][g.Resource.ID] = true
+		}
+	}
+	if !legacy && !found {
+		return nil, errPhoneAccessDenied
+	}
+	return p.forAction("call.read"), nil
 }
+
 func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 	p := phoneIdentity{r.Header.Get("X-Apteva-Issuer-App"), r.Header.Get("X-Apteva-Issuer-Install-ID"), r.Header.Get("X-Apteva-Subject-Type"), r.Header.Get("X-Apteva-Subject-ID"), r.Header.Get("X-Apteva-Organization-ID")}
 	return p, p != (phoneIdentity{}) || r.Header.Get("X-Apteva-Scopes") != ""
@@ -233,6 +273,7 @@ func (a *App) applicationUserHTTP(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "Telephony access denied", 403)
 			return
 		}
+		p = p.forAction(action)
 		for _, scope := range scopes {
 			if scope.Type == "app_user" && scope.App == "telephony" {
 				for _, v := range scope.Actions {
@@ -328,7 +369,7 @@ func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) boo
 	}
 	if owner == p.Identity.key() {
 		if row.Direction == "outbound" {
-			return p.Numbers[row.FromNumber]
+			return p.Numbers[row.FromNumber] && ((dest == "" && p.legacyNumbers[row.FromNumber]) || (dest != "" && p.Destinations[dest]))
 		}
 		return p.Destinations[dest]
 	}
@@ -480,6 +521,7 @@ func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guar
 		if _, _, err = a.phoneOwner(row.ID); err != nil {
 			return nil, err
 		}
+		fresh = fresh.forAction("call.attach")
 		if !a.phoneCallAllowed(fresh, row, false) {
 			return nil, fmt.Errorf("call not owned by user: %w", errPhoneAccessDenied)
 		}
@@ -614,6 +656,7 @@ func (a *App) phoneMediaPrincipalReason(row *callRow, principal string) (string,
 		}
 		return "policy_lookup_failed", phoneIdentity{}
 	}
+	p = p.forAction("call.attach")
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
@@ -766,6 +809,10 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 }
 
 func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
+	if err := validatePhoneDelegations(p); err != nil {
+		return err
+	}
+
 	if len(p.Users) > 10000 || len(p.Groups) > 1000 {
 		return errors.New("policy too large")
 	}
@@ -832,6 +879,11 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 // changes cannot silently restore removed membership. No application-user route
 // maps to this endpoint, including supervisor sessions.
 func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
+	if boundServiceHTTP(r) {
+		http.Error(w, "operator setup credentials required", 403)
+		return
+	}
+
 	if _, delegated := phoneRequestIdentity(r); delegated {
 		http.Error(w, "operator credentials required", 403)
 		return
@@ -859,6 +911,14 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 		if decodeJSONBody(r, &p) != nil {
 			http.Error(w, "invalid policy", 400)
 			return
+		}
+		if p.Delegations == nil {
+			existing, e := a.phonePolicy(project)
+			if e != nil {
+				http.Error(w, "policy unavailable", 503)
+				return
+			}
+			p.Delegations = existing.Delegations
 		}
 		if e := a.validatePhonePolicy(project, p); e != nil {
 			http.Error(w, e.Error(), 400)
@@ -1049,6 +1109,10 @@ func (a *App) cachedPhonePolicy(project string) (*phonePolicy, error) {
 		return saved.policy, nil
 	}
 	fresh, err := a.phonePolicy(project)
+	if err != nil {
+		return nil, err
+	}
+	fresh.resourceGrants, err = loadPhoneResourceGrants(a.db().db, project)
 	if err != nil {
 		return nil, err
 	}

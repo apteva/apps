@@ -492,7 +492,14 @@ func TestApplicationUserMCPAndIncompleteScopesDenied(t *testing.T) {
 	phoneTestPolicy(t, app)
 	for _, tool := range app.MCPTools() {
 		if tool.HandlerCtx != nil {
-			_, err := tool.HandlerCtx(sdk.WithCaller(context.Background(), &sdk.Caller{SubjectType: "user", SubjectID: "alice"}), globalCtx, map[string]any{})
+			result, err := tool.HandlerCtx(sdk.WithCaller(context.Background(), &sdk.Caller{SubjectType: "user", SubjectID: "alice"}), globalCtx, map[string]any{})
+			if tool.Exposure == sdk.ToolExposureAppOnly {
+				response, ok := result.(map[string]any)
+				if !ok || response["ok"] != false {
+					t.Fatalf("app-only MCP bypass: %s", tool.Name)
+				}
+				continue
+			}
 			if err == nil || !strings.Contains(err.Error(), "application users") {
 				t.Fatalf("MCP bypass: %s", tool.Name)
 			}

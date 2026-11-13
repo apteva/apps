@@ -1022,58 +1022,14 @@ func (a *App) listRoutingDestinations(project string) ([]routingDestinationRow, 
 }
 
 func (a *App) saveRoutingDestination(project, id, name, kind string, config any, enabled bool) (*routingDestinationRow, error) {
-	name = strings.TrimSpace(name)
-	kind = strings.ToLower(strings.TrimSpace(kind))
-	if name == "" || len(name) > 120 {
-		return nil, errors.New("destination name is required and must be at most 120 characters")
-	}
-	if !supportedDestinationKinds[kind] {
-		return nil, errors.New("unsupported destination kind")
-	}
 	if id == "" {
 		id = "dest_" + newCallID()
 	}
-	if !routingIDPattern.MatchString(id) {
-		return nil, errors.New("invalid destination id")
-	}
-	raw, err := json.Marshal(config)
-	if err != nil {
-		return nil, errors.New("invalid destination config")
-	}
-	var decoded map[string]any
-	if len(raw) == 0 || json.Unmarshal(raw, &decoded) != nil {
-		decoded = map[string]any{}
-		raw = []byte("{}")
-	}
-	capacity, err := readDestinationCapacity(string(raw))
+	name = strings.TrimSpace(name)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	raw, err := validateRoutingDestination(project, id, name, kind, config)
 	if err != nil {
 		return nil, err
-	}
-	if capacity.Limit > 0 && kind != "browser" {
-		return nil, errors.New("individual capacity is only supported for browser destinations")
-	}
-	if _, err := destinationTurnDetection(kind, string(raw)); err != nil {
-		return nil, err
-	}
-	if _, err := destinationAICallPolicy(kind, string(raw), projectAICallPolicy(nil)); err != nil {
-		return nil, err
-	}
-	if _, err := destinationAIContext(kind, string(raw)); err != nil {
-		return nil, err
-	}
-	switch kind {
-	case "agent", "ai":
-		if routingConfigInt(decoded, "agent_id", 0) <= 0 {
-			return nil, errors.New("agent and AI destinations require agent_id")
-		}
-	case "pstn":
-		if !validE164(routingConfigString(decoded, "phone_number")) {
-			return nil, errors.New("PSTN destination requires an E.164 phone_number")
-		}
-	case "sip":
-		if !validRingSIPURI(routingConfigString(decoded, "uri")) {
-			return nil, errors.New("SIP destination requires uri")
-		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	flag := 0
@@ -1089,6 +1045,60 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 		err = errors.New("destination is not owned by this project")
 	}
 	return row, err
+}
+
+func validateRoutingDestination(project, id, name, kind string, config any) (string, error) {
+	name = strings.TrimSpace(name)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if name == "" || len(name) > 120 {
+		return "", errors.New("destination name is required and must be at most 120 characters")
+	}
+	if !supportedDestinationKinds[kind] {
+		return "", errors.New("unsupported destination kind")
+	}
+	if !routingIDPattern.MatchString(id) {
+		return "", errors.New("invalid destination id")
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return "", errors.New("invalid destination config")
+	}
+	var decoded map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &decoded) != nil {
+		decoded = map[string]any{}
+		raw = []byte("{}")
+	}
+	capacity, err := readDestinationCapacity(string(raw))
+	if err != nil {
+		return "", err
+	}
+	if capacity.Limit > 0 && kind != "browser" {
+		return "", errors.New("individual capacity is only supported for browser destinations")
+	}
+	if _, err := destinationTurnDetection(kind, string(raw)); err != nil {
+		return "", err
+	}
+	if _, err := destinationAICallPolicy(kind, string(raw), projectAICallPolicy(nil)); err != nil {
+		return "", err
+	}
+	if _, err := destinationAIContext(kind, string(raw)); err != nil {
+		return "", err
+	}
+	switch kind {
+	case "agent", "ai":
+		if routingConfigInt(decoded, "agent_id", 0) <= 0 {
+			return "", errors.New("agent and AI destinations require agent_id")
+		}
+	case "pstn":
+		if !validE164(routingConfigString(decoded, "phone_number")) {
+			return "", errors.New("PSTN destination requires an E.164 phone_number")
+		}
+	case "sip":
+		if !validRingSIPURI(routingConfigString(decoded, "uri")) {
+			return "", errors.New("SIP destination requires uri")
+		}
+	}
+	return string(raw), nil
 }
 
 func (a *App) findRoutingDestination(project, id string) (*routingDestinationRow, error) {
@@ -2347,6 +2357,11 @@ func (a *App) listNumbersForRoutingFlow(project, flowID string) ([]map[string]an
 // /routing is intentionally a compact JSON management surface. The UI and MCP
 // tools share the same store and validator so publication cannot bypass rules.
 func (a *App) handleRouting(w http.ResponseWriter, r *http.Request) {
+	if boundServiceHTTP(r) {
+		http.Error(w, "operator setup credentials required", 403)
+		return
+	}
+
 	project, err := a.panelProject(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

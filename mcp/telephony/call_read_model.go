@@ -163,7 +163,7 @@ func (a *App) loadPhoneReadPermissions(project string, calls []callRow, p *phone
 			m.destinations[d] = false
 			destArgs = append(destArgs, d)
 		}
-		if err := read(`SELECT id,config_json FROM routing_destinations WHERE project_id=? AND id IN (`+phonePlaceholders(len(destArgs)-1)+`)`, destArgs, func(s *sql.Rows) error {
+		if err := read(`SELECT id,config_json FROM routing_destinations WHERE enabled=1 AND project_id=? AND id IN (`+phonePlaceholders(len(destArgs)-1)+`)`, destArgs, func(s *sql.Rows) error {
 			var id, raw string
 			if err := s.Scan(&id, &raw); err != nil {
 				return err
