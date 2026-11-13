@@ -76,7 +76,8 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		v, e := s.suites()
 		return map[string]any{"suites": v}, e
 	case "tests_suite_get":
-		v, e := s.getSuite(ids.ID)
+		// Archived suites remain readable from saved-run dashboard links.
+		v, e := scanSuite(s.db.QueryRow(`SELECT `+suiteColumns+` FROM test_suites WHERE project_id=? AND id=?`, s.project, ids.ID))
 		return map[string]any{"suite": v}, e
 	case "tests_suite_save":
 		var v Suite

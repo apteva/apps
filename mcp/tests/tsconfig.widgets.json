@@ -1,0 +1,4 @@
+{
+ "compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","jsx":"react-jsx","strict":true,"noEmit":true,"skipLibCheck":true,"types":["bun","react","react-dom"],"lib":["ES2022","DOM","DOM.Iterable"]},
+ "include":["ui/dashboard.ts","ui/dashboard.test.ts","ui/TestsWidgets.tsx","ui/TestsOverviewWidget.tsx","ui/TestsFailuresWidget.tsx","ui/TestsPanel.tsx","ui/tests/*.ts","playwright.config.ts"]
+}

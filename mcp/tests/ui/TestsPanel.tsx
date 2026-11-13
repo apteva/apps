@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { testsPageRoute } from "./dashboard";
 
 type Props = { projectId: string; installId: number; appName?: string };
-type Suite = { id: number; name: string; description: string; environment: string; release?: Record<string, unknown> };
+type Suite = { id: number; name: string; description: string; environment: string; release?: Record<string, unknown>; archived?: boolean };
 type Assertion = { path: string; op: string; value?: unknown };
 type Definition = { function?: string; event?: unknown; url?: string; method?: string; body?: string; headers?: Record<string, string>; timeout_ms: number; assertions?: Assertion[]; steps?: Record<string, unknown>[] };
 type Check = { id?: number; suite_id: number; name: string; kind: "function" | "http" | "scenario" | "browser"; enabled: boolean; definition: Definition };
@@ -42,7 +43,10 @@ function Badge({ value }: { value: string }) {
 }
 
 export default function TestsPanel(props: Props) { return <Panel key={`${props.projectId}:${props.installId}`} {...props} />; }
-function Panel({ projectId, installId }: Props) {
+function Panel({ projectId, installId, appName = "tests" }: Props) {
+  const [initialRoute] = useState(() => testsPageRoute(typeof window === "undefined" ? "" : window.location.search));
+  const routeApplied = useRef(false);
+  const initialRun = useRef<Run | null>(null);
   const [suites, setSuites] = useState<Suite[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [checks, setChecks] = useState<Check[]>([]);
@@ -63,18 +67,34 @@ function Panel({ projectId, installId }: Props) {
   const suite = suites.find(s => s.id === selected);
   const rpc = useCallback(async (tool: string, args: Record<string, unknown> = {}) => {
     const query = new URLSearchParams({ project_id: projectId, install_id: String(installId) });
-    const res = await fetch(`/api/apps/tests/tools/call?${query}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, args }) });
+    const res = await fetch(`/api/apps/${encodeURIComponent(appName)}/tools/call?${query}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, args }) });
     const text = await res.text();
     let data: any;
     try { data = JSON.parse(text); } catch { throw new Error(`Request failed (${res.status})`); }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
-  }, [projectId, installId]);
+  }, [projectId, installId, appName]);
   const loadSuites = useCallback(async () => {
     const data = await rpc("tests_suites_list");
-    setSuites(data.suites);
-    setSelected(old => data.suites.some((s: Suite) => s.id === old) ? old : data.suites[0]?.id ?? null);
-  }, [rpc]);
+    const available: Suite[] = data.suites;
+    let requested = 0;
+    if (!routeApplied.current) {
+      routeApplied.current = true;
+      requested = initialRoute.suite;
+      if (initialRoute.run) {
+        const detail = await rpc("tests_run_get", { id: initialRoute.run });
+        initialRun.current = detail.run;
+        requested = detail.run.suite_id;
+        setTab("runs");
+      }
+      if (requested && !available.some(s => s.id === requested)) {
+        const detail = await rpc("tests_suite_get", { id: requested });
+        available.push(detail.suite);
+      }
+    }
+    setSuites(available);
+    setSelected(old => available.some(s => s.id === (requested || old)) ? requested || old : available[0]?.id ?? null);
+  }, [rpc, initialRoute]);
   useEffect(() => { let active = true; loadSuites().catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [loadSuites]);
   const loadDetails = useCallback(async () => {
     if (!selected) return;
@@ -84,7 +104,7 @@ function Panel({ projectId, installId }: Props) {
     setChecks(c.checks); setRuns(r.runs);
   }, [rpc, selected]);
   useEffect(() => {
-    setChecks([]); setRuns([]); setRun(null); setEdit(null); setCandidate(""); setPolicy(null); detailGeneration.current++;
+    setChecks([]); setRuns([]); setRun(initialRun.current?.suite_id === selected ? initialRun.current : null); initialRun.current = null; setEdit(null); setCandidate(""); setPolicy(null); detailGeneration.current++;
     loadDetails().catch(e => setError(e.message));
     return () => { generation.current++; };
   }, [loadDetails]);
@@ -105,7 +125,7 @@ function Panel({ projectId, installId }: Props) {
   function editSuite(s: Partial<Suite>) { setSuiteForm(s); setReleaseForm(s.release ? pretty(s.release) : ""); }
   function editCheck(c: Check) { setEdit(c); setDefinition(pretty(c.definition)); }
   const last = runs[0];
-  const artifactURL = (id: number) => `/api/apps/tests/artifacts/${id}?${new URLSearchParams({project_id: projectId, install_id: String(installId)})}`;
+  const artifactURL = (id: number) => `/api/apps/${encodeURIComponent(appName)}/artifacts/${id}?${new URLSearchParams({project_id: projectId, install_id: String(installId)})}`;
 
   return <div className="h-full overflow-auto bg-surface text-text p-5" style={{ minHeight: 500 }}>
     <header className="flex flex-wrap items-center justify-between gap-3 mb-5">
@@ -127,23 +147,24 @@ function Panel({ projectId, installId }: Props) {
     {loading ? <p className="p-8 text-text-dim">Loading tests…</p> : suites.length === 0 ? <div className="rounded-xl border border-dashed border-border p-12 text-center"><h2 className="font-semibold text-lg">Your first check starts here</h2><p className="text-text-dim mt-2 mb-5">Create a suite, add expected results, and run it against your app.</p><button className={primary} onClick={() => editSuite({ name: "", environment: "test", description: "" })}>Create a suite</button></div> : <>
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <label className="flex-1 min-w-0"><span className="sr-only">Suite</span><select className={input} value={selected ?? ""} disabled={busy} onChange={e => setSelected(Number(e.target.value))}>{suites.map(s => <option key={s.id} value={s.id}>{s.name} · {s.environment}</option>)}</select></label>
-        <button className={button} disabled={busy || !suite} onClick={() => suite && act(async () => editSuite((await rpc("tests_suite_get", { id: suite.id })).suite))}>Edit suite</button>
-        <button className={primary} disabled={busy || !checks.some(c => c.enabled) || (!!suite?.release && !/^[a-f0-9]{64}$/.test(candidate.trim()))} onClick={() => act(async () => { const d = await rpc("tests_run", { suite_id: selected, request_key: crypto.randomUUID(), ...(suite?.release ? { candidate_digest: candidate.trim() } : {}) }); setRun(d.run); setTab("runs"); await loadDetails(); })}>{busy ? "Working…" : "Run suite"}</button>
+        <button className={button} disabled={busy || !suite || suite.archived} onClick={() => suite && act(async () => editSuite((await rpc("tests_suite_get", { id: suite.id })).suite))}>Edit suite</button>
+        <button className={primary} disabled={busy || suite?.archived || !checks.some(c => c.enabled) || (!!suite?.release && !/^[a-f0-9]{64}$/.test(candidate.trim()))} onClick={() => act(async () => { const d = await rpc("tests_run", { suite_id: selected, request_key: crypto.randomUUID(), ...(suite?.release ? { candidate_digest: candidate.trim() } : {}) }); setRun(d.run); setTab("runs"); await loadDetails(); })}>{busy ? "Working…" : "Run suite"}</button>
       </div>
+      {suite?.archived && <p className="mb-4 text-sm text-text-dim">Archived suite · saved history is available.</p>}
       {suite?.release && <div className="mb-4 space-y-2 rounded-xl border border-border p-3">
         <div className="flex flex-wrap items-end gap-3">
           <label className="min-w-0 flex-1 text-sm">Candidate SHA-256<input className={`${input} font-mono text-xs`} maxLength={64} value={candidate} onChange={e => setCandidate(e.target.value)} /></label>
           <button className={button} disabled={busy} onClick={() => act(async () => setPolicy(await rpc("tests_release_spec", { suite_id: selected })))}>Show policy revisions</button>
         </div>
-        {policy && <pre className="overflow-auto rounded bg-surface-2 p-2 text-xs">{pretty(policy)}</pre>}
+        {!!policy && <pre className="overflow-auto rounded bg-surface-2 p-2 text-xs">{pretty(policy)}</pre>}
       </div>}
       {suite?.description && <p className="text-sm text-text-dim mb-4">{suite.description}</p>}
       <div className="grid grid-cols-3 gap-3 mb-5">{[["Enabled checks", checks.filter(c => c.enabled).length], ["Latest result", last ? runLabel(last) : "No runs yet"], ["Latest pass count", last ? `${last.passed} / ${last.passed + last.failed}` : "—"]].map(([label, value]) => <div key={label} className="rounded-xl border border-border p-4"><p className="text-xs text-text-dim">{label}</p><p className="font-semibold mt-2">{value}</p></div>)}</div>
       <nav className="flex gap-2 mb-4" aria-label="Tests views"><button className={tab === "checks" ? primary : button} onClick={() => setTab("checks")}>Checks ({checks.length})</button><button className={tab === "runs" ? primary : button} onClick={() => setTab("runs")}>Run history</button><button className={`${button} ml-auto`} disabled={busy} onClick={() => act(loadDetails)}>Refresh</button></nav>
       {tab === "checks" ? <div className="space-y-3">
-        <div className="flex justify-between items-center"><p className="text-sm text-text-dim">Assertions run against the returned JSON. Disabled checks are skipped.</p><button className={button} disabled={busy} onClick={() => editCheck({ suite_id: selected!, name: "", kind: suite?.release ? "scenario" : "function", enabled: true, definition: sample(suite?.release ? "scenario" : "function", !!suite?.release) })}>+ Add check</button></div>
+        <div className="flex justify-between items-center"><p className="text-sm text-text-dim">Assertions run against the returned JSON. Disabled checks are skipped.</p><button className={button} disabled={busy || suite?.archived} onClick={() => editCheck({ suite_id: selected!, name: "", kind: suite?.release ? "scenario" : "function", enabled: true, definition: sample(suite?.release ? "scenario" : "function", !!suite?.release) })}>+ Add check</button></div>
         {!checks.length && <div className="rounded-xl border border-dashed border-border p-8 text-center text-text-dim">No checks yet. Add a check or a multi-step scenario.</div>}
-        {checks.map(c => <div key={c.id} className="rounded-xl border border-border p-4 flex flex-wrap items-center gap-3"><div className="flex-1"><p className="font-medium">{c.name}</p><p className="text-xs text-text-dim mt-1">{c.kind} · {c.definition.steps ? `${c.definition.steps.length} steps` : `${c.definition.assertions?.length ?? 0} assertions`} · {c.definition.timeout_ms / 1000}s limit</p></div><Badge value={c.enabled ? "enabled" : "disabled"} /><button className={button} disabled={busy} onClick={() => editCheck(c)}>Edit</button><button className={button} disabled={busy} onClick={() => act(async () => { await rpc("tests_check_save", { ...c, enabled: !c.enabled }); await loadDetails(); })}>{c.enabled ? "Disable" : "Enable"}</button><button className={button} disabled={busy} onClick={() => act(async () => { await rpc("tests_check_delete", { id: c.id }); await loadDetails(); })}>Delete</button></div>)}
+        {checks.map(c => <div key={c.id} className="rounded-xl border border-border p-4 flex flex-wrap items-center gap-3"><div className="flex-1"><p className="font-medium">{c.name}</p><p className="text-xs text-text-dim mt-1">{c.kind} · {c.definition.steps ? `${c.definition.steps.length} steps` : `${c.definition.assertions?.length ?? 0} assertions`} · {c.definition.timeout_ms / 1000}s limit</p></div><Badge value={c.enabled ? "enabled" : "disabled"} /><button className={button} disabled={busy || suite?.archived} onClick={() => editCheck(c)}>Edit</button><button className={button} disabled={busy || suite?.archived} onClick={() => act(async () => { await rpc("tests_check_save", { ...c, enabled: !c.enabled }); await loadDetails(); })}>{c.enabled ? "Disable" : "Enable"}</button><button className={button} disabled={busy || suite?.archived} onClick={() => act(async () => { await rpc("tests_check_delete", { id: c.id }); await loadDetails(); })}>Delete</button></div>)}
         {edit && <form className="rounded-xl border border-border p-4 space-y-3" onSubmit={e => { e.preventDefault(); act(async () => { const parsed = JSON.parse(definition); await rpc("tests_check_save", { ...edit, definition: parsed }); setEdit(null); await loadDetails(); }); }}>
           <h2 className="font-semibold">{edit.id ? "Edit check" : "New check"}</h2>
           <label className="block text-sm">Name<input className={input} required maxLength={200} value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="Returns the expected total" /></label>
@@ -152,7 +173,7 @@ function Panel({ projectId, installId }: Props) {
           <p className="text-xs text-text-dim">{edit.kind === "scenario" || edit.kind === "browser" ? "Use HTTP, Function, browser, or bound app-tool steps. Browser checks use isolated runtime targets. Capture values and reference them as {{name}}. Select safe JSON pointers for saved evidence." : edit.kind === "function" ? "Invokes the active function version in this project. Assert on /response/field. A timeout here does not stop the function itself." : "Assert on /status_code, /body, or /json/field. Redirects are not followed. Private targets require an operator setting."} Operators: equals, not_equals, exists, contains, lt, lte, gt, gte.</p>
           <div className="flex gap-2"><button className={primary} disabled={busy}>Save check</button><button className={button} type="button" onClick={() => setEdit(null)}>Cancel</button></div>
         </form>}
-        <details className="text-sm text-text-dim pt-5"><summary className="cursor-pointer">Suite management</summary><p className="my-3">Archiving hides this suite. Existing queued runs and history remain.</p><button className={button} disabled={busy} onClick={() => act(async () => { await rpc("tests_suite_archive", { id: selected }); await loadSuites(); })}>Archive suite</button></details>
+        <details className="text-sm text-text-dim pt-5"><summary className="cursor-pointer">Suite management</summary><p className="my-3">Archiving hides this suite. Existing queued runs and history remain.</p><button className={button} disabled={busy || suite?.archived} onClick={() => act(async () => { await rpc("tests_suite_archive", { id: selected }); await loadSuites(); })}>Archive suite</button></details>
       </div> : <div className="space-y-4">
         {!runs.length && <div className="border border-dashed border-border rounded-xl p-8 text-center text-text-dim">No runs yet. Run the suite to save your first result.</div>}
         {runs.map(r => <button key={r.id} className="w-full rounded-xl border border-border p-4 flex flex-wrap text-left items-center gap-3 hover:bg-surface-2" style={run?.id === r.id ? { borderColor: "var(--color-accent, #6366f1)" } : {}} onClick={() => act(() => showRun(r.id))}><span className="font-medium">Run #{r.id}</span><Badge value={runLabel(r)} /><span className="text-sm text-text-dim">{r.passed} passed · {r.failed} failed</span><span className="text-xs text-text-dim ml-auto">{new Date(r.created_at).toLocaleString()}</span></button>)}
