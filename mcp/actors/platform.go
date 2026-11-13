@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,8 +217,7 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 			return err
 		}
-		e.recordMediaResult(out)
-		return e.finishInteraction(out)
+		return e.finishSemanticInteraction(step, args, out)
 	}
 	var shot computerSOMScreenshot
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{
@@ -259,6 +260,17 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
 	}
+	return e.finishSemanticInteraction(step, args, out)
+}
+
+func (e *actorExecution) finishSemanticInteraction(step actorStep, args, out map[string]any) error {
+	if args["action"] == "upload_file" {
+		err := validateUploadReceipt(step, out)
+		e.traceUploadReceipt(step, out, err)
+		if err != nil {
+			return err
+		}
+	}
 	e.recordMediaResult(out)
 	return e.finishInteraction(out)
 }
@@ -300,7 +312,60 @@ func (e *actorExecution) upload(step actorStep) error {
 			args[key] = value
 		}
 	}
-	return e.dispatchSemantic(step, args)
+	if err := e.dispatchSemantic(step, args); err != nil {
+		if errors.Is(err, errActorUploadNotConfirmed) {
+			return err
+		}
+		// Keep the cause for cancellation/deadline handling, but never expose
+		// raw Computer errors (which can contain signed URLs or upload bytes).
+		e.traceUploadReceipt(step, nil, err)
+		return &actorUploadError{cause: err}
+	}
+	return nil
+}
+
+var errActorUploadNotConfirmed = errors.New("upload_not_confirmed")
+
+type actorUploadError struct{ cause error }
+
+func (e *actorUploadError) Error() string {
+	if actorOperationTimedOut(e.cause) {
+		return "upload_not_confirmed: Computer upload action timed out"
+	}
+	return "upload_not_confirmed: Computer upload action failed"
+}
+func (e *actorUploadError) Unwrap() []error { return []error{errActorUploadNotConfirmed, e.cause} }
+
+func validateUploadReceipt(step actorStep, out map[string]any) error {
+	reject := func(reason string) error { return fmt.Errorf("%w: %s", errActorUploadNotConfirmed, reason) }
+	if out["uploaded"] != true {
+		return reject("Computer did not return uploaded=true")
+	}
+	if out["success"] == false || out["action_dispatched"] == false || out["failed"] == true {
+		return reject("Computer rejected the upload or its dispatch")
+	}
+	filename, _ := out["filename"].(string)
+	if strings.TrimSpace(filename) == "" {
+		return reject("Computer receipt is missing a filename")
+	}
+	// Computer's JSON response must contain a positive integral byte count,
+	// not a numeric string, boolean, fraction, or overflowing integer.
+	rawSize, err := json.Marshal(out["size_bytes"])
+	size, sizeErr := strconv.ParseInt(string(rawSize), 10, 64)
+	if err != nil || sizeErr != nil || size <= 0 {
+		return reject("Computer receipt is missing a positive byte count")
+	}
+	if step.Filename != "" && filename != step.Filename {
+		return reject("Computer receipt filename does not match the expected filename")
+	}
+	if step.ExpectedSHA256 != "" {
+		observed, _ := out["sha256"].(string)
+		digest, err := hex.DecodeString(observed)
+		if err != nil || len(digest) != 32 || !strings.EqualFold(observed, step.ExpectedSHA256) {
+			return reject("Computer receipt checksum does not match expected_sha256")
+		}
+	}
+	return nil
 }
 
 func (e *actorExecution) recordMediaResult(out map[string]any) {

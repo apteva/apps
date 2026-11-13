@@ -220,7 +220,7 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 						if in["require_prepared"] != true {
 							t.Fatal("missing staged-file requirement")
 						}
-						return map[string]any{"current_url": current, "uploaded": true}
+						return map[string]any{"current_url": current, "uploaded": true, "filename": in["filename"], "size_bytes": 22, "sha256": in["expected_sha256"]}
 					}
 				}
 				return nil
@@ -315,7 +315,7 @@ func TestDocumentUploadNeedsClearedStagingAndNativeReceiptAfterReload(t *testing
 						if in["require_prepared"] != true {
 							t.Fatal("source not staged")
 						}
-						return map[string]any{"current_url": current, "uploaded": true}
+						return map[string]any{"current_url": current, "uploaded": true, "filename": in["filename"], "size_bytes": 22, "sha256": in["expected_sha256"]}
 					case "click":
 						if in["target_id"] == "save" {
 							saves++

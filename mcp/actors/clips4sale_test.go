@@ -420,7 +420,7 @@ func TestClips4SaleNewUploadSavesReopensAndRejectsDuplicate(t *testing.T) {
 						if (op == "prepare_clip") != (in["source_url"] != nil) || (op == "prepare_clip_base64") != (in["base64"] != nil) {
 							t.Fatal("wrong media source", in)
 						}
-						return map[string]any{"current_url": current, "uploaded": true, "filename": "approved.mp4"}
+						return map[string]any{"current_url": current, "uploaded": true, "filename": "approved.mp4", "size_bytes": 22}
 					case "screenshot":
 						targets := []any{}
 						for _, name := range []string{"Upload", "Upload Files", "Next", "Previous", "Save and Exit", "Change price", "Save price"} {

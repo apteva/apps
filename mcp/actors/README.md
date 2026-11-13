@@ -1,5 +1,7 @@
 # Actors
 
+Actors v0.5.2 requires a valid Computer upload receipt before an upload step can complete, with filename and byte-count evidence plus configured filename/checksum checks. Missing or rejected receipts fail with `upload_not_confirmed` and stop before publication, including optional steps, without automatic replay. Upload traces retain bounded sanitized diagnostics. Staging remains separate, successful `output.media` stays compatible, and actor definitions must still verify the site's ready attachment before publishing.
+
 Actors v0.5.1 declares `inspect_views` navigations read-only to Computer, so Computer 0.9.2+ can retry a transient Browserbase navigation failure once in a fresh page; a navigation result with `success:false` or `failed:true` now fails the run with incomplete coverage, and Actors no longer adds its own HTTP/2 retry on top of a structured Computer failure. Actors v0.5.0 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run), bounds saved pagination ID lists, and adds private native Mobile screen steps. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
 
 Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
@@ -40,6 +42,8 @@ For a saved login, add `browser.context_id` using a context created through Comp
 ## Publish media
 
 `upload_file` attaches an image or file using a semantic locator and exactly one of `source_url`, `base64`, or `file_path`. See `examples/media-publisher.json`. For a hosted video, use ordinary `fill`/`set_text` to enter `{{video_url}}` in the site's video URL field; no upload or provider-specific code is needed. `examples/video-url-publisher.json` is a generic starting point. Replace the host and controls for your site. The saved Patreon actor can accept a Bunny Stream player URL such as `https://iframe.mediadelivery.net/embed/{videoLibraryId}/{guid}`, constructed from the integration's video metadata.
+
+An upload requires a Computer receipt with `uploaded: true`, a nonempty filename and a positive integral `size_bytes`. Explicit `success: false`, `action_dispatched: false` or `failed: true` rejects the receipt. When the step supplies `filename` or `expected_sha256`, the receipt must match. Missing or invalid receipts fail with `upload_not_confirmed`, stop even optional upload steps, and are never automatically retried. The run trace retains expected/observed file details and a bounded scalar allowlist of the Computer response with source values, URLs and credentials redacted. Successful uploads keep the existing `output.media` shape. `prepare_upload` remains staging (`prepared: true, uploaded: false`). A receipt proves delivery to the browser control; actor definitions must separately verify the site's ready attachment (including Patreon's) before publishing. Missing receipts alone do not explain the underlying upload failure.
 
 Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a bounded `timeout_ms` (500–30000). A timeout or unmatched result fails the actor before subsequent actions. `media_present` verifies a rendered audio/video player; combine it with a saved-draft text condition when needed. Successful embeds return provider, iframe and thumbnail URLs under run output `media`. This confirms the rendered embed, not continuous video playback. The same action supports URL, text, selector and semantic-target conditions for other sites.
 
@@ -125,7 +129,7 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.115.0`, derived from fetched tag ancestry (`v0.110.0` and `v0.114.0` are its ancestors). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.115.1` (`a9ba634`), verified against fetched tags as a descendant of `v0.115.0`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
 Read-view identity can use a unique native link (`href`) or image (`src`). Image identity is useful for full-screen tables that hide navigation; declare an anchored URL pattern containing the expected account/profile identity. Every page must contain exactly one matching image with a nonempty source URL on the declared identity host. Empty or ambiguous identity evidence fails the read. Existing URL, loading, filter, total-count and pagination guards continue to apply.
 

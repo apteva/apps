@@ -751,7 +751,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			// Earlier effects remain recorded; unknown dispatch failures stay true.
 			e.commitAttempted, e.preparationAttempted, e.possibleExternalWrite = priorCommit, priorPreparation, priorWrite
 		}
-		if err != nil && step.Optional && e.definition.Browser.Backend != "mobile" && !errors.Is(err, errActorCancelled) && !(actorStepMayWrite(step) && actorOperationTimedOut(err)) {
+		if err != nil && step.Optional && step.Action != "upload_file" && e.definition.Browser.Backend != "mobile" && !errors.Is(err, errActorCancelled) && !(actorStepMayWrite(step) && actorOperationTimedOut(err)) {
 			e.addTrace(step.Action, "skipped", err.Error(), map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds()})
 			continue
 		}
@@ -804,7 +804,7 @@ func actorOperationTimedOut(err error) bool {
 }
 
 func retryableActorError(err error) bool {
-	if err == nil || errors.Is(err, errActorCancelled) {
+	if err == nil || errors.Is(err, errActorCancelled) || errors.Is(err, errActorUploadNotConfirmed) {
 		return false
 	}
 	message := strings.ToLower(err.Error())
@@ -1595,6 +1595,72 @@ func (e *actorExecution) checkpoint() error {
 		return errActorCancelled
 	}
 	return nil
+}
+
+var uploadDiagnosticURL = regexp.MustCompile(`(?i)(?:https?://|data:|file://|blobref://)[^\s"'<>]+`)
+var uploadDiagnosticBearer = regexp.MustCompile(`(?i)bearer\s+[^\s,;"'<>]+`)
+var uploadDiagnosticCredential = regexp.MustCompile(`(?i)(?:token|password|secret|authorization|cookie|api[_-]?key|signature|base64)["']?\s*[=:]\s*["']?[^\s,;"'<>]+`)
+
+func uploadDiagnosticText(step actorStep, text string) string {
+	// Redact known source values before bounding text so a truncated URL,
+	// payload or local path cannot leave part of a secret in the trace.
+	for _, sensitive := range []string{step.SourceURL, step.Base64, step.FilePath} {
+		if sensitive != "" {
+			text = strings.ReplaceAll(text, sensitive, "[redacted]")
+		}
+	}
+	text = uploadDiagnosticURL.ReplaceAllString(text, "[redacted URL]")
+	text = uploadDiagnosticBearer.ReplaceAllString(text, "[redacted credential]")
+	text = uploadDiagnosticCredential.ReplaceAllString(text, "[redacted credential]")
+	return truncateString(text, 256)
+}
+
+func uploadDiagnosticFields(step actorStep, source map[string]any, keys []string) map[string]any {
+	out := map[string]any{}
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		switch v := value.(type) {
+		case string:
+			out[key] = uploadDiagnosticText(step, v)
+		case nil, bool, float64, int, int64:
+			out[key] = v
+		default:
+			// Never copy arbitrary nested responses, headers or binary data.
+			out[key] = "[non-scalar omitted]"
+		}
+	}
+	return out
+}
+
+func (e *actorExecution) traceUploadReceipt(step actorStep, out map[string]any, err error) {
+	fields := []string{"uploaded", "success", "action_dispatched", "failed", "prepared", "filename", "size_bytes", "sha256", "mime_type", "file_source", "backend"}
+	expected := map[string]any{}
+	if step.Filename != "" {
+		expected["filename"] = uploadDiagnosticText(step, step.Filename)
+	}
+	if step.ExpectedSHA256 != "" {
+		expected["sha256"] = uploadDiagnosticText(step, step.ExpectedSHA256)
+	}
+	data := map[string]any{
+		"step": e.lastStartedStep, "expected": expected,
+		"observed": uploadDiagnosticFields(step, out, fields),
+		// A fixed scalar allowlist and 256-byte strings bound the retained
+		// Computer response even when it contains screenshots or file bytes.
+		"computer_response": uploadDiagnosticFields(step, out, append(fields, "error", "error_code", "message", "status", "retryable")),
+	}
+	status := "confirmed"
+	if err != nil {
+		status = "failed"
+		data["error"] = uploadDiagnosticText(step, err.Error())
+	}
+	// Keep the latest receipt/failure even when earlier steps filled the trace.
+	if len(e.trace) >= maxActorTraceEvents {
+		e.trace = e.trace[:maxActorTraceEvents-1]
+	}
+	e.addTrace("upload_file.receipt", status, "", data)
 }
 
 func (e *actorExecution) addTrace(action, status, message string, data map[string]any) {

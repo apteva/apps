@@ -1,8 +1,13 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.5.1
+version: 0.5.2
 description: |
+  v0.5.2 requires confirmed Computer upload receipts with filenames and positive
+  byte counts, validates configured filenames and checksums, and stops before
+  publication on missing or rejected receipts. Retains bounded sanitized upload
+  diagnostics; prepare_upload remains staging and site readiness is verified
+  separately. Unconfirmed uploads cannot be skipped or automatically retried.
   v0.5.1 marks inspect_views navigations read_only so Computer 0.9.2+ can
   retry a transient Browserbase failure once in a fresh page, and treats a
   success=false or failed=true navigation result as a failed, incomplete read
@@ -172,7 +177,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.5.1
+    ref: actors/v0.5.2
     entry: mcp/actors
   port: 8080
   health_check: /health
