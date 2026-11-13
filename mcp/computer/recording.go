@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,37 +89,37 @@ func (a *App) recordingMetadata(requestCtx context.Context, ctx *sdk.AppCtx, id 
 		return nil, err
 	}
 	if !recordingSupported(row.Backend) {
-		return recordingOutput(ctx, row, "unsupported", nil, ""), nil
+		return a.recordingOutput(ctx, row, "unsupported", nil, ""), nil
 	}
 	if row.Status == "active" {
-		return recordingOutput(ctx, row, "recording", nil, ""), nil
+		return a.recordingOutput(ctx, row, "recording", nil, ""), nil
 	}
 	if row.BackendSessionID == "" {
 		_ = a.updateRecordingStatus(ctx, row, "unavailable", "")
-		return recordingOutput(ctx, row, "unavailable", nil, "provider session id is unavailable"), nil
+		return a.recordingOutput(ctx, row, "unavailable", nil, "provider session id is unavailable"), nil
 	}
 
 	resolver, err := replayResolverForSession(ctx, row)
 	if err != nil {
 		_ = a.updateRecordingStatus(ctx, row, "failed", err.Error())
-		return recordingOutput(ctx, row, "failed", nil, err.Error()), nil
+		return a.recordingOutput(ctx, row, "failed", nil, err.Error()), nil
 	}
 	recording, err := resolver.Metadata(requestCtx, row.BackendSessionID)
 	if errors.Is(err, replay.ErrNotFound) {
 		status := missingRecordingStatus(row, time.Now())
 		_ = a.updateRecordingStatus(ctx, row, status, "")
-		return recordingOutput(ctx, row, status, nil, ""), nil
+		return a.recordingOutput(ctx, row, status, nil, ""), nil
 	}
 	if err != nil {
 		_ = a.updateRecordingStatus(ctx, row, "failed", err.Error())
-		return recordingOutput(ctx, row, "failed", nil, err.Error()), nil
+		return a.recordingOutput(ctx, row, "failed", nil, err.Error()), nil
 	}
 	status := recording.Status
 	if status == "" {
 		status = "ready"
 	}
 	_ = a.updateRecordingStatus(ctx, row, status, "")
-	return recordingOutput(ctx, row, status, recording.Streams, ""), nil
+	return a.recordingOutput(ctx, row, status, recording.Streams, ""), nil
 }
 
 func missingRecordingStatus(row *ComputerSession, now time.Time) string {
@@ -132,14 +133,14 @@ func missingRecordingStatus(row *ComputerSession, now time.Time) string {
 	return "unavailable"
 }
 
-func recordingOutput(ctx *sdk.AppCtx, row *ComputerSession, status string, streams []replay.RecordingStream, message string) map[string]any {
+func (a *App) recordingOutput(ctx *sdk.AppCtx, row *ComputerSession, status string, streams []replay.RecordingStream, message string) map[string]any {
 	streamOutput := make([]map[string]any, 0, len(streams))
 	for _, stream := range streams {
 		streamOutput = append(streamOutput, map[string]any{
 			"id":           stream.ID,
 			"start_ms":     stream.StartMS,
 			"end_ms":       stream.EndMS,
-			"playlist_url": recordingPlaylistURL(ctx, row.ID, stream.ID),
+			"playlist_url": a.recordingPlaylistURL(ctx, row.ID, stream.ID),
 		})
 	}
 	out := map[string]any{
@@ -183,18 +184,21 @@ func (a *App) updateRecordingStatus(ctx *sdk.AppCtx, row *ComputerSession, statu
 	return nil
 }
 
-func recordingPlaylistURL(ctx *sdk.AppCtx, sessionID, streamID string) string {
+func (a *App) recordingPlaylistURL(ctx *sdk.AppCtx, sessionID, streamID string) string {
 	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/recording/" + url.PathEscape(streamID) + ".m3u8"
-	return withRecordingQuery(path, ctx, "", "")
+	return a.withRecordingQuery(path, ctx, "", "")
 }
 
-func recordingAssetURL(ctx *sdk.AppCtx, sessionID, streamID, token string) string {
+func (a *App) recordingAssetURL(ctx *sdk.AppCtx, sessionID, streamID, token string) string {
 	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/recording/" + url.PathEscape(streamID) + "/asset"
-	return withRecordingQuery(path, ctx, "token", token)
+	return a.withRecordingQuery(path, ctx, "token", token)
 }
 
-func withRecordingQuery(path string, ctx *sdk.AppCtx, key, value string) string {
+func (a *App) withRecordingQuery(path string, ctx *sdk.AppCtx, key, value string) string {
 	query := url.Values{}
+	if a.installID > 0 {
+		query.Set("install_id", strconv.FormatInt(a.installID, 10))
+	}
 	if ctx != nil && ctx.CurrentProject() != "" {
 		query.Set("project_id", ctx.CurrentProject())
 	}
@@ -221,7 +225,7 @@ func (a *App) recordingPlaylist(requestCtx context.Context, ctx *sdk.AppCtx, id,
 	}
 	if resourceResolver, ok := resolver.(replay.ResourceResolver); ok {
 		body, err = rewriteAuthenticatedPlaylist(body, resourceResolver, row.BackendSessionID, func(token string) string {
-			return recordingAssetURL(ctx, id, streamID, token)
+			return a.recordingAssetURL(ctx, id, streamID, token)
 		})
 		if err != nil {
 			return nil, "", err
@@ -367,7 +371,7 @@ func (a *App) handleRecordingAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.HasPrefix(strings.TrimSpace(string(body)), "#EXTM3U") {
 		body, err = rewriteAuthenticatedPlaylist(body, resourceResolver, row.BackendSessionID, func(token string) string {
-			return recordingAssetURL(ctx, id, streamID, token)
+			return a.recordingAssetURL(ctx, id, streamID, token)
 		})
 		if err != nil {
 			writeRecordingHTTPError(w, err)

@@ -455,6 +455,15 @@ func (r *registry) get(id string) (*session, bool) {
 	return s, ok
 }
 
+// peek observes a session without renewing its idle lifetime. Passive view
+// polling and authorization must not keep an otherwise idle browser alive.
+func (r *registry) peek(id string) (*session, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.m[id]
+	return s, ok
+}
+
 // remove returns the session (if any) and removes it from the map. The
 // caller is responsible for closing it — keeping close-outside-the-lock
 // avoids holding the registry mutex during slow tear-down.
@@ -2340,7 +2349,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	res := map[string]any{
 		"png_b64":        pngBase64(m["screenshot"]),
 		"screenshot":     m["screenshot"],
-		"screenshot_url": sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
 		"current_url":    m["current_url"],
 		"width":          m["width"],
 		"height":         m["height"],
@@ -3010,7 +3019,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				emitEvent(ctx, "session.action", payload)
 				out := map[string]any{
 					"session_id": id, "current_url": afterURL,
-					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_url":       a.sessionResourceURL(ctx, id, "screenshot"),
 					"screenshot_available": true, "post_action_screenshot": "not_embedded",
 					"success": false, "failed": true, "status": "rejected", "action_completed": false,
 					"text":      "The temporal value was not accepted. Inspect temporal_actual_value, temporal_validity, temporal_placeholder, and temporal_format_hint before retrying; open a visible semantic date grid when direct entry is unavailable.",
@@ -3049,7 +3058,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				emitEvent(ctx, "session.action", payload)
 				out := map[string]any{
 					"session_id": id, "current_url": afterURL,
-					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_url":       a.sessionResourceURL(ctx, id, "screenshot"),
 					"screenshot_available": true, "post_action_screenshot": "not_embedded",
 					"success": false, "failed": true, "status": "rejected", "action_completed": false,
 					"error_code": result.ErrorCode,
@@ -3066,7 +3075,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		var consequenceErr *clickguard.ConsequenceError
 		if errors.As(err, &consequenceErr) {
 			a.recordSessionNavigation(ctx, id, sess)
-			out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+			out := a.consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
 			emitEvent(ctx, "session.action", out)
 			return out, nil
 		}
@@ -3216,7 +3225,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	out := map[string]any{
 		"session_id":     id,
 		"current_url":    afterURL,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
 	}
 	if tabID := activeTabID(sess.comp); tabID != "" && (action == "screenshot" || tabEvent.Switched || stringArg(args, "tab_id") != "") {
 		out["active_tab_id"] = tabID
@@ -3486,7 +3495,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		if err != nil {
 			var consequenceErr *clickguard.ConsequenceError
 			if errors.As(err, &consequenceErr) {
-				out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+				out := a.consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
 				out["batch_step"] = index + 1
 				out["completed_steps"] = len(completed)
 				out["steps"] = completed
@@ -3570,7 +3579,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	out := map[string]any{
 		"session_id": id, "current_url": afterURL, "text": "Success: batch completed.",
 		"steps": completed, "completed_steps": completedCount,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
 	}
 	if batchTimedOut {
 		out["timed_out"] = true
@@ -4122,7 +4131,7 @@ func mergeClickResultPayload(payload map[string]any, act backends.Action) {
 	}
 }
 
-func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act backends.Action, rejection *clickguard.ConsequenceError) map[string]any {
+func (a *App) consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act backends.Action, rejection *clickguard.ConsequenceError) map[string]any {
 	out := map[string]any{
 		"session_id": id, "success": false, "failed": true, "status": "rejected",
 		"action":           act.Type,
@@ -4132,7 +4141,7 @@ func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act 
 		"confirm_consequence":   rejection.ConfirmConsequence,
 		"consequence_confirmed": false,
 		"current_url":           currentURL(sess.comp),
-		"screenshot_url":        sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url":        a.sessionResourceURL(ctx, id, "screenshot"),
 		"text":                  rejection.Error(),
 	}
 	if rejection.Target.AccessibleName != "" {
@@ -6614,7 +6623,7 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "session id required")
 		return
 	}
-	sess, ok := a.reg.get(rest)
+	sess, ok := a.reg.peek(rest)
 	if !ok {
 		ctx := appCtxForRequest(r, nil)
 		if ctx == nil || ctx.AppDB() == nil {
@@ -6668,7 +6677,7 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := appCtxForRequest(r, nil)
 	var info sessionInfo
-	if sess, ok := a.reg.get(id); ok {
+	if sess, ok := a.reg.peek(id); ok {
 		if err := a.lockActiveSession(id, sess); err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
@@ -6689,10 +6698,10 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, map[string]any{
 		"session":        info,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
-		"stream_url":     sessionResourceURL(ctx, id, "stream"),
-		"timeline_url":   sessionResourceURL(ctx, id, "timeline"),
-		"recording_url":  sessionResourceURL(ctx, id, "recording"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
+		"stream_url":     a.sessionResourceURL(ctx, id, "stream"),
+		"timeline_url":   a.sessionResourceURL(ctx, id, "timeline"),
+		"recording_url":  a.sessionResourceURL(ctx, id, "recording"),
 	})
 }
 
@@ -6722,7 +6731,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := appCtxForRequest(r, nil)
-	if sess, ok := a.reg.get(id); ok {
+	if sess, ok := a.reg.peek(id); ok {
 		if err := a.lockActiveSession(id, sess); err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
@@ -6734,7 +6743,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"kind": "iframe", "url": liveURL, "backend": backend, "status": "active"})
 			return
 		}
-		writeJSON(w, map[string]any{"kind": "snapshot", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
+		writeJSON(w, map[string]any{"kind": "snapshot", "url": a.sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
 		return
 	}
 	if ctx == nil || ctx.AppDB() == nil {
@@ -6746,12 +6755,12 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, map[string]any{"kind": "final", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
+	writeJSON(w, map[string]any{"kind": "final", "url": a.sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
 }
 
-func sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
+func (a *App) sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
 	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/" + strings.Trim(resource, "/")
-	return withRecordingQuery(path, ctx, "", "")
+	return a.withRecordingQuery(path, ctx, "", "")
 }
 
 func pathSessionID(path, suffix string) string {
