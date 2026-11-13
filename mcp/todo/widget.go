@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type widgetOption struct {
@@ -32,10 +33,11 @@ type widgetTodo struct {
 }
 
 type widgetPage struct {
-	Title string       `json:"title"`
-	Items []widgetTodo `json:"items"`
-	Total int          `json:"total"`
-	Lists []widgetList `json:"lists"`
+	Title   string         `json:"title"`
+	Items   []widgetTodo   `json:"items"`
+	Total   int            `json:"total"`
+	Lists   []widgetList   `json:"lists"`
+	Options []widgetOption `json:"options"`
 }
 
 func widgetOptions(db *sql.DB, pid string) ([]widgetOption, error) {
@@ -50,7 +52,7 @@ func widgetOptions(db *sql.DB, pid string) ([]widgetOption, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []widgetOption{}
+	out := []widgetOption{{Value: "all", Label: "All lists and groups"}}
 	for rows.Next() {
 		var option widgetOption
 		if err := rows.Scan(&option.Value, &option.Label); err != nil {
@@ -61,13 +63,17 @@ func widgetOptions(db *sql.DB, pid string) ([]widgetOption, error) {
 	return out, rows.Err()
 }
 
-// Apply sorting before LIMIT and count the full selection, including undated
-// and snoozed open tasks. A list widget is a work ledger, not a Today view.
-func loadWidget(db *sql.DB, pid, target, order string, limit int) (*widgetPage, error) {
-	kind, rawID, _ := strings.Cut(target, ":")
-	id, err := strconv.ParseInt(rawID, 10, 64)
-	if err != nil || id <= 0 || (kind != "list" && kind != "group") {
-		return nil, fmt.Errorf("%w: choose a list or group", errWidgetSettings)
+// Filter and sort the complete selection before counting and limiting rows.
+// Today includes overdue work and uses the same viewer-day/snooze rules as the panel.
+func loadWidget(db *sql.DB, pid, target, order string, limit int, view string, tzOffset int, now time.Time) (*widgetPage, error) {
+	if target == "" {
+		target = "all"
+	}
+	if view == "" {
+		view = "today"
+	}
+	if view != "today" && view != "overdue" && view != "upcoming" && view != "all" {
+		return nil, fmt.Errorf("%w: unknown view", errWidgetSettings)
 	}
 	if order != "due" && order != "priority" {
 		return nil, fmt.Errorf("%w: sort must be due or priority", errWidgetSettings)
@@ -78,19 +84,36 @@ func loadWidget(db *sql.DB, pid, target, order string, limit int) (*widgetPage, 
 	if limit > 20 {
 		limit = 20
 	}
-	page := &widgetPage{Items: []widgetTodo{}, Lists: []widgetList{}}
-	filter := "l.id = ?"
-	if kind == "group" {
-		filter = "l.group_id = ?"
-		err = db.QueryRow(`SELECT name FROM list_groups WHERE project_id = ? AND id = ? AND archived = 0`, pid, id).Scan(&page.Title)
-	} else {
-		err = db.QueryRow(`SELECT l.name FROM lists l WHERE l.project_id = ? AND l.id = ? AND l.archived = 0
-			AND NOT EXISTS (SELECT 1 FROM list_groups g WHERE g.id = l.group_id AND g.project_id = l.project_id AND g.archived = 1)`, pid, id).Scan(&page.Title)
+	page := &widgetPage{Title: "Todo", Items: []widgetTodo{}, Lists: []widgetList{}}
+	filter := "1 = 1"
+	args := []any{pid}
+	if target != "all" {
+		kind, rawID, _ := strings.Cut(target, ":")
+		id, err := strconv.ParseInt(rawID, 10, 64)
+		if err != nil || id <= 0 || (kind != "list" && kind != "group") {
+			return nil, fmt.Errorf("%w: invalid list or group", errWidgetSettings)
+		}
+		if kind == "group" {
+			filter = "l.group_id = ?"
+			err = db.QueryRow(`SELECT name FROM list_groups WHERE project_id = ? AND id = ? AND archived = 0`, pid, id).Scan(&page.Title)
+		} else {
+			filter = "l.id = ?"
+			err = db.QueryRow(`SELECT l.name FROM lists l WHERE l.project_id = ? AND l.id = ? AND l.archived = 0
+    AND NOT EXISTS (SELECT 1 FROM list_groups g WHERE g.id = l.group_id AND g.project_id = l.project_id AND g.archived = 1)`, pid, id).Scan(&page.Title)
+		}
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, id)
 	}
+	options, err := widgetOptions(db, pid)
 	if err != nil {
 		return nil, err
 	}
-	lists, err := db.Query(`SELECT l.id, l.name FROM lists l WHERE l.project_id = ? AND l.archived = 0 AND `+filter+` ORDER BY l.sort_order, l.id`, pid, id)
+	page.Options = options
+	lists, err := db.Query(`SELECT l.id, l.name FROM lists l WHERE l.project_id = ? AND l.archived = 0 AND `+filter+`
+  AND NOT EXISTS (SELECT 1 FROM list_groups g WHERE g.id = l.group_id AND g.project_id = l.project_id AND g.archived = 1)
+  ORDER BY l.sort_order, l.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,9 +130,17 @@ func loadWidget(db *sql.DB, pid, target, order string, limit int) (*widgetPage, 
 	if err != nil {
 		return nil, err
 	}
-	from := ` FROM todos t JOIN lists l ON l.id = t.list_id AND l.project_id = t.project_id
-		WHERE t.project_id = ? AND t.status = 'open' AND l.archived = 0 AND ` + filter
-	if err := db.QueryRow(`SELECT COUNT(*)`+from, pid, id).Scan(&page.Total); err != nil {
+	from := ` FROM todos t LEFT JOIN lists l ON l.id = t.list_id AND l.project_id = t.project_id
+  LEFT JOIN list_groups g ON g.id = l.group_id AND g.project_id = l.project_id
+  WHERE t.project_id = ? AND (t.list_id IS NULL OR (l.id IS NOT NULL AND l.archived = 0 AND COALESCE(g.archived, 0) = 0)) AND ` + filter
+	nowS, dayEnd := dayBounds(now, tzOffset)
+	clause, clauseArgs, err := viewFilter(view, nowS, dayEnd)
+	if err != nil {
+		return nil, err
+	}
+	from += clause
+	args = append(args, clauseArgs...)
+	if err := db.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&page.Total); err != nil {
 		return nil, err
 	}
 	byDue := `CASE WHEN t.due_at IS NULL OR t.due_at = '' THEN 1 ELSE 0 END, t.due_at ASC`
@@ -117,8 +148,9 @@ func loadWidget(db *sql.DB, pid, target, order string, limit int) (*widgetPage, 
 	if order == "priority" {
 		sorting = `t.priority ASC, ` + byDue
 	}
-	rows, err := db.Query(`SELECT t.id, t.title, t.priority, COALESCE(t.due_at, ''), t.rrule, l.id, l.name`+
-		from+` ORDER BY `+sorting+`, t.id DESC LIMIT ?`, pid, id, limit)
+	queryArgs := append(append([]any{}, args...), limit)
+	rows, err := db.Query(`SELECT t.id, t.title, t.priority, COALESCE(t.due_at, ''), t.rrule, COALESCE(l.id, 0), COALESCE(l.name, 'Inbox')`+
+		from+` ORDER BY `+sorting+`, t.id DESC LIMIT ?`, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +191,7 @@ func (a *App) handleWidget(w http.ResponseWriter, r *http.Request) {
 	if order == "" {
 		order = "due"
 	}
-	page, err := loadWidget(ctx.AppDB(), projectScope(ctx), query.Get("target"), order, limit)
+	page, err := loadWidget(ctx.AppDB(), projectScope(ctx), query.Get("target"), order, limit, query.Get("view"), tzOffsetParam(r), time.Now())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "This list or group is unavailable. Configure the widget to choose another.", http.StatusNotFound)

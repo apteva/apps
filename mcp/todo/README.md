@@ -4,22 +4,22 @@ Personal todos with lists, list groups, tags, due dates and recurrence.
 
 ## Home widget
 
-Add **Todo list** from Home's widget picker. Each copy has its own settings:
+Add **Todo list** from Home's widget picker. It immediately shows **Today + overdue**
+across **all lists and groups**, including dated Inbox tasks. No area selection is
+required. It uses the same viewer timezone and snooze behavior as Todo's Today view.
 
-- **List or group:** select an active list or group by name.
-- **Sort by:** due date (undated tasks last) or priority (P1 first).
-- **Visible todos:** 1–20 rows, with the total remaining count shown separately.
+Use the filters inside the widget to select a list or group, switch between
+Today + overdue, Overdue, Upcoming and All open, or sort by due date or priority.
+List names appear alongside tasks when multiple lists are shown. Settings choose
+starting filters and 1–20 visible rows (default 8); the remaining count covers the
+entire filtered selection. Each copy has independent filters and supports half
+and full width. Archived areas are excluded.
 
-The widget supports half and full width. It shows all open tasks in the chosen
-area, including snoozed tasks. Groups show tasks from their active member lists.
-Archived lists and groups are excluded; an unavailable selection asks the user to
-configure the widget again rather than switching to a broader view.
-
-Complete a task using its check button. Recurring tasks advance to their next
-occurrence and stay open, following the full Todo page's behavior. Quick-add
-creates a task from the entered title directly in the selected list. For a group,
-choose a member list before adding. **Open in Todo** opens the same list or group.
-Changes refresh through the app event bus, with a periodic refresh as a fallback.
+Complete tasks using their check buttons. Recurring tasks advance to their next
+occurrence and remain open. Quick-add uses the selected list, a chosen member list
+for a group, or Inbox by default when viewing all areas. New undated tasks appear
+in All open. **Open in Todo** preserves the current area and view. App events and a
+periodic fallback refresh the widget.
 
 ## Validation
 

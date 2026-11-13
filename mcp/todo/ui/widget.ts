@@ -12,10 +12,11 @@ export type WidgetProps = {
 
 export function widgetPreferences(settings?: Record<string, unknown>) {
   const target = typeof settings?.target === "string" && /^(list|group):[1-9]\d*$/.test(settings.target)
-    ? settings.target : "";
+    ? settings.target : "all";
   const limit = Number(settings?.max_todos ?? 8);
   return {
     target,
+    view: todoWidgetView(settings?.view),
     sort: settings?.sort === "priority" ? "priority" : "due",
     limit: Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.round(limit))) : 8,
   };
@@ -30,7 +31,7 @@ export function widgetAPIURL(props: WidgetProps, path: string, params: Record<st
   return `/api/apps/${encodeURIComponent(props.appName || "todo")}${path}?${query}`;
 }
 
-export function widgetPageLink(props: WidgetProps, target: string) {
+export function widgetPageLink(props: WidgetProps, target: string, view?: string) {
   const query = new URLSearchParams();
   if (props.projectId) query.set("project_id", props.projectId);
   if (props.installId) query.set("install_id", String(props.installId));
@@ -39,6 +40,7 @@ export function widgetPageLink(props: WidgetProps, target: string) {
   }).toString());
   if (selection.listId) query.set("list_id", String(selection.listId));
   if (selection.groupId) query.set("group_id", String(selection.groupId));
+  if (view) query.set("view", todoWidgetView(view));
   return `/apps/${encodeURIComponent(props.appName || "todo")}/page?${query}`;
 }
 
@@ -59,4 +61,14 @@ export async function widgetRequest<T>(url: string, init: RequestInit = {}): Pro
     throw new Error(body || `Request failed (${response.status})`);
   }
   return response.json() as Promise<T>;
+}
+
+export function todoWidgetView(value: unknown): "today" | "overdue" | "upcoming" | "all" {
+  return value === "overdue" || value === "upcoming" || value === "all" ? value : "today";
+}
+export function todoPanelView(search: string): "today" | "overdue" | "upcoming" | "all" {
+  const params = new URLSearchParams(search);
+  if (params.has("view")) return todoWidgetView(params.get("view"));
+  const selection = todoPanelSelection(search);
+  return selection.listId || selection.groupId ? "all" : "today";
 }
