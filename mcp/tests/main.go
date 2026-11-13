@@ -175,7 +175,7 @@ func publishEvent(ctx context.Context, app *sdk.AppCtx, topic string, payload ma
 	return app.EmitWithProjectAck(ctx, topic, app.CurrentProject(), payload)
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/tools/call", Handler: a.httpTool}, {Pattern: "/artifacts/", Handler: a.httpBrowserArtifact}}
+	return []sdk.Route{{Pattern: "/tools/call", Handler: a.httpTool}, {Pattern: "/artifacts/", Handler: a.httpBrowserArtifact}, {Pattern: "/dashboard/", Handler: a.httpDashboard}}
 }
 
 func scoped(ctx context.Context, app *sdk.AppCtx, requested string) (*sdk.AppCtx, error) {

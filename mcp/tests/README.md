@@ -1,7 +1,7 @@
 # Tests
 
 Apteva sidecar for project test suites, multi-step scenarios, durable run
-history, and a native Tests panel. Version 0.3.1 uses app-sdk v0.115.1.
+history, and a native Tests panel. Version 0.4.0 uses app-sdk v0.115.1.
 
 Standalone suites keep the original HTTP and Function checks. Scenario checks
 can chain steps and capture values. An isolated release suite binds an
@@ -384,3 +384,57 @@ value references may resolve to the empty string; values are expanded and
 forwarded without trimming or fallback. Credential and candidate digest probes
 still reject empty results. An omitted `fill` value retains its existing clear
 behavior. Browser suites require Computer 0.9.3 or newer for empty selection.
+
+## Home widgets (0.4.0)
+
+Add **Tests overview** and **Recent test failures** from the Home widget gallery.
+Both are project-scoped and support half/full width. Overview is suggested;
+Home placements remain an operator choice. Existing Tests panels and tools stay
+available.
+
+- Overview shows run count, pass rate, failed runs, active runs, recent results,
+  and a daily trend at full width. Choose the last 24 hours or 7 days and filter
+  by suite/environment. Statistics query the whole period, independently of the
+  existing 100-run history page. Cancelled runs are separate and excluded from
+  the pass-rate denominator. Active now includes older queued/running attempts.
+- Recent failures shows failed checks, the first failed step, a short saved
+  error, repeated-failure counts and screenshot availability. Grouping combines
+  attempts of the same suite/environment/check; ungroup to see every failed
+  attempt. Run setup errors appear even when no check result was saved.
+  Cancelled runs are excluded. Failed attempts stay visible after later passes.
+- Rows open the specific saved run and evidence. Archived suites remain
+  readable through these links, while running/editing archived suites stays
+  disabled. Expired screenshots lose their indicator; run history remains.
+
+Filters are available in the widget; settings optionally choose starting
+suite/environment, time window, maximum full-width rows and failure grouping.
+Widgets refresh on Tests events, window focus, and a 30-second polling fallback.
+Empty/cancelled-only periods have no pass-rate percentage. Loading errors hide
+stale statistics until a successful retry.
+
+Authenticated read-only endpoints are `GET /dashboard/overview` and
+`GET /dashboard/failures`, through the normal app proxy. Query parameters:
+`project_id`, `hours` (24 or 168), optional `suite_id`/`environment`, `limit`
+(1–10), and `group` (true/false). They return saved summaries without check
+inputs, source/fixture snapshots, output bodies or credential values. Trend
+buckets use UTC; durations use start/finish timestamps. Filters use the run's
+captured environment. A dashboard pass rate is historical context; deployment
+continues to use the existing candidate-pinned release verdict.
+
+Local verification (no running Apteva instance or credentials required):
+
+```sh
+(cd mcp/tests && GOWORK=off go test -race ./... && GOWORK=off go vet ./...)
+bun install --frozen-lockfile
+bun test mcp/tests/ui/dashboard.test.ts
+bunx --no-install tsc -p mcp/tests/tsconfig.widgets.json
+bun run scripts/build-panels.ts --app tests
+CHROME_BIN=/absolute/path/to/chrome bunx --no-install playwright test --config mcp/tests/playwright.config.ts
+```
+
+The browser harness hosts the real built widgets and Tests panel with a local
+SQLite-backed app fixture on loopback ports 4337/4338. It exercises filters,
+complete statistics, saved-run/screenshot navigation, archived history,
+refresh/error/empty states, project changes, light/dark themes and 240px
+containers. `TESTS_HOST_VENDOR` and `TESTS_HOST_CSS` can point to a local dashboard
+build to verify its actual vendor modules and stylesheet.

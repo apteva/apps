@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: tests
 display_name: Tests
-version: 0.3.1
+version: 0.4.0
 description: Browser and backend scenarios, isolated runtime tests, owned failure evidence, and candidate-specific release verdicts.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tests
@@ -35,6 +35,41 @@ provides:
     - { name: tests_run_get, description: Get a run and its per-check results and assertions. }
   ui_panels:
     - { slot: project.page, label: Tests, icon: circle-check, entry: /ui/TestsPanel.mjs }
+  ui_components:
+    - name: tests-overview
+      label: Tests overview
+      description: Test-run statistics, pass rate, active runs, recent results and a daily trend.
+      entry: /ui/TestsOverviewWidget.mjs
+      suggested: true
+      slots: [dashboard.home]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [tests.run.queued, tests.run.completed, tests.suite.saved, tests.suite.archived, tests.check.saved, tests.check.deleted]
+      settings_schema:
+        type: object
+        properties:
+          window: {type: string, title: Time window, enum: [24h, 7d], enum_names: [Last 24 hours, Last 7 days], default: 24h}
+          suite_id: {type: integer, title: Starting suite ID, description: "Zero opens all suites. Suites can also be selected in the widget.", minimum: 0, default: 0}
+          environment: {type: string, title: Starting environment, description: "Empty opens all environments.", default: ""}
+          max_results: {type: integer, title: Maximum results at full width, minimum: 3, maximum: 10, default: 8}
+    - name: tests-failures
+      label: Recent test failures
+      description: Recent failed checks, repeated failures, failed steps and links to saved evidence.
+      entry: /ui/TestsFailuresWidget.mjs
+      slots: [dashboard.home]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [tests.run.queued, tests.run.completed, tests.suite.saved, tests.suite.archived, tests.check.saved, tests.check.deleted]
+      settings_schema:
+        type: object
+        properties:
+          window: {type: string, title: Time window, enum: [24h, 7d], enum_names: [Last 24 hours, Last 7 days], default: 24h}
+          suite_id: {type: integer, title: Starting suite ID, description: "Zero opens all suites. Suites can also be selected in the widget.", minimum: 0, default: 0}
+          environment: {type: string, title: Starting environment, description: "Empty opens all environments.", default: ""}
+          max_results: {type: integer, title: Maximum results at full width, minimum: 3, maximum: 10, default: 8}
+          group_repeated: {type: boolean, title: Group repeated failures, default: true}
   workers:
     - { name: runner, schedule: "@every 1s" }
     - { name: events, schedule: "@every 2s" }
@@ -48,7 +83,7 @@ provides:
     - { name: tests.run.completed, description: A run finished with passed or failed status and result counts. }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: tests/v0.3.1, entry: mcp/tests }
+  source: { repo: github.com/apteva/apps, ref: tests/v0.4.0, entry: mcp/tests }
   port: 8080
   health_check: /health
 db:
