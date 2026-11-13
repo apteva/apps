@@ -2,10 +2,11 @@
 // The UI is a thin HTTP client over the same browser_session and computer_use
 // handlers exposed through MCP.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardHeader, StatusDot, StatusPill, DataList } from "@apteva/ui-kit";
 import Hls from "hls.js";
 import { usePollingRefresh } from "./refresh";
+import { scopeComputerURL } from "./shared";
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -257,20 +258,26 @@ const backendOptions = [
   { value: "mobile", label: "Mobile devices" },
 ] as const;
 
-function appURL(path: string, projectId?: string, extra?: Record<string, string | number | boolean | undefined>) {
-  const url = new URL(path, window.location.origin);
-  if (projectId) url.searchParams.set("project_id", projectId);
-  for (const [key, value] of Object.entries(extra ?? {})) {
-    if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
-  }
-  return `${url.pathname}${url.search}`;
+const InstallRoutingContext = createContext<Pick<NativePanelProps, "installId" | "appName" | "projectId">>({});
+function useAppURL() {
+  const { installId, appName } = useContext(InstallRoutingContext);
+  return useCallback((path: string, projectId?: string, extra?: Record<string, string | number | boolean | undefined>) => {
+    const url = new URL(path, window.location.origin);
+    if (url.origin !== window.location.origin) return path;
+    if (projectId) url.searchParams.set("project_id", projectId);
+    for (const [key, value] of Object.entries(extra ?? {})) {
+      if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
+    }
+    return scopeComputerURL(`${url.pathname}${url.search}`, projectId, installId, appName);
+  }, [installId, appName]);
 }
 
 export default function ComputerPanel(props: NativePanelProps) {
- return <ComputerPanelContent key={props.projectId ?? ""} {...props}/>;
+ return <InstallRoutingContext.Provider value={props}><ComputerPanelContent key={JSON.stringify([props.projectId, props.installId, props.appName])} {...props}/></InstallRoutingContext.Provider>;
 }
 
 function ComputerPanelContent({ projectId }: NativePanelProps) {
+  const appURL = useAppURL();
  const settingsGeneration = useRef(0);
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [historyRows, setHistoryRows] = useState<SessionRow[]>([]);
@@ -1135,6 +1142,7 @@ function SessionDetail({
   onRefresh: () => Promise<void>;
   externalRefreshKey: number;
 }) {
+  const appURL = useAppURL();
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1292,7 +1300,7 @@ function SessionDetail({
           {session.stream_url && embedLive ? (
             <div className="border border-border bg-bg-subtle" style={browserViewportFrameStyle}>
               <iframe
-                src={session.stream_url}
+                src={appURL(session.stream_url, projectId)}
                 title="Live browser stream"
                 style={{ width: "100%", height: "100%", border: 0, display: "block" }}
               />
@@ -1461,6 +1469,7 @@ function RecordingSessionDetail({
   projectId?: string;
   externalRefreshKey: number;
 }) {
+  const appURL = useAppURL();
   const [metadata, setMetadata] = useState<RecordingMetadata | null>(null);
   const [selectedStream, setSelectedStream] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -1565,6 +1574,9 @@ function RecordingSessionDetail({
 }
 
 function RecordingPlayer({ stream }: { stream: RecordingStream }) {
+  const appURL = useAppURL();
+  const { projectId } = useContext(InstallRoutingContext);
+  const playlistURL = appURL(stream.playlist_url, projectId);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1576,13 +1588,13 @@ function RecordingPlayer({ stream }: { stream: RecordingStream }) {
 
     if (Hls.isSupported()) {
       hls = new Hls({ enableWorker: true });
-      hls.loadSource(stream.playlist_url);
+      hls.loadSource(playlistURL);
       hls.attachMedia(video);
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) setErr(data.details || "Playback failed");
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = stream.playlist_url;
+      video.src = playlistURL;
       video.load();
     } else {
       setErr("HLS playback is unavailable in this browser");
@@ -1593,7 +1605,7 @@ function RecordingPlayer({ stream }: { stream: RecordingStream }) {
       video.removeAttribute("src");
       video.load();
     };
-  }, [stream.playlist_url]);
+  }, [playlistURL]);
 
   return (
     <div
@@ -1628,6 +1640,7 @@ function InteractivePreview({
   busy: boolean;
   onClickPoint: (x: number, y: number) => void;
 }) {
+  const appURL = useAppURL();
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [stale, setStale] = useState(false);
   const src = appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/screenshot`, projectId, { t: tick });
@@ -1705,6 +1718,7 @@ function OpenSessionModal({
   projectId?: string;
   onOpened: (sessionID: string) => void;
 }) {
+  const appURL = useAppURL();
   const [mode, setMode] = useState<OpenMode>("open");
   const [url, setUrl] = useState("https://");
   const [deviceID, setDeviceID] = useState("");
@@ -1967,6 +1981,7 @@ function AddProxyProfileModal({
   connections: ProxyConnection[];
   onCreated: () => void;
 }) {
+  const appURL = useAppURL();
   const [name, setName] = useState("");
   const [connectionID, setConnectionID] = useState(() => String(connections.find((connection) => connection.default)?.connection_id ?? connections[0]?.connection_id ?? ""));
   const [resourceRef, setResourceRef] = useState("");

@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.9.3
+version: 0.10.0
 description: |
+  v0.10.0 adds persistent browser-view resources, install-scoped routing,
+  and responsive side-panel/floating views with inactive polling suspension.
   v0.9.3 preserves explicit empty option values in the isolated browser test
   selection adapter. Missing or null selections are rejected before dispatch;
   text clearing and secret redaction retain their existing behavior.
@@ -137,8 +139,10 @@ provides:
         session_id=...). Closing is especially important for Browserbase/Steel
         sessions and persisted contexts because it releases provider resources
         and lets context state flush cleanly. Open, status, and close results
-        include view, a copyable browser-view component reference containing
-        only session_id.
+        include view, a stable browser-view resource reference with session_id
+        props. Present it once in a progress message for ongoing work; later progress and final
+        replies reference the existing view. Refreshes keep the same locator.
+        Pinning does not extend browser lifetime; close normally to retain the final frame.
         Proxy routing is provider-neutral: use proxy_mode=managed for the
         selected browser backend's proxy, proxy_mode=profile with a profile
         returned by computer_proxy_profile_list for an external provider, or
@@ -317,9 +321,9 @@ provides:
       description: |
         Close a session opened by this app and release browser/provider
         resources. Use this when finished unless the user explicitly wants the
-        session left open. Returns view, a browser-view component reference
-        containing only session_id. Compatibility alias for
-        browser_session(action=close).
+        session left open. Returns view, a stable browser-view resource reference.
+        Present it once and reference the existing view in subsequent replies.
+        Compatibility alias for browser_session(action=close).
 
   ui_panels:
     - slot: project.page
@@ -345,6 +349,7 @@ provides:
     - name: browser-view
       entry: /ui/BrowserViewCard.mjs
       slots: [chat.message_attachment]
+      resource_types: [computer.browser_session]
       props_schema:
         type: object
         required: [session_id]
@@ -556,8 +561,8 @@ provides:
       command: /computer
       body_file: skills/how-to-use-computer.md
       description: |
-        Teaches the agent to attach the session-following browser-view for
-        direct webpage requests and when to choose session or timeline cards.
+        Teaches the agent to present one persistent browser-view, reuse its
+        stable resource locator, and close normally after browser work.
         Loads on browser_session and computer_use tool calls. Browser actions
         never attach cards automatically.
       metadata:
@@ -568,7 +573,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.3
+    ref: computer/v0.10.0
     entry: mcp/computer
   port: 8080
   health_check: /health

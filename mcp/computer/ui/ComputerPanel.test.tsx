@@ -2,7 +2,7 @@ import {afterEach, expect, mock, test} from "bun:test";
 import React from "react";
 import {act,create} from "react-test-renderer";
 const Container=({children,...props}:any)=><div {...props}>{children}</div>;
-mock.module("@apteva/ui-kit",()=>({Card:Container,CardHeader:Container,StatusDot:Container,StatusPill:Container,DataList:Container}));
+mock.module("@apteva/ui-kit",()=>({Card:Container,AppCardHeader:Container,CardHeader:Container,StatusDot:Container,StatusPill:Container,DataList:Container}));
 const {default:ComputerPanel}=await import("./ComputerPanel");
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 const originalFetch=globalThis.fetch, originalWindow=(globalThis as any).window;
@@ -112,4 +112,36 @@ test("Mobile startup authorization explains the required action without opening 
  await act(async()=>modal.findAll(n=>n.type==="button"&&n.props.title==="Open session")[0].props.onClick());
  expect(modal.findAll(n=>n.type==="div"&&typeof n.props.children==="string"&&n.props.children.includes("Complete the XCTest passcode prompt directly on the phone")).length).toBeGreaterThan(0);
  expect(root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="OpenSessionModal")).toHaveLength(1);
+});
+
+
+test("host install identity scopes panel reads, screenshots and writes", async()=>{
+ const requests:{url:URL,method:string}[]=[];
+ install("?instance=requested",async()=>Response.json({sessions:[row("requested")]}));
+ const baseFetch=globalThis.fetch;
+ globalThis.fetch=(async(input:any,init:any)=>{
+  requests.push({url:new URL(String(input),"http://localhost"),method:init?.method??"GET"});
+  return baseFetch(input,init);
+ }) as typeof fetch;
+ await act(async()=>{root=create(<ComputerPanel projectId="one" installId={55}/>)});
+ expect(requests.length).toBeGreaterThan(3);
+ for(const {url} of requests){expect(url.searchParams.get("install_id")).toBe("55");expect(url.searchParams.get("project_id")).toBe("one")}
+ const image=root!.root.findAll(n=>n.type==="img")[0];
+ expect(new URL(image.props.src,"http://localhost").searchParams.get("install_id")).toBe("55");
+ // A session command goes through the same scoped route as every read.
+ const detail=root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="SessionDetail")[0];
+ await act(async()=>detail.props.onClose("requested"));
+ const confirmation=root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="ConfirmModal")[0];
+ await act(async()=>confirmation.props.onConfirm());
+ expect(requests.some(r=>r.method==="DELETE"&&r.url.searchParams.get("install_id")==="55")).toBe(true);
+});
+
+test("switching installs cannot accept an old install's delayed response",async()=>{
+ let release!:(r:Response)=>void;
+ install("",async(url)=>url.searchParams.get("install_id")==="55"?new Promise(r=>{release=r}):Response.json({sessions:[row("new-install")]}));
+ await act(async()=>{root=create(<ComputerPanel projectId="one" installId={55}/>)});
+ await act(async()=>root!.update(<ComputerPanel projectId="one" installId={56}/>));
+ expect(selected()).toBe("new-install");
+ await act(async()=>release(Response.json({sessions:[row("old-install")]})));
+ expect(selected()).toBe("new-install");
 });

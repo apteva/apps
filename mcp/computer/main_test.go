@@ -94,6 +94,20 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 			browserCard = &fromFile.Provides.UIComponents[i]
 		}
 	}
+	for _, manifest := range []*sdk.Manifest{fromFile, fromEmbed} {
+		found := false
+		for _, component := range manifest.Provides.UIComponents {
+			if component.Name == "browser-view" {
+				found = true
+				if !reflect.DeepEqual(component.ResourceTypes, []string{"computer.browser_session"}) {
+					t.Fatalf("browser-view resource_types = %#v", component.ResourceTypes)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("browser-view resource renderer missing")
+		}
+	}
 	if browserView == nil {
 		t.Fatal("browser-view component missing")
 	}

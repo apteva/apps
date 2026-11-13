@@ -213,7 +213,7 @@ func (a *App) authorizeSessionProject(ctx *sdk.AppCtx, id string) error {
 		return nil
 	}
 	if a.reg != nil {
-		if sess, ok := a.reg.get(id); ok {
+		if sess, ok := a.reg.peek(id); ok {
 			if !projectVisible(ctx, sess.projectID) {
 				return errors.New("session not found")
 			}

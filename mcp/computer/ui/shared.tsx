@@ -15,15 +15,23 @@ export function appURL(path: string, projectId?: string, extra?: Record<string, 
   return url.pathname + url.search;
 }
 
-export function sessionURL(sessionId: string, resource: string, projectId?: string) {
-  return appURL(
-    `/api/apps/computer/sessions/${encodeURIComponent(sessionId)}/${resource}`,
-    projectId,
-  );
+/** Host-injected routing identity; never forward it to a provider origin. */
+export function scopeComputerURL(raw: string, projectId?: string, installId?: number, appName = "computer") {
+  if (!raw) return raw;
+  const url = new URL(raw, window.location.origin);
+  if (url.origin !== window.location.origin || !/^\/(?:api\/apps|apps)\/computer(?:\/|$)/.test(url.pathname)) return raw;
+  url.pathname = url.pathname.replace(/^(\/(?:api\/apps|apps)\/)computer(?=\/|$)/, `$1${encodeURIComponent(appName)}`);
+  if (projectId) url.searchParams.set("project_id", projectId);
+  if (Number.isSafeInteger(installId) && installId! > 0) url.searchParams.set("install_id", String(installId));
+  return url.pathname + url.search + url.hash;
 }
 
-export function panelURL(sessionId: string) {
-  return `/apps/computer/?instance=${encodeURIComponent(sessionId)}`;
+export function sessionURL(sessionId: string, resource: string, projectId?: string, installId?: number, appName = "computer") {
+  return scopeComputerURL(`/api/apps/computer/sessions/${encodeURIComponent(sessionId)}/${resource}`, projectId, installId, appName);
+}
+
+export function panelURL(sessionId: string, projectId?: string, installId?: number, appName = "computer") {
+  return scopeComputerURL(`/apps/computer/?instance=${encodeURIComponent(sessionId)}`, projectId, installId, appName);
 }
 
 export function hostFor(raw: string): string {

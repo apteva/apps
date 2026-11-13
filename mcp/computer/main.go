@@ -62,8 +62,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.9.3
+version: 0.10.0
 description: |
+  v0.10.0 adds persistent browser-view resources, install-scoped routing,
+  and responsive side-panel/floating views with inactive polling suspension.
   v0.9.3 preserves explicit empty option values in the isolated browser test
   selection adapter. Missing or null selections are rejected before dispatch;
   text clearing and secret redaction retain their existing behavior.
@@ -134,7 +136,7 @@ provides:
     - { name: browser_test_step, description: Execute a browser test action or structured observation. }
     - { name: browser_test_capture, description: Capture masked failure evidence for Tests. }
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame."
     - name: computer_use
       description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes. A click that starts a browser download may return downloads_started metadata; this does not mean the download completed. Use browser_download(action=wait), then browser_download(action=get)."
     - name: browser_download
@@ -176,6 +178,7 @@ provides:
     - name: browser-view
       entry: /ui/BrowserViewCard.mjs
       slots: [chat.message_attachment]
+      resource_types: [computer.browser_session]
     - name: browser-timeline
       entry: /ui/TimelineCard.mjs
       slots: [chat.message_attachment]
@@ -290,7 +293,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.3
+    ref: computer/v0.10.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -452,6 +455,15 @@ func (r *registry) get(id string) (*session, bool) {
 	return s, ok
 }
 
+// peek observes a session without renewing its idle lifetime. Passive view
+// polling and authorization must not keep an otherwise idle browser alive.
+func (r *registry) peek(id string) (*session, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.m[id]
+	return s, ok
+}
+
 // remove returns the session (if any) and removes it from the map. The
 // caller is responsible for closing it — keeping close-outside-the-lock
 // avoids holding the registry mutex during slow tear-down.
@@ -527,6 +539,8 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
+	// Own sidecar identity, captured before any sessions or reapers start.
+	installID         int64
 	browserTests      *testBrowserManager
 	providerCleanupMu sync.Mutex
 	reg               *registry
@@ -550,6 +564,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("computer requires a db block")
 	}
+	a.installID = computerInstallID(ctx)
 	if err := a.recoverBrowserTests(ctx); err != nil {
 		a.browserTests.recoveryErr = err
 		ctx.Logger().Warn("browser test recovery failed; browser testing disabled", "error", err.Error())
@@ -569,6 +584,21 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	go a.reaper(ctx)
 	ctx.Logger().Info("computer mounted", "tools", len(a.MCPTools()), "idle_ttl", idleTTL.String(), "interrupted_sessions", interrupted)
 	return nil
+}
+
+// computerInstallID uses backend identity, never the calling app or tool arguments.
+// Standalone hosts without identity retain the legacy inline view reference.
+func computerInstallID(ctx *sdk.AppCtx) int64 {
+	if id, err := strconv.ParseInt(os.Getenv("APTEVA_INSTALL_ID"), 10, 64); err == nil && id > 0 {
+		return id
+	}
+	if platform := ctx.PlatformAPI(); platform != nil {
+		if identity, err := platform.WhoAmI(); err == nil && identity != nil && identity.InstallID > 0 {
+			return identity.InstallID
+		}
+	}
+	ctx.Logger().Warn("Computer install identity unavailable; persistent browser views disabled")
+	return 0
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
@@ -683,7 +713,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height, view}. " +
-				"view is a copyable browser-view component reference containing only session_id; attach it when the browser result should be visible in chat.",
+				"view is a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame.",
 			InputSchema: strictSchemaObject(map[string]any{
 				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
 				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
@@ -948,7 +978,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "browser_close",
 			Exposure:    sdk.ToolExposureAppOnly,
-			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Returns view, a copyable browser-view component reference containing only session_id. Idempotent — unknown ids return {closed:false}.",
+			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Returns view, a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame. Idempotent — unknown ids return {closed:false}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 			}, []string{"session_id"}),
@@ -1337,7 +1367,7 @@ func (a *App) toolBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx
 				}
 				return nil, err
 			}
-			return decorate(historicalSessionOutput(row), nil)
+			return decorate(a.historicalSessionOutput(row), nil)
 		}
 		if err := a.lockActiveSession(id, sess); err != nil {
 			return nil, err
@@ -2219,14 +2249,14 @@ func environmentPointer(value backends.EnvironmentOptions) *backends.Environment
 }
 
 func (a *App) sessionOutput(id string, s *session) map[string]any {
-	return sessionInfoOutput(a.sessionInfo(id, s))
+	return a.sessionInfoOutput(a.sessionInfo(id, s))
 }
 
-func historicalSessionOutput(row *ComputerSession) map[string]any {
-	return sessionInfoOutput(historicalSessionInfo(row))
+func (a *App) historicalSessionOutput(row *ComputerSession) map[string]any {
+	return a.sessionInfoOutput(historicalSessionInfo(row))
 }
 
-func sessionInfoOutput(info sessionInfo) map[string]any {
+func (a *App) sessionInfoOutput(info sessionInfo) map[string]any {
 	out := map[string]any{
 		"target": info.Target, "target_kind": info.Capabilities.TargetKind, "capabilities": info.Capabilities,
 		"session_id":                    info.SessionID,
@@ -2261,7 +2291,7 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 		"proxy":                         info.Proxy,
 		"environment_applied":           info.Environment != nil,
 		"environment_verified":          info.EffectiveEnvironment != nil && info.EffectiveEnvironment.Verified,
-		"view":                          browserViewReference(info.SessionID),
+		"view":                          a.browserViewReference(info.SessionID),
 	}
 	if info.Status != "active" {
 		out["closed"] = true
@@ -2287,14 +2317,18 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 	return out
 }
 
-func browserViewReference(sessionID string) map[string]any {
-	return map[string]any{
+func (a *App) browserViewReference(sessionID string) map[string]any {
+	view := map[string]any{
 		"app":  "computer",
 		"name": "browser-view",
 		"props": map[string]any{
 			"session_id": sessionID,
 		},
 	}
+	if a.installID > 0 {
+		view["resource"] = sdk.AppResourceRef{InstallID: a.installID, ResourceType: "computer.browser_session", ResourceID: sessionID}
+	}
+	return view
 }
 
 func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2315,7 +2349,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	res := map[string]any{
 		"png_b64":        pngBase64(m["screenshot"]),
 		"screenshot":     m["screenshot"],
-		"screenshot_url": sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
 		"current_url":    m["current_url"],
 		"width":          m["width"],
 		"height":         m["height"],
@@ -2985,7 +3019,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				emitEvent(ctx, "session.action", payload)
 				out := map[string]any{
 					"session_id": id, "current_url": afterURL,
-					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_url":       a.sessionResourceURL(ctx, id, "screenshot"),
 					"screenshot_available": true, "post_action_screenshot": "not_embedded",
 					"success": false, "failed": true, "status": "rejected", "action_completed": false,
 					"text":      "The temporal value was not accepted. Inspect temporal_actual_value, temporal_validity, temporal_placeholder, and temporal_format_hint before retrying; open a visible semantic date grid when direct entry is unavailable.",
@@ -3024,7 +3058,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				emitEvent(ctx, "session.action", payload)
 				out := map[string]any{
 					"session_id": id, "current_url": afterURL,
-					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_url":       a.sessionResourceURL(ctx, id, "screenshot"),
 					"screenshot_available": true, "post_action_screenshot": "not_embedded",
 					"success": false, "failed": true, "status": "rejected", "action_completed": false,
 					"error_code": result.ErrorCode,
@@ -3041,7 +3075,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		var consequenceErr *clickguard.ConsequenceError
 		if errors.As(err, &consequenceErr) {
 			a.recordSessionNavigation(ctx, id, sess)
-			out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+			out := a.consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
 			emitEvent(ctx, "session.action", out)
 			return out, nil
 		}
@@ -3191,7 +3225,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	out := map[string]any{
 		"session_id":     id,
 		"current_url":    afterURL,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
 	}
 	if tabID := activeTabID(sess.comp); tabID != "" && (action == "screenshot" || tabEvent.Switched || stringArg(args, "tab_id") != "") {
 		out["active_tab_id"] = tabID
@@ -3461,7 +3495,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		if err != nil {
 			var consequenceErr *clickguard.ConsequenceError
 			if errors.As(err, &consequenceErr) {
-				out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+				out := a.consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
 				out["batch_step"] = index + 1
 				out["completed_steps"] = len(completed)
 				out["steps"] = completed
@@ -3545,7 +3579,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	out := map[string]any{
 		"session_id": id, "current_url": afterURL, "text": "Success: batch completed.",
 		"steps": completed, "completed_steps": completedCount,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
 	}
 	if batchTimedOut {
 		out["timed_out"] = true
@@ -3621,7 +3655,7 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 		out := map[string]any{
 			"closed":     false,
 			"session_id": id,
-			"view":       browserViewReference(id),
+			"view":       a.browserViewReference(id),
 		}
 		if ctx != nil && ctx.AppDB() != nil {
 			row, err := dbGetSessionMetadata(ctx.AppDB(), id)
@@ -3651,7 +3685,7 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"session_id":       id,
 		"status":           row.Status,
 		"recording_status": row.RecordingStatus,
-		"view":             browserViewReference(id),
+		"view":             a.browserViewReference(id),
 	}
 	if usage := sessionUsageFromRow(row); usage != nil {
 		out["usage"] = usage
@@ -4097,7 +4131,7 @@ func mergeClickResultPayload(payload map[string]any, act backends.Action) {
 	}
 }
 
-func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act backends.Action, rejection *clickguard.ConsequenceError) map[string]any {
+func (a *App) consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act backends.Action, rejection *clickguard.ConsequenceError) map[string]any {
 	out := map[string]any{
 		"session_id": id, "success": false, "failed": true, "status": "rejected",
 		"action":           act.Type,
@@ -4107,7 +4141,7 @@ func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act 
 		"confirm_consequence":   rejection.ConfirmConsequence,
 		"consequence_confirmed": false,
 		"current_url":           currentURL(sess.comp),
-		"screenshot_url":        sessionResourceURL(ctx, id, "screenshot"),
+		"screenshot_url":        a.sessionResourceURL(ctx, id, "screenshot"),
 		"text":                  rejection.Error(),
 	}
 	if rejection.Target.AccessibleName != "" {
@@ -6589,7 +6623,7 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "session id required")
 		return
 	}
-	sess, ok := a.reg.get(rest)
+	sess, ok := a.reg.peek(rest)
 	if !ok {
 		ctx := appCtxForRequest(r, nil)
 		if ctx == nil || ctx.AppDB() == nil {
@@ -6643,7 +6677,7 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := appCtxForRequest(r, nil)
 	var info sessionInfo
-	if sess, ok := a.reg.get(id); ok {
+	if sess, ok := a.reg.peek(id); ok {
 		if err := a.lockActiveSession(id, sess); err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
@@ -6664,10 +6698,10 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, map[string]any{
 		"session":        info,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
-		"stream_url":     sessionResourceURL(ctx, id, "stream"),
-		"timeline_url":   sessionResourceURL(ctx, id, "timeline"),
-		"recording_url":  sessionResourceURL(ctx, id, "recording"),
+		"screenshot_url": a.sessionResourceURL(ctx, id, "screenshot"),
+		"stream_url":     a.sessionResourceURL(ctx, id, "stream"),
+		"timeline_url":   a.sessionResourceURL(ctx, id, "timeline"),
+		"recording_url":  a.sessionResourceURL(ctx, id, "recording"),
 	})
 }
 
@@ -6697,7 +6731,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := appCtxForRequest(r, nil)
-	if sess, ok := a.reg.get(id); ok {
+	if sess, ok := a.reg.peek(id); ok {
 		if err := a.lockActiveSession(id, sess); err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
@@ -6709,7 +6743,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"kind": "iframe", "url": liveURL, "backend": backend, "status": "active"})
 			return
 		}
-		writeJSON(w, map[string]any{"kind": "snapshot", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
+		writeJSON(w, map[string]any{"kind": "snapshot", "url": a.sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
 		return
 	}
 	if ctx == nil || ctx.AppDB() == nil {
@@ -6721,12 +6755,12 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, map[string]any{"kind": "final", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
+	writeJSON(w, map[string]any{"kind": "final", "url": a.sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
 }
 
-func sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
+func (a *App) sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
 	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/" + strings.Trim(resource, "/")
-	return withRecordingQuery(path, ctx, "", "")
+	return a.withRecordingQuery(path, ctx, "", "")
 }
 
 func pathSessionID(path, suffix string) string {
