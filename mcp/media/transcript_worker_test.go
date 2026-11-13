@@ -169,17 +169,19 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 
 // newTestCtxWithPlatform mirrors newTestCtx but injects a stub
 // PlatformClient + storage mock so worker code can run.
-func newTestCtxWithPlatform(t *testing.T, p sdk.PlatformClient) *sdk.AppCtx {
+func newTestCtxWithPlatform(t *testing.T, p sdk.PlatformClient, extra ...tk.Option) *sdk.AppCtx {
 	t.Helper()
 	storage := mockStorageURL(t)
-	ctx := tk.NewAppCtx(t, "apteva.yaml",
+	options := []tk.Option{
 		tk.WithProjectID(testProj),
 		tk.WithPlatform(p),
 		tk.WithEnv("APTEVA_GATEWAY_URL", storage.URL),
 		tk.WithEnv("APTEVA_PUBLIC_URL", storage.URL),
 		tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "test-token"),
 		tk.WithEnv("APTEVA_APP_TOKEN", "test-token"),
-	)
+	}
+	options = append(options, extra...)
+	ctx := tk.NewAppCtx(t, "apteva.yaml", options...)
 	globalCtx = ctx
 	return ctx
 }

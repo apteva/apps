@@ -3,6 +3,33 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Per-request transcription options (v0.15.7)
+
+Choose a transcription model/language directly on the request:
+
+```json
+{"file_id":"27706","model":"nova-2","language":"en","require_word_timings":true,"force":true}
+```
+
+Media saves the effective model, requested language and diarization default with
+that queued attempt. Omitting model/language uses the operator's defaults when a
+new job is queued. Automatic retries and ordinary retries without overrides keep
+the saved settings; `force=true` starts a new attempt using the supplied options
+and current defaults. A replacement source starts with current defaults.
+Pending/running attempts cannot be reconfigured; a conflicting request fails
+clearly (REST HTTP 409). This allows different files to use different models
+without changing global installation settings or restarting Media.
+
+Read `options` in the queue response and transcript, or `last_attempt.options`
+when an upgrade failed while retaining an earlier completed transcript.
+`options.language` is the requested language; transcript `language` is the result
+language. Pre-upgrade pending jobs freeze their defaults once when claimed.
+REST accepts the same options as query parameters on POST `/media/:id/transcribe`.
+
+Transcription scripts should check that `media_transcribe` advertises `model`
+and `language`, then pass them per request. They must not change and restore
+`transcribe_model` or `transcribe_language` through the installation config API.
+
 ## Transcript timing (v0.15.6)
 
 Refresh the Deepgram integration catalog before installing this release. Media

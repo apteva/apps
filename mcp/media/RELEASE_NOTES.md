@@ -1,3 +1,10 @@
+## 0.15.7 — per-request transcription settings
+
+`media_transcribe` accepts model/language options and saves effective settings
+with the attempt. Retries keep their saved settings; requests never change global
+defaults or restart Media. Conflicting in-flight settings fail clearly. See
+[release details](RELEASE-v0.15.7.md).
+
 ## 0.15.6 — preserved Deepgram words and safe timing upgrades
 
 Both channel-alternative and utterance word timestamps now survive parsing,

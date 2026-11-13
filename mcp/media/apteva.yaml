@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.6
+version: 0.15.7
 description: |
+  v0.15.7 adds per-request transcription model/language with queue-time
+  settings preserved through retries. Jobs never change install defaults.
   v0.15.6 preserves provider word timestamps from channel alternatives and
   utterances, with audio identity and source-timeline mapping. Transcript tools
   expose timing readiness, bounded word/segment retrieval and phrase matches.
@@ -501,7 +503,7 @@ provides:
 
     # Transcripts — speech-to-text for audio + video (Deepgram-powered).
     - name: media_transcribe
-      description: Queue transcription or safely upgrade missing timings with require_word_timings=true. force=true re-queues completed rows without deleting their active version. Failures retain previous text and segments. prepare_only=true validates transcription audio without provider calls.
+      description: Queue transcription with per-request model/language, saved with the attempt, or safely upgrade missing timings with require_word_timings=true. force=true re-queues completed rows without deleting their active version. Failures retain previous text and segments. prepare_only=true validates transcription audio without provider calls.
     - name: media_get_transcript
       description: Fetch persisted words, counts, timing granularity and redaction readiness. Views full (default), summary, text, segments and words support bounded retrieval, time windows, channel/speaker filters, phrase query/occurrence and revision-bound cursors.
     - name: media_set_transcript
@@ -723,7 +725,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.6
+    ref: media/v0.15.7
     entry: mcp/media
   port: 8080
   health_check: /health

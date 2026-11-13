@@ -10,10 +10,11 @@ import (
 )
 
 type transcriptAttemptStatus struct {
-	Status      string `json:"status"`
-	Error       string `json:"error,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
+	Options     *transcriptionOptions `json:"options,omitempty"`
+	Status      string                `json:"status"`
+	Error       string                `json:"error,omitempty"`
+	StartedAt   string                `json:"started_at,omitempty"`
+	CompletedAt string                `json:"completed_at,omitempty"`
 }
 
 type transcriptQuerier interface{ QueryRow(string, ...any) *sql.Row }
@@ -60,11 +61,11 @@ func getTranscript(db *sql.DB, projectID, fileID string) (*TranscriptRow, error)
 	if err = json.Unmarshal([]byte(raw), &active); err != nil {
 		return nil, err
 	}
-	active.LastAttempt = &transcriptAttemptStatus{Status: current.Status, Error: current.Error, StartedAt: current.StartedAt, CompletedAt: current.CompletedAt}
+	active.LastAttempt = &transcriptAttemptStatus{Options: current.Options, Status: current.Status, Error: current.Error, StartedAt: current.StartedAt, CompletedAt: current.CompletedAt}
 	return &active, nil
 }
 
-func queueTranscript(db *sql.DB, projectID, fileID, kind string, force, requireWords bool) error {
+func queueTranscript(db *sql.DB, projectID, fileID, kind string, force, requireWords bool, requested ...transcriptionOptions) error {
 	if projectID == "" || fileID == "" {
 		return errors.New("project_id and file_id required")
 	}
@@ -77,10 +78,28 @@ func queueTranscript(db *sql.DB, projectID, fileID, kind string, force, requireW
 	}
 	defer tx.Rollback()
 	current, err := getTranscriptAttempt(tx, projectID, fileID)
+	var options *transcriptionOptions
+	if len(requested) > 0 {
+		copy := requested[0]
+		options = &copy
+	}
+	if err == nil && current.Status != "ok" && current.Options != nil && (kind == "auto" || !force && (len(requested) == 0 || !requested[0].Explicit)) {
+		options = current.Options
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.Exec(`INSERT INTO transcripts(file_id,project_id,status,source_kind,require_words) VALUES(?,?,'pending',?,?)`, fileID, projectID, kind, boolInt(requireWords))
+		_, err = tx.Exec(`INSERT INTO transcripts(file_id,project_id,status,source_kind,require_words,request_options) VALUES(?,?,'pending',?,?,?)`, fileID, projectID, kind, boolInt(requireWords), transcriptOptionsJSON(options))
 	} else if err == nil {
 		if current.Status == "running" || current.Status == "pending" {
+			if kind == "manual" && options != nil && current.Options != nil && !sameTranscriptionOptions(options, current.Options) {
+				return errors.New("transcription_request_conflict: active attempt uses different model or language")
+			}
+			if options != nil && current.Options == nil {
+				if _, err = tx.Exec(`UPDATE transcripts SET request_options=? WHERE project_id=? AND file_id=? AND request_options='{}'`, transcriptOptionsJSON(options), projectID, fileID); err != nil {
+					return err
+				}
+			}
+
 			if requireWords {
 				if _, err = tx.Exec(`UPDATE transcripts SET require_words=1 WHERE project_id=? AND file_id=?`, projectID, fileID); err != nil {
 					return err
@@ -94,13 +113,14 @@ func queueTranscript(db *sql.DB, projectID, fileID, kind string, force, requireW
 		if sourceErr != nil && !errors.Is(sourceErr, sql.ErrNoRows) {
 			return sourceErr
 		}
-		if current.Status == "ok" && !force && !changed && (!requireWords || transcriptHasWords(current)) {
+		optionsChanged := options != nil && options.Explicit && !sameTranscriptionOptions(options, current.Options)
+		if current.Status == "ok" && !force && !changed && !optionsChanged && (!requireWords || transcriptHasWords(current)) {
 			return tx.Commit()
 		}
 		if err = snapshotTranscript(tx, current); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`UPDATE transcripts SET status='pending',source_kind=?,source_sha256='',text='',language='',segments='[]',diagnostics='{}',error='',started_at=NULL,completed_at=NULL,require_words=MAX(require_words,?) WHERE project_id=? AND file_id=? AND status NOT IN ('pending','running')`, kind, boolInt(requireWords), projectID, fileID)
+		_, err = tx.Exec(`UPDATE transcripts SET status='pending',source_kind=?,source_sha256='',text='',language='',segments='[]',diagnostics='{}',error='',started_at=NULL,completed_at=NULL,require_words=MAX(require_words,?),request_options=? WHERE project_id=? AND file_id=? AND status NOT IN ('pending','running')`, kind, boolInt(requireWords), transcriptOptionsJSON(options), projectID, fileID)
 	}
 	if err != nil {
 		return err

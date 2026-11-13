@@ -123,7 +123,7 @@ func transcriberOne(app *sdk.AppCtx, msg transcriberMsg) {
 		transcriberSweepOne(app)
 		return
 	}
-	if err := insertPendingTranscript(app.AppDB(), msg.ProjectID, msg.FileID, "auto"); err != nil {
+	if err := insertPendingTranscript(app.AppDB(), msg.ProjectID, msg.FileID, "auto", transcriptionDefaults(app)); err != nil {
 		log.Error("queue pending transcript failed", "file_id", msg.FileID, "err", err)
 		return
 	}
@@ -197,7 +197,7 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 		candidates = nil
 	}
 	for _, fid := range candidates {
-		if err := insertPendingTranscript(db, pid, fid, "auto"); err != nil {
+		if err := insertPendingTranscript(db, pid, fid, "auto", transcriptionDefaults(app)); err != nil {
 			log.Error("queue pending transcript failed", "file_id", fid, "err", err)
 		}
 	}
@@ -242,6 +242,17 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
+	// Freeze pre-upgrade queue rows once; all new requests carry queue-time settings.
+	if err := freezeLegacyTranscriptOptions(db, row, transcriptionDefaults(app)); err != nil {
+		_ = markFailure("transcription options: " + err.Error())
+		return
+	}
+	model, language := row.Options.Model, row.Options.Language
+
+	if !transcriptModelPattern.MatchString(model) || len(language) > 64 || !(language == "auto" || language == "multi" || transcriptLanguagePattern.MatchString(language)) {
+		_ = markFailure("invalid frozen transcription options")
+		return
+	}
 
 	// Gate: skip if source duration exceeds the cap.
 	maxMinutes := parseConfigIntFallback(cfg.Get("transcribe_max_duration_minutes"), 120)
@@ -273,18 +284,6 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		return
 	}
 
-	// Build Deepgram args. Defaults are deliberately conservative —
-	// see deepgram integration spec: "Do NOT enable
-	// paragraphs/utterances/diarize/topics/intents/sentiment/summarize
-	// unless you specifically need that extra data."
-	model := strings.TrimSpace(cfg.Get("transcribe_model"))
-	if model == "" {
-		model = "nova-3"
-	}
-	language := strings.TrimSpace(cfg.Get("transcribe_language"))
-	if language == "" {
-		language = "auto"
-	}
 	args := map[string]any{
 		"url":          signedURL,
 		"model":        model,
@@ -297,7 +296,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	} else {
 		args["language"] = language
 	}
-	if configBool(cfg.Get("transcribe_diarize"), false) {
+	if row.Options.Diarize {
 		args["diarize"] = true
 	}
 
@@ -354,6 +353,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	diagnostics, _ := json.Marshal(map[string]any{"status_semantics": "provider_response_parsed", "speech_coverage": "unverified", "provider_metadata": parsed.Metadata, "provider_duration_ms": parsed.ProviderDurationMs, "word_count": parsed.WordCount, "last_word_end_ms": parsed.LastWordEndMs, "audio_preparation": audioEvidence, "timing": timing})
 	// Persist.
 	final := &TranscriptRow{
+		Options:            row.Options,
 		FileID:             row.FileID,
 		ProjectID:          row.ProjectID,
 		SourceSHA256:       media.SourceSHA256,

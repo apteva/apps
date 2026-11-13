@@ -36,6 +36,7 @@ type TranscriptSegment struct {
 }
 
 type TranscriptRow struct {
+	Options            *transcriptionOptions    `json:"options,omitempty"`
 	LastAttempt        *transcriptAttemptStatus `json:"last_attempt,omitempty"`
 	RequireSourceMatch bool                     `json:"-"`
 	FileID             string                   `json:"file_id"`
@@ -61,8 +62,8 @@ type TranscriptRow struct {
 // Idempotent on file_id (UPSERT) so the worker can re-queue without
 // stepping on running rows — the WHERE in claimNextPendingTranscript
 // guards against double-claim.
-func insertPendingTranscript(db *sql.DB, projectID, fileID, sourceKind string) error {
-	return queueTranscript(db, projectID, fileID, sourceKind, false, false)
+func insertPendingTranscript(db *sql.DB, projectID, fileID, sourceKind string, options ...transcriptionOptions) error {
+	return queueTranscript(db, projectID, fileID, sourceKind, false, false, options...)
 }
 
 // upsertTranscript installs a complete row at status=ok. Used for
@@ -102,8 +103,8 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 		INSERT INTO transcripts (
 			file_id, project_id, source_sha256, status, language, text, segments,
 			provider, model, duration_ms, cost_cents, raw, error, source_kind,
-			completed_at, diagnostics
-		) VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?)
+			completed_at, diagnostics, request_options
+		) VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?)
 		ON CONFLICT(file_id) DO UPDATE SET
 			project_id    = excluded.project_id,
 			source_sha256 = excluded.source_sha256,
@@ -118,10 +119,11 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 			error         = '',
 			source_kind   = excluded.source_kind,
 			completed_at  = excluded.completed_at,
-			diagnostics = excluded.diagnostics
+			diagnostics = excluded.diagnostics,
+ request_options = excluded.request_options
  WHERE transcripts.project_id=excluded.project_id`,
 		t.FileID, t.ProjectID, t.SourceSHA256, t.Language, t.Text, segs,
-		t.Provider, t.Model, t.DurationMs, t.CostCents, t.SourceKind, now, transcriptDiagnosticsJSON(t),
+		t.Provider, t.Model, t.DurationMs, t.CostCents, t.SourceKind, now, transcriptDiagnosticsJSON(t), transcriptOptionsJSON(t.Options),
 	)
 	if err != nil {
 		return err
@@ -155,7 +157,7 @@ func claimNextPendingTranscript(db *sql.DB, projectID string) (*TranscriptRow, e
 		 ) AND project_id = ? AND status = 'pending'
 		 RETURNING file_id, project_id, source_sha256, status, language, text, segments,
 		           provider, model, COALESCE(duration_ms,0), COALESCE(cost_cents,0),
-		           error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics`,
+		           error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics,request_options`,
 		now, projectID, projectID,
 	)
 	return scanTranscriptRow(row)
@@ -242,7 +244,7 @@ func getTranscriptAttempt(db transcriptQuerier, projectID, fileID string) (*Tran
 	row := db.QueryRow(`
 		SELECT file_id, project_id, source_sha256, status, language, text, segments,
 		       provider, model, COALESCE(duration_ms,0), COALESCE(cost_cents,0),
-		       error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics
+		       error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics,request_options
 		FROM transcripts WHERE project_id=? AND file_id=?`,
 		projectID, fileID,
 	)
@@ -258,7 +260,7 @@ func listTranscripts(db *sql.DB, projectID string, f TranscriptFilters) ([]Trans
 	q := strings.Builder{}
 	q.WriteString(`SELECT file_id, project_id, source_sha256, status, language, text, segments,
 	                      provider, model, COALESCE(duration_ms,0), COALESCE(cost_cents,0),
-	                      error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics
+	                      error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), diagnostics,request_options
 	               FROM transcripts WHERE project_id = ?`)
 	args := []any{projectID}
 	if f.Status != "" {
@@ -336,15 +338,16 @@ func transcribeCandidates(db *sql.DB, projectID string, limit int) ([]string, er
 
 func scanTranscriptRow(row *sql.Row) (*TranscriptRow, error) {
 	var t TranscriptRow
-	var segs, diagnostics string
+	var segs, diagnostics, options string
 	err := row.Scan(
 		&t.FileID, &t.ProjectID, &t.SourceSHA256, &t.Status, &t.Language, &t.Text, &segs,
 		&t.Provider, &t.Model, &t.DurationMs, &t.CostCents,
-		&t.Error, &t.SourceKind, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &diagnostics,
+		&t.Error, &t.SourceKind, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &diagnostics, &options,
 	)
 	if err != nil {
 		return nil, err
 	}
+	t.Options = decodeTranscriptOptions(options)
 	if diagnostics != "" && diagnostics != "{}" {
 		t.Diagnostics = json.RawMessage(diagnostics)
 	}
@@ -356,15 +359,16 @@ func scanTranscriptRow(row *sql.Row) (*TranscriptRow, error) {
 
 func scanTranscriptRows(rows *sql.Rows) (*TranscriptRow, error) {
 	var t TranscriptRow
-	var segs, diagnostics string
+	var segs, diagnostics, options string
 	err := rows.Scan(
 		&t.FileID, &t.ProjectID, &t.SourceSHA256, &t.Status, &t.Language, &t.Text, &segs,
 		&t.Provider, &t.Model, &t.DurationMs, &t.CostCents,
-		&t.Error, &t.SourceKind, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &diagnostics,
+		&t.Error, &t.SourceKind, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &diagnostics, &options,
 	)
 	if err != nil {
 		return nil, err
 	}
+	t.Options = decodeTranscriptOptions(options)
 	if diagnostics != "" && diagnostics != "{}" {
 		t.Diagnostics = json.RawMessage(diagnostics)
 	}

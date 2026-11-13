@@ -630,11 +630,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_transcribe",
-			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?, require_word_timings?. Completed transcripts remain readable while upgrades run and after failure.",
+			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?, require_word_timings?, model?, language?. Model/language defaults are frozen when queued and reused on retries; install configuration is never changed. Completed transcripts remain readable while upgrades run and after failure.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":              map[string]any{"type": "string"},
 				"force":                map[string]any{"type": "boolean"},
 				"prepare_only":         map[string]any{"type": "boolean"},
+				"model":                map[string]any{"type": "string", "description": "Per-request model; defaults are resolved and saved when queuing."},
+				"language":             map[string]any{"type": "string", "description": "Per-request BCP-47 language, auto, or multi. Saved with this attempt."},
 				"require_word_timings": map[string]any{"type": "boolean", "description": "Safely upgrade a completed transcript missing validated word timings; retain the previous completed transcript on failure."},
 			}, []string{"file_id"}),
 			Handler: a.toolTranscribe,
@@ -1012,7 +1014,11 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		return map[string]any{"file_id": fid, "prepared": true, "audio_preparation": evidence, "transcript_changed": false}, nil
 	}
-	if err := queueTranscript(ctx.AppDB(), pid, fid, "manual", force, requireWords); err != nil {
+	options, err := resolveTranscriptionOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if err := queueTranscript(ctx.AppDB(), pid, fid, "manual", force, requireWords, options); err != nil {
 		return nil, err
 	}
 	notifyTranscriber(pid, fid)
@@ -1020,7 +1026,7 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"file_id": fid, "status": queued.Status}, nil
+	return map[string]any{"file_id": fid, "status": queued.Status, "options": queued.Options}, nil
 }
 
 func (a *App) toolGetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1747,13 +1753,27 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 	case tail == "transcribe" && r.Method == http.MethodPost:
 		// Queue a transcript (or force-requeue when ?force=true).
 		// Mirrors the media_transcribe MCP tool.
-		if err := queueTranscript(globalCtx.AppDB(), pid, fid, "manual", r.URL.Query().Get("force") == "true", r.URL.Query().Get("require_word_timings") == "true"); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		options, err := resolveTranscriptionOptions(globalCtx, transcriptReadArgs(r.URL.Query()))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := queueTranscript(globalCtx.AppDB(), pid, fid, "manual", r.URL.Query().Get("force") == "true", r.URL.Query().Get("require_word_timings") == "true", options); err != nil {
+			status := http.StatusInternalServerError
+			if strings.HasPrefix(err.Error(), "transcription_request_conflict:") {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		notifyTranscriber(pid, fid)
+		queued, err := getTranscriptAttempt(globalCtx.AppDB(), pid, fid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]any{"file_id": fid, "status": "pending"})
+		writeJSON(w, map[string]any{"file_id": fid, "status": queued.Status, "options": queued.Options})
 	case tail == "description" && r.Method == http.MethodPut:
 		// Panel + agent use this to set/update prose. Same partial-
 		// update semantics as the MCP tool: pointer-distinguished
