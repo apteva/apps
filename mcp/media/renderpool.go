@@ -167,7 +167,14 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 
 	// Wall-clock cap. Combined with the per-render cancel func so
 	// either timeout OR explicit cancel terminates work promptly.
-	parent, stop := mediaContext(context.Background(), app)
+	overallDeadline, deadlineErr := renderOverallDeadline(app, row)
+	if deadlineErr != nil {
+		_ = renderMarkFailed(db, row.ID, deadlineErr.Error())
+		return
+	}
+	overallCtx, stopOverall := context.WithDeadline(context.Background(), overallDeadline)
+	defer stopOverall()
+	parent, stop := mediaContext(overallCtx, app)
 	defer stop()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -176,7 +183,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 	recordRenderMetric(app, row, "execution_timeout_seconds", timeoutSec)
 	executor := selectExecutor(app, local, remote, row)
 	log.Info("render claimed", "id", row.ID, "op", row.Operation, "executor", executor.Name())
-	emitRenderStarted(app, row, executor.Name())
+	recordRenderMetric(app, row, "execution_started", false)
 
 	sc := newStorageClient()
 	cacheRequest := *row // Preserve requested params before Smart Crop resolves them.
@@ -208,18 +215,30 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		recordRenderMetric(app, row, "work_units", weight)
 		recordRenderMetric(app, row, "admission_timeout_seconds", admissionSec)
 		waitDone := renderStage(app, row, "admission")
-		waitCtx, stopWait := context.WithTimeout(ctx, time.Duration(admissionSec)*time.Second)
+		// Capacity is queued under the persisted overall deadline. The old admission
+		// limit is an observability threshold, never a terminal execution failure.
 		started := time.Now()
+		waitCtx := withMediaAdmissionObserver(ctx, fmt.Sprintf("render:%d", row.ID), func(snapshot map[string]any) {
+			snapshot["admission_wait_ms"] = time.Since(started).Milliseconds()
+			snapshot["admission_wait_exceeds_legacy_limit"] = time.Since(started) >= time.Duration(admissionSec)*time.Second
+			for k, v := range snapshot {
+				recordRenderMetric(app, row, k, v)
+			}
+		})
 		leaseCtx, release, admissionErr := acquireMediaWorkWithLeaseContext(waitCtx, ctx, app, weight)
-		stopWait()
 		waitDone()
 		recordRenderMetric(app, row, "admission_wait_ms", time.Since(started).Milliseconds())
 		if admissionErr != nil {
+			if deferWaitingRenderOnShutdown(app, row) {
+				return
+			}
 			if ctx.Err() == context.Canceled {
 				_ = renderMarkCancelled(db, row.ID)
 				emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
 			} else {
-				msg := "render_admission_timeout: " + admissionErr.Error()
+				recordRenderMetric(app, row, "retry_appropriate", true)
+				recordRenderMetric(app, row, "retry_requires_new_request", true)
+				msg := "render_capacity_deadline_exceeded: overall deadline expired before execution"
 				_ = renderMarkFailed(db, row.ID, msg)
 				emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
 			}
@@ -232,6 +251,9 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		if created, e := time.Parse(time.RFC3339, row.CreatedAt); e == nil {
 			recordRenderMetric(app, row, "queue_wait_ms", time.Since(created).Milliseconds())
 		}
+		recordRenderMetric(app, row, "execution_started", true)
+		recordRenderMetric(app, row, "execution_started_at", time.Now().UTC().Format(time.RFC3339Nano))
+		emitRenderStarted(app, row, executor.Name())
 		outputFileID, err = executor.Execute(ctx, app, row)
 		if err == nil {
 			// Do not associate new bytes with an old source/config identity if
@@ -264,13 +286,16 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		// propagate ctx.Err() upwards, but anything that lost the
 		// context wrap still gets classified correctly.
 		if ctx.Err() == context.Canceled {
+			if deferWaitingRenderOnShutdown(app, row) {
+				return
+			}
 			_ = renderMarkCancelled(db, row.ID)
 			emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
 			log.Info("render cancelled", "id", row.ID, "executor", executor.Name())
 			return
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			msg := fmt.Sprintf("timeout after %ds", timeoutSec)
+			msg := renderDeadlineError(ctx, overallDeadline, timeoutSec)
 			_ = renderMarkFailed(db, row.ID, msg)
 			emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
 			return
@@ -289,7 +314,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 			emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
 			return
 		}
-		msg := fmt.Sprintf("timeout after %ds", timeoutSec)
+		msg := renderDeadlineError(ctx, overallDeadline, timeoutSec)
 		_ = renderMarkFailed(db, row.ID, msg)
 		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
 		return

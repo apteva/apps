@@ -3,6 +3,30 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Render queue and audio extents (v0.15.8)
+
+Renders keep their original ID while waiting for weighted host capacity. Supply
+`overall_timeout_seconds` to bound queue, cache-lock, processing and validation
+time from submission (default 86400 seconds; range 30–604800). This saved deadline
+survives restart. `timeout_seconds` separately limits execution after admission.
+The former 600-second admission timeout is now a diagnostic threshold.
+
+Inspect `media_get_render.metrics` for `overall_deadline_at`, `queue_age_ms`,
+`execution_started`, `execution_started_at`, capacity, queue position, work units
+and blocking leases. A claimed row can remain `running` at stage `admission`
+without having started execution. Capacity expiry returns
+`render_capacity_deadline_exceeded`; execution and overall processing expiry use
+`render_execution_timeout` and `render_overall_deadline_exceeded`. Poll the same
+render ID while queued; do not submit duplicate jobs. An expired request needs a
+new explicit request and deadline.
+
+Audio redaction preserves the original audio presentation extent with explicit
+sample bounds, independently of video length. Timeline preparation applies no
+gain changes. Diagnostics expose source/output sample counts and expected versus
+observed start, duration, endpoint and drift, including on validation failure.
+Existing validation tolerances and full audio/video checks remain enforced.
+See [release details](RELEASE-v0.15.8.md).
+
 ## Per-request transcription options (v0.15.7)
 
 Choose a transcription model/language directly on the request:

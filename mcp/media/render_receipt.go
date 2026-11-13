@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -111,7 +112,7 @@ func receiptValidation(raw []byte) map[string]any {
 }
 
 func compactRenderParams(raw []byte) map[string]any {
-	out := receiptScalars(raw, "target_ratio crop_mode crop_version smart_crop_engine smart_crop_framing fit_mode x y width height crop_x crop_y crop_w crop_h start_ms end_ms at_ms output_width output_height trim_mode max_start_drift_ms max_end_drift_ms runtime_error format codec bitrate fps encoder_profile hevc_preset hevc_crf timeout_seconds require_action_preservation crop_fallback target_lufs target_peak_dbtp filter method preview padding_ms fade_ms")
+	out := receiptScalars(raw, "target_ratio crop_mode crop_version smart_crop_engine smart_crop_framing fit_mode x y width height crop_x crop_y crop_w crop_h start_ms end_ms at_ms output_width output_height trim_mode max_start_drift_ms max_end_drift_ms runtime_error format codec bitrate fps encoder_profile hevc_preset hevc_crf overall_timeout_seconds timeout_seconds require_action_preservation crop_fallback target_lufs target_peak_dbtp filter method preview padding_ms fade_ms")
 	var p map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &p)
 	if v, ok := p["crop_path"]; ok {
@@ -140,7 +141,7 @@ func compactRenderParams(raw []byte) map[string]any {
 		"trim_diagnostics":    "algorithm_version app_version mode requested_mode requested_start_ms requested_end_ms actual_start_ms actual_end_ms start_drift_ms end_drift_ms max_start_drift_ms max_end_drift_ms reencoded fallback_reason source_frames_expected copy_frames_checked source_endpoint_hashes_match audio_origin presentation_cutoff timeline_origin",
 		"render_budget":       "effective_timeout_seconds estimated_seconds estimated_encode_seconds estimate_basis estimated_encode_speed warning",
 		"audio_normalization": "algorithm_version passes target_lufs target_peak_dbtp internal_peak_dbtp effective_target_lufs measurement_target_lufs measurement_peak_dbtp loudnorm_peak_dbtp correction_gain_db max_correction_gain_db limiter_peak_dbtp limiter_latency_compensated audio_codec aac_perceptual_noise_substitution attempt max_attempts encoded_lufs encoded_peak_dbtp retry_count loudness_tolerance_lu peak_tolerance_db sample_rate validated timeline_validated decode_ok video_frames_expected video_frames_checked video_pictures_match video_validation_reused presentation_boundary_mode",
-		"audio_redaction":     "algorithm_version app_version method preview source_start_ms source_end_ms fade_ms sample_rate video_copied validated timeline_validated decode_ok video_pictures_match video_frames_checked video_validation_reused leading_audio_silence_ms source_audio_start_seconds output_audio_start_seconds",
+		"audio_redaction":     "algorithm_version app_version method preview source_start_ms source_end_ms fade_ms sample_rate video_copied validated timeline_validated decode_ok video_pictures_match video_frames_checked video_validation_reused leading_audio_silence_ms source_audio_start_seconds output_audio_start_seconds source_audio_duration_seconds expected_audio_start_seconds expected_audio_duration_seconds expected_audio_endpoint_seconds expected_audio_samples output_audio_duration_seconds output_audio_endpoint_seconds audio_start_drift_ms audio_duration_drift_ms audio_endpoint_drift_ms output_decoded_audio_samples decoded_sample_drift source_decoded_audio_samples source_decoded_sample_drift timeline_processing gain_changed",
 		"video_evidence":      "algorithm_version decode_ok frames_checked",
 	}
 	for k, keys := range sections {
@@ -201,11 +202,15 @@ func compactRenderParams(raw []byte) map[string]any {
 }
 
 func compactRenderMetrics(raw []byte) map[string]any {
-	out := receiptScalars(raw, "stage stage_progress_pct work_units admission_ms admission_wait_ms admission_timeout_seconds execution_timeout_seconds queue_wait_ms source_cache_hits source_cache_misses result_cache_hit remote_host_id output_content_type output_bytes remote_execution_ms finalize_ms validation_ms trim_validation_ms download_ms analysis_ms encode_ms provider_execution_ms upload_ms transfer_ms hash_ms source_download_ms source_prepare_ms planning_ms execute_ms observed_encode_speed cancellation_confirmed cancellation_error")
+	out := receiptScalars(raw, "overall_deadline_at overall_timeout_seconds execution_started execution_started_at retry_appropriate retry_requires_new_request admission_wait_exceeds_legacy_limit admission_capacity admission_capacity_used admission_queue_position admission_queue_length stage stage_progress_pct work_units admission_ms admission_wait_ms admission_timeout_seconds execution_timeout_seconds queue_wait_ms source_cache_hits source_cache_misses result_cache_hit remote_host_id output_content_type output_bytes remote_execution_ms finalize_ms validation_ms trim_validation_ms download_ms analysis_ms encode_ms provider_execution_ms upload_ms transfer_ms hash_ms source_download_ms source_prepare_ms planning_ms execute_ms observed_encode_speed cancellation_confirmed cancellation_error")
 	var p map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &p)
 	if v, ok := p["trim_validation"]; ok {
 		out["trim_validation"] = receiptValidation(v)
+	}
+	if v, ok := p["admission_blocking_leases"]; ok {
+		a, _ := receiptArray(v, "lease_id owner work_units age_ms")
+		out["admission_blocking_leases"] = a
 	}
 	return out
 }
@@ -213,6 +218,18 @@ func compactRenderMetrics(raw []byte) map[string]any {
 func renderReceipt(db *sql.DB, r RenderRow, files map[string]*StorageFile) RenderReceipt {
 	e := enrichRender(r, files)
 	out := RenderReceipt{ID: r.ID, ProjectID: receiptString(r.ProjectID), Operation: receiptString(r.Operation), SourceFileIDs: []string{}, Params: compactRenderParams(r.Params), ResolvedParams: compactRenderParams(r.ResolvedParams), Metrics: compactRenderMetrics(r.Metrics), Status: receiptString(r.Status), ProgressPct: r.ProgressPct, OutputFileID: receiptString(r.OutputFileID), OutputName: receiptString(r.OutputName), OutputFolder: receiptString(r.OutputFolder), Error: receiptString(r.Error), ErrorCode: receiptString(r.ErrorCode), RequestedBy: receiptString(r.RequestedBy), CreatedAt: receiptString(r.CreatedAt), StartedAt: receiptString(r.StartedAt), CompletedAt: receiptString(r.CompletedAt), URL: receiptString(e.URL), Name: receiptString(e.Name), Visibility: receiptString(e.Visibility), SizeBytes: e.SizeBytes, ContentType: receiptString(e.ContentType), Detail: "summary", DetailsOmitted: true}
+	if r.Status == "pending" || r.Status == "running" {
+		created, e := time.Parse(time.RFC3339Nano, r.CreatedAt)
+		if e != nil {
+			created, e = time.Parse("2006-01-02 15:04:05", r.CreatedAt)
+		}
+		if e == nil {
+			out.Metrics["job_age_ms"] = time.Since(created).Milliseconds()
+			if out.Metrics["execution_started"] != true {
+				out.Metrics["queue_age_ms"] = time.Since(created).Milliseconds()
+			}
+		}
+	}
 	// Never return a truncated URL as if it were a usable output link.
 	if len(e.URL) > 512 {
 		out.URL = ""

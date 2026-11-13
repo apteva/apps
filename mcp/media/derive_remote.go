@@ -126,7 +126,7 @@ func runRemoteIndexStage(
 		ProjectID:            projectID,
 	})
 
-	ctx, release, err := acquireMediaWork(ctx, app, 1)
+	ctx, release, err := acquireMediaWork(withMediaAdmissionObserver(ctx, fmt.Sprintf("index_derivations:%s:%s", projectID, params.FileID), nil), app, 1)
 	if err != nil {
 		return nil, 0, 0, nil, err
 	}

@@ -66,6 +66,12 @@ func insertPreparedRender(db *sql.DB, projectID, operation string, sourceFileIDs
 	if len(sourceFileIDs) == 0 {
 		return 0, errors.New("at least one source file_id required")
 	}
+	overallSeconds, err := renderOverallSeconds(params)
+	if err != nil {
+		return 0, err
+	}
+	deadline := time.Now().UTC().Add(time.Duration(overallSeconds) * time.Second).Format(time.RFC3339Nano)
+	metrics, _ := json.Marshal(map[string]any{"overall_deadline_at": deadline, "execution_started": false, "stage": "queued", "overall_timeout_seconds": overallSeconds})
 	srcJSON, err := json.Marshal(sourceFileIDs)
 	if err != nil {
 		return 0, fmt.Errorf("marshal source_file_ids: %w", err)
@@ -82,9 +88,9 @@ func insertPreparedRender(db *sql.DB, projectID, operation string, sourceFileIDs
 		prepared = string(resolved)
 	}
 	res, err := db.Exec(`
-		INSERT INTO renders (project_id, operation, source_file_ids, params, resolved_params, output_name, output_folder, requested_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectID, operation, string(srcJSON), string(paramJSON), prepared, outputName, outputFolder, requestedBy,
+		INSERT INTO renders (project_id, operation, source_file_ids, params, resolved_params, output_name, output_folder, requested_by, metrics)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, operation, string(srcJSON), string(paramJSON), prepared, outputName, outputFolder, requestedBy, string(metrics),
 	)
 	if err != nil {
 		return 0, err
@@ -111,7 +117,7 @@ func claimNextPending(db *sql.DB) (*RenderRow, error) {
 		 WHERE id = (
 		   SELECT id FROM renders
 		    WHERE status = 'pending'
-		    ORDER BY created_at
+		    ORDER BY created_at, id
 		    LIMIT 1
 		 )
 		 RETURNING id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''), metrics,

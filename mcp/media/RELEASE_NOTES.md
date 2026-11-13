@@ -1,3 +1,11 @@
+## 0.15.8 — durable capacity waits and sample-accurate audio extents
+
+Renders remain queued under the same ID and a persisted overall deadline rather
+than failing after 600 seconds without execution. Queue/capacity diagnostics and
+execution-start evidence distinguish waiting from processing. Audio redaction
+preserves source presentation extents with sample bounds and no gain normalization,
+retaining strict audio/video validation. See [release details](RELEASE-v0.15.8.md).
+
 ## 0.15.7 — per-request transcription settings
 
 `media_transcribe` accepts model/language options and saves effective settings

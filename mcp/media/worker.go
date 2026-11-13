@@ -978,7 +978,7 @@ func requiredIndexPositions(app *sdk.AppCtx, probe *Probe) []int64 {
 }
 
 func runIndexStage(ctx context.Context, app *sdk.AppCtx, work func(context.Context) error) error {
-	c, release, err := acquireMediaWork(ctx, app, 1)
+	c, release, err := acquireMediaWork(withMediaAdmissionObserver(ctx, "indexing", nil), app, 1)
 	if err != nil {
 		return err
 	}

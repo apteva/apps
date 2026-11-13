@@ -186,7 +186,7 @@ func cleanupStaleTranscriptAudioDerivations(ctx context.Context, app *sdk.AppCtx
 
 func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
 	app = app.WithProject(projectID)
-	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	ctx, release, admissionErr := acquireMediaWork(withMediaAdmissionObserver(ctx, "transcription_audio:"+projectID+":"+fileID, nil), app, 1)
 	if admissionErr != nil {
 		return nil, admissionErr
 	}
@@ -391,7 +391,7 @@ type remoteTranscriptAudioResult struct {
 
 func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectID string, hostID int64, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
 	app = app.WithProject(projectID)
-	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	ctx, release, admissionErr := acquireMediaWork(withMediaAdmissionObserver(ctx, "transcription_audio:"+projectID+":"+fileID, nil), app, 1)
 	if admissionErr != nil {
 		return nil, admissionErr
 	}

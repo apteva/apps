@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.7
+version: 0.15.8
 description: |
+  v0.15.8 persists queue deadlines across capacity waits and restarts, and
+  preserves audio presentation extents with sample-accurate redaction bounds.
   v0.15.7 adds per-request transcription model/language with queue-time
   settings preserved through retries. Jobs never change install defaults.
   v0.15.6 preserves provider word timestamps from channel alternatives and
@@ -725,7 +727,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.7
+    ref: media/v0.15.8
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -848,7 +850,7 @@ config_schema:
     type: text
     default: "600"
     label: Render admission timeout (seconds)
-    description: Maximum wait for fair host admission, separate from execution time.
+    description: Legacy admission-wait warning threshold; capacity waits remain queued until the persisted overall_timeout_seconds deadline. Does not terminate queued work.
   - name: render_timeout_seconds
     type: text
     default: "1800"

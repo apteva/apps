@@ -92,6 +92,13 @@ func validateRenderPlanOutput(op string, plan *opPlan) error {
 // Resolve the format before enqueuing, without downloading source bytes. Never
 // guess MP4 for an extensionless image crop when source metadata is unavailable.
 func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []string, params json.RawMessage, name string) (*opPlan, error) {
+	var submitted map[string]any
+	if err := json.Unmarshal(params, &submitted); err != nil {
+		return nil, err
+	}
+	if _, err := renderOverallSeconds(submitted); err != nil {
+		return nil, err
+	}
 	if err := validateSmartCropEngine(params); err != nil {
 		return nil, err
 	}
@@ -159,7 +166,7 @@ func renderFailureCode(message string) string {
 	if strings.Contains(message, "REMOTE_CANCELLATION_FAILED") {
 		return "remote_cancellation_failed"
 	}
-	for _, code := range []string{"invalid_audio_selection", "invalid_audio_method", "room_tone_required", "invalid_room_tone", "preview_too_wide", "audio_source_unverified", "word_timing_unavailable", "invalid_word_timing", "transcript_source_mismatch", "audio_selection_not_found", "ambiguous_audio_selection", "audio_redaction_failed", "render_admission_timeout", "media_resource_exhausted", "media_processing_interrupted", "timestamp_out_of_range", "source_duration_unavailable", "crop_subject_unverified", "crop_action_exceeds_width", "invalid_crop_policy", "storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
+	for _, code := range []string{"render_capacity_deadline_exceeded", "render_overall_deadline_exceeded", "render_execution_timeout", "invalid_audio_selection", "invalid_audio_method", "room_tone_required", "invalid_room_tone", "preview_too_wide", "audio_source_unverified", "word_timing_unavailable", "invalid_word_timing", "transcript_source_mismatch", "audio_selection_not_found", "ambiguous_audio_selection", "audio_redaction_failed", "render_admission_timeout", "media_resource_exhausted", "media_processing_interrupted", "timestamp_out_of_range", "source_duration_unavailable", "crop_subject_unverified", "crop_action_exceeds_width", "invalid_crop_policy", "storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
 		if strings.Contains(message, code+":") || strings.Contains(message, `"error_code":"`+code+`"`) {
 			return code
 		}

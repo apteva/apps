@@ -209,6 +209,10 @@ func TestAdmissionTerminalNotifications(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if !cancelled {
+				deadline := time.Now().UTC().Add(150 * time.Millisecond).Format(time.RFC3339Nano)
+				_, _ = app.AppDB().Exec(`UPDATE renders SET metrics=json_set(metrics,'$.overall_deadline_at',?) WHERE id=?`, deadline, id)
+			}
 			row, err := claimNextPending(app.AppDB())
 			if err != nil {
 				t.Fatal(err)
@@ -247,7 +251,7 @@ func TestAdmissionTerminalNotifications(t *testing.T) {
 			if terminal.Status != status || len(rec.EventsByTopic(topic)) != 1 {
 				t.Fatalf("terminal=%+v events=%+v", terminal, rec.Events())
 			}
-			if !cancelled && renderFailureCode(terminal.Error) != "render_admission_timeout" {
+			if !cancelled && renderFailureCode(terminal.Error) != "render_capacity_deadline_exceeded" {
 				t.Fatal("unstructured admission error")
 			}
 		})

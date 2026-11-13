@@ -13,7 +13,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const audioRedactionVersion = "media-audio-redact-1"
+const audioRedactionVersion = "media-audio-redact-2"
 
 type audioInterval struct {
 	StartMs int64 `json:"start_ms"`
@@ -341,7 +341,11 @@ func planAudioRedact(sources []string, raw json.RawMessage, outputName, sourceEx
 	}
 	// Represent a genuine leading audio gap as silence from timeline zero.
 	// This also prevents AAC priming from pulling a delayed stream earlier.
-	sourceChain := "aresample=async=1:first_pts=0,atrim=duration=" + duration
+	samples := (q.EndMs - q.StartMs) * int64(rate) / 1000
+	// The runtime replaces this bound with the source presentation endpoint for
+	// full outputs. Explicit padding/trimming avoids codec-frame rounding shortening
+	// the decoded stream; no gain or loudness filter is applied.
+	sourceChain := fmt.Sprintf("aresample=async=1:first_pts=0,apad=whole_len=%d,atrim=end_sample=%d,asetpts=N/SR/TB", samples, samples)
 	graph := "[0:a:0]" + sourceChain + ",aeval=exprs='val(ch)*(1-(" + mask + "))':c=same[dry]"
 	switch q.Method {
 	case "mute":

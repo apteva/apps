@@ -185,7 +185,7 @@ func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
 // ─── MCP tools ─────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "media_get",
 			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. External ingestion URL delivery defaults to apteva with inline disposition; pass delivery=proxy, delivery=direct, or disposition=attachment when needed. Returned delivery, disposition, and expires_at are Storage-confirmed effective values. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
@@ -672,6 +672,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDescribe,
 		},
 	}
+	for i := range tools {
+		if props, ok := tools[i].InputSchema["properties"].(map[string]any); ok {
+			if _, render := props["timeout_seconds"]; render {
+				props["overall_timeout_seconds"] = map[string]any{"type": "integer", "minimum": 30, "maximum": 604800, "description": "Overall queue, execution and validation deadline from submission; default 86400 seconds. Persisted across restarts."}
+			}
+		}
+	}
+	return tools
 }
 
 func main() { sdk.Run(&App{}) }
@@ -2086,7 +2094,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // "file_id" in sourceKeys; concat lists "file_ids".
 
 func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string) sdk.ToolHandler {
-	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds", "require_action_preservation", "crop_fallback", "smart_crop_engine", "smart_crop_framing")
+	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds", "overall_timeout_seconds", "require_action_preservation", "crop_fallback", "smart_crop_engine", "smart_crop_framing")
 	return func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {

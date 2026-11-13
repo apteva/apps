@@ -785,6 +785,17 @@ def normalized_audio(req, info, diagnostics):
     diagnostics["audio_normalization"]["timeline_validated"] = True
 
 
+def decoded_audio_samples(req, path):
+    _, log = run(req["ffmpeg"], ["-hide_banner", "-nostats", "-v", "info", "-xerror", "-i", path, "-map", "0:a:0", "-vn", "-af", "astats=metadata=0:reset=0", "-f", "null", "-"])
+    counts = re.findall(r"Number of samples:\s*([0-9.e+]+)", log)
+    if not counts or not any(float(n) > 0 for n in counts):
+        raise ValueError("audio_redaction_failed: no decoded audio samples")
+    for name in ("Number of NaNs", "Number of Infs"):
+        if any(float(n) > 0 for n in re.findall(name + r":\s*([0-9.e+]+)", log)):
+            raise ValueError("audio_redaction_failed: non-finite encoded audio")
+    return round(max(float(n) for n in counts))
+
+
 def redacted_audio(req, info, diagnostics):
     p = req["params"]
     plan = p.get("_redaction_plan", {})
@@ -814,10 +825,10 @@ def redacted_audio(req, info, diagnostics):
         args[-1:-1] = color_args(source_video)
         if os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4") and "mov" in info.get("format", {}).get("format_name", "").split(","):
             scale, durations = presentation_durations(req["source"])
-            args[-1:-1] = ["-movie_timescale", str(scale * 1000 // math.gcd(scale, 1000) if scale < 1000 else scale)]
+            args[-1:-1] = ["-movie_timescale", str(math.lcm(scale, rate, 1000))]
             if "vide" not in durations:
                 durations = None
-    d = {"algorithm_version": "media-audio-redact-1", "method": plan["method"],
+    d = {"algorithm_version": "media-audio-redact-2", "method": plan["method"],
         "preview": plan["preview"], "source_start_ms": plan["start_ms"], "source_end_ms": plan["end_ms"],
         "ranges": plan["ranges"], "fade_ms": plan["fade_ms"], "sample_rate": rate,
         "video_copied": video_copied, "leading_audio_silence_ms": round(audio_start * 1000), "validated": False}
@@ -827,10 +838,34 @@ def redacted_audio(req, info, diagnostics):
     if plan["method"] == "muffle":
         d["limitations"] = ["Muffle is an audio effect and does not guarantee unintelligible speech."]
     diagnostics["audio_redaction"] = d
+    # The decoded sample clock is authoritative for processing. Keep audio and
+    # video presentation endpoints independent, and never normalize loudness.
+    expected_duration = (plan["end_ms"] - plan["start_ms"]) / 1000 if plan["preview"] else extent + audio_start
+    source_samples = decoded_audio_samples(req, req["source"])
+    # Standalone MP3 duration includes encoder delay/padding, while FFmpeg
+    # presents the decoded programme at zero. Do not pad that priming back in.
+    if not has_video and audio.get("codec_name") == "mp3" and not plan["preview"]:
+        expected_duration = source_samples / rate
+    expected_samples = round(expected_duration * rate)
+    if expected_samples <= 0:
+        raise ValueError("audio_redaction_failed: invalid audio presentation sample count")
+    graph_index = args.index("-filter_complex") + 1
+    graph = args[graph_index]
+    # Also accept stored v1 plans resumed after an upgrade.
+    graph = re.sub(r"aresample=async=1:first_pts=0,atrim=duration=[0-9.]+",
+        "aresample=async=1:first_pts=0,apad=whole_len=%d,atrim=end_sample=%d,asetpts=N/SR/TB" % (expected_samples, expected_samples), graph)
+    graph = re.sub(r"apad=whole_len=\d+,atrim=end_sample=\d+",
+        "apad=whole_len=%d,atrim=end_sample=%d" % (expected_samples, expected_samples), graph)
+    args[graph_index] = graph
+    d.update({"expected_audio_start_seconds": 0, "expected_audio_duration_seconds": expected_samples / rate,
+        "expected_audio_endpoint_seconds": expected_samples / rate, "expected_audio_samples": expected_samples,
+        "timeline_processing": "sample_bound_no_gain", "gain_changed": False,
+        "source_decoded_audio_samples": source_samples, "source_decoded_sample_drift": source_samples - expected_samples})
     runtime_event(req, "encode", {"audio_redaction": d})
     encode(req["ffmpeg"], args)
     runtime_event(req, "validation")
     if durations:
+        durations["soun"] = Fraction(expected_samples, rate)
         patch_presentation_end(req["output"], max(durations.values()), durations)
     output_info = probe(req["ffprobe"], req["output"])
     dst_audio = next((s for s in output_info["streams"] if s.get("codec_type") == "audio"), {})
@@ -840,9 +875,18 @@ def redacted_audio(req, info, diagnostics):
         raise ValueError("audio_redaction_failed: output audio channel count changed")
     # Check presentation extent independently of successful encoding.
     expected_start = 0
-    expected_duration = (plan["end_ms"] - plan["start_ms"]) / 1000 if plan["preview"] else extent + audio_start
+    expected_duration = expected_samples / rate
     start_tolerance, duration_tolerance = (.03, .08) if codec in ("libmp3lame", "libopus") else (.002, .05)
-    d.update({"source_audio_start_seconds": float(audio.get("start_time", 0)), "output_audio_start_seconds": float(dst_audio.get("start_time", 0))})
+    observed_start = float(dst_audio.get("start_time", 0))
+    observed_duration = float(dst_audio.get("duration", output_info.get("format", {}).get("duration", 0)))
+    d.update({"source_audio_start_seconds": float(audio.get("start_time", 0)), "source_audio_duration_seconds": extent,
+        "output_audio_start_seconds": observed_start, "output_audio_duration_seconds": observed_duration,
+        "output_audio_endpoint_seconds": observed_start + observed_duration,
+        "audio_start_drift_ms": observed_start * 1000,
+        "audio_duration_drift_ms": (observed_duration - expected_samples / rate) * 1000,
+        "audio_endpoint_drift_ms": (observed_start + observed_duration - expected_samples / rate) * 1000})
+    decoded_samples = decoded_audio_samples(req, req["output"])
+    d.update({"output_decoded_audio_samples": decoded_samples, "decoded_sample_drift": decoded_samples - expected_samples, "decode_ok": True})
     if abs(float(dst_audio.get("start_time", 0)) - expected_start) > start_tolerance:
         raise ValueError("audio_redaction_failed: audio timeline start changed")
     if abs(float(dst_audio.get("duration", output_info.get("format", {}).get("duration", 0))) - expected_duration) > duration_tolerance:
@@ -865,14 +909,6 @@ def redacted_audio(req, info, diagnostics):
         d.update({"video_pictures_match": True, "video_frames_checked": frames_checked, "video_validation_reused": bool(reused)})
         diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
             "frames_checked": frames_checked, "packet_signature": signature}
-    # Decode the complete encoded audio and reject invalid/non-finite samples.
-    _, log = run(req["ffmpeg"], ["-hide_banner", "-nostats", "-v", "info", "-xerror", "-i", req["output"], "-map", "0:a:0", "-vn", "-af", "astats=metadata=0:reset=0", "-f", "null", "-"])
-    counts = re.findall(r"Number of samples:\s*([0-9.e+]+)", log)
-    if not counts or not any(float(n) > 0 for n in counts):
-        raise ValueError("audio_redaction_failed: no decoded audio samples")
-    for name in ("Number of NaNs", "Number of Infs"):
-        if any(float(n) > 0 for n in re.findall(name + r":\s*([0-9.e+]+)", log)):
-            raise ValueError("audio_redaction_failed: non-finite encoded audio")
     d.update({"decode_ok": True, "timeline_validated": True, "validated": True})
 
 
