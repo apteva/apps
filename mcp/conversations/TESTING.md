@@ -380,3 +380,34 @@ playback clock. It does not establish acoustic echo cancellation quality on ever
 physical device. Deterministic unit/browser regressions additionally cover A/B
 cancellation, late PCM/callbacks, partial progress, legacy controls, silence,
 noise/onset debouncing, mute, and stale connection callbacks.
+
+## Reused provider tool-call IDs (v0.26.1)
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/27-reused-tool-call-identity.yaml
+```
+
+The native runner owns the server, Conversations sidecar and real model agent.
+The driver inserts a loopback proxy at that sidecar boundary, preserves trusted
+agent/thread/project headers, replaces every write's tool-call ID with `call_0`,
+and replays the exact request before returning its original receipt. Core and
+the provider remain unchanged. Two identical replies to separate user inputs
+must both persist; report, alert and approval cards must remain distinct; each
+injected retry must return the same message ID without another insertion.
+The driver serializes new user submissions with each injected retry. A queued
+follow-up can still exist before a final tool call and be released by that call;
+this transition must not change its retry identity.
+
+Deterministic regressions cover legacy rows with `tool-call:<agent>:call_0`,
+acknowledgement/progress/final messages, all three typed Inbox tools, questions,
+forms, queue-state transitions, store-wrapper recreation, and explicit-key
+conflicts. Automatic keys use the trusted call ID, full normalized payload
+(which includes agent/thread/conversation) and latest accepted user-message ID.
+There is no schema migration or lookup against old automatic keys.
+
+The SDK does not expose a separate execution identity. Automatic suppression
+is therefore scoped to the accepted input context: an identical invocation
+retried after genuinely new user input is indistinguishable from new work.
+Callers needing retry identity across that boundary should supply an explicit
+`idempotency_key`; its durable duplicate/conflicting-request checks are unchanged.

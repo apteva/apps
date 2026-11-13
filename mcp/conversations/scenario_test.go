@@ -55,7 +55,7 @@ func newScenarioClient(t *testing.T) *scenarioClient {
 
 func (c *scenarioClient) do(method, path string, body any, out any) int {
 	c.t.Helper()
-	if strings.HasPrefix(path, "/api/apps/") {
+	if strings.HasPrefix(path, "/api/apps/") && !strings.HasPrefix(path, "/api/apps/installs/") {
 		slug := strings.Split(strings.TrimPrefix(path, "/api/apps/"), "/")[0]
 		id := c.installs[slug]
 		if id == 0 {

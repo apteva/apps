@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.26.1 — 2026-11-13
+
+- Scope automatic agent-message deduplication to the thread, accepted user input and full message payload, so providers reusing tool-call IDs such as `call_0` cannot block new replies or Inbox cards.
+- Preserve explicit idempotency-key conflict checks and identical retries within the same input context. Existing stored messages need no migration.
+- Add deterministic regressions and a real Codex / Sol 6.1 Tier 3 transport fixture that reuses `call_0` and retries every message/card write.
+
 ## 0.26.0 — 2026-11-13
 
 - Keep app cards visible in a resizable side panel or draggable, resizable in-page floating view, with compact controls for narrow screens.

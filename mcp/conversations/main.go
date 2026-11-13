@@ -455,7 +455,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	clientID := toolClientID(from, stringArg(args, "idempotency_key"))
+	clientID := strings.TrimSpace(stringArg(args, "idempotency_key"))
 	if from.ThreadID == "main" {
 		approvalID := int64(intArg(args, "approval_message_id", 0))
 		approval, err := a.store.GetMessage(approvalID)
@@ -510,7 +510,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		ComponentKind: kind, ActionStatus: actionStatus,
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
-		ClientID: clientID, Phase: phase,
+		ClientID: clientID, toolCallID: from.ToolCallID, Phase: phase,
 		Components: components, Attachments: attachments,
 	})
 	if err != nil {
@@ -567,7 +567,7 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindApproval,
 		Components:    []Component{approvalCard(title, body, actions)},
-		ClientID:      toolClientID(from, ""),
+		toolCallID:    from.ToolCallID,
 	})
 	if err != nil {
 		return nil, err
@@ -607,7 +607,7 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindReport,
 		Components:    []Component{reportCard(title, summary, stringArg(args, "period"), sections)},
-		ClientID:      toolClientID(from, ""),
+		toolCallID:    from.ToolCallID,
 	})
 	if err != nil {
 		return nil, err
@@ -644,22 +644,12 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindAlert, Severity: severity,
 		Components: []Component{alertCard(text, severity)},
-		ClientID:   toolClientID(from, ""),
+		toolCallID: from.ToolCallID,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"message_id": msg.ID, "inserted": inserted, "duplicate_suppressed": !inserted}, nil
-}
-
-func toolClientID(from *callIdentity, explicit string) string {
-	if value := strings.TrimSpace(explicit); value != "" {
-		return value
-	}
-	if from != nil && strings.TrimSpace(from.ToolCallID) != "" {
-		return fmt.Sprintf("tool-call:%d:%s", from.AgentID, strings.TrimSpace(from.ToolCallID))
-	}
-	return ""
 }
 
 // toolCreate is title-idempotent per agent. The model chooses a meaningful

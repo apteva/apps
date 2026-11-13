@@ -1,0 +1,21 @@
+name: conversations-reused-tool-call-identity
+description: Real Codex replies and Inbox cards survive call_0 reuse and duplicate transport delivery.
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_ReusedToolCallIdentity$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are a concise operations assistant. Follow the Conversations skill.
+  All facts in this test are supplied by the user. Do not contact external services.
+  Fixture metadata for the test driver only (do not fetch):
+  CONVERSATIONS_TEST_UPSTREAM=${APTEVA_TEST_APP_URL}
+budget:
+  total_tokens: 800000
+trajectory_assert:
+  - tool_called: conversations_send
+  - tool_called: conversations_report
+  - tool_called: conversations_alert
+  - tool_called: conversations_request_approval

@@ -63,6 +63,9 @@ type Component struct {
 }
 
 type Message struct {
+	// Only trusted tool handlers set this. Provider call IDs can be reused;
+	// the store scopes automatic retry identity to the input and payload.
+	toolCallID     string
 	Revision       int64          `json:"revision,omitempty"`
 	ID             int64          `json:"id"`
 	ConversationID string         `json:"conversation_id"`
@@ -697,6 +700,10 @@ func normalizeMessage(m *Message) {
 // outbox row in one transaction. There is therefore no state in which a
 // message exists but a crash recovery scan has nothing to replay.
 func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Message, bool, error) {
+	// Do not turn a generated key into an explicit key if a caller retries
+	// using the same Message value.
+	requestMessage := *m
+	m = &requestMessage
 	normalizeMessage(m)
 	for _, item := range m.Attachments {
 		if item.ID != "" {
@@ -744,6 +751,20 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 		return nil, false, err
 	}
 	defer tx.Rollback()
+	if m.ClientID == "" && strings.TrimSpace(m.toolCallID) != "" {
+		// A provider may return call_0 for every invocation. Different payloads
+		// must not collide, and an identical reply to a later user turn is new
+		// work. Include accepted queued input too: sending a final reply can
+		// release it, and that state transition must not change retry identity.
+		// Resolve the anchor in the append transaction.
+		var inputID int64
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(id),0) FROM messages
+			WHERE conversation_id=? AND role='user'`, m.ConversationID).Scan(&inputID); err != nil {
+			return nil, false, err
+		}
+		identity, _ := json.Marshal([]any{strings.TrimSpace(m.toolCallID), inputID, requestHash})
+		m.ClientID = fmt.Sprintf("tool-call:v2:%x", sha256.Sum256(identity))
+	}
 	if m.ClientID != "" {
 		var existingID int64
 		var existingHash string
