@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/todo
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.96.0
+	github.com/apteva/app-sdk v0.115.1
 	modernc.org/sqlite v1.50.0
 )
 

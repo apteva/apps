@@ -24,6 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { todoApiUrl } from "./api";
+import { todoPanelSelection } from "./widget";
 
 async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { credentials: "same-origin", ...init });
@@ -202,11 +203,12 @@ const PRIORITY_TONE: Record<number, string> = {
 
 const SOFT_BORDER = "rgba(148, 163, 184, 0.10)";
 
-export default function TodoPanel({ projectId }: NativePanelProps) {
-  const [view, setView] = useState<View>("today");
+export default function TodoPanel({ projectId, appName, installId }: NativePanelProps) {
+  const [initialSelection] = useState(() => todoPanelSelection(typeof window === "undefined" ? "" : window.location.search));
+  const [view, setView] = useState<View>(initialSelection.listId || initialSelection.groupId ? "all" : "today");
   const [mode, setMode] = useState<PanelMode>("tasks");
-  const [pickedList, setPickedList] = useState<number | null>(null);
-  const [pickedGroup, setPickedGroup] = useState<number | null>(null);
+  const [pickedList, setPickedList] = useState<number | null>(initialSelection.listId);
+  const [pickedGroup, setPickedGroup] = useState<number | null>(initialSelection.groupId);
   const [pickedTag, setPickedTag] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [allOpenTodos, setAllOpenTodos] = useState<Todo[]>([]);
@@ -246,8 +248,8 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   }, [taskOrderByView]);
 
   const apiUrl = useCallback((path: string) => {
-    return todoApiUrl(path, projectId);
-  }, [projectId]);
+    return todoApiUrl(path, projectId, undefined, { appName, installId });
+  }, [projectId, appName, installId]);
 
   const params = useMemo(() => {
     const p = new URLSearchParams();

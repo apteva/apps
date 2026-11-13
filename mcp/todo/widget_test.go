@@ -1,0 +1,201 @@
+package main
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"reflect"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+func TestWidgetManifest(t *testing.T) {
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded := (&App{}).Manifest()
+	if !reflect.DeepEqual(embedded.Provides.UIComponents, external.Provides.UIComponents) {
+		t.Fatal("embedded and installation widget manifests differ")
+	}
+	widgets := embedded.Provides.UIComponents
+	if len(widgets) != 1 || widgets[0].Name != "todo-list" || widgets[0].SettingsUI == nil {
+		t.Fatalf("widget registration: %#v", widgets)
+	}
+	if !reflect.DeepEqual(widgets[0].SupportedSizes, []string{"half", "full"}) {
+		t.Fatal("widget must support half and full widths")
+	}
+}
+
+func TestWidgetSelectionSortingAndCounts(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "widget-project"
+	g, err := insertListGroup(db, pid, "Personal", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := insertList(db, pid, "Website launch", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := insertList(db, pid, "Home", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET group_id = ? WHERE project_id = ?`, g.ID, pid); err != nil {
+		t.Fatal(err)
+	}
+	add := func(title string, listID *int64, due string, priority int, status string) *Todo {
+		t.Helper()
+		row, err := insertTodo(db, pid, &Todo{Title: title, ListID: listID, DueAt: due, Priority: priority, Status: status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != "open" {
+			if err := updateTodoFields(db, pid, row.ID, map[string]any{"status": status}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return row
+	}
+	add("Urgent later", &l.ID, "2026-12-20", 1, "open")
+	early := add("Due first", &l.ID, "2026-11-01", 3, "open")
+	add("No date", &l.ID, "", 2, "open")
+	add("Already done", &l.ID, "2026-10-01", 1, "done")
+	add("Cancelled", &l.ID, "2026-10-01", 1, "cancelled")
+	add("Other list", &other.ID, "2026-12-01", 2, "open")
+	add("Inbox", nil, "2026-10-01", 1, "open")
+
+	listTarget := fmt.Sprintf("list:%d", l.ID)
+	page, err := loadWidget(db, pid, listTarget, "due", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Title != l.Name || page.Total != 3 || len(page.Items) != 1 || page.Items[0].ID != early.ID {
+		t.Fatalf("due ordering/count before limit: %#v", page)
+	}
+	page, err = loadWidget(db, pid, listTarget, "priority", 2)
+	if err != nil || len(page.Items) != 2 || page.Items[0].Title != "Urgent later" || page.Items[1].Title != "No date" {
+		t.Fatalf("priority ordering: %#v, %v", page, err)
+	}
+	page, err = loadWidget(db, pid, fmt.Sprintf("group:%d", g.ID), "due", 20)
+	if err != nil || page.Total != 4 || len(page.Lists) != 2 {
+		t.Fatalf("group selection: %#v, %v", page, err)
+	}
+	for _, item := range page.Items {
+		if item.ListName == "" {
+			t.Fatal("group rows need their list names")
+		}
+	}
+	if _, err := completeTodo(db, pid, early.ID); err != nil {
+		t.Fatal(err)
+	}
+	page, err = loadWidget(db, pid, listTarget, "due", 20)
+	if err != nil || page.Total != 2 || page.Items[1].Title != "No date" {
+		t.Fatalf("completion/undated ordering: %#v, %v", page, err)
+	}
+	if _, err := loadWidget(db, "another-project", listTarget, "due", 8); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cross-project selection must fail: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET archived = 1 WHERE id = ?`, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWidget(db, pid, listTarget, "due", 8); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("archived list selection must fail: %v", err)
+	}
+	page, err = loadWidget(db, pid, fmt.Sprintf("group:%d", g.ID), "due", 8)
+	if err != nil || page.Total != 1 || len(page.Lists) != 1 {
+		t.Fatalf("exclude archived lists in groups: %#v, %v", page, err)
+	}
+	if _, err := db.Exec(`UPDATE list_groups SET archived = 1 WHERE id = ?`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWidget(db, pid, fmt.Sprintf("list:%d", other.ID), "due", 8); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("list in archived group must be unavailable: %v", err)
+	}
+	options, err := widgetOptions(db, pid)
+	if err != nil || len(options) != 0 {
+		t.Fatalf("archived targets must not be offered: %#v, %v", options, err)
+	}
+}
+
+func TestWidgetDiscoveryAndLimits(t *testing.T) {
+	db := openTestDB(t)
+	l, err := insertList(db, "a", "Launch", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertListGroup(db, "a", "Personal", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertList(db, "b", "Private", ""); err != nil {
+		t.Fatal(err)
+	}
+	options, err := widgetOptions(db, "a")
+	if err != nil || len(options) != 2 || options[0].Label != "Group · Personal" || options[1].Label != "List · Launch" {
+		t.Fatalf("scoped discovery: %#v, %v", options, err)
+	}
+	for i := 0; i < 25; i++ {
+		if _, err := insertTodo(db, "a", &Todo{Title: "Task", ListID: &l.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := fmt.Sprintf("list:%d", l.ID)
+	page, err := loadWidget(db, "a", target, "due", 999)
+	if err != nil || len(page.Items) != 20 || page.Total != 25 {
+		t.Fatalf("bounded response with full count: %#v, %v", page, err)
+	}
+	for _, target := range []string{"", "list:0", "list:-1", "group:nope", "all:1", "list:99999999999999999999999"} {
+		if _, err := loadWidget(db, "a", target, "due", 8); err == nil {
+			t.Fatalf("invalid target %q should fail", target)
+		}
+	}
+	if _, err := loadWidget(db, "a", target, "title; DROP TABLE todos", 8); err == nil {
+		t.Fatal("invalid ordering must fail")
+	}
+}
+
+func TestWidgetHTTP(t *testing.T) {
+	db := openTestDB(t)
+	l, err := insertList(db, "project-a", "Launch", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := globalCtx
+	t.Cleanup(func() { globalCtx = previous })
+	globalCtx = sdk.NewAppCtxForTest(nil, db, nil, nil, nil).WithProject("project-a")
+	app := &App{}
+	for _, test := range []struct {
+		method, path string
+		status       int
+		handler      http.HandlerFunc
+	}{
+		{"GET", "/widget?target=list:" + fmt.Sprint(l.ID), 200, app.handleWidget},
+		{"GET", "/widget?target=list:999", 404, app.handleWidget},
+		{"GET", "/widget?target=all", 400, app.handleWidget},
+		{"GET", "/widget?target=list:1&sort=invalid", 400, app.handleWidget},
+		{"POST", "/widget?target=list:1", 405, app.handleWidget},
+		{"GET", "/widget/options", 200, app.handleWidgetOptions},
+		{"POST", "/widget/options", 405, app.handleWidgetOptions},
+	} {
+		response := httptest.NewRecorder()
+		test.handler(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.status {
+			t.Errorf("%s %s = %d, want %d: %s", test.method, test.path, response.Code, test.status, response.Body)
+		}
+	}
+	globalCtx = globalCtx.WithProject("project-b")
+	response := httptest.NewRecorder()
+	app.handleWidget(response, httptest.NewRequest("GET", fmt.Sprintf("/widget?target=list:%d&project_id=project-a", l.ID), nil))
+	if response.Code != 404 {
+		t.Fatal("query parameters must not override the SDK project scope")
+	}
+}

@@ -19,4 +19,10 @@ describe("todoApiUrl", () => {
     const cest = { getTimezoneOffset: () => -120 } as Date;
     expect(tzOffsetMinutes(cest)).toBe(120);
   });
+
+  test("keeps panel requests on the installation opened by the widget", () => {
+    expect(todoApiUrl("/todos?view=all&list_id=2", "a", 120, { appName: "todo", installId: 9 })).toBe(
+      "/api/apps/todo/todos?view=all&list_id=2&project_id=a&tz_offset=120&install_id=9",
+    );
+  });
 });
