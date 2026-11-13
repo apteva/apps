@@ -62,6 +62,12 @@ func CPUDelta(previous, current []cpu.TimesStat, elapsed time.Duration) (CPUMetr
 
 // Run keeps CPU sampling separate from slower filesystem/process observations.
 func Run(ctx context.Context, engine *Engine) {
+	RunAdaptive(ctx, engine, func() time.Duration { return SampleInterval })
+}
+
+// RunAdaptive samples CPU at the interval returned before each wait, so an
+// embedding process can sample slowly until fine detail is actually needed.
+func RunAdaptive(ctx context.Context, engine *Engine, interval func() time.Duration) {
 	var mu sync.Mutex
 	resources := Metrics{Disk: []DiskMetrics{}, Net: []NetMetrics{}}
 	resourceDone := make(chan struct{})
@@ -143,14 +149,18 @@ func Run(ctx context.Context, engine *Engine) {
 	}()
 	previous, _ := cpu.TimesWithContext(ctx, true)
 	last := time.Now()
-	ticker := time.NewTicker(SampleInterval)
-	defer ticker.Stop()
+	wait := interval()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			<-resourceDone
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			expected := wait
+			wait = interval()
+			timer.Reset(wait)
 			now := time.Now()
 			current, err := cpu.TimesWithContext(ctx, true)
 			if err != nil {
@@ -172,8 +182,8 @@ func Run(ctx context.Context, engine *Engine) {
 			m.CPU = c
 			m.Timestamp = now.UTC().Format(time.RFC3339Nano)
 			// Long scheduling gaps are reported by timestamp/coverage, not classified as
-			// 250ms peaks. Averaging that gap would manufacture misleading precision.
-			if elapsed > 2*SampleInterval {
+			// interval peaks. Averaging that gap would manufacture misleading precision.
+			if elapsed > 2*expected {
 				engine.Gap(m)
 				continue
 			}

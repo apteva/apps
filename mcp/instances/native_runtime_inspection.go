@@ -187,6 +187,57 @@ func (p *nativeInspectionPool) runWorker(c context.Context, id int64, w *nativeI
 	}
 }
 
+// Main-process facts from the same systemd query. Only digits and systemd's
+// lowercase result words reach the JSON; anything else is reported as absent.
+func nativeProcessScript() string {
+	return `process_json=null
+ digits_or() { case "$1" in ''|*[!0-9]*) printf '%s' "$2";; *) printf '%s' "$1";; esac; }
+ unix_time() { if test -n "$1" && seconds=$(date -d "$1" +%s 2>/dev/null); then digits_or "$seconds" 0; else printf 0; fi; }
+ case "$observed" in
+ running) process_json=$(printf '{"pid":%s,"started_unix":%s}' "$pid" "$(unix_time "$main_start")");;
+ exited)
+  exit_code=null; exit_signal=null
+  case "$main_code" in 1) exit_code=$(digits_or "$main_status" null);; 2|3) exit_signal=$(digits_or "$main_status" null);; esac
+  case "$result" in ''|*[!a-z-]*) result=;; esac
+  process_json=$(printf '{"pid":%s,"result":"%s","exit_code":%s,"exit_signal":%s,"started_unix":%s,"exited_unix":%s}' "$(digits_or "$main_pid" 0)" "$result" "$exit_code" "$exit_signal" "$(unix_time "$main_start")" "$(unix_time "$main_exit")");;
+ esac
+ `
+}
+
+// Converts and bounds the remote process facts into the Server wire shape.
+func nativeProcessFromObservation(p *nativeProcessObservation) (*nativeProcess, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if p.PID < 0 || p.PID > 1<<22 || len(p.Result) > 32 || p.ExitCode != nil && (*p.ExitCode < 0 || *p.ExitCode > 255) || p.ExitSignal != nil && (*p.ExitSignal < 1 || *p.ExitSignal > 128) {
+		return nil, errors.New("invalid process observation")
+	}
+	for _, c := range p.Result {
+		if !(c >= 'a' && c <= 'z' || c == '-') {
+			return nil, errors.New("invalid process observation")
+		}
+	}
+	out := &nativeProcess{PID: p.PID, Result: p.Result, ExitCode: p.ExitCode, ExitSignal: p.ExitSignal}
+	unix := func(v int64) (*time.Time, error) {
+		if v == 0 {
+			return nil, nil
+		}
+		if v < 0 || v > time.Now().Add(24*time.Hour).Unix() {
+			return nil, errors.New("invalid process observation")
+		}
+		t := time.Unix(v, 0).UTC()
+		return &t, nil
+	}
+	var e error
+	if out.StartedAt, e = unix(p.Started); e != nil {
+		return nil, e
+	}
+	if out.ExitedAt, e = unix(p.Exited); e != nil {
+		return nil, e
+	}
+	return out, nil
+}
+
 func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestore bool, measure ...bool) string {
 	cmd := `set -eu
  root=` + quoteShellArg(d.ReleaseDir) + `
@@ -204,6 +255,14 @@ func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestor
  restore_pending=false
  if test -e "$(dirname "$data")/.restore-intent"; then restore_pending=true; fi
  ` + nativeUnitProperties() + `
+ process_group_empty() {
+  if test -n "$cg"; then
+   for tasks in "/sys/fs/cgroup$cg/cgroup.procs" "/sys/fs/cgroup/systemd$cg/tasks"; do
+    if test -f "$tasks" && test -n "$(cat "$tasks" 2>/dev/null || printf x)"; then return 1; fi
+   done
+  fi
+  return 0
+ }
  inspect_execution() {
 
  if test -e "$root/.stopped"; then ` + nativeInactiveProperties() + nativeReleasedListeners(d) + `printf stopped; return; fi
@@ -215,14 +274,21 @@ func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestor
   test "$(stat -Lc '%d:%i:%s:%y:%z' "/proc/$pid/exe")" = "$(cat "$root/.exe-stat")"
   ` + nativeListener(d, true) + `printf running; return
  fi
- if test -e "$root/.start-intent"; then printf unknown; return; fi
+ if test -e "$root/.start-intent"; then
+  # Exited only when systemd's owned unit has no main PID and an empty cgroup.
+  # Transitional, foreign or unverifiable units stay unknown.
+  if test "$restore_pending" = false && test "$fragment" = "$unitfile" && test "$pid" = 0 && process_group_empty; then
+   case "$state" in inactive|failed) printf exited; return;; esac
+  fi
+  printf unknown; return
+ fi
  if test -e "$root/.prepared"; then printf prepared; else printf preparing; fi
  }
  observed=$(inspect_execution)
- `
+ ` + nativeProcessScript()
 	cmd += nativeInspectionMetadataScript(len(measure) > 0 && measure[0])
 	cmd += nativeResourceInspectionScript()
-	cmd += `printf '{"process_resources":%s,"state":"%s","snapshot_sha256":"%s","restore_pending":%s,"state_bytes":%s,"state_entries":%s,"state_available_bytes":%s}\n' "$resource_json" "$observed" "$snapshot_sha" "$restore_pending" "$metadata_bytes" "$metadata_entries" "$metadata_available"
+	cmd += `printf '{"process":%s,"process_resources":%s,"state":"%s","snapshot_sha256":"%s","restore_pending":%s,"state_bytes":%s,"state_entries":%s,"state_available_bytes":%s}\n' "$process_json" "$resource_json" "$observed" "$snapshot_sha" "$restore_pending" "$metadata_bytes" "$metadata_entries" "$metadata_available"
  `
 	return cmd
 }
@@ -244,9 +310,12 @@ func (s nativeSSH) InspectState(c context.Context, i *Instance, d nativeRecord, 
 		return obs, errors.New("invalid inspection response")
 	}
 	switch obs.State {
-	case "running", "stopped", "prepared", "preparing", "unknown":
+	case "running", "stopped", "prepared", "preparing", "unknown", "exited":
 	default:
 		return obs, fmt.Errorf("invalid inspection state")
+	}
+	if _, e := nativeProcessFromObservation(obs.Process); e != nil {
+		return obs, e
 	}
 	if obs.SnapshotSHA256 != "" && !nativeDigest(obs.SnapshotSHA256) {
 		return obs, errors.New("invalid inspection digest")

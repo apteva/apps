@@ -136,6 +136,11 @@ connectivity adapter; the current backend must not be advertised as container-re
   systemd service. Environment travels through SSH stdin, not command arguments.
 - `POST /inspect`: owned unit/executable identity and metadata, required TCP/UDP listeners, authenticated
   HTTP health and advertised lifecycle capabilities.
+  `process` reports the main PID and start time while running. After a start,
+  an owned unit that is inactive/failed with no main PID, an empty cgroup and
+  no pending restore is `state: exited`, with the last PID, systemd `result`,
+  `exit_code` or `exit_signal` and `exited_at`. Anything less certain stays
+  `unknown`. Units use `Restart=no`; recovery is the Server's decision.
 - `POST /stop`: owned service only; verifies inactive service, empty remaining
   cgroup and released listeners before setting `stopped_confirmed`.
 - `POST /delete`: confirmed stop, remove owned unit and release files; preserve
