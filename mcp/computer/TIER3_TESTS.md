@@ -132,3 +132,35 @@ prove no click was dispatched, after waiting for autosave and refreshing.
 See [WORKFLOW_CONSTRAINTS.md](WORKFLOW_CONSTRAINTS.md) for the production
 registration contract and server dependency. Running this test does not install
 that server change or register authorization for existing production tasks.
+
+## DeepSeek view handoff
+
+`bash scripts/test-tiers.sh 3-deepseek` runs a real multi-turn DeepSeek tool
+conversation against an isolated Computer sidecar and Chromium. The natural
+read-only task asks for a release code on a board with multiple scroll regions
+and asks to see the browser while work continues. Computer's actual tool
+schemas and skill are supplied without a scripted action sequence. The model
+owns session open, screenshot/scroll selection, progress/final messages and
+close; the harness only performs failure cleanup.
+
+Set `COMPUTER_DEEPSEEK_API_KEY` (or `DEEPSEEK_API_KEY`) at runtime. The default
+base URL is `https://api.deepseek.com`; `COMPUTER_DEEPSEEK_BASE_URL` supports an
+OpenAI-compatible DeepSeek route such as Fireworks. Set
+`COMPUTER_DEEPSEEK_MODEL` to the deployed DeepSeek model ID. A non-DeepSeek model
+is rejected. `COMPUTER_DEEPSEEK_HEADERS` accepts a JSON map of provider routing
+headers; OpenCode Go requires a stable `x-opencode-session` for the conversation.
+The test identifies itself as `apteva-computer-tier3/0.11.0`. Credentials and
+provider header values are never saved in evidence. Explicitly requesting
+this test without credentials fails instead of silently counting as coverage.
+
+The test records progress messages in an in-memory Conversations-shaped sink
+and captures ordinary final assistant text or an explicit final send; it sends
+no messages to real users and changes no Conversations code or data. It checks
+one exact returned browser-view in progress before scrolling, no reattachment
+in final, the correct independently known code, agent-issued close before the
+final reply, an unchanged resource locator after closure and a saved final
+frame. The route receives bounded structured observations rather than image
+pixels; this test covers handoff/tool use, not DeepSeek vision capability.
+The loop has an 8-minute deadline and at most 30 tool calls. Optional
+`COMPUTER_LLM_ARTIFACT_DIR` retains sanitized message/lifecycle evidence without
+provider credentials, image bytes or reasoning content.

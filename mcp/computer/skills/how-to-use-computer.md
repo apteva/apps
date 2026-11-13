@@ -139,6 +139,20 @@ goal, pick the lowest.
 no Set-of-Mark labels. Use `computer_use(action="screenshot")` for navigation,
 or pass `annotate=true` to `browser_screenshot` only when labels are desired.
 
+Screenshot arguments are action-specific: use
+`computer_use(action="screenshot", annotate=true, include_som=true, compact=true)`
+and **omit `observation`**. `observation="som_delta"` is a post-action refresh
+for non-screenshot actions such as scroll or wait; it is never a screenshot mode.
+
+Use `compact=true` for iterative observations. Full metadata occurs once in
+`som` or `som_delta`; `added_ids`, `changed_ids`, `revealed_target_ids` and
+`safety_target_ids` reference those targets. Reuse the known target map and its
+revision until refreshed. Explicit screenshots still return fresh pixels.
+Without compact, the legacy response remains available to existing app clients.
+Target arrays have a 64 KiB budget in compact mode. If `observation_truncated`
+or `coverage_incomplete` is true, do not infer absence; narrow/scroll the view
+and inspect again. Preserve safety state and verify the outcome before writing.
+
 When the structured SoM is requested with `include_som=true`, every target can
 also report `accessible_name`, `disabled`, `loading`, `dangerous`, and
 `destructive_effect`. Disabled and loading controls remain visible in SoM so
@@ -187,9 +201,13 @@ Do not rebuild it from the calling app's install ID or strip its resource locato
 
 For ongoing work, attach that view once in a progress message immediately after
 opening the session. Later progress messages and the final reply should refer to
-the existing view without attaching it again. For a short task with no progress
-message, attach it once in the final reply. An explicit refresh keeps the same
-resource locator. The host handles pinning, floating placement and reuse.
+the existing view without attaching it again.
+
+If the user asks to see/show/watch the browser **while you work**, the progress
+handoff is required even for a quick read: send the complete returned `view` now,
+before scrolling or further browsing. Do not postpone it to final. Only a short
+task with no live-view request and no progress message may attach once in final.
+An explicit refresh keeps the same resource locator. The host handles pinning, floating placement and reuse.
 
 The view follows the session while live and displays the saved final frame after
 closure, including historical sessions. Pinning, hiding, resizing or unmounting
@@ -390,7 +408,14 @@ auto-commit on Enter — there's often NO visible "Insert" button.
 suggestion, or just `Enter` for the raw query.
 
 **Lazy-loaded content.** If your target is below the fold or the
-page seems incomplete: `computer_use(action=scroll, direction=down)`.
+page seems incomplete, inspect the returned `scroll_regions` before scrolling.
+When multiple regions can move in that direction, `target_id` is required.
+Copy the intended returned ID (including `scroll_document` only when it was
+actually returned); never guess it or scroll the editor just to move the page.
+Use `computer_use(action="scroll", direction="down", target_id="<returned ID>", compact=true)`.
+An ambiguity rejection has not dispatched that scroll. Use its structured
+`scroll_regions` and recovery guidance. For a partial batch, inspect `steps`,
+`completed_steps` and `failed_step`; never replay earlier completed inputs.
 
 **Form errors.** Rejected input shows red text/icon near the field.
 Read it before retrying.

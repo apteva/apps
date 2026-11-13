@@ -19,6 +19,12 @@ func (a *App) toolComputerUseNative(ctx *sdk.AppCtx, args map[string]any) (any, 
 
 func (a *App) toolComputerUseMCP(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out, err := a.toolComputerUseCaller(callCtx, ctx, args)
+	var repair *actionRecoveryError
+	if errors.As(err, &repair) {
+		body, _ := json.Marshal(repair.details)
+		return sdk.MCPResult{IsError: true, StructuredContent: repair.details, Content: []sdk.MCPContent{{Type: "text", Text: string(body)}}}, nil
+	}
+
 	if result, ok := out.(map[string]any); err == nil && ok && result["navigation_failure"] == true {
 		body, _ := json.Marshal(result)
 		message := stringArg(result, "error")

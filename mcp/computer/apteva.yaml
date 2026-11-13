@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 adds structured scroll/screenshot recovery and opt-in bounded,
+  deduplicated observations, with a real DeepSeek view-handoff regression.
   v0.10.0 adds persistent browser-view resources, install-scoped routing,
   and responsive side-panel/floating views with inactive polling suspension.
   v0.9.3 preserves explicit empty option values in the isolated browser test
@@ -140,7 +142,8 @@ provides:
         sessions and persisted contexts because it releases provider resources
         and lets context state flush cleanly. Open, status, and close results
         include view, a stable browser-view resource reference with session_id
-        props. Present it once in a progress message for ongoing work; later progress and final
+        props. When asked to show the browser while working, present it once
+        immediately after open in progress, even for a quick task; later progress and final
         replies reference the existing view. Refreshes keep the same locator.
         Pinning does not extend browser lifetime; close normally to retain the final frame.
         Proxy routing is provider-neutral: use proxy_mode=managed for the
@@ -216,7 +219,8 @@ provides:
         such as Tab, Backspace, Control+A, Control+Z; use action=type only
         for short literal text and full date/time values such as 2026-06-05 or
         08:00 PM. Screenshots expose independently scrollable semantic
-        scroll_regions. For action=scroll, use a region target_id whenever
+        scroll_regions. Inspect these before action=scroll; a returned region
+        target_id is required whenever
         multiple regions can scroll and optionally guard its name and role.
         Results report the requested and actual region, before/after offsets,
         no movement, wrong movement, boundaries, and newly revealed controls.
@@ -228,7 +232,9 @@ provides:
         for a consequential click followed by wait_for so its external outcome
         is verified without risking a duplicate retry. Consequential clicks
         always return a compact semantic delta plus action_dispatched and
-        outcome_verified fields. Set observation=som_delta for a
+        outcome_verified fields. For screenshot, omit observation and use annotate/include_som. Use
+        compact=true for iterative observations, with ID references and explicit
+        truncation flags. Set observation=som_delta only after other actions for a
         compact refreshed semantic state without image bytes; batch keeps
         observation=screenshot as its compatibility default. Semantic labels
         and target ids become stale after page-changing actions and must be
@@ -573,7 +579,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.10.0
+    ref: computer/v0.11.0
     entry: mcp/computer
   port: 8080
   health_check: /health

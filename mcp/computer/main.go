@@ -62,8 +62,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 adds structured scroll/screenshot recovery and opt-in bounded,
+  deduplicated observations, with a real DeepSeek view-handoff regression.
   v0.10.0 adds persistent browser-view resources, install-scoped routing,
   and responsive side-panel/floating views with inactive polling suspension.
   v0.9.3 preserves explicit empty option values in the isolated browser test
@@ -138,7 +140,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes. A click that starts a browser download may return downloads_started metadata; this does not mean the download completed. Use browser_download(action=wait), then browser_download(action=get)."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, inspect returned scroll_regions before execution; target_id is required when multiple regions can move. Copy an observed ID, never guess scroll_document. For screenshot, omit observation and use annotate/include_som. Use compact=true for bounded, deduplicated iterative observations. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes. A click that starts a browser download may return downloads_started metadata; this does not mean the download completed. Use browser_download(action=wait), then browser_download(action=get)."
     - name: browser_download
       description: "List, wait for, or export files captured by an active browser session. After a click returns a dl_* id, wait for browser-confirmed completion before get. get exports the browser-captured bytes as a Core-managed blobref; it never refetches the URL and Computer never unzips or interprets the file. Actions: list, wait, get."
     - name: computer_context_create
@@ -293,7 +295,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.10.0
+    ref: computer/v0.11.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -713,7 +715,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height, view}. " +
-				"view is a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame.",
+				"When the user asks to see the browser while you work, send the returned view in a progress message immediately after open and before further browsing, even for a quick task. Do not wait until final. view is a stable browser-view resource reference with session_id props. Present it once: attach it in a progress message after opening for ongoing work, then reference the existing view in later progress and final replies. Explicit refreshes keep the same resource locator. Pinning does not extend browser lifetime; close normally to retain the final frame.",
 			InputSchema: strictSchemaObject(map[string]any{
 				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
 				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
@@ -760,10 +762,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. A detected text mask gets one trusted-key fallback after setter reversion. If direct entry is still rejected, use returned recovery_targets or choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. Calendar-grid clicks return changed rendered values with the compact semantic observation. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
-				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
+				"For action=scroll, inspect returned scroll_regions BEFORE execution. If more than one region can move in the requested direction, target_id is REQUIRED: copy the intended returned ID, never guess scroll_document. Pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"For explicitly read-only navigation, set read_only=true to allow one bounded Browserbase fresh-page retry on transient network failure. Never use it to replay or recover an uncertain write. Navigation failures return structured diagnostics and block subsequent writes until a successful read-only navigation or an explicit context reopen after inspection. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. Set observation=som_delta for other compact refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. For action=screenshot OMIT observation; use annotate and include_som. Use compact=true for iterative observations, and observation=som_delta only for NON-screenshot post-action refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
 				"Scroll regions include bounded content_hints naming controls in each panel, including below the viewport; use those hints to choose which panel to scroll. Snapshots include checked (true/false), indeterminate for mixed checkboxes, and current_value for ordinary form fields including time inputs. Use these values to verify configuration without repeating input; password values are omitted. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
@@ -820,7 +822,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"match":       map[string]any{"type": "string", "enum": []string{"any", "all"}, "description": "For wait_for with multiple conditions. Defaults any."},
 				"quiet_ms":    map[string]any{"type": "integer", "minimum": 100, "maximum": 10000, "description": "For wait_for, optional time the outcome must remain matched. For wait_for_stable, required page-wide quiet interval; default 1500 ms."},
 				"timeout_ms":  map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For wait_for/wait_for_stable, maximum wait. Timeout is returned as structured timed_out=true, not failure of a prior action."},
-				"observation": map[string]any{"type": "string", "enum": []string{"none", "som_delta", "screenshot"}, "description": "Final observation after an action or batch. som_delta refreshes semantic targets without returning image bytes. Batch defaults screenshot; scroll and waits default som_delta; other actions default none."},
+				"compact":     map[string]any{"type": "boolean", "description": "Use true for iterative screenshot/semantic observations: target metadata appears once, deltas can reference added_ids/changed_ids, revealed/safety IDs reference those targets, and target arrays have a 64 KiB budget with explicit truncation/coverage flags. Omit for the legacy response shape."},
+				"observation": map[string]any{"type": "string", "enum": []string{"none", "som_delta", "screenshot"}, "description": "For non-screenshot actions only. NEVER pass observation with action=screenshot; omit it and use annotate/include_som. Final observation after an action or batch. som_delta refreshes semantic targets without returning image bytes. Batch defaults screenshot; scroll and waits default som_delta; other actions default none."},
 				"annotate":    map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
 				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
 				"include_som": map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
@@ -950,6 +953,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"session_id":  map[string]any{"type": "string"},
 				"annotate":    map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
 				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"compact":     map[string]any{"type": "boolean", "description": "Opt-in compact response: one image envelope without the legacy png_b64 alias; structured target arrays are bounded with explicit truncation flags."},
 				"include_som": map[string]any{"type": "boolean", "description": "Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
@@ -2016,7 +2020,12 @@ func (a *App) openBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx
 	payload := a.sessionEventPayload(id, sess)
 	payload["resume"] = resume
 	emitEvent(ctx, "session.opened", payload)
-	return a.sessionOutput(id, sess), nil
+	out := a.sessionOutput(id, sess)
+	out["view_handoff"] = map[string]any{
+		"component_field": "view", "present_once": true, "phase": "progress",
+		"next_step": "If the user asks to see the browser while you work, send the returned view now in one progress message before further browsing, even for a quick task. Reuse that mounted view; do not attach it again in final. Close normally, then reference its saved final frame.",
+	}
+	return out, nil
 }
 
 func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, error) {
@@ -2358,6 +2367,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 		res["som"] = som
 	}
 	for _, key := range []string{
+		"observation_truncated", "coverage_incomplete", "omitted_target_count",
 		"media_embed_status", "media_player_visible", "media_iframe_visible", "media_thumbnail_visible",
 		"media_thumbnail_url", "media_duration_text", "media_duration_seconds", "media_configuration_present",
 		"media_error_text", "media_iframe_src", "media_provider", "draft_save_state", "draft_save_text",
@@ -2366,7 +2376,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 			res[key] = value
 		}
 	}
-	return res, nil
+	return compactComputerObservation(res, args), nil
 }
 
 func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2734,8 +2744,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 			nil)
 	}
 	if err := validateObservationArgs(action, args); err != nil {
-		return nil, computerUseFailure("invalid_observation", id, sess, action,
-			err.Error(), "Use observation=none, som_delta, or screenshot. Omit it for the action default.", err)
+		return nil, observationRecoveryFailure(id, sess, action, args, err)
 	}
 	if err := validateSelectOptionArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
@@ -2877,18 +2886,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		return nil, computerUseFailure("stale_or_mismatched_target", id, sess, action, err.Error(),
 			"Take a fresh screenshot and use its current target_id/som_revision or scroll_regions entry.", err)
 	}
-	if action == "scroll" && act.TargetID == "" && act.Label <= 0 && !hasCoordinateArg(args) {
-		regions := scrollRegionsFor(sess.comp)
-		count := 0
-		for _, region := range regions {
-			if ((act.Direction == "left" || act.Direction == "right") && region.CanScrollX) || ((act.Direction != "left" && act.Direction != "right") && region.CanScrollY) {
-				count++
-			}
-		}
-		if count > 1 {
-			return nil, computerUseFailure("ambiguous_scroll_target", id, sess, action,
-				fmt.Sprintf("%d independently scrollable regions are visible; a generic center scroll is ambiguous", count),
-				"Choose a stable id from scroll_regions and pass target_id, optionally with expected_name and expected_role.", nil)
+	if action == "scroll" {
+		if regions := ambiguousScrollRegions(sess, act, args); regions != nil {
+			return nil, ambiguousScrollFailure(id, sess, act.Direction, regions, nil, 0)
 		}
 	}
 	if (action == "click" || action == "double_click" || action == "upload_file") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
@@ -3322,7 +3322,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
-	return out, nil
+	return compactComputerObservation(out, args), nil
 }
 
 func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, action string, cause error) error {
@@ -3465,16 +3465,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
 				fmt.Sprintf("step %d: %v", index+1, err), "Take a fresh screenshot and rebuild the batch from current stable targets.", err)
 		}
-		if action == "scroll" && act.TargetID == "" && act.Label <= 0 && !hasCoordinateArg(step) {
-			count := 0
-			for _, region := range scrollRegionsFor(sess.comp) {
-				if ((act.Direction == "left" || act.Direction == "right") && region.CanScrollX) || ((act.Direction != "left" && act.Direction != "right") && region.CanScrollY) {
-					count++
-				}
-			}
-			if count > 1 {
-				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
-					fmt.Sprintf("step %d: %d independently scrollable regions make this target ambiguous", index+1, count), "Pass a scroll_regions target_id.", nil)
+		if action == "scroll" {
+			if regions := ambiguousScrollRegions(sess, act, step); regions != nil {
+				return nil, ambiguousScrollFailure(id, sess, act.Direction, regions, completed, index+1)
 			}
 		}
 		if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
@@ -3617,7 +3610,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	eventPayload := map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL}
 	mergeDownloadsStartedPayload(eventPayload, downloadsStarted)
 	emitEvent(ctx, "session.action", eventPayload)
-	return out, nil
+	return compactComputerObservation(out, args), nil
 }
 
 func batchStepArgs(raw any) ([]map[string]any, error) {
@@ -5572,18 +5565,20 @@ func validateStableArgs(action string, args map[string]any) error {
 }
 
 func validateObservationArgs(action string, args map[string]any) error {
-	if !rawArgPresent(args, "observation") {
+	raw, present := args["observation"]
+	if !present || raw == nil || raw == "" {
 		return nil
+	} // legacy mechanically populated defaults
+	if action == "screenshot" {
+		return fmt.Errorf("observation is not valid for screenshot; omit it and use annotate/include_som directly")
 	}
-	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "observation")))
-	if mode == "" {
-		return nil
+	text, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf("observation must be a string: none, som_delta, or screenshot")
 	}
+	mode := strings.ToLower(strings.TrimSpace(text))
 	if mode != "none" && mode != "som_delta" && mode != "screenshot" {
 		return fmt.Errorf("observation must be none, som_delta, or screenshot")
-	}
-	if action == "screenshot" {
-		return fmt.Errorf("observation is not valid for screenshot; use annotate/include_som directly")
 	}
 	return nil
 }
@@ -6527,6 +6522,13 @@ func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
 	body["session_id"] = id
 	out, err := a.toolComputerUseCaller(r.Context(), appCtxForRequest(r, body), body)
 	if err != nil {
+		var repair *actionRecoveryError
+		if errors.As(err, &repair) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, repair.details)
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

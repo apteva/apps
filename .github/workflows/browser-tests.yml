@@ -38,6 +38,8 @@ jobs:
       - if: matrix.app == 'computer'
         run: RUN_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 -run '^TestBrowserTestStepSelectEmptyValue$' .
       - if: matrix.app == 'computer'
+        run: RUN_COMPUTER_APP_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 -run '^TestComputerActionRecoveryBrowser$' .
+      - if: matrix.app == 'computer'
         run: RUN_NAVIGATION_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 ./internal/browser/browserbase ./internal/browser/navigation
       - if: matrix.app == 'computer'
         uses: oven-sh/setup-bun@v2

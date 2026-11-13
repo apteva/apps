@@ -32,6 +32,10 @@ case "${1:-all}" in
     "${COMPUTER_LLM_CODEX_BIN:-codex}" --version
     go test -p 1 -count=1 -v -run '^TestLLM' -timeout 90m ./...
     ;;
+  3-deepseek)
+    export RUN_COMPUTER_DEEPSEEK_TESTS=1
+    go test -count=1 -v -run '^TestLLMDeepSeekViewHandoffLive$' -timeout 12m .
+    ;;
   ui)
     bun test ui
     bun scripts/typecheck-ui.ts
@@ -40,5 +44,5 @@ case "${1:-all}" in
   all)
     for tier in 1 2 3 ui; do bash scripts/test-tiers.sh "$tier"; done
     ;;
-  *) echo "usage: $0 [1|2|3|ui|all]" >&2; exit 2 ;;
+  *) echo "usage: $0 [1|2|3|3-deepseek|ui|all]" >&2; exit 2 ;;
 esac
