@@ -177,47 +177,26 @@ error string is absent but Computer reports a rendered media block, do not
 submit the URL again automatically; verify the player first. This avoids
 duplicate embeds caused by treating “no error text” as “nothing happened.”
 
-## Chat attachments are agent-selected
+## Present one persistent browser view
 
-Opening or driving a browser does not create an attachment automatically. You
-still decide which card belongs in the response. However, when the user directly
-asks you to open, show, inspect, review, or navigate to a webpage, the final
-response must include exactly one `browser-view` unless the user explicitly asks
-for text only or the destination channel does not support components. All cards
-are render-only; never use them to ask the operator a question.
+Opening or driving a browser does not create an attachment automatically.
+Copy the complete `view` object returned by `browser_session` open/status/close
+into the Conversations message components. It includes the trusted Computer
+install, `computer.browser_session` resource type, session ID, and renderer props.
+Do not rebuild it from the calling app's install ID or strip its resource locator.
 
-| When | Component | Key props |
-|---|---|---|
-| Open, show, inspect, review, or navigate to a webpage | `browser-view` | `session_id` |
-| Session metadata is the result, but page pixels are not useful | `browser-session` | `session_id` |
-| Several distinct pages are part of the result | `browser-timeline` | `session_id` |
-| A specific marked screenshot is needed | legacy `screenshot-with-som` | `screenshot_url`, `som`, `caption` |
+For ongoing work, attach that view once in a progress message immediately after
+opening the session. Later progress messages and the final reply should refer to
+the existing view without attaching it again. For a short task with no progress
+message, attach it once in the final reply. An explicit refresh keeps the same
+resource locator. The host handles pinning, floating placement and reuse.
 
-Attach via:
-
-```
-channels_send(
-  channel="current",
-  text="<final outcome>",
-  components=[{ app: "computer", name: "browser-view", props: {session_id: "br_..."} }]
-)
-```
-
-`browser_session(open)` and `browser_session(close)` return a `view` object that
-is already shaped like a channel component. Copy that object into the final
-`channels_send(..., components=[...])`. Do not add `screenshot_url` or a display
-mode.
-
-The canonical `browser-view` follows the session lifecycle itself. While the
-session is active, it shows the live stream when available and otherwise follows
-the latest frame. After close, it automatically settles on the durable clean
-final frame. The same attachment therefore works whether it is sent during the
-browse or after cleanup.
-
-The acknowledgement before browser work is text-only. The single final outcome
-contains the `browser-view`; do not send a second component-only message. Do not
-attach both `browser-session` and `browser-view` for the same result unless both
-metadata and pixels are independently useful.
+The view follows the session while live and displays the saved final frame after
+closure, including historical sessions. Pinning, hiding, resizing or unmounting
+it does not extend browser lifetime. Close the browser normally when finished
+unless the user explicitly asks to keep it open; Computer owns that cleanup.
+The `screenshot-with-som` component remains available for an explicitly requested
+annotated snapshot, using `screenshot_url` and optional `som` marks.
 
 The older names `browser-card`, `screenshot-with-som`, `live-view`, and
 `navigation-timeline` remain compatibility aliases for existing transcripts.

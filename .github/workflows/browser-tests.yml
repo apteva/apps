@@ -39,3 +39,19 @@ jobs:
         run: RUN_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 -run '^TestBrowserTestStepSelectEmptyValue$' .
       - if: matrix.app == 'computer'
         run: RUN_NAVIGATION_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 ./internal/browser/browserbase ./internal/browser/navigation
+      - if: matrix.app == 'computer'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - if: matrix.app == 'computer'
+        run: bun install --frozen-lockfile
+        working-directory: .
+      - if: matrix.app == 'computer'
+        run: bun test mcp/computer/ui/*.test.tsx
+        working-directory: .
+      - if: matrix.app == 'computer'
+        run: bun run scripts/build-panels.ts --app computer
+        working-directory: .
+      - if: matrix.app == 'computer'
+        run: CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' bunx playwright test --config mcp/computer/playwright.config.ts
+        working-directory: .
