@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.14
+version: 0.5.0
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -53,6 +53,48 @@ provides:
       label: Todo
       icon: check-square
       entry: /ui/TodoPanel.mjs
+  ui_components:
+    - name: todo-list
+      label: Todo list
+      description: Open todos from a list or group, with completion and quick-add.
+      entry: /ui/TodoListWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [todo.created, todo.updated, todo.completed, todo.uncompleted,
+        todo.snoozed, todo.deleted, todo.list.created, todo.list.updated,
+        todo.list.deleted, todo.list_group.created, todo.list_group.updated, todo.list_group.deleted]
+      settings_schema:
+        type: object
+        required: [target]
+        additionalProperties: false
+        properties:
+          target:
+            type: string
+            title: List or group
+            description: Choose the area this copy of the widget shows.
+          sort:
+            type: string
+            title: Sort by
+            enum: [due, priority]
+            enum_names: [Due date, Priority]
+            default: due
+          max_todos:
+            type: integer
+            title: Visible todos
+            default: 8
+            minimum: 1
+            maximum: 20
+      settings_ui:
+        order: [target, sort, max_todos]
+        fields:
+          target:
+            discovery:
+              route: /widget/options
+              value_field: value
+              label_field: label
   publishes:
     - name: todo.created
       description: A todo was created.
@@ -143,7 +185,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: todo/v0.5.0
     entry: mcp/todo
   port: 8080
   health_check: /health
