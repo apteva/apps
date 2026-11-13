@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { todoApiUrl } from "./api";
-import { todoPanelSelection } from "./widget";
+import { todoPanelSelection, todoPanelView } from "./widget";
 
 async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { credentials: "same-origin", ...init });
@@ -205,7 +205,7 @@ const SOFT_BORDER = "rgba(148, 163, 184, 0.10)";
 
 export default function TodoPanel({ projectId, appName, installId }: NativePanelProps) {
   const [initialSelection] = useState(() => todoPanelSelection(typeof window === "undefined" ? "" : window.location.search));
-  const [view, setView] = useState<View>(initialSelection.listId || initialSelection.groupId ? "all" : "today");
+  const [view, setView] = useState<View>(() => todoPanelView(typeof window === "undefined" ? "" : window.location.search));
   const [mode, setMode] = useState<PanelMode>("tasks");
   const [pickedList, setPickedList] = useState<number | null>(initialSelection.listId);
   const [pickedGroup, setPickedGroup] = useState<number | null>(initialSelection.groupId);

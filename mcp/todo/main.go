@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.5.0
+version: 0.5.1
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 icon: /ui/icon.svg
@@ -81,7 +81,7 @@ provides:
   ui_components:
     - name: todo-list
       label: Todo list
-      description: Open todos from a list or group, with completion and quick-add.
+      description: Today and overdue todos across all lists and groups, with inline filters, completion and quick-add.
       entry: /ui/TodoListWidget.mjs
       slots: [dashboard.home]
       suggested: true
@@ -93,13 +93,19 @@ provides:
         todo.list.deleted, todo.list_group.created, todo.list_group.updated, todo.list_group.deleted]
       settings_schema:
         type: object
-        required: [target]
         additionalProperties: false
         properties:
           target:
             type: string
             title: List or group
-            description: Choose the area this copy of the widget shows.
+            description: Starting filter; change it inside the widget at any time.
+            default: all
+          view:
+            type: string
+            title: Starting view
+            enum: [today, overdue, upcoming, all]
+            enum_names: [Today + overdue, Overdue, Upcoming, All open]
+            default: today
           sort:
             type: string
             title: Sort by
@@ -113,7 +119,7 @@ provides:
             minimum: 1
             maximum: 20
       settings_ui:
-        order: [target, sort, max_todos]
+        order: [target, view, sort, max_todos]
         fields:
           target:
             discovery:
@@ -209,7 +215,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: todo/v0.5.0
+    ref: todo/v0.5.1
     entry: mcp/todo
   port: 8080
   health_check: /health

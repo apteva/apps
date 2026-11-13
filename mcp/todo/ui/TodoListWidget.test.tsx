@@ -54,7 +54,7 @@ test("host scope and list/group deep links survive navigation", () => {
   expect(todoPanelSelection(link.search)).toEqual({ listId: null, groupId: 12 });
   expect(todoPanelSelection("?list_id=2&group_id=12")).toEqual({ listId: 2, groupId: null });
   expect(todoPanelSelection("?list_id=-1&group_id=nope")).toEqual({ listId: null, groupId: null });
-  expect(widgetPreferences({ target: "all", sort: "random", max_todos: 999 })).toEqual({ target: "", sort: "due", limit: 20 });
+  expect(widgetPreferences({ target: "all", sort: "random", max_todos: 999 })).toEqual({ target: "all", view: "today", sort: "due", limit: 20 });
 });
 
 test("shows the selection name, full remaining count and correctly scoped actions", async () => {
@@ -83,7 +83,7 @@ test("group quick-add requires choosing a member list and creates there", async 
   expect(input.disabled).toBe(true);
   expect(host.textContent).toContain("Website launch");
   await act(async () => {
-    const select = host.querySelector("select") as HTMLSelectElement;
+    const select = host.querySelector('[aria-label="Add to list"]') as HTMLSelectElement;
     select.value = "7";
     select.dispatchEvent(domEvent("change"));
   });
@@ -120,14 +120,18 @@ test("failed completion retains work; recurring completion refreshes instead of 
   expect(host.textContent).toContain("Publish website");
 });
 
-test("missing settings and project do not fetch unscoped todos", async () => {
+test("missing settings loads today across all areas; a missing project never fetches", async () => {
   stub(() => json(page));
   const host = await mount({ projectId: undefined });
   expect(host.textContent).toContain("Select a project");
   expect(calls.length).toBe(0);
   await act(async () => root!.render(<Widget projectId="a" />));
-  expect(host.textContent).toContain("Configure this widget");
-  expect(calls.length).toBe(0);
+  expect(host.textContent).not.toContain("Configure this widget");
+  expect(calls.length).toBe(1);
+  expect(calls[0].url.searchParams.get("target")).toBe("all");
+  expect(calls[0].url.searchParams.get("view")).toBe("today");
+  expect((host.querySelector('[aria-label="Todo view"]') as HTMLSelectElement).value).toBe("today");
+  expect((host.querySelector('[aria-label="Filter by list or group"]') as HTMLSelectElement).value).toBe("all");
 });
 
 test("unavailable selection shows retry and hides actions instead of broadening scope", async () => {
@@ -192,4 +196,27 @@ test("opening the full Todo page honors the widget list and installation", async
     && call.url.searchParams.get("view") === "all"
     && call.url.searchParams.get("list_id") === "2"
     && call.url.searchParams.get("install_id") === "9")).toBe(true);
+});
+
+test("inline filters can switch list, group, view and sort without configuration", async () => {
+  stub(call => json({ ...page, title: call.url.searchParams.get("target") === "all" ? "Todo" : "Personal", options: [
+    {value:"all",label:"All lists and groups"}, {value:"list:2",label:"List · Website launch"}, {value:"group:3",label:"Group · Personal"},
+  ] }));
+  const host = await mount({widgetSettings: {}});
+  const change = async (label: string, value: string) => act(async () => {
+    const select = host.querySelector(`[aria-label="${label}"]`) as HTMLSelectElement;
+    select.value = value; select.dispatchEvent(domEvent("change"));
+  });
+  await change("Filter by list or group", "group:3");
+  expect(calls.at(-1)!.url.searchParams.get("target")).toBe("group:3");
+  await change("Todo view", "all");
+  expect(calls.at(-1)!.url.searchParams.get("view")).toBe("all");
+  await change("Sort todos", "priority");
+  expect(calls.at(-1)!.url.searchParams.get("sort")).toBe("priority");
+  await change("Filter by list or group", "list:2");
+  expect(calls.at(-1)!.url.searchParams.get("target")).toBe("list:2");
+  await change("Filter by list or group", "all");
+  const link = new URL((host.querySelector("header a") as HTMLAnchorElement).href);
+  expect(link.searchParams.get("view")).toBe("all");
+  expect(link.searchParams.has("list_id")).toBe(false);
 });
