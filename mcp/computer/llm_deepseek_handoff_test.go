@@ -32,6 +32,7 @@ type deepSeekTranscript struct {
 
 func (s *deepSeekTranscript) assertHandoff() error {
 	attached := 0
+	finalCount := 0
 	final := ""
 	progress := false
 	for _, message := range s.Messages {
@@ -51,6 +52,10 @@ func (s *deepSeekTranscript) assertHandoff() error {
 			progress = true
 		}
 		if message["phase"] == "final" {
+			finalCount++
+			if finalCount > 1 {
+				return fmt.Errorf("agent emitted more than one final reply")
+			}
 			final = fmt.Sprint(message["text"])
 			if len(components) > 0 {
 				return fmt.Errorf("final reply reattached the browser view")

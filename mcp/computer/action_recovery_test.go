@@ -182,12 +182,14 @@ func TestViewHandoffAssertionsRejectDuplicateOrMissingLifecycle(t *testing.T) {
 	if err := fixture().assertHandoff(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"duplicate", "missing", "wrong locator", "not closed", "closed late", "wrong answer"} {
+	for _, name := range []string{"duplicate", "duplicate final", "missing", "wrong locator", "not closed", "closed late", "wrong answer"} {
 		t.Run(name, func(t *testing.T) {
 			trace := fixture()
 			switch name {
 			case "duplicate":
 				trace.Messages[1]["components"] = []any{view}
+			case "duplicate final":
+				trace.Messages = append(trace.Messages, map[string]any{"phase": "final", "text": "MAPLE-731 in the existing browser view"})
 			case "missing":
 				delete(trace.Messages[0], "components")
 			case "wrong locator":
