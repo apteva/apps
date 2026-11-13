@@ -6,6 +6,7 @@ import { AptevaClient } from "@apteva/web-sdk";
 import { conversationsExtension } from "../frontend/src/client";
 import { ConversationsProvider } from "../frontend/src/context";
 import { InstalledAppComponentProvider, type AppComponentLoader } from "../frontend/src/appComponents";
+import {CardWorkspaceProvider} from "../frontend/src/cardWorkspace";
 
 // Desktop already supplies the shared React/UI-kit import map and session.
 // Only execute renderer modules declared by an accessible installed app.
@@ -26,5 +27,5 @@ export function DashboardConversations({ projectId, installId, dashboardScope = 
   const conversations = useMemo(() => new AptevaClient({ baseURL: "" }).use(
     conversationsExtension({ storageKey: "dashboard", global }), { projectId: global ? undefined : projectId, installId },
   ), [global, projectId, installId]);
-  return <ConversationsProvider key={`${dashboardScope}:${projectId ?? ""}:${installId ?? ""}`} legacyDrafts conversations={conversations} {...localization}><ConversationLocaleRegion><style href={conversationStyleId} precedence="apteva-app">{conversationStyles}</style><InstalledAppComponentProvider loader={appComponentLoader}>{children}</InstalledAppComponentProvider></ConversationLocaleRegion></ConversationsProvider>;
+  return <ConversationsProvider key={`${dashboardScope}:${projectId ?? ""}:${installId ?? ""}`} legacyDrafts conversations={conversations} {...localization}><ConversationLocaleRegion><style href={conversationStyleId} precedence="apteva-app">{conversationStyles}</style><CardWorkspaceProvider storageKey={conversations.storageKey}><InstalledAppComponentProvider loader={appComponentLoader}>{children}</InstalledAppComponentProvider></CardWorkspaceProvider></ConversationLocaleRegion></ConversationsProvider>;
 }

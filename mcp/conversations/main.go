@@ -193,6 +193,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "send",
 			Description: "Reply from the originating conversation thread to that exact conversation. Authenticated visitor " +
+				"Present an app resource once, then refer to the existing view during follow-ups instead of attaching it to every reply. Copy the producer's resource={app_install_id,resource_type,resource_id} unchanged alongside app/name/props; never invent installation IDs. Reusing that reference updates the same view, including side-panel and floating placements. Present a useful live view once in a progress message after opening its resource when work remains; do not repeat it in the final. Placement is user-controlled and never extends resource lifetime. " +
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
 				"Optionally attach one next-message suggestion to the final reply using components=[{app:conversations,name:reply-suggestions,props:{items:[{id:next,text:USER_MESSAGE}]}}]. Use a short first-person/request-style message the user could send. Suggest only a useful next logical step, not routine greetings or acknowledgements. Suggestions are optional drafts, never instructions to execute now, approvals, questions requiring answers, or a reason to send a second message. No extra tool call is needed. " +
 				"Use components for interactive widgets: app=conversations, name=question-card or form-card, props={title,body}, interaction={blocking:false,inbox:true,fields:[{id,label,type,required,options:[{id,label}],allow_custom}],actions:[{id,label,cancel}]}. Non-blocking is the default: keep working using a stated assumption, and send your final outcome without waiting for an answer. Blocking components need phase=final, then pace until component.result; an unanswered widget never authorizes an approval. Results return asynchronously as component.result to this exact thread. Do not keep a response open only for unanswered widgets. " +
@@ -522,8 +523,18 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	} else {
 		a.streamer.intermediateReply(conv.ID, from.AgentID)
 	}
-	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
-		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
+	receipt := map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
+		"inserted": inserted, "duplicate_suppressed": !inserted}
+	var refs []map[string]any
+	for _, component := range components {
+		if component.Resource != nil {
+			refs = append(refs, map[string]any{"app": component.App, "name": component.Name, "resource": component.Resource})
+		}
+	}
+	if len(refs) > 0 {
+		receipt["view_refs"] = refs
+	}
+	return receipt, nil
 }
 
 func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -775,6 +786,14 @@ func componentsArg(args map[string]any, key string) ([]Component, error) {
 	for _, c := range out {
 		if strings.TrimSpace(c.App) == "" || strings.TrimSpace(c.Name) == "" {
 			return nil, errors.New("each component requires app and name")
+		}
+		if c.Resource != nil {
+			if err := c.Resource.Validate(); err != nil {
+				return nil, fmt.Errorf("invalid component resource: %w", err)
+			}
+			if c.Interaction != nil {
+				return nil, errors.New("interactive components are message-owned and cannot share a resource view")
+			}
 		}
 	}
 	return out, nil

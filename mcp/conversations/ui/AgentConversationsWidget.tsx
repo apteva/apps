@@ -12,7 +12,7 @@ export default function AgentConversationsWidget(props: AgentConversationsWidget
 
   return (
     <PageContextProvider.Provider value={props.pageContext}>
-      <div className="h-full min-w-0" style={agentDetail ? { height: "clamp(460px, 65vh, 640px)" } : undefined}>
+      <div className="h-full min-w-0" style={agentDetail ? { height: "clamp(460px, 65vh, 640px)" } : {height:"100%",minHeight:0}}>
         <DashboardConversations
           projectId={props.projectId}
           installId={props.installId}

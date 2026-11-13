@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.26.0 — 2026-11-13
+
+- Keep app cards visible in a resizable side panel or draggable, resizable in-page floating view, with compact controls for narrow screens.
+- Reuse one mounted renderer for each resource across message references, retaining React state and preserving iframe state on hosts with state-preserving DOM moves.
+- Preserve SDK resource locators in messages and tool receipts, scope views by project/conversation/installation, and restore selected references from authorized history.
+- Teach agents to present a useful live view once and reuse it through ordinary follow-ups instead of repeatedly attaching cards.
+- Document the existing SDK declarations and optional presentation context for producer apps such as Computer.
+- Cover live resource reuse and placement changes through Codex / Sol 6.1 and Chromium Tier 3 tests.
+
 ## 0.25.5 — 2026-11-13
 
 - Render installed-app message cards using existing SDK declarations across dashboard chats, agent/project widgets and Inbox details.

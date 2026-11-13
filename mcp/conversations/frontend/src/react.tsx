@@ -12,6 +12,7 @@ export type { AgentAvatarMode } from "./agentAppearance";
 import type { AgentAvatarMode } from "./agentAppearance";
 import { InstalledAppComponentProvider, type AppComponentLoader } from "./appComponents";
 import { ConversationComponentProvider, type ConversationComponentRenderers } from "./messageComponents";
+import {CardWorkspaceProvider} from "./cardWorkspace";
 type ChatConfiguration = ConversationLocalization & {componentRenderers?:ConversationComponentRenderers;appComponentLoader?:AppComponentLoader;replySuggestions?:boolean;threadActions?:ThreadActionOptions|false;composer?:ComposerOptions;pageContext?:PageContext;onContextCleared?:(context:PageContext)=>void};
 import { ConversationLocalizationProvider, ConversationLocaleRegion, type ConversationLocalization } from "./i18n";
 export { ConversationLocalizationProvider } from "./i18n";
@@ -40,7 +41,7 @@ export interface ChatProps extends ChatConfiguration {
 function Surface({ conversations, children, className, pageContext, componentRenderers, appComponentLoader, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
   const content=<ConversationComponentProvider renderers={componentRenderers}>{children}</ConversationComponentProvider>;
   return <PageContextProvider.Provider value={pageContext}><ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
-    <ConversationLocaleRegion className={className}>{appComponentLoader?<InstalledAppComponentProvider loader={appComponentLoader}>{content}</InstalledAppComponentProvider>:content}</ConversationLocaleRegion>
+    <ConversationLocaleRegion className={className}><CardWorkspaceProvider storageKey={conversations.storageKey}>{appComponentLoader?<InstalledAppComponentProvider loader={appComponentLoader}>{content}</InstalledAppComponentProvider>:content}</CardWorkspaceProvider></ConversationLocaleRegion>
   </ConversationsProvider></PageContextProvider.Provider>;
 }
 export const ConversationChat = forwardRef<ConversationComposerHandle, ChatProps>(function ConversationChat({ host, conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
@@ -108,5 +109,7 @@ export const conversationsComponents = {
 export { MessageComponents, ConversationComponentProvider } from "./messageComponents";
 export { InstalledAppComponentProvider } from "./appComponents";
 export type { AppComponentLoader, InstalledComponentApp, AppCardModule } from "./appComponents";
+export {CardWorkspaceProvider,useCardPresentation} from "./cardWorkspace";
+export type {CardPresentation} from "./cardWorkspace";
 export type { ConversationComponentRenderer, ConversationComponentRenderers, ConversationComponentProps } from "./messageComponents";
 export type { CardComponent, ComponentInteraction, InteractionField, InteractionAction } from "./types";

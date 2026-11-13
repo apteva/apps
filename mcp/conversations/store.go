@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const appName = "conversations"
@@ -51,6 +53,7 @@ type Conversation struct {
 // report-card, alert-card, status-card). Kept schema-compatible with
 // channel-chat's shape so the dashboard's existing renderers port over.
 type Component struct {
+	Resource    *sdk.AppResourceRef   `json:"resource,omitempty"`
 	ID          string                `json:"id,omitempty"`
 	Version     int                   `json:"version,omitempty"`
 	Interaction *ComponentInteraction `json:"interaction,omitempty"`

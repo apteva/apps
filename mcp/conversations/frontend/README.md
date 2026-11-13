@@ -66,6 +66,14 @@ a stable `client_message_id`; preserve the entire request when retrying an
 uncertain response. REST change pages own the durable replay cursor. SSE stream
 frames remain ephemeral and cannot advance that cursor or suppress later edits.
 
+## Persistent views
+
+Conversations 0.26.0 adds shared side-panel and in-page floating placement for
+installed-app cards. See [the producer guide](../COMPONENT_VIEWS.md) for existing
+SDK declarations, canonical resource references and the optional injected
+`presentation` prop. The exported React surfaces include the same workspace.
+Native channels keep their own supported presentation.
+
 ## Installed app message cards
 
 Dashboard chat, agent/project widgets and Inbox details resolve message cards

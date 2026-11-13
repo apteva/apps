@@ -75,8 +75,8 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const user=req.headers.get("authorization")==="Bearer fixture-visitor-a"?"visitor-a":req.headers.get("cookie")?.includes("host_session=fixture")?"operator":"";
  if(!user)return new Response("unauthorized",{status:401});
  calls.push({path:url.pathname,query:Object.fromEntries(url.searchParams),bearer:Boolean(req.headers.get("authorization")),cookie:Boolean(req.headers.get("cookie")),method:req.method});
- const module=url.pathname.match(/^\/api\/apps\/(computer|tasks)\/ui\/([A-Za-z0-9_-]+\.mjs)$/);
- if(module)return new Response(Bun.file(join(root,"../../",module[1],"ui",module[2])),{headers:{"Content-Type":"text/javascript"}});
+ const module=url.pathname.match(/^\/api\/apps\/(computer|tasks|view-fixture)\/ui\/([A-Za-z0-9_-]+\.mjs)$/);
+ if(module)return new Response(Bun.file(module[1]==="view-fixture"?join(root,"../testdata/view-fixture/ui",module[2]):join(root,"../../",module[1],"ui",module[2])),{headers:{"Content-Type":"text/javascript"}});
  if(url.searchParams.get("project_id")!=="project"||url.searchParams.get("install_id")!=="7")return new Response("scope missing",{status:403});
  const path=url.pathname.replace("/api/apps/conversations","");
  if(path==="/ui/frontend.json")return new Response(Bun.file(join(root,"../ui/frontend.json")),{headers:{"Content-Type":"application/json"}});

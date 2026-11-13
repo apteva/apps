@@ -1,0 +1,24 @@
+schema: apteva-app/v1
+name: view-fixture
+display_name: View Fixture
+version: 1.0.0
+description: Disposable producer for persistent resource view tests.
+scopes: [project]
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: open
+      description: Open the existing preview resource and return its reusable component reference.
+    - name: advance
+      description: Update the same preview resource without creating another resource.
+  ui_components:
+    - name: preview-card
+      entry: /ui/PreviewCard.mjs
+      slots: [chat.message_attachment]
+      resource_types: [preview.document]
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/conversations/testdata/view-fixture}
+  port: 8080
+  health_check: /health

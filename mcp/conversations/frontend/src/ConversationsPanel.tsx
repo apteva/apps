@@ -4,6 +4,7 @@ import { useConversationHost, type ConversationHost } from "./hostUI";
 import { voiceTranscriptMessages } from "./voiceTranscript";
 import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
+import {useCardConversation} from "./cardWorkspace";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
 import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
@@ -1332,6 +1333,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onRemoved,
 }, ref) => {
   useConversationHost(host);
+  useCardConversation(conversation.project_id,conversation.id);
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, replySuggestions, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();

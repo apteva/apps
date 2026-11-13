@@ -2,6 +2,7 @@ import { AppComponentRegistry, type AppComponentSpec } from "@apteva/web-sdk";
 import { Component, createContext, useContext, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ConversationComponentProvider, type ConversationComponentProps } from "./messageComponents";
 import { useConversationLocalization } from "./i18n";
+import {appViewKey, PersistentAppCard, useCardPresentation} from "./cardWorkspace";
 
 /** Existing provides.ui_components declarations from an authorized host catalog. */
 export interface InstalledComponentApp {
@@ -113,13 +114,24 @@ class CardBoundary extends Component<{children: ReactNode; retry: () => void}, {
   render() { return this.state.failed ? <CardUnavailable retry={this.props.retry}/> : this.props.children; }
 }
 
-function InstalledAppCard({component, projectId}: ConversationComponentProps) {
+function InstalledAppCard({component, projectId, message, componentKey}: ConversationComponentProps) {
   const runtime = useContext(RuntimeContext)!;
   const {t} = useConversationLocalization();
   const [loaded, setLoaded] = useState<Awaited<ReturnType<Runtime["resolve"]>> | null>(null);
   const [failed, setFailed] = useState(false);
+  const [viewKey,setViewKey]=useState("");
   const identity = `${runtime.revision}:${projectId}:${component.app}:${component.name}`;
   const [loadedIdentity, setLoadedIdentity] = useState("");
+  const reference=JSON.stringify(component.resource??component.props);
+  useEffect(()=>{
+    let active=true;setViewKey("");
+    if(!loaded||!projectId)return;
+    const resource=component.resource;
+    const types=(loaded.spec as AppComponentSpec&{resource_types?:string[]}).resource_types;
+    if(resource&&(resource.app_install_id!==loaded.app.install_id||!resource.resource_type||!resource.resource_id||(types?.length&&!types.includes(resource.resource_type)))){setFailed(true);return;}
+    void appViewKey(projectId,message.conversation_id,loaded.app.install_id,component.app,component.name,resource,component.props).then(key=>{if(active)setViewKey(key)},()=>{if(active)setFailed(true)});
+    return()=>{active=false};
+  },[loaded,projectId,message.conversation_id,component.app,component.name,reference]);
   useEffect(() => {
     let active = true;
     setLoaded(null); setFailed(false);
@@ -130,9 +142,15 @@ function InstalledAppCard({component, projectId}: ConversationComponentProps) {
     return () => { active = false; };
   }, [runtime, projectId, component.app, component.name, identity]);
   if (failed) return <CardUnavailable retry={runtime.retry}/>;
-  if (!loaded || loadedIdentity !== identity) return <p role="status" className="p-3 text-sm text-text-muted">{t("component.loadingPreview")}</p>;
+  if (!loaded || loadedIdentity !== identity || !viewKey) return <p role="status" className="p-3 text-sm text-text-muted">{t("component.loadingPreview")}</p>;
   const {Renderer, app} = loaded;
-  return <CardBoundary key={identity} retry={runtime.retry}><div className="min-w-0 max-w-full" data-app-card={`${app.name}/${component.name}`}>
-    <Renderer {...component.props} appName={app.name} projectId={projectId} installId={app.install_id||undefined} slot={slot}/>
-  </div></CardBoundary>;
+  const content=<CardBoundary key={identity} retry={runtime.retry}><AppCardContent Renderer={Renderer} component={component} app={app} projectId={projectId}/></CardBoundary>;
+  return <PersistentAppCard viewKey={viewKey} projectId={projectId!} conversationId={message.conversation_id} owner={`${message.id}:${componentKey??component.id??component.name}`} order={message.id} label={String(component.props.title??component.props.caption??loaded.spec.label??`${app.display_name??app.name}: ${component.name}`)}>{content}</PersistentAppCard>;
+}
+
+function AppCardContent({Renderer,component,app,projectId}:{Renderer:ComponentType<any>;component:ConversationComponentProps["component"];app:InstalledComponentApp;projectId?:string}) {
+  const presentation=useCardPresentation();
+  return <div className="min-w-0 max-w-full" data-app-card={`${app.name}/${component.name}`}>
+    <Renderer {...component.props} appName={app.name} projectId={projectId} installId={app.install_id||undefined} slot={slot} presentation={presentation}/>
+  </div>;
 }

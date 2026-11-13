@@ -1,4 +1,5 @@
 import { MessageComponents } from "./messageComponents";
+import {useCardConversation} from "./cardWorkspace";
 import type { Message } from "./types";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 // InboxWidget — the conversations app's dashboard.home widget, a
@@ -198,6 +199,7 @@ function Overlay({
 
 function ComponentModal({open,message,agentName,onClose,onActed,projectId}:{open:boolean;message:InboxMessage;agentName:string;onClose:()=>void;onActed:()=>void;projectId:string}) {
  const {t}=useConversationLocalization();
+ useCardConversation(projectId,open?message.conversation_id:"",true);
  return <Overlay open={open} onClose={onClose} ariaLabel={itemTitle(message)}>
   <div className="border-b border-border px-5 py-3 text-xs text-text-muted">{agentName}</div>
   <div className="overflow-auto px-5 py-4"><MessageComponents message={message} projectId={projectId} onChanged={()=>{onActed();onClose()}}/></div>

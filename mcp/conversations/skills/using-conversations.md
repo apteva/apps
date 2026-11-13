@@ -80,8 +80,38 @@ simple bullets or numbered lists, and avoid Markdown tables, raw HTML, or
 transport-specific syntax. Basic emphasis, links, inline/fenced code, quotes,
 and headings are adapted to each bound surface; Telegram receives native
 Telegram formatting while the dashboard renders the stored Markdown. When
-showing a specific supported entity, attach the matching component card in the
-SAME send call as the text — never a second component-only message.
+showing a specific supported entity for the first time, attach the matching
+component card in the SAME send call as the text. Once presented, refer to its
+existing view in follow-ups instead of attaching the card again.
+
+### Persistent app views
+
+App cards can stay visible in a shared side panel or an in-page floating view.
+The operator controls placement. Present each resource once, then continue the
+conversation with normal text. Do not send a new card with every update or final
+reply, manufacture new component IDs to refresh it, or reopen the same browser
+session to obtain another preview. This host presentation rule applies even when
+an app's older guidance suggests attaching its card to every final response.
+
+Copy the producer's complete component reference, including an optional
+`resource: {app_install_id, resource_type, resource_id}`. These are the SDK's
+resource locator fields, not an access grant. Never guess installation IDs or
+resource types. `conversations_send` returns `view_refs` when such references are
+present. Preserve them through follow-ups and delegation. If an explicit refresh
+needs changed display props, reuse that exact resource reference; the host keeps
+one mounted view for it. A different resource gets a different view. Legacy
+cards without a resource locator can still be pinned and identical references
+are coalesced, but do not rely on changed props having the same identity.
+
+For work the user should watch live, attach the view once in a concise
+`phase=progress` message after the resource opens, then keep working. This is a
+meaningful visual handoff and can happen before the usual progress interval.
+Do not repeat that card in the final outcome. If work is already complete,
+attach it once to the final instead. Do not add a separate component-only send.
+The producer owns updates and cleanup. Pinning is not permission to keep a
+browser session alive; close it normally unless the user asked to keep it open.
+Questions/forms and approval decisions retain their existing message identity
+and action lifecycle; they are not reusable resource previews.
 
 ## Thread ownership and delegation
 

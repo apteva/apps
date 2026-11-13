@@ -8,6 +8,7 @@ import type { CardComponent, InteractionField, Message } from "./types";
 export interface ConversationComponentProps {
  message:Message;
  component:CardComponent;
+ componentKey?:string;
  projectId?:string;
  submit:(action:string,values?:Record<string,unknown>)=>Promise<Message>;
 }
@@ -134,7 +135,7 @@ export function MessageComponents({message,onApprovalAction,onChanged,projectId}
   if(component.app==="conversations"&&component.name==="report-card")return <ReportCard key={key} message={single}/>;
   if(component.app==="conversations"&&component.name==="alert-card")return <AlertCard key={key} message={single}/>;
   const Renderer=renderers[`${component.app}/${component.name}`]??(component.interaction?InteractionCard:InstalledRenderer);
-  if(Renderer)return <Renderer key={key} message={message} component={component} submit={submit} projectId={projectId??conversationsClient.projectId}/>;
+  if(Renderer)return <Renderer key={key} message={message} component={component} componentKey={key} submit={submit} projectId={projectId??conversationsClient.projectId}/>;
   return <p key={key} role="status" className="rounded border border-border p-3 text-sm text-text-muted">{t("component.previewUnavailable")}</p>;
  })}</div>;
 }

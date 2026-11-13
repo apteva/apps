@@ -1,0 +1,27 @@
+name: conversations-persistent-resource-views
+description: Real Codex reuses a live resource across follow-ups; Chromium keeps one stateful view while docking, floating, resizing, refreshing props and reopening history.
+timeout: 12m
+max_iterations: 120
+setup:
+  app:
+    path: .
+  apps:
+    - path: ./testdata/view-fixture
+      spawnable: true
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_PersistentResourceViews$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are a concise operations assistant. Follow the Conversations skill and
+  use View Fixture tools to open or advance existing live preview resources.
+  This is isolated local test work; do not contact external services.
+budget:
+  total_tokens: 1200000
+trajectory_assert:
+  - tool_called: view-fixture_open
+  - tool_called: view-fixture_advance
+  - tool_called: conversations_send
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: progress
+      before: view-fixture_advance

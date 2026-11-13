@@ -50,6 +50,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Alert | Agent-created, titled operator conversation and warning/error inbox card |
 | Approval round trip | Advertised action accepted, card updated in place, verdict acknowledged |
 | Report | Same report present in inbox and transcript |
+| Persistent resource views | Real Codex presents a resource once, performs two normal follow-ups without duplicate cards, explicitly refreshes the same reference, then opens a second resource; Chromium verifies side/floating/inline placements, retained component and iframe state, live updates, switching and history restoration |
 | Installed app cards | Real Codex opens a local Computer browser session and attaches Computer/Tasks cards; Chromium loads actual installed modules, a durable final screenshot and working task details across widget/panel/project/Inbox surfaces; review preserves the operator draft |
 | Work conversation Inbox | Local reports, alerts and approvals stay in the originating conversation; a scheduled follow-up reuses it without creating a generic topic |
 | Public escalation | Visitor reply with no inbox leakage; escalation in operator chat |

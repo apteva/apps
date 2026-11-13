@@ -23,3 +23,8 @@ const hostProps: Pick<ChatProps, "host"> = {host};
 // @ts-expect-error Host presentation policies cannot force a disabled launcher on.
 host.ui.request({chatAssistant:{launcher:"show"}});
 void hostProps;
+
+import type {CardPresentation,CardComponent} from "../dist/react";
+const presentation:CardPresentation={mode:"floating",width:400,height:500,active:true};
+const reference:CardComponent={app:"computer",name:"browser-view",resource:{app_install_id:19,resource_type:"computer.browser_session",resource_id:"br_example"},props:{session_id:"br_example"}};
+void [presentation,reference];

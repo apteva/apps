@@ -19,6 +19,7 @@ export interface InteractionField {id:string;label:string;type:"text"|"textarea"
 export interface InteractionAction {id:string;label:string;style?:"primary"|"secondary"|"danger";cancel?:boolean}
 export interface ComponentInteraction {blocking:boolean;inbox?:boolean;expires_at?:string;fields?:InteractionField[];actions:InteractionAction[];status:"pending"|"answered"|"cancelled"|"expired";action_id?:string;values?:Record<string,unknown>;resolved_by?:number;resolved_at?:string}
 export interface CardComponent {
+  resource?: {app_install_id:number;resource_type:string;resource_id:string};
   id?:string;
   version?:number;
   interaction?:ComponentInteraction;
