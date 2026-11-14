@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.4.0
+version: 0.4.1
 description: |
   Operate physical Android and iOS devices through exclusive sessions.
   Navigate websites, install and launch apps, inspect screens and UI trees,
@@ -94,7 +94,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: mobile/v0.4.0
+    ref: mobile/v0.4.1
     entry: mcp/mobile
   port: 8080
   health_check: /health

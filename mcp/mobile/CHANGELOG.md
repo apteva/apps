@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-11-14
+
+- Embed the production panel, source map and icon in the app binary and serve
+  them through exact asset routes. Packaged installs with an empty runtime UI
+  directory can load the Mobile panel, including Android power controls.
+- Add an asset-serving regression check using an empty working directory.
+
 ## 0.4.0 — 2026-11-14
 
 - Add an Android **Stay awake while charging** option under session controls.
