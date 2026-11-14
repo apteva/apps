@@ -12,6 +12,7 @@ interface Upload { status: string; storage_file_id?: number; error?: string }
 interface Recording { id: string; kind: "capture" | "export"; parent_id?: string; session_id?: string; run_id?: string; device_id?: string; platform?: string; method?: string; preset?: string; audio: boolean; status: string; file_name?: string; size_bytes: number; duration_ms: number; width: number; height: number; fps: number; video_codec?: string; audio_codec?: string; markers: Marker[]; checks: Check[]; valid?: boolean; error?: string; created_at: number; started_at?: number; file_url?: string; upload?: Upload }
 interface Preset { name: string; description?: string; sizes?: Record<string, { w: number; h: number }>; default_variant?: string; min_seconds?: number; max_seconds?: number; orientations?: string[] }
 interface IOSSetup { state: string; message: string; team_id?: string; teams: {id: string; name: string; personal: boolean}[] }
+interface PowerSettings { keep_awake_while_charging: boolean; charging_sources: string[]; normal_screen_timeout_ms?: number }
 
 const API = "/api/apps/mobile/api";
 const sample = JSON.stringify([
@@ -58,6 +59,8 @@ export default function MobilePanel({ projectId }: Props) {
   const [iosSetup, setIOSSetup] = useState<IOSSetup | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [pendingConnection,setPendingConnection] = useState(false);
+  const [power, setPower] = useState<PowerSettings | null>(null);
+  const [powerError, setPowerError] = useState("");
   const connection = useRef<AbortController | null>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
 
@@ -117,6 +120,22 @@ export default function MobilePanel({ projectId }: Props) {
   const working = recordings.some(r => r.status === "recording" || r.status === "processing");
   const video = recordings.find(r => r.id === selectedRecording);
   const caps = device?.capabilities || session?.device.capabilities || [];
+  const canSetPower = active && session?.device.capabilities.includes("keep_awake");
+
+  useEffect(() => { setPower(null); setPowerError(""); }, [sessionID]);
+  useEffect(() => {
+    if (!canSetPower || busy) return;
+    const abort = new AbortController(); let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const status = await call("mobile_power", {session_id: sessionID, action: "status"}, abort.signal);
+        if (!abort.signal.aborted) { setPower(status); setPowerError(""); }
+      } catch (e) { if (!abort.signal.aborted) setPowerError((e as Error).message); }
+      if (!abort.signal.aborted) timer = setTimeout(poll, 10000);
+    };
+    void poll();
+    return () => { abort.abort(); clearTimeout(timer); };
+  }, [call, canSetPower, sessionID, busy]);
 
   useEffect(() => {
     if (!capturing) return;
@@ -335,6 +354,22 @@ export default function MobilePanel({ projectId }: Props) {
               </section>
 
               <aside className="shrink-0 w-full lg:w-72 border-t lg:border-t-0 lg:border-l border-border p-4 space-y-5" aria-label="Session controls">
+                {canSetPower && <section className="space-y-2" aria-label="Power settings">
+                  <h2 className={sectionTitleClass}>Power</h2>
+                  <label className="flex items-center gap-2 text-sm text-text">
+                    <input type="checkbox" aria-label="Stay awake while charging" checked={power?.keep_awake_while_charging ?? false} disabled={busy || !power} onChange={e => {
+                      const enabled = e.target.checked;
+                      void perform(async () => {
+                        const updated = await call("mobile_power", {session_id: sessionID, action: "set", enabled});
+                        setPower(updated); setNotice(enabled ? "Phone will stay awake while charging." : "Phone uses its normal screen timeout.");
+                      });
+                    }} />
+                    Stay awake while charging
+                  </label>
+                  <p className="text-xs text-text-dim">Saved on the phone, including after closing this session. Unplugged, its normal screen timeout applies.</p>
+                  {power && <p className="text-xs text-text-muted" role="status">{power.keep_awake_while_charging ? `Enabled for ${power.charging_sources.join(", ")} charging.` : "Normal screen timeout."}</p>}
+                  {powerError && <p className="text-xs text-error" role="alert">{powerError}</p>}
+                </section>}
                 <section>
                   <h2 className={`${sectionTitleClass} mb-3`}>Input</h2>
                   <form className="space-y-2" onSubmit={e => { e.preventDefault(); void perform(async () => { await act("text", { text }); setText(""); }); }}>

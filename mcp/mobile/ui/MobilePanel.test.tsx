@@ -10,6 +10,7 @@ let browser:Window,root:Root,container:HTMLElement;
 const oldFetch=globalThis.fetch;
 let requests:{tool:string,args:any}[], setup:any, currentSession:any, attempts:number, preparing:boolean;
 const phone={id:"ios:PHONE",name:"Spare iPhone",platform:"ios",physical:true,driver:"xctest",state:"ready",capabilities:["screen"]};
+let targetPhone=phone, power:any, denyPower:boolean;
 const json=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:{"Content-Type":"application/json"}});
 const button=(label:string)=>[...container.querySelectorAll("button")].find(b=>b.textContent===label)!;
 const click=async(label:string)=>{expect(button(label)).toBeDefined();await act(async()=>{button(label).click();});};
@@ -17,19 +18,27 @@ beforeEach(()=>{
  browser=new Window();Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Event:browser.Event,IS_REACT_ACT_ENVIRONMENT:true});
  container=browser.document.createElement("div") as any;browser.document.body.appendChild(container as any);root=createRoot(container);
  requests=[];currentSession=null;attempts=0;preparing=false;
+ targetPhone=phone;power={keep_awake_while_charging:false,charging_sources:[],normal_screen_timeout_ms:30000};denyPower=false;
  setup={state:"ready",message:"Signing configured automatically",team_id:"AAAAAAAAAA",teams:[{id:"AAAAAAAAAA",name:"Personal Team",personal:true}]};
  globalThis.fetch=(async(_input:any,init:any)=>{
   const req=JSON.parse(init.body);requests.push(req);const a=req.args;
   switch(req.tool){
-   case "mobile_devices":return json({devices:[phone],diagnostics:[]});
+   case "mobile_devices":return json({devices:[targetPhone],diagnostics:[]});
    case "mobile_session":
     if(a.action==="list")return json({sessions:currentSession?[currentSession]:[]});
     if(a.action==="open"){
      attempts++;if(preparing&&attempts===1)return json({code:"setup_in_progress",error:"Building runner"},502);
-     currentSession={id:"session-1",device_id:phone.id,device:phone,status:"active",mode:"screen",expires_at:Date.now()/1000+900};
+     currentSession={id:"session-1",device_id:targetPhone.id,device:targetPhone,status:"active",mode:"screen",expires_at:Date.now()/1000+900};
      return json({session:currentSession});
     }
+    if(a.action==="close"){currentSession=null;return json({session:{id:"session-1",status:"closed"}});}
     break;
+   case "mobile_power":
+    if(a.action==="set"){
+     if(denyPower)return json({error:"Device policy denied the change",code:"device_unavailable"},409);
+     power={...power,keep_awake_while_charging:a.enabled,charging_sources:a.enabled?["AC","USB","wireless","dock"]:[]};
+    }
+    return json(power);
    case "mobile_setup":
     if(a.action==="select_team")setup={...setup,state:"ready",team_id:a.team_id,message:"Signing configured automatically"};
     return json(setup);
@@ -71,4 +80,27 @@ test("first build retries automatically and shows preparation progress",async()=
  expect(container.textContent).toContain("Preparing your iPhone");
  await act(async()=>{await new Promise(r=>setTimeout(r,3200));});
  expect(attempts).toBe(2);expect(container.textContent).toContain("Screen session");
+});
+
+const android=()=>{targetPhone={...phone,id:"android:PHONE",name:"Spare Android",platform:"android",driver:"adb",capabilities:["screen","keep_awake"]};};
+const powerToggle=()=>container.querySelector('input[aria-label="Stay awake while charging"]') as HTMLInputElement;
+test("Android power toggle reads the phone and persists on then off explicitly",async()=>{
+ android();await render();expect(powerToggle()).toBeNull();await click("Open session");
+ expect(powerToggle().checked).toBe(false);expect(container.textContent).toContain("Unplugged, its normal screen timeout applies");
+ await act(async()=>{powerToggle().click();});
+ expect(requests).toContainEqual({tool:"mobile_power",args:{session_id:"session-1",action:"set",enabled:true}});expect(powerToggle().checked).toBe(true);
+ await act(async()=>{powerToggle().click();});
+ expect(requests).toContainEqual({tool:"mobile_power",args:{session_id:"session-1",action:"set",enabled:false}});expect(powerToggle().checked).toBe(false);
+});
+test("Android power state survives closing and reopening the session",async()=>{
+ android();power={...power,keep_awake_while_charging:true,charging_sources:["USB"]};await render();await click("Open session");
+ expect(powerToggle().checked).toBe(true);await click("Close session");await click("Open session");
+ expect(powerToggle().checked).toBe(true);expect(requests.filter(r=>r.tool==="mobile_power"&&r.args.action==="set")).toHaveLength(0);
+});
+test("rejected power changes show the error and retain actual phone state",async()=>{
+ android();denyPower=true;await render();await click("Open session");await act(async()=>{powerToggle().click();});
+ expect(container.textContent).toContain("Device policy denied the change");expect(powerToggle().checked).toBe(false);
+});
+test("iPhone controls do not offer the Android-only power option",async()=>{
+ await render();await click("Open session");expect(powerToggle()).toBeNull();expect(requests.some(r=>r.tool==="mobile_power")).toBe(false);
 });

@@ -129,7 +129,7 @@ func TestPanelAndMCPUseSameTools(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(names) != 12 || len(m.Provides.MCPTools) != len(names) {
+	if len(names) != 13 || len(m.Provides.MCPTools) != len(names) {
 		t.Fatalf("manifest and implementation disagree: %d tools vs %d declarations", len(names), len(m.Provides.MCPTools))
 	}
 	for _, tool := range m.Provides.MCPTools {

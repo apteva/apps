@@ -240,6 +240,26 @@ passing steps. Capture failure, missing requested audio, an early recorder exit,
 or a finalization error fails the run while retaining its step evidence and any
 usable media. An existing assertion/cancellation failure keeps its classification.
 
+### Keep an Android test phone awake
+
+Open an Android ADB session, then enable **Power → Stay awake while charging**
+in the session controls. Mobile reads the actual phone preference and verifies
+changes. It covers AC, USB, wireless and dock charging. The preference is saved
+on the phone and remains enabled after closing the session or Mobile. Turning
+it off restores normal idle timeout behavior; it does not change that timeout.
+On battery the phone uses its normal screen timeout. Manual locking still works.
+
+Agents can use the same option through an owned active session:
+
+```json
+{"tool":"mobile_power","args":{"session_id":"ses_...","action":"status"}}
+{"tool":"mobile_power","args":{"session_id":"ses_...","action":"set","enabled":true}}
+```
+
+This option is advertised as the `keep_awake` capability. It is currently
+available for Android ADB sessions; iPhone Auto-Lock remains a phone setting.
+Mobile does not change it automatically when opening a session.
+
 ### Android capture timing
 
 Install ffmpeg and ffprobe on the runner for both recording qualities. Android
