@@ -76,17 +76,14 @@ func fetchRecord(ctx *sdk.AppCtx, app string, id int64) (map[string]any, error) 
 		}
 		return record, nil
 	}
-	if e := scoped.PlatformAPI().CallAppResult(app, "post_list", map[string]any{"limit": 200}, &out); e != nil {
+	posts, e := fetchSocialPosts(scoped, map[int64]bool{id: true})
+	if e != nil {
 		return nil, e
 	}
-	posts, _ := out["posts"].([]any)
-	for _, p := range posts {
-		record, ok := p.(map[string]any)
-		if ok && number(record, "id") == id {
-			return record, nil
-		}
+	if record := posts[id]; record != nil {
+		return record, nil
 	}
-	return nil, invalid("linked post is not in Social's latest 200 posts; previous results have been preserved")
+	return nil, invalid("linked Social post was not found; previous results preserved")
 }
 func (a *App) refresh(ctx *sdk.AppCtx, id int64) (any, error) {
 	pid := ctx.CurrentProject()
@@ -104,6 +101,16 @@ func (a *App) refresh(ctx *sdk.AppCtx, id int64) (any, error) {
 	// Re-read brand mappings under the write lock before saving the snapshot.
 	a.writes.Lock()
 	defer a.writes.Unlock()
+	if r.App == "social" {
+		saved, _, err := a.syncSocialRelease(ctx, r, record)
+		if err != nil {
+			return nil, err
+		}
+		if err = a.syncSocialParent(ctx, saved.ItemID); err != nil {
+			return nil, err
+		}
+		return saved, nil
+	}
 	parent, e := readItem(ctx.AppDB(), pid, r.ItemID)
 	if e != nil {
 		return nil, e
@@ -115,7 +122,7 @@ func (a *App) refresh(ctx *sdk.AppCtx, id int64) (any, error) {
 	if !brandAllows(findBrand(s, parent.BrandID), r.App, record) {
 		return nil, invalid("linked record is outside this brand's mappings; previous results preserved")
 	}
-	patch := map[string]any{"results": record, "synced_at": time.Now().UTC().Format(time.RFC3339)}
+	patch := map[string]any{"results": mergeResultObject(r.Results, record), "synced_at": time.Now().UTC().Format(time.RFC3339)}
 	// Remote status stays separate from the planner's intent.
 	return saveRelease(ctx.AppDB(), pid, id, 0, r.Revision, patch, true)
 }

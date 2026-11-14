@@ -62,7 +62,7 @@ func (a *App) Workers() []sdk.Worker {
 	// The SDK fans this out per project on every tick — the pinned project for a
 	// project-scoped install, every project the owner can see for a global one —
 	// so the body only ever handles one project at a time.
-	return []sdk.Worker{{Name: "due_scanner", Schedule: dueSchedule, Run: a.runDueScanner}}
+	return []sdk.Worker{{Name: "due_scanner", Schedule: dueSchedule, Run: a.runMaintenance}}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -178,7 +178,7 @@ func toolSpecs() []toolSpec {
 		{"releases_update", "Update using current revision. Release status is separate from content workflow status. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(releaseProperties(releaseFields))}, "id", "revision", "patch")},
 		{"releases_get", "Read one release without history. Results are omitted by default; results_keys selects exact top-level result keys. include_results=true explicitly reads all results.", object(releaseReadProperties(), "id")},
 		{"releases_merge_results", "Atomically recursively merge only supplied result keys with a current revision. Unspecified keys/history remain untouched; arrays replace, null is a literal value. Returns compact receipt; never changes the publisher binding or external delivery.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "merge": map[string]any{"type": "object"}}, "id", "revision", "merge")},
-		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
+		{"releases_refresh", "Refresh linked delivery results and Social destination/parent status. Missing or ambiguous destinations preserve existing state.", object(properties([]string{"id"}), "id")},
 		{"calendar", "List dated items and channel releases between from and to (YYYY-MM-DD) as one flat, sorted stream. Defaults to the next 30 days. date_field planned_at or deadline; releases appear on planned_at only.", object(properties([]string{"from", "to", "date_field", "brand_id", "include_releases", "limit"}))},
 		{"settings_get", "Read project brands, content workflow statuses, formats, channel suggestions and the due-date timezone and time. The first status and format are the defaults used when an item omits them.", object(nil)},
 		{"settings_update", "Configure brands, formats, statuses, channels and when a bare date falls due (timezone as an IANA name, due_time as HH:MM). Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels", "timezone", "due_time"}), "revision", "statuses", "formats", "channels")},

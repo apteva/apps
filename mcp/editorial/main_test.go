@@ -358,13 +358,13 @@ func TestOptionalIntegrationReadOnlyRefresh(t *testing.T) {
 		t.Fatal(p.calls)
 	}
 	p.bindings["social"] = float64(7)
-	p.result = map[string]any{"posts": []any{map[string]any{"id": 21, "status": "published", "targets": []any{map[string]any{"platform_url": "https://example.com/post"}}}}}
+	p.result = map[string]any{"posts": []any{map[string]any{"id": 21, "status": "published", "targets": []any{map[string]any{"id": 1, "platform": "linkedin", "social_account_id": 1, "status": "published", "platform_url": "https://example.com/post"}}}}}
 	v, e = a.dispatch(c, "releases_refresh", map[string]any{"id": r.ID})
 	if e != nil {
 		t.Fatal(e)
 	}
 	r = v.(Release)
-	if r.Results["status"] != "published" || r.SyncedAt == "" || r.PlannedAt != "2026-10-01" || r.Status != "planned" {
+	if r.Results["social_delivery"].(map[string]any)["status"] != "published" || r.SyncedAt == "" || r.PlannedAt != "2026-10-01" || r.Status != "published" {
 		t.Fatal(r)
 	}
 	if p.project != "alpha" || len(p.calls) != 1 || p.calls[0] != "social/post_list" {
@@ -375,7 +375,7 @@ func TestOptionalIntegrationReadOnlyRefresh(t *testing.T) {
 		t.Fatal("missing result accepted")
 	}
 	saved, _ := readRelease(c.AppDB(), "alpha", r.ID)
-	if saved.Revision != r.Revision || saved.Results["status"] != "published" {
+	if saved.Revision != r.Revision || saved.Results["social_delivery"].(map[string]any)["status"] != "published" {
 		t.Fatal("lost results")
 	}
 	p.bindings["campaigns"] = float64(8)

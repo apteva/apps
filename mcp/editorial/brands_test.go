@@ -106,7 +106,7 @@ func TestBrandConnectionFilteringAndRefresh(t *testing.T) {
 	}
 	i := create(t, a, c, map[string]any{"title": "Sample", "brand_id": "acme"})
 	post := func(id, account int) map[string]any {
-		return map[string]any{"id": id, "targets": []any{map[string]any{"social_account_id": account}}}
+		return map[string]any{"id": id, "targets": []any{map[string]any{"social_account_id": account, "platform": "linkedin", "status": "published"}}}
 	}
 	p.result = map[string]any{"posts": []any{post(21, 10), post(22, 11)}}
 	v, e := a.dispatch(c, "integrations", map[string]any{"app": "social", "brand_id": "acme"})
