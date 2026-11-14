@@ -72,6 +72,6 @@ func (a *App) resumeRetiredStep(s StepRun) error {
 	_, err = a.db.Exec(`UPDATE process_step_runs SET state='ready',delivery_suspended=0,delivery_warning='',error='',
  target_thread_id='',delivery_event_id='',delivered_at='',execution_id='',lifecycle_sequence=0,
  delivery_attempts=0,next_attempt_at='',claimed_at='',claim_next_at='',claim_event_id='',claim_attempts=0,
- updated_by='operator',updated_at=?,revision=revision+1 WHERE id=?`, timestamp(), s.ID)
+ wait_json='',wait_wake_at='',updated_by='operator',updated_at=?,revision=revision+1 WHERE id=?`, timestamp(), s.ID)
 	return err
 }

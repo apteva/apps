@@ -79,6 +79,8 @@ type StepRun struct {
 	LifecycleSequence int64    `json:"-"`
 	ExecutionState    string   `json:"execution_state,omitempty"`
 
+	Wait *WorkerWait `json:"wait,omitempty"`
+
 	// Provider is set only when the assignment pinned this step's worker.
 	Provider *sdk.ThreadProviderStatus `json:"provider,omitempty"`
 }
@@ -189,17 +191,20 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 	return nil
 }
 
-const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at,claimed_at,claim_attempts,claim_next_at,claim_event_id,retain_worker`
+const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at,claimed_at,claim_attempts,claim_next_at,claim_event_id,retain_worker,wait_json`
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
-	var def, executor, legacyDecision, legacyTaskID string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt, &s.ClaimedAt, &s.ClaimAttempts, &s.ClaimNextAt, &s.ClaimEventID, &s.RetainWorker)
+	var def, executor, legacyDecision, legacyTaskID, waitJSON string
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt, &s.ClaimedAt, &s.ClaimAttempts, &s.ClaimNextAt, &s.ClaimEventID, &s.RetainWorker, &waitJSON)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
 	if e == nil {
 		e = json.Unmarshal([]byte(executor), &s.Executor)
+	}
+	if e == nil && waitJSON != "" {
+		e = json.Unmarshal([]byte(waitJSON), &s.Wait)
 	}
 	// Legacy native approvals are ordinary generic steps from 0.16 onward.
 	s.Definition.Kind = ""
@@ -635,7 +640,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if s.DeliveryEventID != "" {
 		eventID = s.DeliveryEventID
 	}
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Retain context across assigned steps. When blocked, awaiting approval or waiting for a Processes event with no delivered ready work or active child work, call pace with clear_wake=true to park until an event. Never set a periodic sleep to check this run; Processes owns scheduling and recovery. Processes releases this worker after its recoverable work finishes, including between timed steps; the saved run continues later with its recorded evidence. Keep this worker attached while a business approval or callback depends on this thread. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Retain context across assigned steps. When waiting on a thread-bound dependency, keep the worker and preserve any required native timer exactly. Use pace(clear_wake=true) only if no native deadline is required. Never set periodic sleeps to check this run; Processes owns scheduling and recovery. Processes releases this worker after its recoverable work finishes, including between timed steps; the saved run continues later with its recorded evidence. Keep this worker attached while a business approval or callback depends on this thread. "+workerWaitContract+" For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
 	if aiParallel(*r) {
 		directive = parallelWorkerDirective(*r)
 	}
@@ -768,6 +773,10 @@ func (a *App) writeStep(s StepRun, state string, progress int, output, reason, a
 	return a.writeStepClaim(s, state, progress, output, reason, actor, false)
 }
 func (a *App) writeStepClaim(s StepRun, state string, progress int, output, reason, actor string, claim bool) error {
+	return a.writeStepWait(s, state, progress, output, reason, actor, claim, nil)
+}
+
+func (a *App) writeStepWait(s StepRun, state string, progress int, output, reason, actor string, claim bool, wait *WorkerWait) error {
 	tx, e := a.db.Begin()
 	if e != nil {
 		return e
@@ -783,6 +792,12 @@ func (a *App) writeStepClaim(s StepRun, state string, progress int, output, reas
 	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision='',updated_by=?,updated_at=?,revision=revision+1,completed_at=CASE WHEN ?='completed' AND completed_at='' THEN ? ELSE completed_at END,retain_worker=CASE WHEN ?='runtime' THEN retain_worker WHEN ? IN ('waiting','blocked') THEN 1 ELSE 0 END,delivery_suspended=CASE WHEN ?<>'runtime' AND ?='running' THEN 0 ELSE delivery_suspended END WHERE id=?`, state, progress, output, reason, actor, now, state, now, actor, state, actor, state, s.ID)
 	if e != nil {
 		return e
+	}
+	if e = saveWorkerWait(tx, s, actor, wait); e != nil {
+		return e
+	}
+	if wait.releasable() {
+		state = "blocked"
 	}
 	_, e = tx.Exec(`INSERT INTO process_step_events(step_id,actor,state,output,error,created_at) VALUES(?,?,?,?,?,?)`, s.ID, actor, state, output, reason, now)
 	if e != nil {
@@ -1206,7 +1221,7 @@ func currentWorkerReminderError(s StepRun, l *sdk.AgentEventLifecycle) bool {
 }
 
 func (a *App) holdWorkerExecutionError(s StepRun, reason string) error {
-	if terminal(s.State) {
+	if terminal(s.State) || (s.Wait.releasable() && s.DeliverySuspended) {
 		return nil
 	}
 	reason = strings.TrimSpace(reason)
@@ -1377,13 +1392,20 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 	if actor == "operator" && str(args, "state") == "running" && s.State == "blocked" && s.DeliverySuspended && s.UpdatedBy == "runtime" && !terminal(r.State) {
 		return a.resumeRetiredStep(s)
 	}
-	if e := a.authorizeStepWrite(s, r, all, actor); e != nil {
-		return e
-	}
 	var normalizeError error
 	args, normalizeError = normalizeHandoff(args)
 	if normalizeError != nil {
 		return normalizeError
+	}
+	if s.Wait != nil && s.Wait.releasable() && s.DeliverySuspended {
+		// Retries of a saved checkpoint are acknowledgements, never new work.
+		if strings.HasPrefix(actor, "agent:") && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, s.ThreadID) && sameWaitRetry(s, args) {
+			return nil
+		}
+		return errors.New("step checkpoint is parked; use explicit operator recovery after retirement")
+	}
+	if e := a.authorizeStepWrite(s, r, all, actor); e != nil {
+		return e
 	}
 	state := str(args, "state")
 	switch state {
@@ -1435,7 +1457,11 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 		if terminal(r.State) && !(s.Origin == "attached" && !s.Required && r.State == "completed") {
 			return errors.New("run is terminal")
 		}
-		if e := a.writeStep(s, state, progress, output, reason, actor); e != nil {
+		wait, err := parseWorkerWait(args, state, r, s, output)
+		if err != nil {
+			return err
+		}
+		if e := a.writeStepWait(s, state, progress, output, reason, actor, false, wait); e != nil {
 			return e
 		}
 	}

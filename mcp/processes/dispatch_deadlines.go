@@ -41,6 +41,10 @@ func (a *App) nextQueueWake(ctx context.Context, project string) (time.Time, err
 // pass was running still wake the dispatcher. An overdue step waiting for a
 // controller or a busy worker instead wakes on the next state change.
 func (a *App) nextRunWake(ctx context.Context, project string, checkedAt time.Time) (time.Time, error) {
+	next, waitErr := a.nextWorkerWaitWake(ctx, project, checkedAt)
+	if waitErr != nil {
+		return time.Time{}, waitErr
+	}
 	rows, err := a.db.QueryContext(ctx, `WITH open_runs AS (
  SELECT id,workflow,backend,delivered_at,delivery_suspended,next_attempt_at
  FROM process_runs r WHERE `+openRunsInProject+`
@@ -74,7 +78,6 @@ func (a *App) nextRunWake(ctx context.Context, project string, checkedAt time.Ti
 		return time.Time{}, err
 	}
 	defer rows.Close()
-	var next time.Time
 	for rows.Next() {
 		var kind, claim, retry string
 		var base sql.NullString

@@ -111,9 +111,9 @@ exact output receipts rather than replacing them with remembered context.
 Workers use `step_claim` before acting and inspect `step_update.done`: call the
 native done tool immediately when true; otherwise follow `next_action`: continue
 the current step after progress, or await the next app event after completion.
-When no delivered ready work or active child work remains, park with
-`pace(clear_wake=true)` to clear automatic wakes and retain context until an
-event arrives. Never set periodic sleep timers to check Processes state.
+When no delivered ready work, active child work, or required native deadline
+remains, park with `pace(clear_wake=true)` until an event arrives. Preserve
+required native timers exactly and register their ownership with `wait`. Never set periodic sleep timers to check Processes state.
 Processes durably stops run workers on completion, failure or cancellation,
 with retries and recovery after restart; main does not need to kill them.
 Main receives a compact terminal event and can reread the saved outcome once.
@@ -259,3 +259,36 @@ requires explicit operator recovery after retirement.
 stays queued; do not create extra workers to bypass
 admission. Keep a routing procedure to one step and finish it after recording
 the verified durable child run, while customer handling continues independently.
+
+
+## Durable wait ownership (0.18.3)
+
+`step_update.wait` records why a worker must remain attached. Save the original
+blocker and an exact recoverable output checkpoint with every wait.
+
+| Kind | Ownership and recovery |
+| --- | --- |
+| `hold` | No live approval, callback, child or native timer remains. Suspend the step and automatically release its worker. Explicit operator recovery is required; no automatic replay. |
+| `timer` | New Processes-owned delay. Save an exact RFC3339 `wake_at`; release the worker and resume the same step from its checkpoint at that deadline. |
+| `approval` | Retain the owner of the exact pending approval `reference`. |
+| `callback` | Retain the owner of the exact callback/subscription `reference`. |
+| `thread_timer` | Retain the owner and exact existing native `wake_at` and timer `reference`. Never clear/recreate an armed native timer to migrate it. |
+
+The assigned worker verifies dependency records before surrendering ownership.
+A missing reference or an expired-looking message is not evidence that a real
+approval/callback/timer has settled. Unknown ownership remains attached.
+Non-delegating workers only may use releasable waits. Delegating owners keep
+their children and callbacks.
+
+Legacy waiting/blocked steps receive one tracked ownership-revalidation request
+per saved revision after ten minutes, in batches of ten per project. The event
+uses a stable identity across lost replies and sidecar restarts. The worker
+checks the original records and registers its actual dependency or parks a stale
+hold. A missing response never authorizes termination. This is a bounded upgrade
+handshake, not recurring model polling of every wait.
+
+Checkpoint, ownership, suspension and audit history commit together. A `done`
+acknowledgement follows durable retirement reservation. Timer continuations wait
+for cleanup acknowledgement, use fresh worker/delivery identities, and preserve
+output, progress, evidence and frozen policy. Legacy timers/approvals remain
+attached until explicitly classified; they are never expired just by age.

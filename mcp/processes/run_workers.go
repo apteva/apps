@@ -61,6 +61,9 @@ func (a *App) runWorker(run string, agent int64) (string, error) {
 }
 
 func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
+	if s.Wait.releasable() && s.DeliverySuspended {
+		return errors.New("step is durably parked; wait for Processes timer or explicit operator recovery")
+	}
 	if !stepReleased(r, s) {
 		return errors.New("step is held for controller advancement")
 	}

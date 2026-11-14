@@ -331,10 +331,11 @@ func (a *App) tickDirect(ctx context.Context, now time.Time, scope ...string) er
 	defer a.mu.Unlock()
 	now = now.UTC()
 
+	waitErr := a.reconcileWorkerWaits(ctx, project, now)
 	// Schedule first so newly recorded occurrences can dispatch in this tick.
 	scheduleErr := a.scheduleDueAssignments(ctx, project, now)
 	runs, runErr := a.pendingRuns(ctx, project, now)
-	failures := []error{scheduleErr, runErr}
+	failures := []error{waitErr, scheduleErr, runErr}
 	for i := range runs {
 		if ctx.Err() != nil {
 			return ctx.Err()

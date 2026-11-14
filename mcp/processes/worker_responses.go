@@ -20,6 +20,8 @@ type WorkerStep struct {
 	Error      string   `json:"error,omitempty"`
 	StartAt    string   `json:"start_at,omitempty"`
 	DueAt      string   `json:"due_at,omitempty"`
+
+	Wait *WorkerWait `json:"wait,omitempty"`
 }
 
 type WorkerAssignment struct {
@@ -32,12 +34,12 @@ type WorkerAssignment struct {
 func workerStep(s StepRun) WorkerStep {
 	return WorkerStep{ID: s.ID, Key: s.Key, Definition: s.Definition, Executor: s.Executor,
 		State: s.State, ReleasedAt: s.ReleasedAt, Progress: s.Progress, Revision: s.Revision, Output: s.Output,
-		Error: s.Error, StartAt: s.StartAt, DueAt: s.DueAt}
+		Error: s.Error, StartAt: s.StartAt, DueAt: s.DueAt, Wait: s.Wait}
 }
 
 func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, string) {
 	persistent := worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker)
-	done := terminal(r.State) || terminal(s.State)
+	done := terminal(r.State) || terminal(s.State) || (s.Wait.releasable() && s.DeliverySuspended)
 	if persistent {
 		done = persistentWorkerDone(r, s.Executor.AgentID, all)
 	}
@@ -61,7 +63,10 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 		return false, "Continue your claimed work and assess ready_steps for useful parallel delegation within max_parallel_steps. Await Processes events or child results when no eligible work remains; do not poll."
 	}
 	if s.State == "waiting" || s.State == "blocked" {
-		return false, "Retain this worker and await resolution of the recorded blocker; park using pace(clear_wake=true) until an event; do not set a sleep timer, poll or repeat completed actions."
+		if s.Wait == nil {
+			return false, "Retain this worker and await resolution. Register step_update.wait (see schema). Preserve existing approvals/callbacks/timers; use pace(clear_wake=true) only if no native deadline is required. Never replay actions."
+		}
+		return false, "Retain this worker and await resolution of its registered dependency. Preserve any existing native timer exactly; do not clear or replace it. If no native timer is required, park with pace(clear_wake=true). Do not poll or repeat completed actions."
 	}
 	if !terminal(s.State) {
 		return false, "Continue only this assigned step; use step_get if you need to recover its context or saved checkpoint."
@@ -76,6 +81,9 @@ func workerAcknowledgement(process string, r Run, s StepRun, done bool, next str
 	result := map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID,
 		"control_mode": controlMode(r), "revision": s.Revision, "state": s.State, "progress": s.Progress, "run_state": r.State,
 		"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID)}
+	if s.Wait != nil {
+		result["wait"] = s.Wait
+	}
 	if s.Error != "" {
 		result["error"] = s.Error
 	}
