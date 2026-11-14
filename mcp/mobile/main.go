@@ -23,6 +23,12 @@ import (
 //go:embed apteva.yaml
 var manifestBytes []byte
 
+// Keep the panel available when a packaged runtime has no populated ./ui dir.
+// Exact asset routes coexist with the SDK's optional directory handler.
+//
+//go:embed ui/*.mjs ui/*.mjs.map ui/icon.svg
+var embeddedUI embed.FS
+
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
@@ -258,7 +264,18 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/api/call", Handler: a.handleCall}, {Pattern: "/api/screen/", Handler: a.handleScreen}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}, {Pattern: "/api/recordings/", Handler: a.handleRecording}}
+	routes := []sdk.Route{{Pattern: "/api/call", Handler: a.handleCall}, {Pattern: "/api/screen/", Handler: a.handleScreen}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}, {Pattern: "/api/recordings/", Handler: a.handleRecording}}
+	assets := http.FileServer(http.FS(embeddedUI))
+	serveAsset := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".mjs.map") {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		assets.ServeHTTP(w, r)
+	}
+	for _, path := range []string{"/ui/MobilePanel.mjs", "/ui/MobilePanel.mjs.map", "/ui/icon.svg"} {
+		routes = append(routes, sdk.Route{Pattern: path, Method: http.MethodGet, Handler: serveAsset})
+	}
+	return routes
 }
 func (a *App) requestProject(r *http.Request) error {
 	if a.project == "" {
