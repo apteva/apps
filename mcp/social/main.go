@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.11
+version: 0.24.12
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -212,7 +212,6 @@ provides:
           platform: { type: string, title: Platform, enum: [all, facebook, instagram, youtube, tiktok, twitter, linkedin, pinterest, threads, reddit], default: all }
           start_date: { type: string, title: Custom start date, description: 'YYYY-MM-DD; set both dates for a custom window of at most 366 complete UTC days.', default: '' }
           end_date: { type: string, title: Custom end date, description: 'Inclusive YYYY-MM-DD, no later than yesterday UTC.', default: '' }
-          demo_data: { type: boolean, title: Demo data, description: 'Show four sample profiles with four synthetic accounts each; no providers or real metrics.', default: false }
           visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
           show_trends: { type: boolean, title: Show trends, default: true }
       preview_props: { preview: true }
@@ -245,7 +244,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.11
+    ref: social/v0.24.12
     entry: mcp/social
   port: 8080
   health_check: /health

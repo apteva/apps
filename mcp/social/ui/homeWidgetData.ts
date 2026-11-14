@@ -25,7 +25,6 @@ export interface WidgetMetric {
   trend: MetricPoint[];
 }
 export interface PerformanceSummary {
-  demo_data?: boolean;
   days: number;
   start_date: string;
   end_date: string;

@@ -15,7 +15,6 @@ export interface PerformanceOptions {
     profile_name: string;
   }[];
   platforms: string[];
-  demo_data?: boolean;
 }
 export interface PerformanceFilters {
   profileID: number;
@@ -24,7 +23,6 @@ export interface PerformanceFilters {
   period: string;
   startDate: string;
   endDate: string;
-  demo: boolean;
 }
 export type PerformanceSort =
   | "name"
@@ -58,7 +56,6 @@ export function performanceDefaults(
       settings.start_date || settings.end_date ? "custom" : String(prefs.days),
     startDate: String(settings.start_date || dates.startDate),
     endDate: String(settings.end_date || dates.endDate),
-    demo: !props.preview && settings.demo_data === true,
   };
 }
 export function performanceDateError(
@@ -103,7 +100,6 @@ export function performanceURL(
         ? { start_date: filters.startDate, end_date: filters.endDate }
         : { days: Number(filters.period) }),
       ...(filters.platform !== "all" ? { platforms: filters.platform } : {}),
-      demo_data: String(filters.demo),
     },
   );
 }

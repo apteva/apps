@@ -218,15 +218,6 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	demo, err := performanceDemoRequested(r)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	if demo {
-		a.handleDemoPerformance(w, r, window, selectedPlatforms)
-		return
-	}
 	scope, err := widgetScope(globalCtx, r)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -347,10 +338,10 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			acct.Metrics[name] = summarizeWidgetMetric([]widgetAccount{*acct}, name, start, today, previous)
 		}
 	}
-	writePerformanceSummary(w, accounts, window, false)
+	writePerformanceSummary(w, accounts, window)
 }
 
-func writePerformanceSummary(w http.ResponseWriter, accounts []widgetAccount, window performanceWindow, demo bool) {
+func writePerformanceSummary(w http.ResponseWriter, accounts []widgetAccount, window performanceWindow) {
 	start, today, previous := window.Start, window.End, window.Previous
 	// A board preset and its parent account overlap. Show both rows, but
 	// aggregate only the parent when it is included in this widget scope.
@@ -394,7 +385,7 @@ func writePerformanceSummary(w http.ResponseWriter, accounts []widgetAccount, wi
 			updated = acct.UpdatedAt
 		}
 	}
-	writeJSON(w, map[string]any{"accounts": accounts, "metrics": metrics, "days": window.Days, "demo_data": demo, "start_date": start.Format("2006-01-02"), "end_date": today.AddDate(0, 0, -1).Format("2006-01-02"), "updated_at": updated})
+	writeJSON(w, map[string]any{"accounts": accounts, "metrics": metrics, "days": window.Days, "start_date": start.Format("2006-01-02"), "end_date": today.AddDate(0, 0, -1).Format("2006-01-02"), "updated_at": updated})
 }
 
 func widgetDailyMetric(name string) string {

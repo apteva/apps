@@ -46,7 +46,7 @@ const emptyOptions: PerformanceOptions = {
 
 export default function SocialPerformanceWidget(props: HomeWidgetProps) {
   // Reset filters and cached responses when switching installation, project or
-  // configured defaults. A synthetic account ID never carries into real data.
+  // configured defaults.
   return (
     <PerformanceView
       key={`${props.installId}:${props.projectId}:${JSON.stringify(props.widgetSettings || {})}`}
@@ -85,7 +85,7 @@ function PerformanceView(props: HomeWidgetProps) {
     widgetURL(
       { ...props, widgetSettings: undefined },
       "/widgets/performance/options",
-      { demo_data: String(filters.demo) },
+      {},
     ),
     props,
     () => emptyOptions,
@@ -167,17 +167,15 @@ function PerformanceView(props: HomeWidgetProps) {
           </h2>
           <p className="mt-1 text-[11px] text-text-dim">{range} · UTC</p>
         </div>
-        {!filters.demo && (
-          <a
-            href={socialPageLink(navigation, {
-              tab: "metrics",
-              ...(filters.period !== "custom" ? { range: `${days}d` } : {}),
-            })}
-            className="shrink-0 text-[11px] text-text-muted hover:text-accent"
-          >
-            Open analytics →
-          </a>
-        )}
+        <a
+          href={socialPageLink(navigation, {
+            tab: "metrics",
+            ...(filters.period !== "custom" ? { range: `${days}d` } : {}),
+          })}
+          className="shrink-0 text-[11px] text-text-muted hover:text-accent"
+        >
+          Open analytics →
+        </a>
       </header>
       <div
         className="flex flex-wrap items-end gap-2 border-b border-border px-4 py-2"
@@ -297,33 +295,7 @@ function PerformanceView(props: HomeWidgetProps) {
             )}
           </div>
         </details>
-        {!props.preview && (
-          <label className="flex items-center gap-2 text-[11px] text-text-dim">
-            <input
-              type="checkbox"
-              aria-label="Demo data"
-              checked={filters.demo}
-              onChange={(event) =>
-                changeFilter({
-                  demo: event.target.checked,
-                  profileID: 0,
-                  accountIDs: "",
-                  platform: "all",
-                })
-              }
-            />
-            Demo data
-          </label>
-        )}
       </div>
-      {filters.demo && (
-        <p
-          role="status"
-          className="border-b border-border bg-bg-input px-4 py-2 text-xs text-warn"
-        >
-          Demo data · 4 profiles, 16 synthetic accounts · No connected providers
-        </p>
-      )}
       {(invalid || result.error || optionsResult.error) && (
         <div
           role="alert"
@@ -408,30 +380,23 @@ function PerformanceView(props: HomeWidgetProps) {
                   {rows.map((account) => (
                     <tr key={account.id} className="border-t border-border">
                       <td className="px-2 py-2 text-text whitespace-nowrap">
-                        {filters.demo ? (
-                          account.name
-                        ) : (
-                          <a
-                            className="hover:text-accent"
-                            href={socialPageLink(navigation, {
-                              tab: "metrics",
-                              account_ids: account.id,
-                              ...(filters.period !== "custom"
-                                ? { range: `${days}d` }
-                                : {}),
-                            })}
-                          >
-                            {account.name}
-                          </a>
+                        <a
+                          className="hover:text-accent"
+                          href={socialPageLink(navigation, {
+                            tab: "metrics",
+                            account_ids: account.id,
+                            ...(filters.period !== "custom"
+                              ? { range: `${days}d` }
+                              : {}),
+                          })}
+                        >
+                          {account.name}
+                        </a>
+                        {account.status && account.status !== "active" && (
+                          <span className="block text-[10px] text-text-dim">
+                            {account.status.replace(/_/g, " ")} · cached metrics
+                          </span>
                         )}
-                        {!filters.demo &&
-                          account.status &&
-                          account.status !== "active" && (
-                            <span className="block text-[10px] text-text-dim">
-                              {account.status.replace(/_/g, " ")} · cached
-                              metrics
-                            </span>
-                          )}
                         {account.aggregate_exclusion_reason && (
                           <span className="block max-w-56 whitespace-normal text-text-dim">
                             {account.aggregate_exclusion_reason}
@@ -489,11 +454,9 @@ function PerformanceView(props: HomeWidgetProps) {
         </div>
       )}
       <footer className="border-t border-border px-4 py-2 text-[10px] text-text-dim">
-        {filters.demo
-          ? "Synthetic demonstration metrics"
-          : data?.updated_at
-            ? `Oldest available refresh: ${new Date(data.updated_at).toLocaleString()}`
-            : "No cached analytics yet"}{" "}
+        {data?.updated_at
+          ? `Oldest available refresh: ${new Date(data.updated_at).toLocaleString()}`
+          : "No cached analytics yet"}{" "}
         · Missing metrics shown as —
       </footer>
     </section>
