@@ -31,6 +31,7 @@ public final class AptevaSecureInput {
   static AccessibilityNodeInfo check(UiAutomation ui,JSONObject in,boolean before) throws Exception {
     for(AccessibilityNodeInfo n:nodes)n.recycle();nodes.clear();
     AccessibilityNodeInfo root=ui.getRootInActiveWindow();
+    for(int i=0;root==null && i<20;i++){Thread.sleep(100);root=ui.getRootInActiveWindow();}
     String pkg=in.getString("expected_package");
     if(root==null || !pkg.equals(text(root.getPackageName())))throw new Exception();
     collect(root,0);
