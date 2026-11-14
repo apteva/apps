@@ -45,6 +45,11 @@ func (a *App) nextRunWake(ctx context.Context, project string, checkedAt time.Ti
 	if waitErr != nil {
 		return time.Time{}, waitErr
 	}
+	scanAt, scanErr := a.nextWorkerStartScan(ctx, project)
+	if scanErr != nil {
+		return next, scanErr
+	}
+	next = earlierDeadline(next, scanAt)
 	rows, err := a.db.QueryContext(ctx, `WITH open_runs AS (
  SELECT id,workflow,backend,delivered_at,delivery_suspended,next_attempt_at
  FROM process_runs r WHERE `+openRunsInProject+`

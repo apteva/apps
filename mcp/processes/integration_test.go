@@ -300,6 +300,12 @@ func sidecarAssignment(t *testing.T, app *tk.Sidecar, p Process, c AssignmentCon
 
 // The real SDK now verifies the caller's current MCP attachment before delivery.
 func serveExecutorAttachment(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path == "/api/apps/callback/telemetry/history" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sdk.TelemetryPage{ServerID: "test-server", Events: []sdk.TelemetryStreamEvent{}, Order: "newest"})
+		return true
+	}
+
 	if strings.HasPrefix(r.URL.Path, "/api/apps/callback/threads/") && r.Method == http.MethodDelete {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})

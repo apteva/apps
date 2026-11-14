@@ -53,7 +53,7 @@ func (f *fakeTasks) GetInstance(id int64) (*sdk.PlatformInstance, error) {
 	if id == 9 {
 		project = "other"
 	}
-	return &sdk.PlatformInstance{ID: id, ProjectID: project, DefaultThreadID: "owner-default"}, nil
+	return &sdk.PlatformInstance{ID: id, ProjectID: project, Status: "running", DefaultThreadID: "owner-default"}, nil
 }
 func (f *fakeTasks) CallAppResult(app, tool string, input map[string]any, out any) error {
 	if app != "tasks" || tool != "process_task" {

@@ -21,6 +21,7 @@ type App struct {
 	mu            sync.Mutex
 	eventMu       sync.Mutex
 	cleanupMu     sync.Mutex
+	waitMu        sync.Mutex
 	asyncDispatch bool
 	dispatcher    *processDispatcher
 }

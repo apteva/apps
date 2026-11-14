@@ -188,6 +188,13 @@ func TestDurableWaitLegacyRevalidationIsBoundedAndFailClosed(t *testing.T) {
 	if err := a.tickDirect(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
+	if len(f.events) != before+1 {
+		t.Fatal("retried before persisted backoff")
+	}
+	a = &App{ctx: a.ctx, db: a.db}
+	if err := a.tickDirect(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	if f.events[len(f.events)-1].SourceEventID != id || !strings.HasPrefix(id, "process-wait:") {
 		t.Fatal("revalidation duplicated identity")
 	}

@@ -327,6 +327,19 @@ func (a *App) tickDirect(ctx context.Context, now time.Time, scope ...string) er
 	if project == "" {
 		return nil
 	}
+	runErr := a.tickDirectLocked(ctx, now, project)
+	waitErr := a.revalidateLegacyWaits(ctx, project, now.UTC())
+	repairErr := a.repairRestoredWorkerCleanup(ctx, project, now.UTC())
+	return errors.Join(runErr, waitErr, repairErr)
+}
+
+func (a *App) tickDirectLocked(ctx context.Context, now time.Time, scope ...string) error {
+	project := a.workerProject(scope)
+	if project == "" {
+		return nil
+	}
+	// Deliver revalidation after unlocking: a worker can immediately save its
+	// checkpoint while another owner is unavailable or a platform call is slow.
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now = now.UTC()

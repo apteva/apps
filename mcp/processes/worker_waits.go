@@ -196,14 +196,50 @@ func (a *App) reconcileWorkerWaits(ctx context.Context, project string, now time
 			return e
 		}
 	}
-	return a.revalidateLegacyWaits(ctx, project, now)
+	return nil
 }
 
-// A stable tracked event per revision survives lost acknowledgements/restarts.
-// No response is NOT consent to retire. This is only a migration handshake,
-// never a periodic model-based poll of every business wait.
+// Stable per-revision identities survive failed deliveries and sidecar restarts.
+// A missing reply or unavailable owner is never consent to retire its worker.
+const legacyWaitCandidate = `s.project_id=:project AND s.state IN ('waiting','blocked')
+ AND s.retain_worker=1 AND s.wait_json='' AND s.updated_at<:cutoff AND s.target_thread_id<>''
+ AND json_extract(s.executor_json,'$.kind')='agent'
+ AND EXISTS(SELECT 1 FROM process_runs r WHERE r.id=s.run_id AND r.state NOT IN ('completed','failed','cancelled'))
+ AND NOT EXISTS(SELECT 1 FROM process_wait_checks c WHERE c.step_id=s.id AND c.revision=s.revision)`
+
+const legacyWaitRetryDue = `NOT EXISTS(SELECT 1 FROM process_wait_retries retry
+ WHERE retry.step_id=s.id AND retry.revision=s.revision AND rtrim(retry.next_attempt_at,'Z')>:now)`
+
+func waitRevalidationArgs(project string, now time.Time) []any {
+	return []any{sql.Named("project", project), sql.Named("cutoff", now.Add(-10*time.Minute).UTC().Format(time.RFC3339Nano)), sql.Named("now", deadlineKey(now))}
+}
+
+func waitRevalidationBackoff(attempt int) time.Duration {
+	delay := time.Minute
+	for i := 0; i < attempt && delay < 15*time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > 15*time.Minute {
+		delay = 15 * time.Minute
+	}
+	return delay
+}
+
+func (a *App) deferWaitCheck(ctx context.Context, s StepRun, now time.Time, reason error) error {
+	var attempts int
+	err := a.db.QueryRowContext(ctx, `SELECT attempts FROM process_wait_retries WHERE step_id=? AND revision=?`, s.ID, s.Revision).Scan(&attempts)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `INSERT INTO process_wait_retries(step_id,revision,attempts,next_attempt_at,last_error)
+ VALUES(?,?,?,?,?) ON CONFLICT(step_id) DO UPDATE SET revision=excluded.revision,attempts=excluded.attempts,next_attempt_at=excluded.next_attempt_at,last_error=excluded.last_error`, s.ID, s.Revision, attempts+1, now.Add(waitRevalidationBackoff(attempts)).UTC().Format(time.RFC3339Nano), reason.Error())
+	return err
+}
+
 func (a *App) revalidateLegacyWaits(ctx context.Context, project string, now time.Time) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT `+stepColumns+` FROM process_step_runs s WHERE project_id=? AND state IN ('waiting','blocked') AND retain_worker=1 AND wait_json='' AND updated_at<? AND target_thread_id<>'' AND EXISTS(SELECT 1 FROM process_runs r WHERE r.id=s.run_id AND r.state NOT IN ('completed','failed','cancelled')) AND NOT EXISTS(SELECT 1 FROM process_wait_checks c WHERE c.step_id=s.id AND c.revision=s.revision) ORDER BY updated_at,id LIMIT 10`, project, now.Add(-10*time.Minute).UTC().Format(time.RFC3339Nano))
+	a.waitMu.Lock()
+	defer a.waitMu.Unlock()
+	rows, err := a.db.QueryContext(ctx, `SELECT `+stepColumns+` FROM process_step_runs s WHERE `+legacyWaitCandidate+` AND `+legacyWaitRetryDue+` ORDER BY updated_at,id LIMIT 10`, waitRevalidationArgs(project, now)...)
 	if err != nil {
 		return err
 	}
@@ -216,8 +252,7 @@ func (a *App) revalidateLegacyWaits(ctx context.Context, project string, now tim
 		}
 		checks = append(checks, s)
 	}
-	err = errors.Join(rows.Err(), rows.Close())
-	if err != nil {
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
 	}
 	if len(checks) == 0 {
@@ -227,36 +262,103 @@ func (a *App) revalidateLegacyWaits(ctx context.Context, project string, now tim
 	if api == nil {
 		return errors.New("wait revalidation requires tracked events")
 	}
+	type owner struct{ err error }
+	owners := map[int64]owner{}
+	var failures []error
 	for _, s := range checks {
-		if s.Executor.Kind != "agent" {
+		if err = ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		// Worker callbacks can checkpoint concurrently while this batch is sending.
+		// Never act on a stale revision, retired owner, or newly registered approval.
+		var current bool
+		err = a.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.id=:step AND s.revision=:revision AND `+legacyWaitCandidate+`)`, append(waitRevalidationArgs(project, now), sql.Named("step", s.ID), sql.Named("revision", s.Revision))...).Scan(&current)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if !current {
+			continue
+		}
+		status, ok := owners[s.Executor.AgentID]
+		if !ok {
+			agent, e := a.ctx.WithProject(project).GetAgent(s.Executor.AgentID)
+			if e != nil {
+				status.err = e
+			} else if agent == nil || agent.Status != "running" {
+				status.err = errors.New("wait owner is not running; deferred without waking it")
+			}
+			owners[s.Executor.AgentID] = status
+		}
+		if status.err != nil {
+			// Expected stopped owners only schedule another metadata check. Their
+			// absence must not turn a healthy project into a five-second error loop.
+			if err = a.deferWaitCheck(ctx, s, now, status.err); err != nil {
+				failures = append(failures, err)
+			}
 			continue
 		}
 		id := fmt.Sprintf("process-wait:%s:%d", s.ID, s.Revision)
-		// Get the procedure identity without loading its definition.
 		var process string
 		if err = a.db.QueryRowContext(ctx, `SELECT process_id FROM process_runs WHERE id=?`, s.RunID).Scan(&process); err != nil {
-			return err
+			failures = append(failures, err)
+			continue
 		}
 		message := fmt.Sprintf("Processes wait ownership revalidation for process_id=%s run_id=%s step_id=%s. Inspect the saved checkpoint and actual dependency records, then call processes_step_update to register wait ownership or record the already-known terminal result. This is not authorization to replay external work. %s", process, s.RunID, s.ID, workerWaitContract)
 		receipt, e := api.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: s.Executor.AgentID, ThreadID: s.ThreadID, SourceEventID: id, Message: message})
-		if e != nil {
-			return e
+		if e == nil && (receipt == nil || (!receipt.Accepted && !receipt.Duplicate)) {
+			e = errors.New("wait revalidation not accepted")
 		}
-		if receipt == nil || (!receipt.Accepted && !receipt.Duplicate) {
-			return errors.New("wait revalidation not accepted")
+		if e != nil {
+			// Include a failed delivery in the result, but continue the other owners.
+			// Persist backoff even for an ambiguous acknowledgement; retry its SAME ID.
+			failures = append(failures, fmt.Errorf("revalidate wait %s: %w", s.ID, e), a.deferWaitCheck(ctx, s, now, e))
+			continue
 		}
 		_, err = a.db.ExecContext(ctx, `INSERT INTO process_wait_checks(step_id,revision,event_id,checked_at) VALUES(?,?,?,?) ON CONFLICT(step_id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,checked_at=excluded.checked_at`, s.ID, s.Revision, id, now.UTC().Format(time.RFC3339Nano))
 		if err != nil {
-			return err
+			failures = append(failures, err)
+			continue
+		}
+		_, err = a.db.ExecContext(ctx, `DELETE FROM process_wait_retries WHERE step_id=? AND revision=?`, s.ID, s.Revision)
+		if err != nil {
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
+
 func (a *App) nextWorkerWaitWake(ctx context.Context, project string, now time.Time) (time.Time, error) {
 	var due sql.NullString
 	err := a.db.QueryRowContext(ctx, `SELECT MIN(rtrim(wait_wake_at,'Z')) FROM process_step_runs s WHERE project_id=? AND wait_wake_at<>'' AND rtrim(wait_wake_at,'Z')>? AND state='blocked' AND EXISTS(SELECT 1 FROM process_runs r WHERE r.id=s.run_id AND r.state NOT IN ('completed','failed','cancelled'))`, project, deadlineKey(now)).Scan(&due)
-	if err != nil || !due.Valid {
+	if err != nil {
 		return time.Time{}, err
 	}
-	return parseDeadlineKey(due.String)
+	var next time.Time
+	if due.Valid {
+		next, err = parseDeadlineKey(due.String)
+		if err != nil {
+			return next, err
+		}
+	}
+	var pending bool
+	err = a.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM process_step_runs s WHERE `+legacyWaitCandidate+` AND `+legacyWaitRetryDue+`)`, waitRevalidationArgs(project, now)...).Scan(&pending)
+	if err != nil {
+		return next, err
+	}
+	if pending {
+		next = earlierDeadline(next, now.Add(2*time.Second))
+	}
+	err = a.db.QueryRowContext(ctx, `SELECT MIN(rtrim(retry.next_attempt_at,'Z')) FROM process_wait_retries retry CROSS JOIN process_step_runs s ON s.id=retry.step_id AND s.revision=retry.revision WHERE `+legacyWaitCandidate+` AND rtrim(retry.next_attempt_at,'Z')>:now`, waitRevalidationArgs(project, now)...).Scan(&due)
+	if err != nil {
+		return next, err
+	}
+	if due.Valid {
+		at, e := parseDeadlineKey(due.String)
+		if e != nil {
+			return next, e
+		}
+		next = earlierDeadline(next, at)
+	}
+	return next, nil
 }

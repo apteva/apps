@@ -56,13 +56,26 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 		return err
 	}
 	var failures []error
+	owners := map[int64]error{}
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var killErr error
 		api := a.ctx.WithProject(project).ThreadAPI()
-		if t.reason == "idle" {
+		ownerErr, checked := owners[t.agent]
+		if !checked {
+			agent, e := a.ctx.WithProject(project).GetAgent(t.agent)
+			if e != nil {
+				ownerErr = e
+			} else if agent == nil || (agent.Status != "" && agent.Status != "running") {
+				ownerErr = errors.New("cleanup owner is not running; awaiting live acknowledgement")
+			}
+			owners[t.agent] = ownerErr
+		}
+		if ownerErr != nil {
+			killErr = ownerErr
+		} else if t.reason == "idle" {
 			killErr = a.retireIdleWorker(ctx, project, t.agent, t.thread)
 		} else if api == nil {
 			killErr = errors.New("platform thread API unavailable")

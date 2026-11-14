@@ -16,8 +16,11 @@ type directPlatform struct {
 	events []sdk.AgentEventRequest
 	lose   bool
 	// spawnErr refuses new workers; missing reports a pinned provider as gone.
-	spawnErr error
-	missing  bool
+	spawnErr         error
+	missing          bool
+	eventErrors      map[string]error
+	instanceStatuses map[int64]string
+	afterTracked     func(sdk.AgentEventRequest)
 }
 
 func (f *directPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
@@ -46,8 +49,23 @@ func (f *directPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpa
 	return result, nil
 }
 
+func (f *directPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	agent, err := f.fakeTasks.GetInstance(id)
+	if err == nil {
+		if status, ok := f.instanceStatuses[id]; ok {
+			agent.Status = status
+		}
+	}
+	return agent, err
+}
 func (f *directPlatform) SendTrackedAgentEvent(r sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {
 	f.events = append(f.events, r)
+	if f.afterTracked != nil {
+		f.afterTracked(r)
+	}
+	if err := f.eventErrors[r.ThreadID]; err != nil {
+		return nil, err
+	}
 	if f.lose {
 		f.lose = false
 		return nil, errors.New("response lost")

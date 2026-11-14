@@ -744,3 +744,23 @@ acknowledgement follows durable retirement reservation. Timer continuations wait
 for cleanup acknowledgement, use fresh worker/delivery identities, and preserve
 output, progress, evidence and frozen policy. Legacy timers/approvals remain
 attached until explicitly classified; they are never expired just by age.
+
+
+## Unavailable owners and restored workers (0.18.4)
+
+Legacy ownership revalidation continues after an unavailable owner or failed
+tracked delivery. Each step/revision has durable retry backoff (one minute,
+doubling to fifteen minutes), and accepted requests keep their original stable
+event identity. Stopped owners are deferred without waking them or acknowledging
+their waits. Deferred failures cannot occupy the next page indefinitely; eligible
+pages drain ten at a time. Revalidation IO runs outside the action mutex, so a
+worker can immediately save its checkpoint while other deliveries are pending.
+
+Cleanup requires a live owner acknowledgement. Read-only `thread.spawn` metadata
+also repairs cleanup receipts predating a worker restore for an already terminal
+run. Only an exact app-owned agent/thread/run in the same project is eligible.
+Pending retry order and newer acknowledgements remain unchanged; unfinished runs,
+approval owners and native timer owners are excluded. Processes requests
+`platform.telemetry.observe` for this metadata repair. It does not read telemetry
+content. Backfill is paginated (100 events), bounded to the preceding day on first
+start, then checks each minute with a one-hour overlap and durable cursor/backoff.
