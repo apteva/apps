@@ -71,15 +71,16 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, error
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
 type drivers struct {
-	cfg      runnerConfig
-	command  commandFunc
-	http     *http.Client
-	helperMu sync.Mutex
-	ios      iosRunners
+	cfg          runnerConfig
+	command      commandFunc
+	commandInput func(context.Context, []byte, string, ...string) ([]byte, error)
+	http         *http.Client
+	helperMu     sync.Mutex
+	ios          iosRunners
 }
 
 func newDrivers(cfg runnerConfig) *drivers {
-	return &drivers{cfg: cfg, command: runCommand, http: &http.Client{Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &drivers{cfg: cfg, command: runCommand, commandInput: runPrivateCommand, http: &http.Client{Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (d *drivers) adb(ctx context.Context, serial string, args ...string) ([]byte, error) {
 	return d.command(ctx, "adb", append([]string{"-s", serial}, args...)...)
@@ -209,7 +210,7 @@ func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
 	switch driver {
 	case "adb":
-		out = append(out, "keep_awake", "replace_text")
+		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:
@@ -436,6 +437,9 @@ func appID(args map[string]any) (string, error) {
 }
 
 func (d *drivers) Action(ctx context.Context, s Session, action string, args map[string]any) (any, error) {
+	if action == "secure_text" {
+		return d.androidSecureText(ctx, s, args)
+	}
 	if raw, supplied := args["replace"]; supplied {
 		replace, ok := raw.(bool)
 		if !ok {

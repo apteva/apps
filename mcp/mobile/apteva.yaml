@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.6.0
+version: 0.7.0
 description: |
+  v0.7.0 adds Android password entry through a private stdin pipe and accessibility ACTION_SET_TEXT, with exact screen guards, confirmation and recording exclusion.
   v0.6.0 collects bounded Android UI trees without waiting for animations
   to stop, and verifies focused-field text replacement and clearing by readback.
   Retains iOS/Android keep-awake controls, recording fixes and embedded panels.
@@ -58,8 +59,8 @@ provides:
     - { name: mobile_setup, description: "Inspect and complete native iPhone signing setup. Args: action? (status|select_team|open_xcode), team_id?; no existing certificate is needed. Apple sign-in, phone trust and Developer Mode require operator interaction." }
     - { name: mobile_devices, description: "List discovered/configured devices and host setup diagnostics. Args: platform?, physical?." }
     - { name: mobile_session, description: "Open, list, get, renew or close an exclusive device session. Recover releases an unknown Appium creation outcome after manual cleanup and confirm=true. Args: action, device_id? or platform?, physical?, session_id?, ttl_seconds?, mode? (screen|structured), confirm?. Close preserves app data." }
-    - { name: mobile_observe, description: "Inspect a session. Returns screenshot image content and optional UI source. Args: session_id, source? (default false)." }
-    - { name: mobile_action, description: "Operate a session. Args: session_id, action (navigate|tap|swipe|text|key|tap_element|context), url?, x?, y?, to_x?, to_y?, text?, key?, using?, value?, context?. Coordinates are normalized 0..1." }
+    - { name: mobile_observe, description: "Inspect a session. Returns screenshot image content and optional UI source. Args: session_id, source? (default false), image? (default true). image=false with source=true gives Android ADB source without capturing an image; unsupported drivers fail without fallback." }
+    - { name: mobile_action, description: "Operate a session. Args: session_id, action (navigate|tap|swipe|text|secure_text|key|tap_element|context), url?, x?, y?, to_x?, to_y?, text?, key?, using?, value?, context?. Coordinates are normalized 0..1. Android secure_text takes password, expected_package, expected_resource_id, expected_bounds, native_required and native_values; requires an empty focused password field and no active or finalizing recording. Returns secure_input=true and verified=true only after private verification." }
     - { name: mobile_app, description: "Install, launch, stop, uninstall or check an app. Args: session_id, action (install|launch|stop|uninstall|status), source? (artifact|store|beta), app_id?, app_name?, store_id?, artifact?, flow?. Artifact installs take an APK or device IPA from the artifact directory; store/beta installs drive the Play Store, App Store or TestFlight. Uninstall requires confirm=true." }
     - { name: mobile_stream, description: "Get authenticated screenshot polling details for a live session. Use mobile_record for video. Args: session_id." }
     - { name: mobile_record, description: "Record a session's screen to video and manage recordings. Args: action (start|stop|mark|get|list|delete|presets|upload), session_id?, recording_id?, quality? (auto|standard|high), audio?, max_seconds?, name?, status?, run_id?, kind?, confirm?. Ready recordings include file_url and their Storage upload state." }
@@ -97,7 +98,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.6.0
+    ref: mobile/v0.7.0
     entry: mcp/mobile
   port: 8080
   health_check: /health

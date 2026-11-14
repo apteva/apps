@@ -3,7 +3,8 @@
 Check the exact foreground package, visible screen markers and unique target
 before native input. `native_values` asserts exact values of unique fields,
 such as the active account header. `native_read` returns only a selected,
-bounded regular field. Password fields are rejected.
+bounded regular field. Regular typing, replacement and reads reject password
+fields. Secure input uses the separate private path described in [the Instagram notes](examples/instagram.md).
 
 Android direct-child selectors scope repeated form controls to an exact field.
 `native_read` records only the selected value in the normal run dataset, after

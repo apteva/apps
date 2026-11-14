@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 — 2026-11-14
+
+- Add guarded Android password entry using accessibility ACTION_SET_TEXT and a
+  private stdin pipe. Require an empty focused password field, screen/account
+  guards and a positive input receipt; never expose the secret in command
+  arguments, helper files, output, errors or screenshots.
+- Add source-only Android observation with no screenshot fallback. Wait for the
+  accessibility root before checking guards and reject active/finalizing captures.
+- Retain iOS/Android recording, embedded panels, keep-awake controls, and verified
+  regular-field replacement/clearing. Pin app-sdk v0.115.2 by tag ancestry.
+
 ## 0.6.0 — 2026-11-14
 
 - Collect bounded, read-only Android UI source during animations, with a stock

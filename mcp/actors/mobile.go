@@ -350,7 +350,11 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			if err != nil {
 				return err
 			}
-			args["text"] = value
+			if e.definition.SelectedPlatform == "android" || (e.session.Target != nil && e.session.Target.Platform == "android") {
+				args["password"] = value
+			} else {
+				args["text"] = value
+			}
 			args["observation"] = "none"
 		}
 	}
@@ -363,6 +367,9 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			return errors.New("secret-backed native input failed; inspect the screen privately")
 		}
 		return err
+	}
+	if nativeSecretAction(step.Action) && out["success"] != true {
+		return errors.New("secret-backed native input was not confirmed")
 	}
 	if err := finishScreenInteraction(out); err != nil {
 		return err

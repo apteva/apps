@@ -70,3 +70,18 @@
 
 If an Appium creation outcome is unknown, stop the orphaned session on its host
 before explicitly confirming mobile_session(action=recover,confirm=true).
+
+## Android password fields
+
+Use Actors' encrypted, context-bound password references for actor logins. Never
+put passwords in definitions, presets, run inputs, screenshots or recording
+scenarios. Private Android observation is mobile_observe(source=true,image=false);
+it requires Android ADB and fails without a screenshot fallback.
+
+The secure_text action receives a password only at runtime, plus exact package,
+resource ID (empty for anonymous fields), bounds, native_required screen markers
+and native_values regular-field guards. It requires a live exclusive session,
+an empty focused password EditText, and no active/finalizing recording. Input
+uses a private stdin pipe and Android accessibility; only secure_input=true and
+verified=true confirms entry. Failures require private inspection, never blind
+replay. Confirm the service's signed-in account separately; stop at challenges.
