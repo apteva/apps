@@ -27,7 +27,7 @@ func testStore(t testing.TB) store {
 	// Match the SDK app writer pool: serialize SQLite writers.
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql", "005_protocol_fixtures.sql", "006_history_indexes.sql", "007_reconcile_state.sql", "008_run_shutdown.sql", "009_voice_operations.sql", "010_run_targets.sql"} {
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql", "005_protocol_fixtures.sql", "006_history_indexes.sql", "007_reconcile_state.sql", "008_run_shutdown.sql", "009_voice_operations.sql", "010_run_targets.sql", "011_definition_list.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -242,12 +242,16 @@ func TestListDefinitionsWithSingleDatabaseConnection(t *testing.T) {
 	}
 
 	type result struct {
-		definitions []Definition
+		definitions []EnvironmentSummary
 		err         error
 	}
 	done := make(chan result, 1)
 	go func() {
-		definitions, err := s.listDefinitions()
+		page, err := s.listDefinitionSummaries(ListOptions{})
+		var definitions []EnvironmentSummary
+		if page != nil {
+			definitions = page.Items
+		}
 		done <- result{definitions: definitions, err: err}
 	}()
 

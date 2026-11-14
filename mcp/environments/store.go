@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -59,51 +58,6 @@ func (s store) listDefinitionLifecycles() ([]definitionLifecycle, error) {
 
 func (s store) getDefinitionLifecycle(id string) (*definitionLifecycle, error) {
 	return scanDefinitionLifecycle(s.db.QueryRow(`SELECT `+definitionLifecycleColumns+` FROM environment_definitions d WHERE d.id=?`, id))
-}
-
-func (s store) listDefinitions() ([]Definition, error) {
-	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions ORDER BY updated_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Definition{}
-	for rows.Next() {
-		var d Definition
-		var raw, created, updated string
-		var next, degraded sql.NullString
-		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated, &d.ReconcileStatus, &d.ReconcileFailures, &d.ReconcileError, &next, &degraded); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(raw), &d.Spec); err != nil {
-			return nil, fmt.Errorf("definition %s spec: %w", d.ID, err)
-		}
-		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-		d.ReconcileNextAt = parseOptionalTime(next)
-		d.DegradedAt = parseOptionalTime(degraded)
-		out = append(out, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	runs, err := s.activeRuns("")
-	if err != nil {
-		return nil, err
-	}
-	byEnvironment := map[string]*Run{}
-	for i := range runs {
-		if byEnvironment[runs[i].EnvironmentID] == nil {
-			byEnvironment[runs[i].EnvironmentID] = &runs[i]
-		}
-	}
-	for i := range out {
-		out[i].ActiveRun = byEnvironment[out[i].ID]
-	}
-	return out, nil
 }
 
 func (s store) getDefinition(id string) (*Definition, error) {

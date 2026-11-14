@@ -23,7 +23,13 @@ func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
 func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := a.svc.listDefinitions()
+		options, err := listOptionsFromHTTP(r)
+		if err != nil {
+			a.svc.logListRejection(err, time.Now())
+			httpError(w, 400, err)
+			return
+		}
+		rows, err := a.svc.listDefinitions(options)
 		if err != nil {
 			httpError(w, 500, err)
 			return

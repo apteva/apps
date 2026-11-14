@@ -90,6 +90,8 @@ interface RealtimeProvider {
   default_voice?: string;
 }
 
+interface EnvironmentSummary { id: string; name: string }
+interface EnvironmentPage { items: EnvironmentSummary[]; next_cursor: string | null; has_more: boolean }
 interface Environment {
   id: string;
   name: string;
@@ -429,7 +431,9 @@ interface Experiment {
 interface Catalog {
   agents: Agent[];
   models: Model[];
-  environments: Environment[];
+  environments: EnvironmentSummary[];
+  environment_next_cursor?: string | null;
+  environment_has_more?: boolean;
   apps: CatalogApp[];
   connections: Connection[];
   integrations: Integration[];
@@ -529,10 +533,10 @@ const experimentOutcome = (experiment: Experiment) => {
 };
 const suiteHealth = (suite: Suite, experiments: Experiment[]) => {
   if (!suite.enabled) return { label: "Paused", tone: "muted" };
-  const relevant = suite.schedule_minutes > 0
+  const relevant = (suite.schedule_minutes || 0) > 0
     ? experiments.find((experiment) => experiment.trigger_type === "schedule")
     : experiments[0];
-  if (!relevant) return { label: suite.schedule_minutes > 0 ? "Waiting" : "Not run", tone: "muted" };
+  if (!relevant) return { label: (suite.schedule_minutes || 0) > 0 ? "Waiting" : "Not run", tone: "muted" };
   if (relevant.status === "queued" || relevant.status === "running") {
     return { label: relevant.status === "queued" ? "Queued" : "Running", tone: "active" };
   }
@@ -717,6 +721,37 @@ function SeedEditor({ app, seed, onChange, onRemove }: {
   </div>;
 }
 
+// Each picker retains only its current summary page. Selection by ID survives
+// paging, including saved suites whose environment is outside the first page.
+export function EnvironmentPicker({ value, onChange, placeholder = "Choose an environment" }: { value: string; onChange: (id: string) => void; placeholder?: string }) {
+  const [page, setPage] = useState<EnvironmentPage>({ items: [], next_cursor: null, has_more: false });
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const cursor = cursors[cursors.length - 1];
+  useEffect(() => {
+    let stopped = false;
+    setLoading(true); setError("");
+    request<EnvironmentPage>(`/environments?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`).then(next => {
+      if (!stopped) setPage(next);
+    }).catch(cause => { if (!stopped) setError(cause.message); }).finally(() => { if (!stopped) setLoading(false); });
+    return () => { stopped = true; };
+  }, [cursor]);
+  return <div>
+    <select aria-label="Saved environment" disabled={loading} value={value} onChange={event => onChange(event.target.value)} className="ev-field">
+      <option value="">{placeholder}</option>
+      {value && !page.items.some(item => item.id === value) && <option value={value}>{value}</option>}
+      {page.items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+    <div className="ev-detail-actions" style={{ marginTop: 6 }}>
+      <button type="button" className="ev-button" disabled={loading || cursors.length === 1} onClick={() => setCursors(values => values.slice(0, -1))}>Previous environments</button>
+      <span className="ev-muted">Page {cursors.length}</span>
+      <button type="button" className="ev-button" disabled={loading || !page.next_cursor} onClick={() => { if (page.next_cursor) setCursors(values => [...values, page.next_cursor]); }}>Next environments</button>
+      {error && <span role="alert">{error}</span>}
+    </div>
+  </div>;
+}
+
 const newTask = (id: number): TaskDraft => ({ id, name: "", prompt: "", success: "" });
 
 function QuickRunBuilder({ catalog, onClose, onCreated }: {
@@ -796,8 +831,17 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const tasksValid = tasks.length > 0 && tasks.every((item) => item.prompt.trim() && goalsFromText(item.success).length > 0);
   const environmentValid = environmentMode === "clone" ? Boolean(environmentName.trim()) : Boolean(savedEnvironmentID);
   const telephonyApp = catalog.apps.find((item) => item.name === "telephony");
-  const savedEnvironment = catalog.environments.find((item) => item.id === savedEnvironmentID);
-  const savedCarrierFixture = savedEnvironment?.spec?.protocol_fixtures?.find((item) => item.pack === "telephony-carrier");
+  const [savedEnvironment, setSavedEnvironment] = useState<Environment | null>(null);
+  useEffect(() => {
+    let stopped = false;
+    setSavedEnvironment(null);
+    if (!savedEnvironmentID || environmentMode !== "saved" || mode !== "voice" || voiceTransport !== "carrier") return;
+    request<Environment>(`/environments/${encodeURIComponent(savedEnvironmentID)}`).then(value => {
+      if (!stopped) setSavedEnvironment(value);
+    }).catch(cause => { if (!stopped) setError(cause.message); });
+    return () => { stopped = true; };
+  }, [savedEnvironmentID, environmentMode, mode, voiceTransport]);
+  const savedCarrierFixture = (savedEnvironment?.id === savedEnvironmentID ? savedEnvironment : null)?.spec?.protocol_fixtures?.find((item) => item.pack === "telephony-carrier");
   const carrierFixtureID = environmentMode === "clone" ? "telephony-carrier" : savedCarrierFixture?.id || "";
   const carrierReady = voiceTransport === "direct" || (environmentMode === "clone" ? Boolean(telephonyApp) : Boolean(savedCarrierFixture));
   const voiceValid = mode === "text" || (Boolean(realtimeProvider) && carrierReady);
@@ -986,7 +1030,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             <div><span className="ev-label">Fake integrations</span><TogglePicker placeholder="Search integrations" items={catalog.integrations} selected={new Set(fakeSlugs)} keyOf={(item) => item.slug} titleOf={(item) => item.name} detailOf={(item) => item.description || `${item.tool_count || 0} tools`} onToggle={toggleIntegration} /></div>
             <div><span className="ev-label">Seed test data</span><select value={seedAppID} onChange={(event) => { const app = selectedApps.find((item) => String(item.install_id) === event.target.value); if (app) setSeeds([...seeds, { app: app.name, tool: "", input: {} }]); setSeedAppID(""); }} className="ev-field"><option value="">Add seed step from an app</option>{selectedApps.map((item) => <option key={item.install_id} value={item.install_id}>{item.display_name || item.name}</option>)}</select><div className="ev-task-list" style={{ marginTop: 8 }}>{seeds.map((seed, index) => { const app = catalog.apps.find((item) => item.name === seed.app); return app ? <SeedEditor key={`${seed.app}-${index}`} app={app} seed={seed} onChange={(next) => setSeeds(seeds.map((item, itemIndex) => itemIndex === index ? next : item))} onRemove={() => setSeeds(seeds.filter((_, itemIndex) => itemIndex !== index))} /> : null; })}</div></div>
           </div></details>
-        </div> : <div className="ev-setup" style={{ marginTop: 10 }}><label><span className="ev-label">Saved environment</span><select value={savedEnvironmentID} onChange={(event) => setSavedEnvironmentID(event.target.value)} className="ev-field"><option value="">Choose an environment</option>{catalog.environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{catalog.environments.length === 0 && <div className="ev-help">No saved environments yet. Use Clone this project to create one here.</div>}</div>}
+        </div> : <div className="ev-setup" style={{ marginTop: 10 }}><label><span className="ev-label">Saved environment</span><EnvironmentPicker value={savedEnvironmentID} onChange={setSavedEnvironmentID} /></label></div>}
       </section>
       <section>
         <div className="ev-section-heading"><span className="ev-label" style={{ margin: 0 }}>3. {mode === "voice" ? "Calls" : "Tasks"} to verify</span><button type="button" onClick={addTask} className="ev-button">Add {mode === "voice" ? "call" : "task"}</button></div>
@@ -1092,7 +1136,7 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
     <div className="ev-form">
       <label><span className="ev-label">Name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
       <label><span className="ev-label">Description</span><textarea rows={3} value={item.description || ""} onChange={(event) => setItem({ ...item, description: event.target.value })} className="ev-field" /></label>
-      <div className="ev-grid-2"><label><span className="ev-label">Environment</span><select value={item.environment_id || ""} onChange={(event) => setItem({ ...item, environment_id: event.target.value })} className="ev-field"><option value="">Fresh isolated environment</option>{catalog.environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}</select></label><label><span className="ev-label">Evaluation model</span><select value={item.judge_model || ""} onChange={(event) => setItem({ ...item, judge_model: event.target.value })} className="ev-field"><option value="">Deterministic checks only</option>{catalog.models.map((model) => <option key={modelID(model)} value={modelID(model)}>{modelLabel(model)}</option>)}</select></label></div>
+      <div className="ev-grid-2"><label><span className="ev-label">Environment</span><EnvironmentPicker value={item.environment_id || ""} onChange={id => setItem({ ...item, environment_id: id })} placeholder="Fresh isolated environment" /></label><label><span className="ev-label">Evaluation model</span><select value={item.judge_model || ""} onChange={(event) => setItem({ ...item, judge_model: event.target.value })} className="ev-field"><option value="">Deterministic checks only</option>{catalog.models.map((model) => <option key={modelID(model)} value={modelID(model)}>{modelLabel(model)}</option>)}</select></label></div>
       <div className="ev-divider"><div className="ev-grid-2"><label><span className="ev-label">Continuous schedule</span><select value={item.schedule_minutes || 0} onChange={(event) => setItem({ ...item, schedule_minutes: Number(event.target.value) })} className="ev-field"><option value={0}>Manual only</option><option value={60}>Hourly</option><option value={360}>Every 6 hours</option><option value={1440}>Daily</option><option value={10080}>Weekly</option></select></label><label><span className="ev-label">Required pass rate</span><input type="number" min={0} max={100} value={Math.round((item.required_pass_rate || 0) * 100)} onChange={(event) => setItem({ ...item, required_pass_rate: Number(event.target.value) / 100 })} className="ev-field" /></label></div>{(item.schedule_minutes || 0) > 0 && <div style={{ marginTop: 14 }}><span className="ev-label">Production targets</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(value) => value.name} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div className="ev-selected-name">{agent.name}</div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}<div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{targets.map((target, index) => <span key={index} className="ev-button">{targetDescription(target)}<button type="button" title="Remove" onClick={() => setItem({ ...item, continuous_targets: targets.filter((_, targetIndex) => targetIndex !== index) })} style={{ marginLeft: 7 }}>×</button></span>)}</div></div>}</div>
       <label className="ev-check"><input type="checkbox" checked={item.enabled !== false} onChange={(event) => setItem({ ...item, enabled: event.target.checked })} /> Enabled</label>
       {error && <div className="ev-error"><span>{error}</span></div>}
@@ -1264,13 +1308,13 @@ function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, l
   const health = suiteHealth(suite, experiments);
   return <div className="ev-detail">
     <header className="ev-detail-header">
-      <div><h2 className="ev-detail-title">{suite.name}</h2><div className="ev-detail-id">{suite.schedule_minutes > 0 ? `Continuous · ${scheduleLabel(suite.schedule_minutes)}` : "Manual eval"} · revision {suite.revision}</div></div>
+      <div><h2 className="ev-detail-title">{suite.name}</h2><div className="ev-detail-id">{(suite.schedule_minutes || 0) > 0 ? `Continuous · ${scheduleLabel(suite.schedule_minutes)}` : "Manual eval"} · revision {suite.revision}</div></div>
       <div className="ev-detail-actions"><span className="ev-status" data-tone={health.tone}>{health.label}</span><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run now</button></div>
     </header>
-    <div className="ev-metrics ev-eval-metrics"><Metric label="Latest score" value={score(latest?.summary?.average_score)} /><Metric label="Latest pass rate" value={latest ? pct(latest.summary?.pass_rate) : "-"} /><Metric label="Last run" value={latest ? formatDate(latest.created_at) : "-"} /><Metric label="Next run" value={suite.schedule_minutes > 0 && suite.next_run_at ? formatDate(suite.next_run_at) : "-"} /></div>
+    <div className="ev-metrics ev-eval-metrics"><Metric label="Latest score" value={score(latest?.summary?.average_score)} /><Metric label="Latest pass rate" value={latest ? pct(latest.summary?.pass_rate) : "-"} /><Metric label="Last run" value={latest ? formatDate(latest.created_at) : "-"} /><Metric label="Next run" value={(suite.schedule_minutes || 0) > 0 && suite.next_run_at ? formatDate(suite.next_run_at) : "-"} /></div>
     <div className="ev-config">
-      <div className="ev-config-item"><span className="ev-config-label">Environment</span><span className="ev-config-value">{environment?.name || "Fresh isolated environment"}</span></div>
-      <div className="ev-config-item"><span className="ev-config-label">Schedule</span><span className="ev-config-value">{suite.enabled ? scheduleLabel(suite.schedule_minutes) : "Paused"}{suite.schedule_minutes > 0 ? ` · ${Math.round(suite.required_pass_rate * 100)}% required` : ""}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Environment</span><span className="ev-config-value">{environment?.name || suite.environment_id || "Fresh isolated environment"}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Schedule</span><span className="ev-config-value">{suite.enabled ? scheduleLabel(suite.schedule_minutes) : "Paused"}{(suite.schedule_minutes || 0) > 0 ? ` · ${Math.round(suite.required_pass_rate * 100)}% required` : ""}</span></div>
       <div className="ev-config-item"><span className="ev-config-label">Evaluation model</span><span className="ev-config-value">{suite.judge_model || "Deterministic checks only"}</span></div>
       <div className="ev-config-item"><span className="ev-config-label">Targets</span><span className="ev-config-value" title={targetLabel}>{targetLabel}</span></div>
     </div>

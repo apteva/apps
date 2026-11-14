@@ -30,29 +30,27 @@ type service struct {
 
 const startingRunGracePeriod = 2 * time.Minute
 
-func (s *service) listDefinitions() ([]Definition, error) {
-	defs, err := s.db.listDefinitions()
-	if err != nil {
-		return nil, err
-	}
-	var active []*Run
-	for i := range defs {
-		if defs[i].ActiveRun != nil {
-			active = append(active, defs[i].ActiveRun)
+func (s *service) listDefinitions(options ListOptions) (page *EnvironmentPage, err error) {
+	started := time.Now()
+	defer func() {
+		if s.ctx == nil {
+			return
 		}
-	}
-	if err := s.decorateRuns(active); err != nil {
-		return nil, err
-	}
-	live, _ := s.liveMap()
-	for i := range defs {
-		if defs[i].ActiveRun != nil {
-			if rt := live[defs[i].ActiveRun.RuntimeID]; rt != nil {
-				defs[i].Runtime = rt
-			}
+		if err != nil {
+			s.logListRejection(err, started)
+			return
 		}
+		raw, _ := json.Marshal(page)
+		escaped, _ := json.Marshal(string(raw))
+		s.ctx.Logger().Info("environment list", "items", len(page.Items), "response_bytes", len(raw), "encoded_bytes_upper_bound", len(raw)+len(escaped)+512, "duration", time.Since(started))
+	}()
+	return s.db.listDefinitionSummaries(options)
+}
+
+func (s *service) logListRejection(err error, started time.Time) {
+	if s.ctx != nil {
+		s.ctx.Logger().Warn("environment list rejected", "reason", err.Error(), "duration", time.Since(started))
 	}
-	return defs, nil
 }
 
 func (s *service) getDefinition(id string) (*Definition, error) {
@@ -76,8 +74,11 @@ func (s *service) saveDefinition(d *Definition) (*Definition, error) {
 	if d.ID == "" {
 		d.ID = "env_" + token(10)
 	}
-	if !validID(d.ID) {
-		return nil, errors.New("id may contain only letters, numbers, dash, underscore, and dot")
+	if !validID(d.ID) || len(d.ID) > maxSummaryIDBytes {
+		return nil, errors.New("id must be at most 512 bytes and contain only letters, numbers, dash, underscore, and dot")
+	}
+	if len(d.Name) > maxSummaryNameBytes {
+		return nil, errors.New("name must be at most 16384 bytes")
 	}
 	if d.Name == "" {
 		return nil, errors.New("name required")

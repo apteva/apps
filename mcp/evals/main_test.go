@@ -459,7 +459,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.9.7" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.10.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -1373,7 +1373,7 @@ func (s *evalPlatformStub) CallAppResult(app, tool string, input map[string]any,
 			"snapshots":       []map[string]any{},
 		}
 	case "environment_list":
-		value = []EnvironmentDefinition{{ID: "env-one", Name: "Project clone"}}
+		value = EnvironmentPage{Items: []EnvironmentSummary{{ID: "env-one", Name: "Project clone"}}}
 	case "llm_models_list":
 		value = LLMModels{Models: []LLMModel{{Provider: "anthropic", ModelID: "claude-sonnet", GatewayModel: "anthropic/claude-sonnet"}}}
 	case "environment_create":
@@ -1397,7 +1397,7 @@ func TestCatalogAndEnvironmentCreationDelegateToEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentDefinition)) != 1 || len(catalog["models"].([]LLMModel)) != 1 || len(catalog["assertion_types"].([]string)) != 9 {
+	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentSummary)) != 1 || len(catalog["models"].([]LLMModel)) != 1 || len(catalog["assertion_types"].([]string)) != 9 {
 		t.Fatalf("catalog=%#v", catalog)
 	}
 

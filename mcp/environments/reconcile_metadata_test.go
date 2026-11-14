@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -57,7 +59,7 @@ func TestReconcileIdleDoesNotDecodeSpecifications(t *testing.T) {
 	if _, err := s.db.db.Exec(`UPDATE environment_definitions SET spec_json='invalid JSON decoder sentinel'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.listDefinitions(); err == nil {
+	if _, err := s.db.legacyListDefinitions(); err == nil {
 		t.Fatal("decoder sentinel failed to detect full definition decoding")
 	}
 	for i := 0; i < 10; i++ {
@@ -236,13 +238,13 @@ func BenchmarkIdleReconcileLargeDefinitions(b *testing.B) {
 				if _, err := s.liveMap(); err != nil {
 					b.Fatal(err)
 				}
-				if _, err := s.db.listDefinitions(); err != nil {
+				if _, err := s.db.legacyListDefinitions(); err != nil {
 					b.Fatal(err)
 				}
 				if _, err := s.db.activeRuns(""); err != nil {
 					b.Fatal(err)
 				}
-				if _, err := s.db.listDefinitions(); err != nil {
+				if _, err := s.db.legacyListDefinitions(); err != nil {
 					b.Fatal(err)
 				}
 				if err := s.pruneHistory(); err != nil {
@@ -251,4 +253,49 @@ func BenchmarkIdleReconcileLargeDefinitions(b *testing.B) {
 			}
 		})
 	}
+}
+
+func (s store) legacyListDefinitions() ([]Definition, error) {
+	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Definition{}
+	for rows.Next() {
+		var d Definition
+		var raw, created, updated string
+		var next, degraded sql.NullString
+		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated, &d.ReconcileStatus, &d.ReconcileFailures, &d.ReconcileError, &next, &degraded); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &d.Spec); err != nil {
+			return nil, fmt.Errorf("definition %s spec: %w", d.ID, err)
+		}
+		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		d.ReconcileNextAt = parseOptionalTime(next)
+		d.DegradedAt = parseOptionalTime(degraded)
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	runs, err := s.activeRuns("")
+	if err != nil {
+		return nil, err
+	}
+	byEnvironment := map[string]*Run{}
+	for i := range runs {
+		if byEnvironment[runs[i].EnvironmentID] == nil {
+			byEnvironment[runs[i].EnvironmentID] = &runs[i]
+		}
+	}
+	for i := range out {
+		out[i].ActiveRun = byEnvironment[out[i].ID]
+	}
+	return out, nil
 }
