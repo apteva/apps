@@ -64,7 +64,7 @@ All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in
 - `PATCH /items/:id`: `{revision, patch}`. Content edits can reset approval.
 - `POST /releases`: `{item_id, channel, ...}`.
 - `PATCH /releases/:id`: `{revision, patch}`.
-- `POST /releases/:id/refresh`: read the saved link's results.
+- `POST /releases/:id/refresh`: read linked results and reconcile Social destination status, publication URL and timestamp.
 - `GET /calendar`: the flat, pre-merged planning stream a calendar surface needs. Filters `from`, `to` (`YYYY-MM-DD` or RFC3339, defaulting to today and 30 days out, 400 days maximum), `date_field` (`planned_at` or `deadline`), `brand_id`, `include_releases`, `limit` (default 500, max 2000). Returns `events` sorted by date with `truncated`. Each event carries `kind` (`item` or `release`), `date` (the server-side bucket), `at` (the value as stored), the item's identity and, for releases, `release_id`, `channel` and `url`. Releases are matched on their own planned date and joined back to their parent, so a release inside the window appears even when its item's date sits outside it — which is why this is not a filter on `/items`. Archived content and archived releases are always excluded, and releases appear on `planned_at` views only, as in the panel.
 - `GET /mobile/calendar-summary`: native-ready upcoming agenda rows. Filters `date_field`, `brand_id`, `include_releases`, `horizon_days` (1–365, default 30) and `limit` (1–20, default 12). The date window begins today in the project's configured Editorial timezone. Project scope comes only from the pinned install or trusted gateway header; a `project_id` query cannot switch it.
 
@@ -89,6 +89,8 @@ A bare `YYYY-MM-DD` names a day, not an instant, so **Settings** carries a `time
 Each (topic, record, due instant) fires exactly once, tracked in the app's own table rather than on the record — writing a marker into an item would bump its revision and conflict with anyone editing it. Because the instant is part of the key, rescheduling re-arms the notice: move a release to Friday and it fires on Friday; move it back and it stays quiet. The first scan of a project starts the clock, so installing into a project holding a year of back-dated content does not replay it, and a sidecar that was down still delivers the last 48 hours rather than an unbounded backlog. Archived content and archived releases never come due.
 
 The scanner ticks every five minutes — the SDK's schedule grammar is `@every <duration>` only, so a due time is a frequent check rather than a cron expression. The platform runs it once per project, so both project-scoped and global installs work.
+
+The same tick reconciles linked Social destinations from stored delivery records. It matches each channel and any saved account ID, retains existing review evidence and updates the parent only when every active destination is published or scheduled. Ambiguous or missing targets preserve prior state. Publication timestamps come from publication evidence rather than submission times. Archived items and cancelled destinations are skipped. Refresh uses the same reconciliation path and can find linked posts beyond the first Social page.
 
 ## Events
 

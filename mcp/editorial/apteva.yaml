@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.6.2
+version: 0.6.3
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -37,7 +37,7 @@ provides:
     - { name: editorial_releases_get, description: "Read one release with optional projected results and no history." }
     - { name: editorial_releases_merge_results, description: "Revision-guarded atomic recursive results merge; compact receipt, unrelated history preserved." }
     - { name: editorial_releases_update, description: "Patch a release using id, revision and patch; release status is separate from content workflow status. Optionally link an existing Social/Campaigns record." }
-    - { name: editorial_releases_refresh, description: "Read results from an optionally bound Social or Campaigns app into a linked release. Never sends or schedules." }
+    - { name: editorial_releases_refresh, description: "Refresh linked results and Social delivery status, URLs and publication times. Never sends or schedules." }
     - { name: editorial_calendar, description: "List dated content and channel releases between two dates as one flat, sorted stream. Read-only planning view; never publishes or schedules." }
     - { name: editorial_settings_get, description: "Read configurable content workflow statuses, formats and channels. The first status and format are item creation defaults." }
     - { name: editorial_settings_update, description: "Replace formats, statuses and channels using revision. Existing used formats/statuses must remain available." }
@@ -91,7 +91,7 @@ provides:
     - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.6.2, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.6.3, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:
