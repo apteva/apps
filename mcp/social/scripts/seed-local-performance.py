@@ -20,7 +20,7 @@ LABELS = ("Facebook Page", "Instagram Business", "TikTok", "YouTube")
 DESCRIPTION = "Local performance sample; no provider connection."
 
 
-def seed(database: Path, project: str):
+def seed(database: Path, project: str, followers_only: bool = False):
     database = database.expanduser().resolve()
     local_root = (Path.home() / ".apteva/apps/social/data").resolve()
     if not database.is_relative_to(local_root) or not database.is_file():
@@ -42,6 +42,8 @@ def seed(database: Path, project: str):
             if row:
                 profile = row[0]
             else:
+                if followers_only:
+                    raise ValueError("Follower-only seeding requires existing sample profiles")
                 profile = db.execute("INSERT INTO profiles(project_id,name,slug,description,color) VALUES(?,?,?,?,?)", (project, name, seed_slug, DESCRIPTION, color)).lastrowid
             result["profile_ids"].append(profile)
             for platform_index, (platform, label) in enumerate(zip(PLATFORMS, LABELS)):
@@ -52,6 +54,8 @@ def seed(database: Path, project: str):
                     if (saved_profile, saved_platform, status, connection) != (profile, platform, "disconnected", 0):
                         raise ValueError("Seed account has changed; refusing to overwrite it")
                 else:
+                    if followers_only:
+                        raise ValueError("Follower-only seeding requires existing sample accounts")
                     account = db.execute("""INSERT INTO social_accounts
                         (project_id,profile_id,platform,connection_id,external_account_id,display_name,status,provider_slug,provider_account_id)
                         VALUES(?,?,?,0,?,?,'disconnected','native',?)""", (project, profile, platform, identity, name + " · " + label, identity)).lastrowid
@@ -59,15 +63,28 @@ def seed(database: Path, project: str):
                 ordinal = brand_index * 4 + platform_index + 1
                 # Replace only observations owned by this seed. Unique source
                 # keys and stable account IDs make reruns nonduplicating.
-                db.execute("DELETE FROM social_metric_points WHERE project_id=? AND social_account_id=? AND source=?", (project, account, SOURCE))
+                delete_sql = "DELETE FROM social_metric_points WHERE project_id=? AND social_account_id=? AND source=?"
+                if followers_only:
+                    delete_sql += " AND metric='followers'"
+                db.execute(delete_sql, (project, account, SOURCE))
                 points = []
-                for offset in range(180, 0, -1):
+                for offset in ([] if followers_only else range(180, 0, -1)):
                     day = today - dt.timedelta(days=offset)
                     views = 180 + ordinal * 57 + (180 - offset) * (2 + ordinal // 4) + day.weekday() * 19
                     values = {"views": views, "impressions": views * 3 // 2 + 77, "likes": views // 16, "comments": views // 90, "shares": views // 65}
                     for metric, value in values.items():
                         points.append((project, profile, account, platform, metric, "day", day.isoformat() + "T00:00:00Z", value, SOURCE, DESCRIPTION))
-                points.extend((project, profile, account, platform, metric, "snapshot", now, value, SOURCE, DESCRIPTION) for metric, value in {"followers": 2400 + ordinal * 1370, "_refresh": 1}.items())
+                # Balances at UTC midnight support exact 7/28/90-day and custom
+                # boundaries, including today. Include gains, losses and zero.
+                current = 2400 + ordinal * 1370
+                daily_change = (-3, 0, 4, 7)[(ordinal + brand_index) % 4]
+                for offset in range(180, -1, -1):
+                    day = today - dt.timedelta(days=offset)
+                    points.append((project, profile, account, platform, "followers", "snapshot", day.isoformat() + "T00:00:00Z", current - daily_change * offset, SOURCE, DESCRIPTION))
+                if now != today.isoformat() + "T00:00:00Z":
+                    points.append((project, profile, account, platform, "followers", "snapshot", now, current, SOURCE, DESCRIPTION))
+                if not followers_only:
+                    points.append((project, profile, account, platform, "_refresh", "snapshot", now, 1, SOURCE, DESCRIPTION))
                 db.executemany("""INSERT INTO social_metric_points
                     (project_id,profile_id,social_account_id,platform,scope,metric,period,point_time,value,source,status,note)
                     VALUES(?,?,?,?,'account',?,?,?,?,?,'ok',?)""", points)
@@ -79,5 +96,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--project-id", required=True)
+    parser.add_argument("--followers-only", action="store_true", help="Refresh only follower observations on existing sample accounts")
     args = parser.parse_args()
-    print(json.dumps(seed(args.database, args.project_id)))
+    print(json.dumps(seed(args.database, args.project_id, args.followers_only)))

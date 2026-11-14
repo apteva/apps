@@ -136,7 +136,9 @@ test("performance ranks the top ten persisted accounts and filters by named prof
     browser.document.querySelector('button[aria-label="Select accounts"]'),
   ).toBeTruthy();
   expect(
-    browser.document.querySelector('[role="group"][aria-label="Account selection"]'),
+    browser.document.querySelector(
+      '[role="group"][aria-label="Account selection"]',
+    ),
   ).toBeNull();
   expect(
     browser.document.querySelector('input[aria-label="Demo data"]'),
@@ -437,4 +439,82 @@ test("display defaults bound the account limit and use a visible metric for rank
       },
     }).ranking,
   ).toBe("name");
+});
+
+test("follower ranking shows selected-period growth and explains missing history without a false zero", async () => {
+  const data = summary(options.accounts.slice(0, 5));
+  const changes = [10, -20, 0, undefined, undefined];
+  for (const [index, account] of data.accounts.entries()) {
+    account.metrics.followers.change_percent = changes[index];
+    account.metrics.followers.growth = {
+      status: index < 3 ? "available" : "unavailable",
+      reason:
+        index === 3
+          ? "zero_baseline"
+          : index === 4
+            ? "missing_baseline"
+            : undefined,
+      start_date: "2026-10-17",
+      end_date: "2026-11-13",
+      baseline_value: index === 3 ? 0 : 1000,
+      end_value: 1100,
+      net_change: index < 4 ? 100 : null,
+      accounts: index < 4 ? 1 : 0,
+      baseline_observed_at: "2026-10-17T00:00:00Z",
+      end_observed_at: "2026-11-14T00:00:00Z",
+    };
+  }
+  globalThis.fetch = (async (input) =>
+    Response.json(
+      String(input).includes("/options?") ? options : data,
+    )) as typeof fetch;
+  await render({
+    projectId: "brand",
+    widgetSettings: {
+      ranking_metric: "followers",
+      show_summary: false,
+      show_trends: false,
+    },
+  });
+  expect(
+    browser.document.querySelectorAll(
+      'tbody [aria-label^="Followers change:"]',
+    ),
+  ).toHaveLength(3);
+  const gain = browser.document.querySelector(
+    '[aria-label="Followers change: +10.0%"]',
+  );
+  expect(gain?.classList.contains("text-success")).toBe(true);
+  expect(gain?.getAttribute("title")).toContain(
+    "Follower growth during 2026-10-17 – 2026-11-13",
+  );
+  expect(gain?.getAttribute("title")).toContain("2026-10-17T00:00:00Z");
+  expect(gain?.getAttribute("title")).not.toContain("previous 28 days");
+  expect(
+    browser.document
+      .querySelector('[aria-label="Followers change: -20.0%"]')
+      ?.classList.contains("text-error"),
+  ).toBe(true);
+  expect(
+    browser.document
+      .querySelector('[aria-label="Followers change: 0.0%"]')
+      ?.classList.contains("text-text-dim"),
+  ).toBe(true);
+  const missing = [
+    ...browser.document.querySelectorAll(
+      '[aria-label="Followers growth unavailable"]',
+    ),
+  ];
+  expect(missing).toHaveLength(2);
+  expect(
+    missing.some((e) =>
+      e.getAttribute("title")?.includes("undefined from zero"),
+    ),
+  ).toBe(true);
+  expect(
+    missing.some((e) => e.getAttribute("title")?.includes("at the start")),
+  ).toBe(true);
+  expect(browser.document.body.textContent).toContain(
+    "Growth during 2026-10-17 – 2026-11-13",
+  );
 });
