@@ -6,6 +6,7 @@ import Performance from "./SocialPerformanceWidget";
 import {
   performanceDateError,
   performanceDefaults,
+  performanceDisplay,
   performanceURL,
   sortPerformanceAccounts,
   type PerformanceOptions,
@@ -118,7 +119,7 @@ function mockResponses(requests: URL[]) {
   }) as typeof fetch;
 }
 
-test("performance shows all sixteen persisted accounts and filters by named profile and platform", async () => {
+test("performance ranks the top ten persisted accounts and filters by named profile and platform", async () => {
   const requests: URL[] = [];
   mockResponses(requests);
   await render({
@@ -126,7 +127,17 @@ test("performance shows all sixteen persisted accounts and filters by named prof
     installId: 34,
     widgetSize: "half",
   });
-  expect(browser.document.querySelectorAll("tbody tr")).toHaveLength(16);
+  expect(browser.document.querySelectorAll("tbody tr")).toHaveLength(10);
+  expect(browser.document.querySelector("tbody tr a")?.textContent).toBe(
+    "Brand 4 youtube",
+  );
+  expect(browser.document.body.textContent).toContain("Top 10 of 16 accounts");
+  expect(
+    browser.document.querySelector('button[aria-label="Select accounts"]'),
+  ).toBeTruthy();
+  expect(
+    browser.document.querySelector('[role="group"][aria-label="Account selection"]'),
+  ).toBeNull();
   expect(
     browser.document.querySelector('input[aria-label="Demo data"]'),
   ).toBeNull();
@@ -159,6 +170,13 @@ test("account selection narrows rows and changing profile clears the incompatibl
   const requests: URL[] = [];
   mockResponses(requests);
   await render({ projectId: "brand", widgetSettings: {} });
+  await act(async () =>
+    (
+      browser.document.querySelector(
+        'button[aria-label="Select accounts"]',
+      ) as HTMLButtonElement
+    ).click(),
+  );
   const check = browser.document.querySelector(
     'input[aria-label="Include Brand 1 facebook"]',
   ) as HTMLInputElement;
@@ -242,10 +260,10 @@ test("account metrics sort numerically with missing values last and preserve rea
   accounts[1].metrics.views.value = 0;
   accounts[2].metrics.views.value = 20;
   expect(
-    sortPerformanceAccounts(accounts, "views", false, "views").map((a) => a.id),
+    sortPerformanceAccounts(accounts, "views", false).map((a) => a.id),
   ).toEqual([2, 3, 1]);
   expect(
-    sortPerformanceAccounts(accounts, "views", true, "views").map((a) => a.id),
+    sortPerformanceAccounts(accounts, "views", true).map((a) => a.id),
   ).toEqual([3, 2, 1]);
   const defaults = performanceDefaults({
     widgetSettings: { days: 7, platform: "facebook" },
@@ -264,4 +282,159 @@ test("account metrics sort numerically with missing values last and preserve rea
       new Date("2026-11-14T12:00:00Z"),
     ),
   ).toContain("completed UTC days");
+});
+
+test("widget settings support accounts only, visible columns, ranking and a limit after sorting", async () => {
+  const data = summary();
+  data.accounts[0].metrics.interactions.value = 99999;
+  const requests: URL[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input), browser.location.origin);
+    requests.push(url);
+    return Response.json(data);
+  }) as typeof fetch;
+  await render({
+    projectId: "brand",
+    widgetSettings: {
+      max_accounts: 3,
+      ranking_metric: "interactions",
+      show_summary: false,
+      show_trends: false,
+      show_filters: false,
+      show_profile: false,
+      show_platform: false,
+      show_followers: false,
+      show_impressions: false,
+    },
+  });
+  expect(browser.document.querySelectorAll("tbody tr")).toHaveLength(3);
+  expect(browser.document.querySelector("tbody tr a")?.textContent).toBe(
+    "Brand 1 facebook",
+  );
+  expect(
+    [...browser.document.querySelectorAll("th button")].map(
+      (e) => e.textContent,
+    ),
+  ).toEqual(["Account", "Views", "Interactions ↓"]);
+  expect(
+    browser.document.querySelector('[aria-label="Performance totals"]'),
+  ).toBeNull();
+  expect(
+    browser.document.querySelector('[aria-label="Performance graph"]'),
+  ).toBeNull();
+  expect(
+    browser.document.querySelector('[aria-label="Performance filters"]'),
+  ).toBeNull();
+  expect(
+    browser.document.querySelectorAll('[aria-label^="Interactions change:"]'),
+  ).toHaveLength(3);
+  expect(
+    browser.document.querySelector('[aria-label^="Views change:"]'),
+  ).toBeNull();
+  expect(requests).toHaveLength(1);
+
+  await render({
+    projectId: "brand",
+    widgetSettings: { max_accounts: 2, show_accounts: false },
+  });
+  expect(browser.document.querySelector("table")).toBeNull();
+  expect(
+    browser.document.querySelector('[aria-label="Performance totals"]'),
+  ).toBeTruthy();
+  expect(
+    browser.document.querySelector('[aria-label="Performance graph"]'),
+  ).toBeTruthy();
+  expect(browser.document.body.textContent).toContain("13.6K"); // all-account totals, independent of the row limit
+});
+
+test("percentage badges follow the sorted metric, preserve missing data and distinguish gains, losses and zero", async () => {
+  const data = summary(options.accounts.slice(0, 3));
+  data.accounts[0].metrics.views.change_percent = 12.5;
+  data.accounts[1].metrics.views.change_percent = -8.2;
+  delete data.accounts[2].metrics.views.change_percent;
+  data.accounts[0].metrics.impressions.change_percent = 0;
+  data.accounts[1].metrics.impressions.change_percent = -4;
+  data.accounts[2].metrics.impressions.value = null;
+  for (const account of data.accounts)
+    delete account.metrics.followers.change_percent;
+  globalThis.fetch = (async (input) =>
+    Response.json(
+      String(input).includes("/options?") ? options : data,
+    )) as typeof fetch;
+  await render({
+    projectId: "brand",
+    widgetSettings: { show_summary: false, show_trends: false },
+  });
+  expect(
+    [...browser.document.querySelectorAll("th")].some((e) =>
+      e.textContent?.includes("Change"),
+    ),
+  ).toBe(false);
+  const gain = browser.document.querySelector(
+    '[aria-label="Views change: +12.5%"]',
+  );
+  const loss = browser.document.querySelector(
+    '[aria-label="Views change: -8.2%"]',
+  );
+  expect(gain?.classList.contains("text-success")).toBe(true);
+  expect(loss?.classList.contains("text-error")).toBe(true);
+  expect(gain?.parentElement?.parentElement?.tagName).toBe("TD");
+  expect(
+    browser.document.querySelectorAll('[aria-label^="Views change:"]'),
+  ).toHaveLength(2);
+
+  const clickHeading = async (name: string) => {
+    const button = [...browser.document.querySelectorAll("th button")].find(
+      (e) => e.textContent?.startsWith(name),
+    ) as HTMLButtonElement;
+    await act(async () => button.click());
+  };
+  await clickHeading("Impressions");
+  expect(
+    browser.document.querySelector('[aria-label^="Views change:"]'),
+  ).toBeNull();
+  expect(
+    browser.document
+      .querySelector('[aria-label="Impressions change: 0.0%"]')
+      ?.classList.contains("text-text-dim"),
+  ).toBe(true);
+  expect(
+    browser.document.querySelectorAll('[aria-label^="Impressions change:"]'),
+  ).toHaveLength(2);
+  await clickHeading("Followers");
+  expect(browser.document.querySelector('[aria-label*=" change:"]')).toBeNull();
+  await clickHeading("Account");
+  expect(browser.document.querySelector('[aria-label*=" change:"]')).toBeNull();
+});
+
+test("display defaults bound the account limit and use a visible metric for ranking", () => {
+  expect(performanceDisplay({})).toMatchObject({
+    maxAccounts: 10,
+    ranking: "views",
+  });
+  expect(
+    performanceDisplay({ widgetSettings: { max_accounts: 0 } }).maxAccounts,
+  ).toBe(1);
+  expect(
+    performanceDisplay({ widgetSettings: { max_accounts: 999 } }).maxAccounts,
+  ).toBe(100);
+  expect(
+    performanceDisplay({ widgetSettings: { max_accounts: "invalid" } })
+      .maxAccounts,
+  ).toBe(10);
+  expect(
+    performanceDisplay({
+      widgetSettings: { ranking_metric: "views", show_views: false },
+    }).ranking,
+  ).toBe("followers");
+  expect(
+    performanceDisplay({
+      widgetSettings: {
+        show_views: false,
+        show_followers: false,
+        show_impressions: false,
+        show_interactions: false,
+      },
+    }).ranking,
+  ).toBe("name");
 });

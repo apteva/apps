@@ -31,8 +31,44 @@ export type PerformanceSort =
   | "followers"
   | "views"
   | "impressions"
-  | "interactions"
-  | "change";
+  | "interactions";
+export const performanceMetrics = [
+  "followers",
+  "views",
+  "impressions",
+  "interactions",
+] as const;
+export type PerformanceMetric = (typeof performanceMetrics)[number];
+
+export function performanceDisplay(props: HomeWidgetProps) {
+  const settings = props.widgetSettings || {};
+  const columns = performanceMetrics.filter(
+    (metric) => settings[`show_${metric}`] !== false,
+  );
+  const requested = performanceMetrics.includes(
+    settings.ranking_metric as PerformanceMetric,
+  )
+    ? (settings.ranking_metric as PerformanceMetric)
+    : "views";
+  const ranking: PerformanceSort = columns.includes(requested)
+    ? requested
+    : columns.length > 0
+      ? columns[0]
+      : "name";
+  const limit = Number(settings.max_accounts ?? 10);
+  return {
+    columns,
+    ranking,
+    maxAccounts: Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(100, limit))
+      : 10,
+    showSummary: settings.show_summary !== false,
+    showAccounts: settings.show_accounts !== false,
+    showFilters: settings.show_filters !== false,
+    showProfile: settings.show_profile !== false,
+    showPlatform: settings.show_platform !== false,
+  };
+}
 const stamp = (date: Date) => date.toISOString().slice(0, 10);
 export function completePerformanceDates(now = new Date()) {
   const end = new Date(
@@ -107,16 +143,13 @@ export function sortPerformanceAccounts(
   accounts: PerformanceSummary["accounts"],
   key: PerformanceSort,
   descending: boolean,
-  changeMetric: string,
 ) {
   const value = (
     a: PerformanceSummary["accounts"][number],
   ): string | number | null | undefined =>
     key === "name" || key === "platform" || key === "profile_name"
       ? a[key] || ""
-      : key === "change"
-        ? a.metrics[changeMetric]?.change_percent
-        : a.metrics[key]?.value;
+      : a.metrics[key]?.value;
   return [...accounts].sort((a, b) => {
     const x = value(a),
       y = value(b);
