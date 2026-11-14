@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.24.12
+version: 0.24.13
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -188,8 +188,26 @@ provides:
           platform: { type: string, title: Platform, enum: [all, facebook, instagram, youtube, tiktok, twitter, linkedin, pinterest, threads, reddit], default: all }
           start_date: { type: string, title: Custom start date, description: 'YYYY-MM-DD; set both dates for a custom window of at most 366 complete UTC days.', default: '' }
           end_date: { type: string, title: Custom end date, description: 'Inclusive YYYY-MM-DD, no later than yesterday UTC.', default: '' }
-          visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
-          show_trends: { type: boolean, title: Show trends, default: true }
+          visibility_metric: { type: string, title: Graph metric, enum: [views, impressions], default: views }
+          show_trends: { type: boolean, title: Show graph, default: true }
+          max_accounts: { type: integer, title: Maximum accounts to show, description: 'Applied after filtering and sorting. Totals and the graph still cover all matching accounts.', minimum: 1, maximum: 100, default: 10 }
+          ranking_metric: { type: string, title: Rank best accounts by, enum: [views, impressions, interactions, followers], default: views }
+          show_summary: { type: boolean, title: Show totals, default: true }
+          show_accounts: { type: boolean, title: Show account table, default: true }
+          show_filters: { type: boolean, title: Show filter bar, default: true }
+          show_profile: { type: boolean, title: Show profile column, default: true }
+          show_platform: { type: boolean, title: Show platform column, default: true }
+          show_followers: { type: boolean, title: Show followers, default: true }
+          show_views: { type: boolean, title: Show views, default: true }
+          show_impressions: { type: boolean, title: Show impressions, default: true }
+          show_interactions: { type: boolean, title: Show interactions, default: true }
+      settings_ui:
+        steps:
+          - { id: display, title: Display, fields: [max_accounts, ranking_metric, show_summary, show_trends, show_accounts, show_filters] }
+          - { id: columns, title: Columns, fields: [show_profile, show_platform, show_followers, show_views, show_impressions, show_interactions] }
+          - { id: scope, title: Filters, fields: [platform, days, visibility_metric] }
+        advanced: [profile_id, account_ids, start_date, end_date]
+        preview: true
       preview_props: { preview: true }
     - name: calendar-card
       entry: /ui/SocialCalendarCard.mjs
@@ -221,7 +239,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.12
+    ref: social/v0.24.13
     entry: mcp/social
   port: 8080
   health_check: /health

@@ -1,15 +1,30 @@
 # Performance widget
 
-The existing Performance widget lists each matching account at both half and
-full width. Use its Profile, Platform, Accounts and Date range controls to
-compare accounts. Column headings sort the account table. Configure the widget
-to save default profile/account IDs, platform, date preset or custom dates;
-changes made in the visible filter bar last for that mounted widget.
+The existing Performance widget ranks matching accounts at both half and full
+width. Its Profile, Platform, Date range and Accounts controls share one row
+(scrolling horizontally on narrow widgets); Accounts opens a separate selection
+panel. Column headings change the sort for the mounted widget.
+
+Use the widget's **Configure** action for persisted SDK settings. Display lets
+you choose the ranking metric, account limit (10 by default, configurable from
+1 to 100), totals, graph, account table and filter bar independently. Turn off
+Show totals and Show graph for an accounts-only view. Columns lets you choose
+profile, platform, followers, views, impressions and interactions separately.
+Filters saves the default platform, dates and graph metric; explicit profile
+and account IDs and custom dates are advanced settings.
+
+Accounts start sorted by the chosen ranking metric, descending. If that column
+is hidden, ranking uses the first visible metric; with no metric columns, it
+uses account names. The row limit applies **after** filters and sorting, and
+never truncates the all-account totals or graph. The table shows how many rows
+are displayed out of the matching set.
 
 Views, impressions and interactions cover the selected complete UTC dates.
 Custom dates are inclusive and may span 1–366 days, ending no later than
-yesterday UTC. Change compares the selected visibility metric with the previous
-equal period, and is unavailable when either period lacks complete coverage.
+yesterday UTC. A small percentage next to the sorted metric compares it with
+the previous equal period: green for gains, red for losses, neutral for zero.
+There is no separate Change column. The badge moves when sorting another metric
+and disappears for text sorting or missing/incomplete comparison evidence.
 Followers are a current snapshot regardless of the selected dates. Missing
 metrics stay unavailable, partial daily coverage is labeled, and a Pinterest
 board selected with its parent remains excluded from aggregate totals.

@@ -16,6 +16,7 @@ import {
   completePerformanceDates,
   performanceDateError,
   performanceDefaults,
+  performanceDisplay,
   performanceURL,
   sortPerformanceAccounts,
   type PerformanceFilters,
@@ -57,13 +58,15 @@ export default function SocialPerformanceWidget(props: HomeWidgetProps) {
 
 function PerformanceView(props: HomeWidgetProps) {
   const prefs = widgetPreferences(props);
+  const display = performanceDisplay(props);
+  const [accountsOpen, setAccountsOpen] = useState(false);
   const [filters, setFilters] = useState<PerformanceFilters>(() =>
     performanceDefaults(props),
   );
   const [sort, setSort] = useState<{
     key: PerformanceSort;
     descending: boolean;
-  }>({ key: "name", descending: false });
+  }>({ key: display.ranking, descending: display.ranking !== "name" });
   const invalid = performanceDateError(filters);
   const days =
     filters.period === "custom"
@@ -89,15 +92,17 @@ function PerformanceView(props: HomeWidgetProps) {
     ),
     props,
     () => emptyOptions,
+    display.showFilters,
   );
   const options = optionsResult.data || emptyOptions;
   const data = result.data;
-  const rows = sortPerformanceAccounts(
+  const sortedRows = sortPerformanceAccounts(
     data?.accounts || [],
     sort.key,
     sort.descending,
-    prefs.visibilityMetric,
   );
+  const rows = sortedRows.slice(0, display.maxAccounts);
+  const sortedMetric = display.columns.find((metric) => metric === sort.key);
   const accountChoices = (options.accounts || []).filter(
     (account) =>
       (!filters.profileID || account.profile_id === filters.profileID) &&
@@ -118,7 +123,6 @@ function PerformanceView(props: HomeWidgetProps) {
       : filters.period === "custom"
         ? `${filters.startDate} – ${filters.endDate}`
         : `Last ${days} complete days`;
-  const keys = ["followers", prefs.visibilityMetric, "interactions"];
   const full = props.widgetSize === "full";
   const changeFilter = (patch: Partial<PerformanceFilters>) =>
     setFilters((previous) => ({ ...previous, ...patch }));
@@ -131,6 +135,7 @@ function PerformanceView(props: HomeWidgetProps) {
     });
   const heading = (key: PerformanceSort, label: string) => (
     <th
+      key={key}
       className="px-2 py-2 text-left font-medium whitespace-nowrap"
       aria-sort={
         sort.key === key
@@ -159,7 +164,7 @@ function PerformanceView(props: HomeWidgetProps) {
   );
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
-      <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+      <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <h2 className="flex items-center gap-2 text-sm font-bold text-text">
             <BarChart3 size={16} aria-hidden />
@@ -177,125 +182,140 @@ function PerformanceView(props: HomeWidgetProps) {
           Open analytics →
         </a>
       </header>
-      <div
-        className="flex flex-wrap items-end gap-2 border-b border-border px-4 py-2"
-        aria-label="Performance filters"
-      >
-        <label className="min-w-0 text-[11px] text-text-dim">
-          Profile
-          <select
-            aria-label="Profile"
-            className={`block ${control}`}
-            value={filters.profileID}
-            onChange={(event) =>
-              changeFilter({
-                profileID: Number(event.target.value),
-                accountIDs: "",
-              })
-            }
-          >
-            <option value={0}>All profiles</option>
-            {(options.profiles || []).map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-[11px] text-text-dim">
-          Platform
-          <select
-            aria-label="Platform"
-            className={`block ${control}`}
-            value={filters.platform}
-            onChange={(event) =>
-              changeFilter({ platform: event.target.value, accountIDs: "" })
-            }
-          >
-            <option value="all">All platforms</option>
-            {(options.platforms || []).map((platform) => (
-              <option key={platform} value={platform}>
-                {platformPresentation(platform).label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-[11px] text-text-dim">
-          Date range
-          <select
-            aria-label="Date range"
-            className={`block ${control}`}
-            value={filters.period}
-            onChange={(event) => changeFilter({ period: event.target.value })}
-          >
-            <option value="7">Last 7 days</option>
-            <option value="28">Last 28 days</option>
-            <option value="90">Last 90 days</option>
-            <option value="custom">Custom dates</option>
-          </select>
-        </label>
-        {filters.period === "custom" && (
-          <>
-            <label className="text-[11px] text-text-dim">
-              From
-              <input
-                aria-label="Start date"
-                type="date"
-                max={completePerformanceDates().endDate}
-                className={`block ${control}`}
-                value={filters.startDate}
-                onChange={(event) =>
-                  changeFilter({ startDate: event.target.value })
-                }
-              />
-            </label>
-            <label className="text-[11px] text-text-dim">
-              To
-              <input
-                aria-label="End date"
-                type="date"
-                max={completePerformanceDates().endDate}
-                className={`block ${control}`}
-                value={filters.endDate}
-                onChange={(event) =>
-                  changeFilter({ endDate: event.target.value })
-                }
-              />
-            </label>
-          </>
-        )}
-        <details className="w-full text-xs">
-          <summary className="cursor-pointer text-text-muted">
-            Accounts ·{" "}
-            {selectedIDs.length
-              ? `${selectedIDs.length} selected`
-              : "All matching accounts"}
-          </summary>
-          <div className="mt-2 max-h-32 overflow-auto rounded border border-border p-2">
+      {display.showFilters && (
+        <div
+          className="flex shrink-0 flex-nowrap items-end gap-2 overflow-x-auto border-b border-border px-4 py-2"
+          aria-label="Performance filters"
+        >
+          <label className="shrink-0 text-[11px] text-text-dim">
+            Profile
+            <select
+              aria-label="Profile"
+              className={`block ${control}`}
+              value={filters.profileID}
+              onChange={(event) =>
+                changeFilter({
+                  profileID: Number(event.target.value),
+                  accountIDs: "",
+                })
+              }
+            >
+              <option value={0}>All profiles</option>
+              {(options.profiles || []).map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="shrink-0 text-[11px] text-text-dim">
+            Platform
+            <select
+              aria-label="Platform"
+              className={`block ${control}`}
+              value={filters.platform}
+              onChange={(event) =>
+                changeFilter({ platform: event.target.value, accountIDs: "" })
+              }
+            >
+              <option value="all">All platforms</option>
+              {(options.platforms || []).map((platform) => (
+                <option key={platform} value={platform}>
+                  {platformPresentation(platform).label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="shrink-0 text-[11px] text-text-dim">
+            Date range
+            <select
+              aria-label="Date range"
+              className={`block ${control}`}
+              value={filters.period}
+              onChange={(event) => changeFilter({ period: event.target.value })}
+            >
+              <option value="7">Last 7 days</option>
+              <option value="28">Last 28 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="custom">Custom dates</option>
+            </select>
+          </label>
+          {filters.period === "custom" && (
+            <>
+              <label className="shrink-0 text-[11px] text-text-dim">
+                From
+                <input
+                  aria-label="Start date"
+                  type="date"
+                  max={completePerformanceDates().endDate}
+                  className={`block ${control}`}
+                  value={filters.startDate}
+                  onChange={(event) =>
+                    changeFilter({ startDate: event.target.value })
+                  }
+                />
+              </label>
+              <label className="shrink-0 text-[11px] text-text-dim">
+                To
+                <input
+                  aria-label="End date"
+                  type="date"
+                  max={completePerformanceDates().endDate}
+                  className={`block ${control}`}
+                  value={filters.endDate}
+                  onChange={(event) =>
+                    changeFilter({ endDate: event.target.value })
+                  }
+                />
+              </label>
+            </>
+          )}
+          <div className="shrink-0 text-[11px] text-text-dim">
+            <p>Accounts</p>
             <button
               type="button"
-              className="mb-2 text-accent"
-              onClick={() => changeFilter({ accountIDs: "" })}
+              className={control}
+              aria-label="Select accounts"
+              aria-expanded={accountsOpen}
+              onClick={() => setAccountsOpen((open) => !open)}
             >
-              Use all matching accounts
+              {selectedIDs.length
+                ? `${selectedIDs.length} selected`
+                : "All matching accounts"}{" "}
+              ▾
             </button>
-            {accountChoices.map((account) => (
-              <label key={account.id} className="flex items-center gap-2 py-1">
-                <input
-                  type="checkbox"
-                  aria-label={`Include ${account.name}`}
-                  checked={selectedIDs.includes(String(account.id))}
-                  onChange={() => toggleAccount(account.id)}
-                />
-                {account.name} · {platformPresentation(account.platform).label}
-              </label>
-            ))}
-            {accountChoices.length === 0 && (
-              <p>No accounts match these filters.</p>
-            )}
           </div>
-        </details>
-      </div>
+        </div>
+      )}
+      {display.showFilters && accountsOpen && (
+        <div
+          role="group"
+          aria-label="Account selection"
+          className="max-h-40 shrink-0 overflow-auto border-b border-border px-4 py-2 text-xs"
+        >
+          <button
+            type="button"
+            className="mb-2 text-accent"
+            onClick={() => changeFilter({ accountIDs: "" })}
+          >
+            Use all matching accounts
+          </button>
+          {accountChoices.map((account) => (
+            <label key={account.id} className="flex items-center gap-2 py-1">
+              <input
+                type="checkbox"
+                aria-label={`Include ${account.name}`}
+                checked={selectedIDs.includes(String(account.id))}
+                onChange={() => toggleAccount(account.id)}
+              />
+              {account.name} · {platformPresentation(account.platform).label}
+            </label>
+          ))}
+          {accountChoices.length === 0 && (
+            <p>No accounts match these filters.</p>
+          )}
+        </div>
+      )}
       {(invalid || result.error || optionsResult.error) && (
         <div
           role="alert"
@@ -321,143 +341,166 @@ function PerformanceView(props: HomeWidgetProps) {
         </p>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
-          <div className="grid grid-cols-3 gap-3">
-            {keys.map((key) => (
-              <Headline
-                key={key}
-                name={key}
-                metric={data.metrics[key]}
-                totalAccounts={
-                  data.accounts.filter(
-                    (account) => !account.aggregate_exclusion_reason,
-                  ).length
-                }
-                days={data.days}
-                showTrend={prefs.showTrends && !full}
-              />
-            ))}
-          </div>
-          <p className="mt-3 text-[10px] text-text-dim">
-            Followers are current totals, not unique people or historical
-            totals. Views, impressions and interactions use the selected dates.
-            Interactions = likes + comments + shares.
-          </p>
-          {full && prefs.showTrends && (
-            <div className="mt-3 rounded border border-border p-2">
+          {display.showSummary && display.columns.length > 0 && (
+            <div
+              aria-label="Performance totals"
+              className="grid gap-3"
+              style={{
+                gridTemplateColumns: `repeat(${Math.min(display.columns.length, full ? 4 : 2)}, minmax(0, 1fr))`,
+              }}
+            >
+              {display.columns.map((key) => (
+                <Headline
+                  key={key}
+                  name={key}
+                  metric={data.metrics[key]}
+                  totalAccounts={
+                    data.accounts.filter(
+                      (account) => !account.aggregate_exclusion_reason,
+                    ).length
+                  }
+                  days={data.days}
+                />
+              ))}
+            </div>
+          )}
+          {prefs.showTrends && (
+            <div
+              aria-label="Performance graph"
+              className="mt-3 rounded border border-border p-2"
+            >
               <Trend
                 metric={data.metrics[prefs.visibilityMetric]}
                 label={labels[prefs.visibilityMetric]}
               />
             </div>
           )}
-          <p className="mt-3 text-[11px] text-text-muted">
-            {rows.length} {rows.length === 1 ? "account" : "accounts"} · Change
-            compares {prefs.visibilityMetric} with the previous equal period
-          </p>
-          {rows.length === 0 ? (
-            <p className="py-4 text-xs text-text-dim">
-              No connected accounts match these filters.
-            </p>
-          ) : (
-            <div className="mt-2 overflow-x-auto">
-              <table className="w-full text-left text-[11px]">
-                <caption className="sr-only">
-                  Social performance by account
-                </caption>
-                <thead className="text-text-dim">
-                  <tr>
-                    {heading("name", "Account")}
-                    {heading("profile_name", "Profile")}
-                    {heading("platform", "Platform")}
-                    {heading("followers", "Followers (current)")}
-                    {heading("views", "Views")}
-                    {heading("impressions", "Impressions")}
-                    {heading("interactions", "Interactions")}
-                    {heading("change", "Change %")}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((account) => (
-                    <tr key={account.id} className="border-t border-border">
-                      <td className="px-2 py-2 text-text whitespace-nowrap">
-                        <a
-                          className="hover:text-accent"
-                          href={socialPageLink(navigation, {
-                            tab: "metrics",
-                            account_ids: account.id,
-                            ...(filters.period !== "custom"
-                              ? { range: `${days}d` }
-                              : {}),
-                          })}
-                        >
-                          {account.name}
-                        </a>
-                        {account.status && account.status !== "active" && (
-                          <span className="block text-[10px] text-text-dim">
-                            {account.status.replace(/_/g, " ")} · cached metrics
-                          </span>
+          {display.showAccounts && (
+            <>
+              <p className="mt-3 text-[11px] text-text-muted">
+                {rows.length < sortedRows.length
+                  ? `${sort.descending && sortedMetric ? "Top" : "Showing"} ${rows.length} of ${sortedRows.length} accounts`
+                  : `${rows.length} ${rows.length === 1 ? "account" : "accounts"}`}
+                {sortedMetric &&
+                  ` · ${labels[sortedMetric]} ${sort.descending ? "↓" : "↑"}${sortedMetric === "followers" ? " · Current snapshot" : ` · % vs previous ${data.days} days`}`}
+              </p>
+              {rows.length === 0 ? (
+                <p className="py-4 text-xs text-text-dim">
+                  No connected accounts match these filters.
+                </p>
+              ) : (
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-left text-[11px]">
+                    <caption className="sr-only">
+                      Social performance by account
+                    </caption>
+                    <thead className="text-text-dim">
+                      <tr>
+                        {heading("name", "Account")}
+                        {display.showProfile &&
+                          heading("profile_name", "Profile")}
+                        {display.showPlatform &&
+                          heading("platform", "Platform")}
+                        {display.columns.map((metric) =>
+                          heading(
+                            metric,
+                            metric === "followers"
+                              ? "Followers (current)"
+                              : labels[metric],
+                          ),
                         )}
-                        {account.aggregate_exclusion_reason && (
-                          <span className="block max-w-56 whitespace-normal text-text-dim">
-                            {account.aggregate_exclusion_reason}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-2 py-2 whitespace-nowrap">
-                        {account.profile_name || "Unassigned"}
-                      </td>
-                      <td className="px-2 py-2 whitespace-nowrap">
-                        {platformPresentation(account.platform).label}
-                      </td>
-                      {[
-                        "followers",
-                        "views",
-                        "impressions",
-                        "interactions",
-                      ].map((key) => {
-                        const metric = account.metrics[key];
-                        return (
-                          <td
-                            key={key}
-                            className="px-2 py-2 tabular-nums"
-                            title={
-                              metric?.value == null
-                                ? "Unavailable"
-                                : key === "followers"
-                                  ? "Current follower snapshot"
-                                  : `${metric.days || 0}/${data.days} days of data`
-                            }
-                          >
-                            {number(metric?.value)}
-                            {key !== "followers" &&
-                              metric?.value != null &&
-                              (metric.days || 0) < data.days && (
-                                <span className="block text-[10px] text-text-dim">
-                                  Partial · {metric.days || 0}/{data.days} days
-                                </span>
-                              )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((account) => (
+                        <tr key={account.id} className="border-t border-border">
+                          <td className="px-2 py-2 text-text whitespace-nowrap">
+                            <a
+                              className="hover:text-accent"
+                              href={socialPageLink(navigation, {
+                                tab: "metrics",
+                                account_ids: account.id,
+                                ...(filters.period !== "custom"
+                                  ? { range: `${days}d` }
+                                  : {}),
+                              })}
+                            >
+                              {account.name}
+                            </a>
+                            {account.status && account.status !== "active" && (
+                              <span className="block text-[10px] text-text-dim">
+                                {account.status.replace(/_/g, " ")} · cached
+                                metrics
+                              </span>
+                            )}
+                            {account.aggregate_exclusion_reason && (
+                              <span className="block max-w-56 whitespace-normal text-text-dim">
+                                {account.aggregate_exclusion_reason}
+                              </span>
+                            )}
                           </td>
-                        );
-                      })}
-                      <td className="px-2 py-2 tabular-nums">
-                        {account.metrics[prefs.visibilityMetric]
-                          ?.change_percent == null
-                          ? "—"
-                          : `${account.metrics[prefs.visibilityMetric].change_percent! > 0 ? "+" : ""}${account.metrics[prefs.visibilityMetric].change_percent!.toFixed(1)}%`}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                          {display.showProfile && (
+                            <td className="px-2 py-2 whitespace-nowrap">
+                              {account.profile_name || "Unassigned"}
+                            </td>
+                          )}
+                          {display.showPlatform && (
+                            <td className="px-2 py-2 whitespace-nowrap">
+                              {platformPresentation(account.platform).label}
+                            </td>
+                          )}
+                          {display.columns.map((key) => {
+                            const metric = account.metrics[key];
+                            return (
+                              <td
+                                key={key}
+                                className="px-2 py-2 tabular-nums"
+                                title={
+                                  metric?.value == null
+                                    ? "Unavailable"
+                                    : key === "followers"
+                                      ? "Current follower snapshot"
+                                      : `${metric.days || 0}/${data.days} days of data`
+                                }
+                              >
+                                <span className="inline-flex items-baseline gap-1.5 whitespace-nowrap">
+                                  {number(metric?.value)}
+                                  {sort.key === key &&
+                                    metric?.value != null && (
+                                      <MetricChange
+                                        change={metric.change_percent}
+                                        label={labels[key]}
+                                        days={data.days}
+                                      />
+                                    )}
+                                </span>
+                                {key !== "followers" &&
+                                  metric?.value != null &&
+                                  (metric.days || 0) < data.days && (
+                                    <span className="block text-[10px] text-text-dim">
+                                      Partial · {metric.days || 0}/{data.days}{" "}
+                                      days
+                                    </span>
+                                  )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
-      <footer className="border-t border-border px-4 py-2 text-[10px] text-text-dim">
+      <footer className="shrink-0 border-t border-border px-4 py-2 text-[10px] text-text-dim">
         {data?.updated_at
           ? `Oldest available refresh: ${new Date(data.updated_at).toLocaleString()}`
           : "No cached analytics yet"}{" "}
-        · Missing metrics shown as —
+        · Followers are current; other metrics use selected dates · Missing
+        metrics —
       </footer>
     </section>
   );
@@ -467,13 +510,11 @@ function Headline({
   metric,
   totalAccounts,
   days,
-  showTrend,
 }: {
   name: string;
   metric?: WidgetMetric;
   totalAccounts: number;
   days: number;
-  showTrend: boolean;
 }) {
   const change = metric?.change_percent;
   return (
@@ -492,21 +533,38 @@ function Headline({
           ? "Unavailable"
           : `${metric.accounts}/${totalAccounts} accounts${name === "followers" ? "" : ` · ${metric.days || 0}/${days} complete days`}`}
       </p>
-      {change != null && (
+      {change != null && Number.isFinite(change) && (
         <p
-          className={`mt-1 text-[10px] ${change >= 0 ? "text-success" : "text-error"}`}
+          className={`mt-1 text-[10px] ${change > 0 ? "text-success" : change < 0 ? "text-error" : "text-text-dim"}`}
           title="Compared with the previous equal period, using the same accounts and complete daily data"
         >
           {change > 0 ? "+" : ""}
           {change.toFixed(1)}% vs prior period
         </p>
       )}
-      {showTrend && name !== "followers" && (
-        <div className="mt-2">
-          <Trend metric={metric} label={labels[name]} />
-        </div>
-      )}
     </div>
+  );
+}
+
+function MetricChange({
+  change,
+  label,
+  days,
+}: {
+  change?: number;
+  label: string;
+  days: number;
+}) {
+  if (change == null || !Number.isFinite(change)) return null;
+  const text = `${change > 0 ? "+" : ""}${change.toFixed(1)}%`;
+  return (
+    <span
+      className={`text-[10px] font-normal ${change > 0 ? "text-success" : change < 0 ? "text-error" : "text-text-dim"}`}
+      aria-label={`${label} change: ${text}`}
+      title={`Compared with the previous ${days} days, using complete data`}
+    >
+      {text}
+    </span>
   );
 }
 
