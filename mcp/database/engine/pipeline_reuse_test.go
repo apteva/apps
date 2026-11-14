@@ -53,7 +53,12 @@ func TestPipelineReadBatchReuse(t *testing.T) {
 			for _, ch := range channels {
 				r := <-ch
 				checkErr(t, r.err)
-				rows := reuseRows(r.value)
+				rows := cloneAggregateValue(reuseRows(r.value), false).([]any)
+				// Independent executions sign cursors with their own expiry time.
+				// Page membership and cursor reuse are checked separately below.
+				for _, row := range rows {
+					delete(row.(map[string]any), "nextCursor")
+				}
 				if expected == nil {
 					expected = rows
 				} else if !reflect.DeepEqual(expected, rows) {
