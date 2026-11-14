@@ -85,6 +85,8 @@ final class Agent {
             response = key(body)
         case ("POST", "/app"):
             response = app(body)
+        case ("POST", "/power"):
+            response = power(body)
         case ("POST", "/open"):
             response = open(body)
         case ("POST", "/tap_element"):
@@ -201,6 +203,109 @@ final class Agent {
         if let id = body["bundle_id"] as? String, !id.isEmpty { remember(id) }
         XCUIDevice.shared.system.open(url)
         return .json(["ok": true])
+    }
+
+    /// iOS has no public global idle-timer API. Drive its real Auto-Lock
+    /// preference instead; disabling the runner app's idle timer would not keep
+    /// other apps awake. Never send synthetic touches to the app under test.
+    private func power(_ body: [String: Any]) -> HTTPResponse {
+        let action = body["action"] as? String ?? "status"
+        guard action == "status" || action == "set" else {
+            return .error(400, "invalid_argument", "power action must be status or set")
+        }
+        let enabled = body["enabled"] as? Bool
+        guard action != "set" || enabled != nil else {
+            return .error(400, "invalid_argument", "enabled must be true or false")
+        }
+        guard !ProcessInfo.processInfo.isLowPowerModeEnabled else {
+            return .error(409, "device_unavailable", "Turn off Low Power Mode on the iPhone to read or change Auto-Lock")
+        }
+
+        let (previousID, previousApp) = foreground(nil)
+        let settingsID = "com.apple.Preferences"
+        let settings = XCUIApplication(bundleIdentifier: settingsID)
+        // Reading also visits Settings. Restore the foreground app after every
+        // request, including errors. The panel must not poll this endpoint.
+        defer {
+            if previousID == springboardID { XCUIDevice.shared.press(.home) }
+            else if previousID != settingsID { previousApp.activate() }
+        }
+        remember(settingsID)
+        settings.activate()
+
+        func cell(_ identifier: String, _ label: String) -> XCUIElement {
+            let identified = settings.cells.matching(identifier: identifier).firstMatch
+            if identified.exists { return identified }
+            return settings.cells.containing(.staticText, identifier: label).firstMatch
+        }
+        func autoLock() -> XCUIElement { cell("AUTOLOCK", "Auto-Lock") }
+        // Settings may have been left on any subpage. Prefer stable system
+        // accessibility identifiers; labels are a fallback for older iOS.
+        for _ in 0..<8 {
+            if autoLock().exists { break }
+            let display = cell("DISPLAY", "Display & Brightness")
+            if display.exists { display.tap(); continue }
+            let back = settings.navigationBars.buttons.firstMatch
+            guard back.exists, back.isEnabled else { break }
+            back.tap()
+        }
+        let row = autoLock()
+        guard row.waitForExistence(timeout: 3), row.isEnabled else {
+            return .error(409, "device_unavailable", "Auto-Lock is unavailable. Unlock the iPhone and check Low Power Mode or device policy in Settings > Display & Brightness")
+        }
+        func currentValue(_ row: XCUIElement) -> String? {
+            if let value = row.value as? String, !value.isEmpty { return value }
+            return row.staticTexts.allElementsBoundByIndex.map(\.label).first { !$0.isEmpty && $0 != "Auto-Lock" }
+        }
+        guard let current = currentValue(row) else {
+            return .error(422, "unsupported", "This iOS Settings layout does not expose the current Auto-Lock value")
+        }
+        row.tap()
+        func choice(_ label: String) -> XCUIElement {
+            let predicate = NSPredicate(format: "identifier ==[c] %@ OR label ==[c] %@", label, label)
+            let exact = settings.cells.matching(predicate).firstMatch
+            if exact.exists { return exact }
+            return settings.staticTexts.matching(predicate).firstMatch
+        }
+        let never = choice("Never")
+        guard never.waitForExistence(timeout: 3) else {
+            return .error(422, "unsupported", "This iOS Settings language or layout is not supported for automatic Auto-Lock changes. Set Auto-Lock in Settings > Display & Brightness")
+        }
+        guard choice(current).exists else {
+            return .error(422, "unsupported", "Could not match the current Auto-Lock value to an option; no preference was changed")
+        }
+        let defaults = UserDefaults.standard
+        let restoreKey = "apteva.autoLock.previousTimeout"
+        let wasEnabled = current.caseInsensitiveCompare("Never") == .orderedSame
+        var actual = current
+        if action == "set", let enabled, enabled != wasEnabled {
+            let target = enabled ? "Never" : (defaults.string(forKey: restoreKey) ?? "30 seconds")
+            let option = choice(target)
+            guard option.exists, option.isEnabled else {
+                return .error(409, "device_unavailable", "Auto-Lock option '\(target)' is unavailable; check the iPhone's language and device policy")
+            }
+            // Save before changing so runner/session restarts retain restoration
+            // information. Repeated enable requests must not overwrite it with Never.
+            if enabled { defaults.set(current, forKey: restoreKey) }
+            option.tap()
+            let back = settings.navigationBars.buttons.firstMatch
+            guard back.exists else {
+                return .error(422, "action_failed", "Could not verify Auto-Lock after changing it")
+            }
+            back.tap()
+            let updated = autoLock()
+            guard updated.waitForExistence(timeout: 3), let value = currentValue(updated), value.caseInsensitiveCompare(target) == .orderedSame else {
+                return .error(409, "device_unavailable", "The iPhone did not accept the Auto-Lock setting; check Low Power Mode and device policy")
+            }
+            actual = value
+            if !enabled { defaults.removeObject(forKey: restoreKey) }
+        }
+        return .json([
+            "keep_awake": actual.caseInsensitiveCompare("Never") == .orderedSame,
+            "scope": "always",
+            "keep_awake_while_charging": false,
+            "charging_sources": [String](),
+        ])
     }
 
     private func tapElement(_ body: [String: Any]) -> HTTPResponse {

@@ -240,14 +240,25 @@ passing steps. Capture failure, missing requested audio, an early recorder exit,
 or a finalization error fails the run while retaining its step evidence and any
 usable media. An existing assertion/cancellation failure keeps its classification.
 
-### Keep an Android test phone awake
+### Keep a test phone awake
 
-Open an Android ADB session, then enable **Power → Stay awake while charging**
-in the session controls. Mobile reads the actual phone preference and verifies
-changes. It covers AC, USB, wireless and dock charging. The preference is saved
-on the phone and remains enabled after closing the session or Mobile. Turning
-it off restores normal idle timeout behavior; it does not change that timeout.
-On battery the phone uses its normal screen timeout. Manual locking still works.
+Open a session, then use **Power → Keep awake** in the session controls.
+The shared `mobile_power` API returns `keep_awake` and `scope`, allowing clients
+to present the phone's actual behavior without choosing a platform themselves:
+
+- Android ADB: `scope=while_charging` uses Stay awake while charging for AC,
+  USB, wireless and dock power. On battery its normal screen timeout applies.
+  Turning it off does not change that normal timeout. The existing
+  `keep_awake_while_charging` and `charging_sources` fields remain available.
+- Native iOS: `scope=always` uses Settings → Display & Brightness → Auto-Lock →
+  Never, including on battery. Turning it off restores the timeout saved by the
+  runner when enabling; if the phone was already on Never without a saved
+  timeout, it uses 30 seconds. The saved timeout survives runner/session restarts
+  in the runner app's preferences; removing the runner app removes that history.
+
+Both preferences persist after closing Mobile or the session. Manual locking
+still works. Mobile reads the actual preference and verifies requested changes;
+opening a session never automatically changes the power preference.
 
 Agents can use the same option through an owned active session:
 
@@ -256,9 +267,19 @@ Agents can use the same option through an owned active session:
 {"tool":"mobile_power","args":{"session_id":"ses_...","action":"set","enabled":true}}
 ```
 
-This option is advertised as the `keep_awake` capability. It is currently
-available for Android ADB sessions; iPhone Auto-Lock remains a phone setting.
-Mobile does not change it automatically when opening a session.
+This option is advertised as the `keep_awake` capability for ADB and native
+XCTest sessions. iOS requires an unlocked phone with Low Power Mode off and
+device policy permitting Never. It uses native UI automation, without Appium,
+private preference writes or synthetic activity in the app under test. Settings
+accessibility identifiers are preferred, with English labels as a fallback;
+unsupported languages/layouts return an actionable error without guessing an
+option. No setting change is claimed until its value has been read back.
+
+Reading or changing iOS power settings briefly visits Settings, then restores
+the runner's previously known foreground app (or Home). Stop recording first;
+Mobile rejects these operations during an active recording. The panel reads
+once per connection and on **Refresh power**, rather than polling Settings in
+the background. Use refresh after changing the preference directly on the phone.
 
 ### Android capture timing
 

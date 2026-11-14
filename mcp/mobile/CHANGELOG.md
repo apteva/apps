@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 — 2026-11-14
+
+- Share the Keep awake control and `mobile_power` status/set API between Android
+  ADB and native iOS. Return `keep_awake` and `scope` so clients show charging-only
+  Android behavior and always-on iPhone Auto-Lock behavior accurately.
+- Use native iOS Settings automation to read and verify Auto-Lock changes, save
+  the previous timeout across sessions, and restore it when disabling (30 seconds
+  if no timeout was saved). Surface Low Power Mode, policy and unsupported layout
+  errors. No Appium dependency or app-specific idle-timer workaround.
+- Read power settings on connection or explicit refresh, without background
+  Settings polling. Block iOS power operations during recordings.
+- Pin app-sdk v0.115.2, selected by tag ancestry.
+
 ## 0.4.1 — 2026-11-14
 
 - Embed the production panel, source map and icon in the app binary and serve

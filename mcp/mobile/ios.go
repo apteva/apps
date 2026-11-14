@@ -591,7 +591,7 @@ func (r *iosRunner) do(ctx context.Context, method, path string, body any) ([]by
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(b, &e)
-		code := map[string]string{"invalid_argument": "invalid_argument", "no_such_element": "assertion_failed", "action_failed": "action_failed"}[e.Error]
+		code := map[string]string{"invalid_argument": "invalid_argument", "no_such_element": "assertion_failed", "action_failed": "action_failed", "unsupported": "unsupported", "device_unavailable": "device_unavailable"}[e.Error]
 		if code == "" {
 			code = "infrastructure_error"
 		}
