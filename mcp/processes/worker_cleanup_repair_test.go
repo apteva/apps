@@ -140,6 +140,9 @@ func TestWorkerStartRepairPagesSurviveRestartAndUseOnlyMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
+	if _, err := a.db.Exec(`INSERT INTO process_worker_start_agent_scans(project_id,agent_id,since_at) VALUES('project-a',7,?)`, now.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.repairRestoredWorkerCleanup(context.Background(), "project-a", now); err != nil {
 		t.Fatal(err)
 	}
@@ -157,12 +160,41 @@ func TestWorkerStartRepairPagesSurviveRestartAndUseOnlyMetadata(t *testing.T) {
 		t.Fatal("restart changed cursor filters", f.queries)
 	}
 	for _, q := range f.queries {
-		if q.Projection != "metadata" || q.Limit != 100 || q.ProjectID != "project-a" || q.ThreadPrefix != "process-run-" || len(q.Events) != 1 || q.Events[0] != "thread.spawn" {
+		if q.Projection != "metadata" || q.Limit != 25 || q.AgentID != 7 || q.ProjectID != "project-a" || q.ThreadPrefix != "process-run-" || len(q.Events) != 1 || q.Events[0] != "thread.spawn" {
 			t.Fatal("repair read broad telemetry", q)
 		}
 	}
 	at, err := a.nextWorkerStartScan(context.Background(), "project-a")
 	if err != nil || !at.Equal(now.Add(62*time.Second)) {
 		t.Fatal("scan did not return to minute cadence", at, err)
+	}
+}
+
+func TestWorkerStartRepairDefersStoppedOwnerAndContinuesAnotherAgent(t *testing.T) {
+	f := &cleanupRepairPlatform{pages: []*sdk.TelemetryPage{{}}}
+	f.instanceStatuses = map[int64]string{7: "stopped"}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(f))
+	a := &App{}
+	if err := a.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, agent := range []int64{7, 8} {
+		if _, err := a.db.Exec(`INSERT INTO process_worker_start_agent_scans(project_id,agent_id,since_at) VALUES('project-a',?,?)`, agent, now.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.repairRestoredWorkerCleanup(context.Background(), "project-a", now); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.queries) != 0 {
+		t.Fatal("queried or woke stopped owner")
+	}
+	a = &App{ctx: a.ctx, db: a.db}
+	if err := a.repairRestoredWorkerCleanup(context.Background(), "project-a", now); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.queries) != 1 || f.queries[0].AgentID != 8 || f.queries[0].Limit != 25 {
+		t.Fatal("healthy metadata owner was blocked", f.queries)
 	}
 }

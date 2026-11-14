@@ -762,5 +762,9 @@ run. Only an exact app-owned agent/thread/run in the same project is eligible.
 Pending retry order and newer acknowledgements remain unchanged; unfinished runs,
 approval owners and native timer owners are excluded. Processes requests
 `platform.telemetry.observe` for this metadata repair. It does not read telemetry
-content. Backfill is paginated (100 events), bounded to the preceding day on first
+content. Backfill is paginated per agent (25 events), bounded to the preceding day on first
 start, then checks each minute with a one-hour overlap and durable cursor/backoff.
+
+The v0.18.5 repair keeps a separate cursor and retry deadline for each known
+cleanup owner, queries one agent at a time, and defers stopped owners without
+waking them. This keeps busy-project metadata reads within the host query budget.

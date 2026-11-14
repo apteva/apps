@@ -32,26 +32,31 @@ func (a *App) requeueRestoredTerminalWorker(ctx context.Context, project string,
 	return err
 }
 
-// Repair uses metadata only. Each pass reads at most one 100-event history page;
-// a saved cursor drains the initial day of restarts, then minute checks overlap
-// the preceding hour to tolerate delayed telemetry. Replays are harmless because
-// a completed cleanup newer than the start event cannot be reopened again.
+// Each known cleanup owner has a bounded metadata scan and independent cursor.
+// Narrowing by agent and a 25-event page stays within the platform query budget
+// on busy projects. Stopped owners are deferred without waking them.
 func (a *App) repairRestoredWorkerCleanup(ctx context.Context, project string, now time.Time) error {
 	api := a.ctx.WithProject(project).TelemetryAPI()
 	if api == nil {
 		return nil
 	}
-	_, err := a.db.ExecContext(ctx, `INSERT INTO process_worker_start_scans(project_id,since_at) VALUES(?,?) ON CONFLICT DO NOTHING`, project, now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return err
-	}
+	var agentID int64
 	var since, until, cursor, next string
-	err = a.db.QueryRowContext(ctx, `SELECT since_at,until_at,cursor,next_attempt_at FROM process_worker_start_scans WHERE project_id=?`, project).Scan(&since, &until, &cursor, &next)
+	err := a.db.QueryRowContext(ctx, `SELECT agent_id,since_at,until_at,cursor,next_attempt_at FROM process_worker_start_agent_scans
+ WHERE project_id=? AND rtrim(next_attempt_at,'Z')<=? ORDER BY next_attempt_at,agent_id LIMIT 1`, project, deadlineKey(now)).Scan(&agentID, &since, &until, &cursor, &next)
+	if err == sql.ErrNoRows {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if at, e := time.Parse(time.RFC3339Nano, next); e == nil && at.After(now) {
-		return nil
+	agent, e := a.ctx.WithProject(project).GetAgent(agentID)
+	if e == nil && (agent == nil || agent.Status != "running") {
+		e = errors.New("worker-start owner is not running; deferred without waking it")
+	}
+	if e != nil {
+		_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET next_attempt_at=?,last_error=? WHERE project_id=? AND agent_id=?`, now.Add(5*time.Minute).UTC().Format(time.RFC3339Nano), e.Error(), project, agentID)
+		return err
 	}
 	from, e := time.Parse(time.RFC3339Nano, since)
 	if e != nil {
@@ -64,48 +69,51 @@ func (a *App) repairRestoredWorkerCleanup(ctx context.Context, project string, n
 	if e != nil {
 		return e
 	}
-	// Persist the page bounds before IO so a restart keeps the same cursor/filter.
-	_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_scans SET until_at=? WHERE project_id=?`, until, project)
+	_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET until_at=? WHERE project_id=? AND agent_id=?`, until, project, agentID)
 	if err != nil {
 		return err
 	}
-	page, e := api.QueryTelemetry(ctx, sdk.TelemetryQuery{ProjectID: project, Events: []string{"thread.spawn"}, ThreadPrefix: "process-run-", Projection: "metadata", Since: from, Until: to, Cursor: cursor, Limit: 100})
+	page, e := api.QueryTelemetry(ctx, sdk.TelemetryQuery{ProjectID: project, AgentID: agentID, Events: []string{"thread.spawn"}, ThreadPrefix: "process-run-", Projection: "metadata", Since: from, Until: to, Cursor: cursor, Limit: 25})
 	if e == nil && page == nil {
 		e = errors.New("worker-start metadata unavailable")
 	}
 	if e == nil {
 		for _, event := range page.Events {
+			if event.AgentID != agentID {
+				continue
+			}
 			if e = a.requeueRestoredTerminalWorker(ctx, project, event); e != nil {
 				break
 			}
 		}
 	}
 	if e != nil {
-		// An expired/invalid page cursor must not wedge observation forever.
-		// Replaying the bounded recent window cannot requeue a newer receipt.
 		if cursor != "" {
-			_, resetErr := a.db.ExecContext(ctx, `UPDATE process_worker_start_scans SET cursor='',until_at='',since_at=? WHERE project_id=?`, now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano), project)
+			_, resetErr := a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET cursor='',until_at='',since_at=? WHERE project_id=? AND agent_id=?`, now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano), project, agentID)
 			e = errors.Join(e, resetErr)
 		}
-		_, saveErr := a.db.ExecContext(ctx, `UPDATE process_worker_start_scans SET next_attempt_at=?,last_error=? WHERE project_id=?`, now.Add(time.Minute).UTC().Format(time.RFC3339Nano), e.Error(), project)
+		_, saveErr := a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET next_attempt_at=?,last_error=? WHERE project_id=? AND agent_id=?`, now.Add(time.Minute).UTC().Format(time.RFC3339Nano), e.Error(), project, agentID)
 		return errors.Join(e, saveErr)
 	}
 	if page.NextCursor != "" {
-		_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_scans SET cursor=?,next_attempt_at=?,last_error='' WHERE project_id=?`, page.NextCursor, now.Add(2*time.Second).UTC().Format(time.RFC3339Nano), project)
+		_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET cursor=?,next_attempt_at=?,last_error='' WHERE project_id=? AND agent_id=?`, page.NextCursor, now.Add(2*time.Second).UTC().Format(time.RFC3339Nano), project, agentID)
 	} else {
-		_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_scans SET since_at=?,until_at='',cursor='',next_attempt_at=?,last_error='' WHERE project_id=?`, to.Add(-time.Hour).UTC().Format(time.RFC3339Nano), now.Add(time.Minute).UTC().Format(time.RFC3339Nano), project)
+		_, err = a.db.ExecContext(ctx, `UPDATE process_worker_start_agent_scans SET since_at=?,until_at='',cursor='',next_attempt_at=?,last_error='' WHERE project_id=? AND agent_id=?`, to.Add(-time.Hour).UTC().Format(time.RFC3339Nano), now.Add(time.Minute).UTC().Format(time.RFC3339Nano), project, agentID)
 	}
 	return err
 }
 
 func (a *App) nextWorkerStartScan(ctx context.Context, project string) (time.Time, error) {
-	var due string
-	err := a.db.QueryRowContext(ctx, `SELECT next_attempt_at FROM process_worker_start_scans WHERE project_id=?`, project).Scan(&due)
-	if err == sql.ErrNoRows || (err == nil && due == "") {
+	if a.ctx.WithProject(project).TelemetryAPI() == nil {
 		return time.Time{}, nil
 	}
-	if err != nil {
+	var due sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT MIN(rtrim(next_attempt_at,'Z')) FROM process_worker_start_agent_scans WHERE project_id=?`, project).Scan(&due)
+	if err != nil || !due.Valid {
 		return time.Time{}, err
 	}
-	return time.Parse(time.RFC3339Nano, due)
+	if due.String == "" {
+		return time.Now(), nil
+	}
+	return parseDeadlineKey(due.String)
 }

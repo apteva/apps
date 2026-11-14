@@ -95,6 +95,9 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 					_, err = tx.Exec(`UPDATE process_worker_cleanup SET attempts=attempts+1,completed_at=?,last_error='',next_attempt_at='' WHERE run_id=? AND agent_id=? AND thread_id=?`, timestamp(), t.run, t.agent, t.thread)
 				}
 				if err == nil {
+					_, err = tx.Exec(`INSERT INTO process_worker_start_agent_scans(project_id,agent_id,since_at) VALUES(?,?,?) ON CONFLICT DO NOTHING`, project, t.agent, now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano))
+				}
+				if err == nil {
 					err = tx.Commit()
 				}
 				_ = tx.Rollback()
