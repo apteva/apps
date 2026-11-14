@@ -1,9 +1,10 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.6.1-local.login.2
+version: 0.6.1-local.login.3
 description: |
-  v0.6.1-local.login.2 collects bounded Android UI trees without waiting for animations
+  Adds Android password entry through a private stdin pipe and accessibility ACTION_SET_TEXT, with exact screen guards, confirmation and recording exclusion.
+  v0.6.1-local.login.3 collects bounded Android UI trees without waiting for animations
   to stop, and verifies focused-field text replacement and clearing by readback.
   Retains iOS/Android keep-awake controls, recording fixes and embedded panels.
   Operate physical Android and iOS devices through exclusive sessions.
@@ -97,7 +98,7 @@ runtime:
   kind: source
   source:
     repo: file:///Users/marcoschwartz/Documents/code/apps
-    ref: mobile/v0.6.1-local.login.2
+    ref: mobile/v0.6.1-local.login.3
     entry: mcp/mobile
   port: 8080
   health_check: /health

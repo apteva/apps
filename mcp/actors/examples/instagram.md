@@ -37,3 +37,30 @@ automatic input replay. `restart_and_open_profile` is a separate recovery read.
 The example's observed notification-denial, location-denial and contact-skip
 operations are explicit setup choices. Adapt the example's protected-account
 assertions to the operator's account policy before using it elsewhere.
+
+Android login uses the same actor's `android` variants. From the account switcher,
+scroll until “Add Instagram account” is visible, then run `open_add_account_menu`
+and `open_sign_in`. `focus_sign_in_username` chooses “Use another profile” on the
+saved-profile chooser. If Google Password Manager appears, explicitly run
+`dismiss_sign_in_password_manager` to cancel it. Unexpected screens stop input.
+
+Use `fill_empty_sign_in_username` when the username field is blank.
+`fill_sign_in_username` requires `username` and `expected_username` (the exact
+current username field value). It replaces and verifies that field. `sign_in`
+requires the same `username` and a `password_ref` in Actors' encrypted
+`browser_secrets` settings. Bind the reference to the selected Android Computer
+context, `native_app=com.instagram.android`, and a future RFC3339 `expires_at`.
+Never put a password in actor inputs, definitions, presets, or traces.
+
+The private operation checks the username, login markers and a unique password
+field before sending the secret through Mobile's private stdin pipe. Mobile
+requires an empty, focused, editable password field and rechecks the app, bounds,
+username and screen markers immediately before setting its text. No screenshot,
+clipboard or secret-bearing ADB argument is used. Missing secure-input capability
+or confirmation stops before tapping Log in. Active Mobile recordings block
+secure entry. The operation verifies the resulting account profile header;
+challenges, invalid credentials and unknown prompts stop for operator inspection,
+without automatically replaying the password or submission. Resume the observed
+save-login prompt with `finish_sign_in`, or the notification reminder with
+`complete_sign_in_setup`; neither operation re-enters credentials. Login adds an
+existing account; it does not create an account or bypass verification.

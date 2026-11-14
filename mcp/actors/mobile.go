@@ -350,7 +350,7 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			if err != nil {
 				return err
 			}
-			if e.definition.SelectedPlatform == "android" {
+			if e.definition.SelectedPlatform == "android" || (e.session.Target != nil && e.session.Target.Platform == "android") {
 				args["password"] = value
 			} else {
 				args["text"] = value

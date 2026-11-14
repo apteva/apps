@@ -96,3 +96,31 @@ func TestAndroidPrivateSourceNeverCapturesImage(t *testing.T) {
 		}
 	}
 }
+
+func TestSecureInputRejectsActiveDeviceRecording(t *testing.T) {
+	e, b := fixture(t)
+	s := openFixture(t, e, "p")
+	if err := e.insertRecording(Recording{ID: "rec-private", ProjectID: "p", SessionID: s.ID, DeviceID: s.DeviceID, Status: "recording"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.Execute(context.Background(), "p", "mobile_action", map[string]any{"session_id": s.ID, "action": "secure_text", "password": "fixture-only"})
+	b.mu.Lock()
+	calls := b.actions
+	b.mu.Unlock()
+	if err == nil || calls != 0 {
+		t.Fatalf("recorded secure input was dispatched: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestPrivateObservationRejectsUnsupportedOrMalformedRequests(t *testing.T) {
+	for _, args := range []map[string]any{{"source": true, "image": false}, {"source": false, "image": false}, {"source": true, "image": "false"}} {
+		e, _ := fixture(t)
+		s := openFixture(t, e, "p")
+		args["session_id"] = s.ID
+		// This backend only supports screenshot observation. Private calls must fail,
+		// rather than silently capturing an image as a fallback.
+		if _, err := e.Execute(context.Background(), "p", "mobile_observe", args); err == nil {
+			t.Fatal("unsafe private observation accepted")
+		}
+	}
+}
