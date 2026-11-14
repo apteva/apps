@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.3 — 2026-11-14
+
+- Fix Android take duration by freezing the monotonic stop boundary before
+  encoder shutdown and USB copy, trimming encoder drain and preserving idle
+  tails with held frames. Finalize H.264 at 30 fps; require ffmpeg/ffprobe.
+- Run scrcpy headlessly without a desktop window or input controller. Read
+  its actual muxer-ready message through a private terminal before starting
+  the timer, and finalize cleanly on interrupt. Require requested device audio.
+- Fail recorded smoke tests when capture is missing, unplayable, interrupted
+  early, or cannot finalize. Retain step evidence and the original assertion
+  or cancellation failure classification.
+- Add timeline trim/pad/audio fixtures, recorder startup/shutdown regressions,
+  failure-propagation tests, and opt-in physical Android recording checks.
+- Pin app-sdk v0.115.1, selected by tag ancestry.
+
+Validation: race-enabled Go suite (64.0% coverage), vet, Darwin/Linux builds,
+and a physical Samsung SM-A176B on Android 16. Eight-second standard and
+high-quality video takes measured 8.000 s and 8.033 s; an 18-second take with
+device audio measured 18.000 s. Failure regressions cover invalid media,
+shutdown errors, missing audio, early exit, and preservation of assertion errors.
+
 ## 0.3.2 — 2026-11-07
 
 - Fix shortened iPhone USB recordings caused by overlapping QuickTime edit

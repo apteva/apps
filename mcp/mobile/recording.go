@@ -94,6 +94,7 @@ type activeRecording struct {
 	path     string
 	r        recorder
 	started  time.Time
+	elapsed  time.Duration
 	stopOnce sync.Once
 	finished chan struct{}
 	timer    *time.Timer
@@ -303,7 +304,7 @@ func (e *engine) startRecording(ctx context.Context, s Session, runID string, ar
 		case <-rec.Done():
 			// The capture process ended without a stop request (crash, unplug,
 			// or the tool's own limit). Finalise whatever it produced.
-			e.stopActive(a, "")
+			e.stopActive(a, "capture stopped unexpectedly")
 		case <-a.finished:
 		}
 	}()
@@ -311,12 +312,18 @@ func (e *engine) startRecording(ctx context.Context, s Session, runID string, ar
 }
 
 // stopActive finalises a capture exactly once, in the background.
-func (e *engine) stopActive(a *activeRecording, _ string) {
+func (e *engine) stopActive(a *activeRecording, reason string) {
 	a.stopOnce.Do(func() {
+		// Freeze the take boundary before recorder shutdown, USB copy or encoding.
+		elapsed := time.Since(a.started)
 		if a.timer != nil {
 			a.timer.Stop()
 		}
 		a.mu.Lock()
+		a.elapsed = elapsed
+		if reason == "capture stopped unexpectedly" {
+			a.rec.Error = reason
+		}
 		a.rec.Status = "processing"
 		rec := a.rec
 		a.mu.Unlock()
@@ -336,7 +343,12 @@ func (e *engine) finalize(a *activeRecording) {
 	stopErr := a.r.Stop(ctx)
 	a.mu.Lock()
 	r := a.rec
+	elapsed := a.elapsed
 	a.mu.Unlock()
+	var timelineErr error
+	if stopErr == nil && (r.Method == methodScreenrecord || r.Method == methodScrcpy) {
+		timelineErr = normaliseAndroidTake(ctx, a.path, elapsed, r.Audio)
+	}
 	finished := time.Now().Unix()
 	r.FinishedAt = &finished
 	info, statErr := os.Stat(a.path)
@@ -353,6 +365,14 @@ func (e *engine) finalize(a *activeRecording) {
 		probe, probeErr := probeMedia(ctx, a.path)
 		switch {
 		case probeErr == nil:
+			if timelineErr != nil {
+				r.Status, r.Error = "failed", timelineErr.Error()
+				break
+			}
+			if r.Audio && !probe.HasAudio {
+				r.Status, r.Error = "failed", "requested device audio was not captured"
+				break
+			}
 			probe.apply(&r)
 			r.Status = "ready"
 			if stopErr != nil {
@@ -434,7 +454,12 @@ func (e *engine) recordingStop(pid, rid string, wait time.Duration) (Recording, 
 	if a == nil || a.rec.ProjectID != pid {
 		return e.recording(pid, rid)
 	}
-	e.stopActive(a, "requested")
+	select {
+	case <-a.r.Done():
+		e.stopActive(a, "capture stopped unexpectedly")
+	default:
+		e.stopActive(a, "requested")
+	}
 	select {
 	case <-a.finished:
 	case <-time.After(wait):

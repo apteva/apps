@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.3.2
+version: 0.3.3
 description: |
   Operate physical Android and iOS devices through exclusive sessions.
   Navigate websites, install and launch apps, inspect screens and UI trees,
@@ -35,7 +35,7 @@ requires:
     - name: ffmpeg
       executables: [ffmpeg, ffprobe]
       required: false
-      hint: "Needed on the runner to export recordings, read video metadata, and join Android recordings longer than 170 seconds."
+      hint: "ffmpeg and ffprobe are needed for accurate Android recording timelines, video metadata, and exports."
       sources: {}
     - name: xcode
       executables: [xcrun]
@@ -93,7 +93,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: mobile/v0.3.2
+    ref: mobile/v0.3.3
     entry: mcp/mobile
   port: 8080
   health_check: /health

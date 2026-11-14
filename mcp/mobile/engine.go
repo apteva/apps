@@ -726,7 +726,22 @@ func (e *engine) executeTest(ctx context.Context, r TestRun, steps []Step, mode 
 		if r.SessionID != "" {
 			// Finalise the video before the lease ends so it covers every step.
 			if rid := e.runRecording(r.ID); rid != "" {
-				_, _ = e.recordingStop(r.ProjectID, rid, 3*time.Minute)
+				capture, captureErr := e.recordingStop(r.ProjectID, rid, 3*time.Minute)
+				if captureErr == nil && (capture.Status != "ready" || capture.Error != "") {
+					reason := capture.Error
+					if reason == "" {
+						reason = "recording status is " + capture.Status
+					}
+					captureErr = errors.New(reason)
+				}
+				if captureErr != nil {
+					if err == nil {
+						err = problem("infrastructure_error", "test recording failed: "+captureErr.Error())
+					} else {
+						// Retain the original assertion/cancellation classification.
+						err = fmt.Errorf("%w; test recording failed: %v", err, captureErr)
+					}
+				}
 			}
 			// A passing report also requires successful session teardown. Cleanup
 			// bypasses request admission so shutdown/cancellation can release a lease.

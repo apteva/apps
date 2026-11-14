@@ -3,7 +3,8 @@ module github.com/apteva/apps/mcp/mobile
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.115.0
+	github.com/apteva/app-sdk v0.115.1
+	github.com/creack/pty v1.1.24
 	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0
 )
