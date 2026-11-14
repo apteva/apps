@@ -16,7 +16,7 @@ func (a *App) nextQueueWake(ctx context.Context, project string) (time.Time, err
  SELECT MIN(rtrim(c.next_attempt_at,'Z'))
  FROM process_worker_cleanup c INDEXED BY process_worker_cleanup_pending
  CROSS JOIN process_runs r ON r.id=c.run_id CROSS JOIN processes p ON p.id=r.process_id
- WHERE p.project_id=:project AND c.completed_at='' AND r.state IN ('completed','failed','cancelled')
+ WHERE p.project_id=:project AND c.completed_at='' AND (r.state IN ('completed','failed','cancelled') OR c.reason='idle')
  UNION ALL
  SELECT MIN(rtrim(n.next_attempt_at,'Z'))
  FROM process_run_terminal_events n INDEXED BY process_run_terminal_events_pending

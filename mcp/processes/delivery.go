@@ -55,6 +55,9 @@ func (a *App) immutableDelivery(project string, candidate sdk.AgentEventRequest)
 // request, using the same worker id; never confuse a planned worker with a
 // confirmed worker or create another session after an ambiguous response.
 func (a *App) ensureProcessThread(project, run, eventID string, candidate sdk.ThreadSpawnRequest) error {
+	if err := a.reserveWorker(run, candidate.AgentID, candidate.ThreadID); err != nil {
+		return err
+	}
 	var raw string
 	var spawned bool
 	if err := a.db.QueryRow(`SELECT spawn_json,spawned FROM process_delivery_envelopes WHERE event_id=? AND project_id=?`, eventID, project).Scan(&raw, &spawned); err != nil {
@@ -139,6 +142,9 @@ func permanentDeliveryError(err error) bool {
 }
 
 func deliveryRetry(err error, attempts int) (bool, string) {
+	if workerCapacityError(err) {
+		return false, time.Now().Add(5 * time.Second).UTC().Format(time.RFC3339Nano)
+	}
 	if permanentDeliveryError(err) {
 		return true, ""
 	}
@@ -178,7 +184,9 @@ func (a *App) pendingRuns(ctx context.Context, project string, now time.Time) ([
 	rows, err := a.db.QueryContext(ctx, `SELECT `+runColumns+` FROM process_runs r WHERE `+openRunsInProject+` AND (
 	 (`+runAwaitsDelivery+` AND rtrim(r.next_attempt_at,'Z')<=:now) OR
 	 (workflow=1 AND (
-	  delivered_at='' OR state='queued' OR
+	  delivered_at='' OR
+	  (state<>'blocked' AND EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state='blocked')) OR
+	  (delivery_suspended=0 AND EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.delivery_suspended=1 AND s.state NOT IN ('completed','failed','cancelled'))) OR
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state IN ('failed','cancelled')) OR
 	  NOT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state<>'completed') OR
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND (

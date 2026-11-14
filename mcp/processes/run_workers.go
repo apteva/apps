@@ -138,11 +138,8 @@ func persistentWorkerDone(r Run, agent int64, all []StepRun) bool {
 	if terminal(r.State) {
 		return true
 	}
-	if r.Binding.WorkerContinuity != "per_executor" {
-		return false
-	}
 	for _, s := range all {
-		if s.Origin == "process_step" && s.Executor.Kind == "agent" && s.Executor.AgentID == agent && !terminal(s.State) {
+		if s.Origin == "process_step" && s.Executor.Kind == "agent" && s.Executor.AgentID == agent && (workerNeedsContinuation(s) || (aiParallel(r) && !terminal(s.State))) {
 			return false
 		}
 	}

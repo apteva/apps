@@ -243,3 +243,19 @@ Procedures may declare a `quality` block: `scale` (`stars` 1–5, or `thumbs` st
 As the reviewer, read the run once with `run_get`, then call `run_rate` once: omit `step_id` for the whole run, or name a step. Scores of 2 or lower need at least one configured reason tag. Criteria keys must exist in the frozen rubric. Use a stable `idempotency_key`; rating the same target again creates a new revision and supersedes your previous one. Do not execute, retry or change the run.
 
 `run_ratings` reads a run's active ratings or pages a procedure's ratings. `quality_get` reports per-version averages, coverage, distributions, top tags, rubric results, step quality per executor and the lowest-rated runs. Low scores, failed runs and sampled runs open review items. Reviewers list them with `review_queue`, then `review_update` with `expected_revision` to claim, release, resolve or dismiss them. Resolving or dismissing needs a short resolution. A rating is a judgement, not evidence or approval.
+
+
+Worker lifecycle and capacity: durable pending work does not require a live
+worker. Processes releases non-delegating workers between timed steps or during
+an explicit runtime hold, using the existing thread API. Delegating workers
+retain ownership across waits. Keep business approval/callback waits attached to
+their original thread. Read saved evidence when a continuation receives a fresh
+worker identity; never repeat accepted external operations without reconciling
+their exact IDs. Provider retry exhaustion blocks the parent run immediately and
+requires explicit operator recovery after retirement.
+
+`max_workers_per_agent` limits Processes workers across assignments and runs
+(default 8). Delegated children are outside this app limit. Excess root work
+stays queued; do not create extra workers to bypass
+admission. Keep a routing procedure to one step and finish it after recording
+the verified durable child run, while customer handling continues independently.

@@ -21,25 +21,32 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 	// finishing step_update or producing lifecycle callbacks at the same time.
 	a.cleanupMu.Lock()
 	defer a.cleanupMu.Unlock()
+	a.mu.Lock()
+	queueErr := a.queueIdleWorkers(ctx, project)
+	a.mu.Unlock()
+	if queueErr != nil {
+		return queueErr
+	}
 	// Keep the pending queue first in join order so idle polls skip run history.
-	rows, err := a.db.QueryContext(ctx, `SELECT c.run_id,c.agent_id,c.thread_id,c.attempts
+	rows, err := a.db.QueryContext(ctx, `SELECT c.run_id,c.agent_id,c.thread_id,c.attempts,
+ CASE WHEN r.state IN ('completed','failed','cancelled') THEN 'terminal' ELSE c.reason END
  FROM process_worker_cleanup c INDEXED BY process_worker_cleanup_pending
  CROSS JOIN process_runs r ON r.id=c.run_id CROSS JOIN processes p ON p.id=r.process_id
- WHERE p.project_id=? AND r.state IN ('completed','failed','cancelled') AND c.completed_at=''
+ WHERE p.project_id=? AND (r.state IN ('completed','failed','cancelled') OR c.reason='idle') AND c.completed_at=''
  AND c.next_attempt_at<=? AND rtrim(c.next_attempt_at,'Z')<=?
  ORDER BY c.next_attempt_at,c.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339), deadlineKey(now))
 	if err != nil {
 		return err
 	}
 	type target struct {
-		run, thread string
-		agent       int64
-		attempts    int
+		run, thread, reason string
+		agent               int64
+		attempts            int
 	}
 	var targets []target
 	for rows.Next() {
 		var t target
-		if err = rows.Scan(&t.run, &t.agent, &t.thread, &t.attempts); err != nil {
+		if err = rows.Scan(&t.run, &t.agent, &t.thread, &t.attempts, &t.reason); err != nil {
 			break
 		}
 		targets = append(targets, t)
@@ -55,13 +62,34 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 		}
 		var killErr error
 		api := a.ctx.WithProject(project).ThreadAPI()
-		if api == nil {
+		if t.reason == "idle" {
+			killErr = a.retireIdleWorker(ctx, project, t.agent, t.thread)
+		} else if api == nil {
 			killErr = errors.New("platform thread API unavailable")
 		} else {
 			killErr = api.KillThread(t.agent, t.thread)
 		}
 		if killErr == nil {
-			_, err = a.db.Exec(`UPDATE process_worker_cleanup SET attempts=attempts+1,completed_at=?,last_error='',next_attempt_at='' WHERE run_id=? AND agent_id=? AND thread_id=?`, timestamp(), t.run, t.agent, t.thread)
+			a.mu.Lock()
+			tx, beginErr := a.db.Begin()
+			err = beginErr
+			if err == nil {
+				_, err = tx.Exec(`DELETE FROM process_run_workers WHERE run_id=? AND agent_id=? AND thread_id=?`, t.run, t.agent, t.thread)
+				if err == nil {
+					_, err = tx.Exec(`DELETE FROM process_worker_slots WHERE run_id=? AND agent_id=? AND thread_id=?`, t.run, t.agent, t.thread)
+				}
+				if err == nil {
+					_, err = tx.Exec(`UPDATE process_worker_cleanup SET attempts=attempts+1,completed_at=?,last_error='',next_attempt_at='' WHERE run_id=? AND agent_id=? AND thread_id=?`, timestamp(), t.run, t.agent, t.thread)
+				}
+				if err == nil {
+					err = tx.Commit()
+				}
+				_ = tx.Rollback()
+			}
+			a.mu.Unlock()
+			if err == nil {
+				a.wakeDispatch(project)
+			}
 		} else {
 			delay := workerCleanupBackoff(t.attempts)
 			_, err = a.db.Exec(`UPDATE process_worker_cleanup SET attempts=attempts+1,last_error=?,next_attempt_at=? WHERE run_id=? AND agent_id=? AND thread_id=?`, killErr.Error(), now.Add(delay).UTC().Format(time.RFC3339Nano), t.run, t.agent, t.thread)

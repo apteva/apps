@@ -229,6 +229,7 @@ func TestMCPWorkflowReadKeepsApprovalReceiptsAndOneDefinition(t *testing.T) {
 	for _, key := range []string{"inventory", "portrait_3", "portrait_4", "validate"} {
 		finishStep(t, a, p, r, key, actor, "exact receipt:"+key, "")
 	}
+	cleanupWorkersNow(t, a)
 	finishStep(t, a, p, r, "approve", "operator", "Approved exact portrait identities", "")
 	read := mcpOK(t, a, p.ProjectID, "main", "run_get", map[string]any{"process_id": p.ID, "run_id": r.ID})
 	text := responseJSON(t, read)
@@ -255,6 +256,7 @@ func TestMCPWorkflowReadKeepsApprovalReceiptsAndOneDefinition(t *testing.T) {
 	if httpObject(t, a, "/processes/"+p.ID+"/runs/"+r.ID) != responseJSON(t, legacy) {
 		t.Fatal("workflow HTTP object changed")
 	}
+	actor = "agent:7:" + stepBy(t, a, r, "publish").ThreadID
 	ack := mcpOK(t, a, p.ProjectID, strings.TrimPrefix(actor, "agent:7:"), "step_update", map[string]any{"run_id": r.ID, "step_id": stepBy(t, a, r, "publish").ID, "state": "completed", "output": "published approved artifacts"})
 	recovered := followReread(t, a, p.ProjectID, "main", ack["reread"].(RereadReference))
 	if recovered["step"].(WorkerStep).Output != "published approved artifacts" || ack["done"] != true {

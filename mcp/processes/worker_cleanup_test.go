@@ -191,6 +191,10 @@ func TestWorkerCleanupUpgradeBackfillAndMainSafety(t *testing.T) {
 	if _, err = a.db.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
+	// Upgrade the restored migration-020 cleanup queue through the current schema.
+	if _, err = a.db.Exec(`ALTER TABLE process_worker_cleanup ADD COLUMN reason TEXT NOT NULL DEFAULT 'terminal'; CREATE INDEX process_cleanup_thread ON process_worker_cleanup(agent_id,thread_id)`); err != nil {
+		t.Fatal(err)
+	}
 	if err = a.cleanupWorkers(context.Background(), time.Now(), p.ProjectID); err != nil {
 		t.Fatal(err)
 	}

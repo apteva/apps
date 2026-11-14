@@ -130,6 +130,7 @@ func TestStepByStepReleaseContinuityAndApproval(t *testing.T) {
 	if stepBy(t, a, r, "publish").ReleasedAt != "" || len(f.events) != 2 {
 		t.Fatal("publication auto dispatched")
 	}
+	cleanupWorkersNow(t, a)
 	advance(t, a, p, r, "publish")
 	claimAndFinish(t, a, p, r, "publish", "published exact beta.png")
 	fresh, err = a.getRun(p.ProjectID, p.ID, r.ID)

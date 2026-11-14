@@ -296,7 +296,15 @@ func TestNativeTaskMigrationPreservesLegacyWorkAndForeignKeys(t *testing.T) {
 	if e = tx.Commit(); e != nil {
 		t.Fatal(e)
 	}
-	for _, file := range []string{"007_app_events.sql", "008_run_workers.sql", "009_step_timing.sql", "010_native_step_events.sql", "011_step_delivery_event.sql", "012_generic_steps.sql", "013_delivery_reliability.sql", "014_executor_workers.sql", "015_run_control.sql", "016_claim_recovery.sql", "017_remove_assignment_target.sql"} {
+	files, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range files {
+		file := entry.Name()
+		if file <= "006_native_tasks.sql" || !strings.HasSuffix(file, ".sql") {
+			continue
+		}
 		raw, err := os.ReadFile("migrations/" + file)
 		if err != nil {
 			t.Fatal(err)

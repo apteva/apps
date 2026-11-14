@@ -100,18 +100,20 @@ func TestExecutorWorkerSerializesBranchesKeepsJoinAndApproval(t *testing.T) {
 	if _, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, approval.ID, "step_update", map[string]any{"state": "completed", "output": "self-approved"}); err == nil {
 		t.Fatal("worker impersonated operator")
 	}
+	cleanupWorkersNow(t, a)
 	finishStep(t, a, p, r, "approve", "operator", "approved:portrait-3.png,portrait-4.png", "")
+	actor = "agent:7:" + stepBy(t, a, r, "publish").ThreadID
 	claim("publish")
 	raw, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, publish.ID, "step_update", map[string]any{"state": "completed", "output": "receipt:exact-artifacts"})
 	if err != nil || raw.(map[string]any)["done"] != true {
 		t.Fatal("worker didn't finish", raw, err)
 	}
-	if len(f.threads) != 1 {
-		t.Fatal("provisioned another worker", f.threads)
+	if len(f.threads) != 2 {
+		t.Fatal("approval continuation did not receive a fresh worker", f.threads)
 	}
 	all, _ := a.steps(r.ID)
 	for _, s := range all {
-		if s.Executor.Kind == "agent" && s.ThreadID != first.ThreadID {
+		if s.Executor.Kind == "agent" && s.Key != "publish" && s.ThreadID != first.ThreadID {
 			t.Fatal("step lost worker", s)
 		}
 	}
@@ -157,7 +159,7 @@ func TestExplicitIsolationKeepsStrictChainWorkersSeparate(t *testing.T) {
 	}
 }
 
-func TestExecutorContinuityRetainsTimedWaitAndRejectsEarlyClaim(t *testing.T) {
+func TestExecutorContinuityRecoversTimedWaitAndRejectsEarlyClaim(t *testing.T) {
 	d := workflowDefinition()
 	d.Steps = d.Steps[:2]
 	d.Steps[1].StartAfter = &TimingRule{After: "step_completed", StepKey: "research", Offset: 1, Unit: "minutes"}
@@ -175,13 +177,14 @@ func TestExecutorContinuityRetainsTimedWaitAndRejectsEarlyClaim(t *testing.T) {
 	if _, err := a.db.Exec(`UPDATE process_step_runs SET start_at=? WHERE id=?`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), two.ID); err != nil {
 		t.Fatal(err)
 	}
+	cleanupWorkersNow(t, a)
 	a = &App{ctx: a.ctx, db: a.db}
 	if err := a.tickDirect(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	two = stepBy(t, a, r, "write")
-	if two.ThreadID != one.ThreadID || len(f.threads) != 1 {
-		t.Fatal("timed recovery replaced worker")
+	if two.ThreadID == "" || two.ThreadID == one.ThreadID || len(f.threads) != 2 {
+		t.Fatal("timed recovery did not replace the retired worker")
 	}
 }
 

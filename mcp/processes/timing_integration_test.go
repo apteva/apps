@@ -88,6 +88,7 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 	read()
 	saved := detail.Steps[1].StartAt
 	first := detail.Steps[0].CompletedAt
+	firstWorker := detail.Steps[0].ThreadID
 	if detail.Run.State != "scheduled" || saved == "" {
 		t.Fatal("timer not persisted")
 	}
@@ -112,8 +113,9 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.at.Before(due) || next.request.SourceEventID != "process-step:"+detail.Steps[1].ID {
-		t.Fatal("early or incorrect notification")
+	read() // Retirement gives the continuation its own worker and delivery identity.
+	if next.at.Before(due) || next.request.SourceEventID != deliveryEventID(detail.Steps[1], detail.Steps[1].ThreadID) || detail.Steps[1].ThreadID == firstWorker {
+		t.Fatalf("early or incorrect continuation: due=%s at=%s event=%s worker=%s", due, next.at, next.request.SourceEventID, detail.Steps[1].ThreadID)
 	}
 	completed, _ := time.Parse(time.RFC3339Nano, first)
 	t.Logf("Follow-up notification arrived %.2fs after completion (%.2fs after due), across an app restart", next.at.Sub(completed).Seconds(), next.at.Sub(due).Seconds())

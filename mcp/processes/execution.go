@@ -113,6 +113,9 @@ func (a *App) startAssignment(project, id, assignmentID, key, inputs string, ove
 		return nil, e
 	}
 	result, e := a.dispatch(p, &r)
+	if workerCapacityError(e) {
+		return map[string]any{"run": r, "delivery_warning": e.Error()}, nil
+	}
 	if e != nil {
 		return nil, fmt.Errorf("run saved; retry with the same idempotency_key: %w", e)
 	}

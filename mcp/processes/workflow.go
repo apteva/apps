@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,7 @@ type StepRun struct {
 	DeliveryEventID   string   `json:"-"`
 	DeliveryWarning   string   `json:"delivery_warning,omitempty"`
 	DeliverySuspended bool     `json:"delivery_suspended,omitempty"`
+	RetainWorker      bool     `json:"-"`
 	Attempts          int      `json:"delivery_attempts"`
 	NextAttemptAt     string   `json:"next_attempt_at,omitempty"`
 	LifecycleSequence int64    `json:"-"`
@@ -187,12 +189,12 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 	return nil
 }
 
-const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at,claimed_at,claim_attempts,claim_next_at,claim_event_id`
+const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at,claimed_at,claim_attempts,claim_next_at,claim_event_id,retain_worker`
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
 	var def, executor, legacyDecision, legacyTaskID string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt, &s.ClaimedAt, &s.ClaimAttempts, &s.ClaimNextAt, &s.ClaimEventID)
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt, &s.ClaimedAt, &s.ClaimAttempts, &s.ClaimNextAt, &s.ClaimEventID, &s.RetainWorker)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
@@ -396,6 +398,14 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 	if t, e := time.Parse(time.RFC3339Nano, s.NextAttemptAt); e == nil && time.Now().Before(t) {
 		return nil
 	}
+	worker, e := a.runWorker(r.ID, s.Executor.AgentID)
+	if e != nil {
+		return e
+	}
+	retiring, e := a.workerRetiring(r.ID, s.Executor.AgentID, worker)
+	if e != nil || retiring {
+		return e
+	}
 	defer func() {
 		if err != nil {
 			err = a.recordStepDeliveryError(*s, err)
@@ -566,7 +576,11 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 	}
 	worker := s.ThreadID
 	if worker == "" {
-		worker = processWorkerID(*r, *s, false)
+		var err error
+		worker, err = a.nextWorkerID(*r, *s, false)
+		if err != nil {
+			return err
+		}
 	}
 	eventID := deliveryEventID(*s, worker)
 	if s.DeliveryEventID != "" {
@@ -608,7 +622,11 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	}
 	worker := s.ThreadID
 	if worker == "" {
-		worker = processWorkerID(*r, *s, true)
+		var err error
+		worker, err = a.nextWorkerID(*r, *s, true)
+		if err != nil {
+			return err
+		}
 		if _, err := a.db.Exec(`INSERT INTO process_run_workers(run_id,agent_id,thread_id,created_at) VALUES(?,?,?,?) ON CONFLICT(run_id,agent_id) DO NOTHING`, r.ID, s.Executor.AgentID, worker, timestamp()); err != nil {
 			return err
 		}
@@ -617,7 +635,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if s.DeliveryEventID != "" {
 		eventID = s.DeliveryEventID
 	}
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Retain context across assigned steps. When blocked, awaiting approval or waiting for a Processes event with no delivered ready work or active child work, call pace with clear_wake=true to park until an event. Never set a periodic sleep to check this run; Processes owns scheduling and recovery. Processes stops this worker when the run becomes terminal. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Retain context across assigned steps. When blocked, awaiting approval or waiting for a Processes event with no delivered ready work or active child work, call pace with clear_wake=true to park until an event. Never set a periodic sleep to check this run; Processes owns scheduling and recovery. Processes releases this worker after its recoverable work finishes, including between timed steps; the saved run continues later with its recorded evidence. Keep this worker attached while a business approval or callback depends on this thread. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
 	if aiParallel(*r) {
 		directive = parallelWorkerDirective(*r)
 	}
@@ -762,7 +780,7 @@ func (a *App) writeStepClaim(s StepRun, state string, progress int, output, reas
 			return e
 		}
 	}
-	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision='',updated_by=?,updated_at=?,revision=revision+1,completed_at=CASE WHEN ?='completed' AND completed_at='' THEN ? ELSE completed_at END WHERE id=?`, state, progress, output, reason, actor, now, state, now, s.ID)
+	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision='',updated_by=?,updated_at=?,revision=revision+1,completed_at=CASE WHEN ?='completed' AND completed_at='' THEN ? ELSE completed_at END,retain_worker=CASE WHEN ?='runtime' THEN retain_worker WHEN ? IN ('waiting','blocked') THEN 1 ELSE 0 END,delivery_suspended=CASE WHEN ?<>'runtime' AND ?='running' THEN 0 ELSE delivery_suspended END WHERE id=?`, state, progress, output, reason, actor, now, state, now, actor, state, actor, state, s.ID)
 	if e != nil {
 		return e
 	}
@@ -863,9 +881,19 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 	if e != nil {
 		return e
 	}
+	return errors.Join(append(failures, a.refreshWorkflowState(r, all))...)
+}
+
+// refreshWorkflowState only derives saved state. It never provisions workers,
+// retries delivery, or executes a newly ready step.
+func (a *App) refreshWorkflowState(r *Run, all []StepRun) error {
+	if terminal(r.State) || !r.Workflow || r.DeliveredAt == "" {
+		return nil
+	}
+	var e error
 	done, total := 0, 0
 	state := "running"
-	runnable, scheduled := false, false
+	runnable, scheduled, capacityQueued := false, false, false
 	names := []string{}
 	outputs := map[string]string{}
 	for _, s := range all {
@@ -873,7 +901,9 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 			continue
 		}
 		total++
-		if s.State == "running" || s.State == "ready" {
+		atCapacity := strings.Contains(s.DeliveryWarning, "worker capacity exhausted")
+		capacityQueued = capacityQueued || (s.State == "ready" && atCapacity)
+		if s.State == "running" || (s.State == "ready" && !atCapacity) {
 			runnable = true
 		}
 		if s.State == "scheduled" {
@@ -884,15 +914,18 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 			outputs[s.Key] = s.Output
 		} else if s.State != "pending" {
 			names = append(names, s.Definition.Name)
-			if s.State == "blocked" || s.DeliveryWarning != "" {
+			if s.State == "blocked" || (s.DeliveryWarning != "" && !atCapacity) {
 				state = "blocked"
 			} else if state != "blocked" && s.State == "waiting" {
 				state = "waiting"
 			}
 		}
 	}
-	if state == "running" && scheduled && !runnable {
+	if state == "running" && scheduled && !runnable && !capacityQueued {
 		state = "scheduled"
+	}
+	if state == "running" && capacityQueued && !runnable {
+		state = "queued"
 	}
 	if controlMode(*r) == "step_by_step" && state == "running" {
 		active := false
@@ -915,9 +948,9 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 	warnings := []string{}
 	suspended := false
 	for _, s := range all {
+		suspended = suspended || (!terminal(s.State) && s.DeliverySuspended)
 		if !terminal(s.State) && s.DeliveryWarning != "" {
 			warnings = append(warnings, s.Definition.Name+": "+s.DeliveryWarning)
-			suspended = suspended || s.DeliverySuspended
 		}
 	}
 	warning := strings.Join(warnings, "\n")
@@ -932,12 +965,12 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 	if e != nil {
 		return e
 	}
-	fresh, e := a.getRun(p.ProjectID, p.ID, r.ID)
+	fresh, e := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE id=?`, r.ID))
 	if e == nil {
 		*r = fresh
 		setRunControl(r, all)
 	}
-	return errors.Join(append(failures, e)...)
+	return e
 }
 func (a *App) stepAction(project, actor, process, run, id, action string, args map[string]any) (any, error) {
 	r, e := a.getRun(project, process, run)
@@ -1021,6 +1054,18 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	}
 	if strings.HasPrefix(actor, "agent:") {
 		done, next := workerAction(r, s, actor, worker, all)
+		retiringThread := worker
+		if retiringThread == "" {
+			retiringThread = s.ThreadID
+		}
+		// Persist retirement before telling a worker to finish. A timer or human
+		// approval may release the next step before asynchronous cleanup runs.
+		if done && !terminal(r.State) && !aiParallel(r) && retiringThread != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, retiringThread) {
+			if err := a.queueIdleWorkers(context.Background(), project); err != nil {
+				return nil, err
+			}
+			a.wakeDispatch(project)
+		}
 		if action == "step_update" {
 			ack := workerAcknowledgement(process, r, s, done, next)
 			if actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
@@ -1072,7 +1117,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 
 }
 
-func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
+func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) (err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	id := strings.TrimPrefix(l.SourceEventID, "process-step:")
@@ -1089,6 +1134,20 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	if event.SourceApp != "apteva-server" || event.InstanceID != s.Executor.AgentID || s.Executor.Kind != "agent" {
 		return errors.New("step lifecycle source mismatch")
 	}
+	defer func() {
+		if s.RunID == "" {
+			return
+		}
+		r, e := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE id=?`, s.RunID))
+		if e == nil && !terminal(r.State) {
+			var all []StepRun
+			all, e = a.steps(r.ID)
+			if e == nil {
+				e = a.refreshWorkflowState(&r, all)
+			}
+		}
+		err = errors.Join(err, e)
+	}()
 	if s.RunID != "" {
 		if err := a.workerRunActive(s.RunID); err != nil {
 			if errors.Is(err, errWorkerRunTerminal) {
@@ -1116,11 +1175,15 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	if int64(l.Sequence) <= s.LifecycleSequence {
 		return nil
 	}
-	_, e = a.db.Exec(`UPDATE process_step_runs SET lifecycle_sequence=?,execution_state=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning=CASE WHEN claim_attempts>0 AND state='ready' THEN delivery_warning ELSE '' END,next_attempt_at='',delivery_suspended=CASE WHEN state='blocked' AND updated_by='runtime' THEN delivery_suspended WHEN claim_attempts>0 AND state='ready' THEN delivery_suspended ELSE 0 END WHERE id=?`, l.Sequence, l.Type, l.ExecutionID, timestamp(), id)
-	if e != nil || l.Type != "event.error" {
-		return e
+	// Persist the business hold before acknowledging the lifecycle sequence.
+	// A failed write must remain retryable through the same callback.
+	if l.Type == "event.error" {
+		if e = a.holdWorkerExecutionError(s, l.Reason); e != nil {
+			return e
+		}
 	}
-	return a.holdWorkerExecutionError(s, l.Reason)
+	_, e = a.db.Exec(`UPDATE process_step_runs SET lifecycle_sequence=?,execution_state=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning=CASE WHEN claim_attempts>0 AND state='ready' THEN delivery_warning ELSE '' END,next_attempt_at='',delivery_suspended=CASE WHEN state='blocked' AND updated_by='runtime' THEN delivery_suspended WHEN claim_attempts>0 AND state='ready' THEN delivery_suspended ELSE 0 END WHERE id=?`, l.Sequence, l.Type, l.ExecutionID, timestamp(), id)
+	return e
 
 }
 
@@ -1311,6 +1374,9 @@ func (a *App) authorizeStepWrite(s Task, r Run, all []Task, actor string) error 
 }
 
 func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[string]any) error {
+	if actor == "operator" && str(args, "state") == "running" && s.State == "blocked" && s.DeliverySuspended && s.UpdatedBy == "runtime" && !terminal(r.State) {
+		return a.resumeRetiredStep(s)
+	}
 	if e := a.authorizeStepWrite(s, r, all, actor); e != nil {
 		return e
 	}

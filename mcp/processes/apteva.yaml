@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.18.1
+version: 0.18.2
 description: Create and run company procedures. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -151,7 +151,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.18.1
+    ref: processes/v0.18.2
     entry: mcp/processes
   port: 8080
   health_check: /health
@@ -168,5 +168,10 @@ db:
   driver: sqlite
   path: /data/processes.db
   migrations: migrations/
-config_schema: []
+config_schema:
+  - name: max_workers_per_agent
+    type: number
+    label: Maximum Processes workers per agent
+    default: 8
+    description: Shared Processes root-worker admission limit across all runs and assignments. Delegated children are outside this app limit.
 upgrade_policy: auto-patch

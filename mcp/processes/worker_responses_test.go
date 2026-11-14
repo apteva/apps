@@ -179,15 +179,20 @@ func TestWorkerAcknowledgementKeepsApprovalGateAndFinalDone(t *testing.T) {
 		if ready, ok := ack["ready_steps"].([]WorkerWorkItem); ok && len(ready) > 0 {
 			expected = "Claim delivered ready_steps"
 		}
-		if ack["done"] != false || !strings.Contains(ack["next_action"].(string), expected) {
-			t.Fatal("worker stopped before approval", ack)
+		if key != "validate" && (ack["done"] != false || !strings.Contains(ack["next_action"].(string), expected)) {
+			t.Fatal("worker stopped with ready work", ack)
 		}
 		if key == "validate" && ack["run_state"] != "waiting" {
 			t.Fatal("lost approval gate state", ack)
 		}
+		if key == "validate" && ack["done"] != true {
+			t.Fatal("idle worker was retained across a human gate", ack)
+		}
 	}
+	cleanupWorkersNow(t, a)
 	finishStep(t, a, p, r, "approve", "operator", "approved exact receipts", "")
 	s := stepBy(t, a, r, "publish")
+	actor = "agent:7:" + s.ThreadID
 	raw, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, s.ID, "step_update", map[string]any{"state": "completed", "output": "published exact artifacts"})
 	if err != nil {
 		t.Fatal(err)

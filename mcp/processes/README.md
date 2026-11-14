@@ -233,8 +233,11 @@ keeps run receipts, step ownership and worker history, and does not stop main.
 A separate durable terminal event notifies the coordinator even when app cleanup
 beats native `done`; notification retries preserve one stable event identity.
 External actions already accepted can still complete outside the worker; reconcile
-their exact operation identities before retrying. Blocked and approval-waiting
-workers retain context using `pace(clear_wake=true)` instead of periodic polling.
+their exact operation identities before retrying. Business waits with thread-bound
+approvals or callbacks retain their worker using `pace(clear_wake=true)`. Explicit
+runtime failures and future timed work can release non-delegating workers through
+the existing thread API. Workers configured to delegate remain attached so their
+children and callbacks continue safely.
 Pausing a process or assignment stops future scheduled occurrences, not a run.
 
 Migration 004 adds `process_step_runs`, append-only `process_step_events`, and a
@@ -403,8 +406,8 @@ its editor. The choice is frozen in each run's assignment snapshot:
 - `auto` (default, including historical assignments): reuse the existing worker
   only for a strict, untimed same-agent chain; other steps remain isolated.
 - `per_executor`: one persistent worker thread per run and executor agent, even
-  with branches, dependency joins, redundant dependencies, or timed steps. This
-  retains conversational context and discovered tools. Ready work on the same
+  with branches, dependency joins or redundant dependencies while work is active. This
+  retains conversational context and discovered tools until safe retirement. Ready work on the same
   executor is serialized; different executor agents can run concurrently.
 - `isolated`: provision a separate worker thread for each step, preserving
   parallel execution even when steps use the same agent.
@@ -415,9 +418,10 @@ its worker. Each dispatch retains a separate tracked execution ID and immutable
 delivery envelope; each step retains its own checkpoint and receipt. Workers
 claim the app-assigned step before acting and use durable dependency evidence
 for exact artifact identities. The final validation and human approval gates
-are unchanged. A worker finishes after its own frozen steps are terminal, or
-when the run becomes terminal, and stays available across waits while it still
-has future assigned work. App restarts reuse saved ownership and delivery IDs.
+remain explicit. Future work stays in SQLite while a recoverable idle worker
+retires. A continuation gets a new worker identity and reads saved checkpoints
+and evidence. Business waits retain their callback owner. App restarts preserve
+ownership, retirement retries and delivery identities.
 
 Migration 014 preserves existing worker rows and changes their key to
 `(run_id, agent_id)`. Existing assignment edits only affect future runs; they
@@ -451,12 +455,12 @@ SQLite. A completion-relative timer starts when Processes records successful
 completion, not when an external service says it performed the action. Report
 the first email's completion promptly.
 
-The app's five-second worker changes eligible steps from `scheduled` to `ready`
+The app's deadline dispatcher changes eligible steps from `scheduled` to `ready`
 and sends the normal tracked event to their assigned agent or requests human
 work. No model requests or sleeping worker are
 needed during the delay. In automatic mode, timed workflows use independent step deliveries and untimed
 strict sequential workflows reuse their existing worker. With `per_executor`,
-timers wake the same saved worker thread after the delay. Restarts retain timers;
+timers create a fresh continuation after safe worker retirement. Restarts retain timers;
 if the app was offline when due, it dispatches after recovery. Retries reuse the
 same delivery identity. Cancellation stops future handoffs; pausing an assignment
 only stops new runs. Start times are earliest eligibility, not guaranteed delivery
@@ -465,7 +469,9 @@ or completion times.
 Live flows, the project map, and the overview widget show scheduled timing
 and deadlines. Procedure-relative deadlines cannot be overridden on an individual
 task. Date-parameter anchors, business calendars, reminders and escalation rules
-are not part of this release. No Server or Core changes are required.
+are not part of step timing. Worker cleanup uses the existing platform thread
+API; no Server or Core changes are required. Delegating workers retain ownership
+across waits.
 
 ## MCP response recovery
 
@@ -678,3 +684,29 @@ named selectors. Claims/updates keep ownership, dependency, timing, controller,
 worker-continuity and approval gates. Completion and diagnostics survive restart.
 The `16-compact-handoffs.yaml` GPT-6.1 Sol scenario verifies exact local fixture
 artifacts, targeted recovery, separate evidence, one worker and HTTP approval.
+
+
+## Shared worker admission and lifecycle recovery
+
+`max_workers_per_agent` limits Processes root workers across all assignments and
+runs in this installation (default 8). New work queues until capacity is
+available. Delegated Core children are outside this app limit; Processes does
+not impose a global Core thread-tree limit. Delegating workers retain ownership
+across waits to preserve their children and callbacks. A root slot is released
+only after the existing thread API acknowledges cleanup. `max_parallel_steps`
+continues to govern concurrency within a run.
+
+Runtime lifecycle errors immediately refresh the parent run's aggregate status
+without another model request. Provider retry exhaustion preserves step outputs
+and evidence, blocks the run and suspends automatic delivery. After safe worker
+retirement, an operator can explicitly resume that step with state `running`;
+Processes issues a new worker and delivery identity. Stale callbacks cannot
+change that continuation. Recovery must reconcile saved external operation IDs
+before repeating writes. Cleanup retries keep their persisted retry order.
+
+A router should have one routing step. Complete it only after saving a real
+handling-run ID (or a justified exclusion). Keep customer handling and approvals
+in an independent procedure. When splitting an existing router, retain the
+original handling procedure ID, target assignment IDs, activation cutoff and
+idempotency-key namespace; move only routing assignments and subscriptions.
+Do not execute six model-driven no-op steps after a durable handoff.
