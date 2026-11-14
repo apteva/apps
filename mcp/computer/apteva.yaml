@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.12.1-local.login.1
+version: 0.12.1-local.login.2
 description: |
-  v0.12.1-local.login.1 exposes native iOS and Android screen guards with exact app,
+  v0.12.1-local.login.2 exposes native iOS and Android screen guards with exact app,
   marker, account-field and unique-target checks. Supports bounded native reads,
   verified Android replacement/clearing, scoped repeated form controls and
   strict handling of duplicated Compose buttons without input replay.
@@ -583,7 +583,7 @@ runtime:
   kind: source
   source:
     repo: file:///Users/marcoschwartz/Documents/code/apps
-    ref: computer/v0.12.1-local.login.1
+    ref: computer/v0.12.1-local.login.2
     entry: mcp/computer
   port: 8080
   health_check: /health

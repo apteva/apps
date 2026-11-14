@@ -179,3 +179,43 @@ func TestAndroidDuplicateComposeButtonMustBeNestedAndIdentical(t *testing.T) {
 		}
 	}
 }
+
+func TestAndroidReplacementAdvancesOnlyEditedFieldGuard(t *testing.T) {
+	source := androidFixture("test-account")
+	c, _ := New(api.SessionTarget{}, func(_ context.Context, tool string, args map[string]any, out any) error {
+		if tool == "mobile_observe" {
+			b, _ := json.Marshal(sdk.MCPResult{StructuredContent: map[string]any{"source": source}})
+			return json.Unmarshal(b, out)
+		}
+		if tool == "mobile_action" && args["action"] == "text" {
+			source = strings.Replace(source, "Old bio", "New bio", 1)
+		}
+		return nil
+	})
+	c.lease = lease{ID: "s", Status: "active", ExpiresAt: time.Now().Add(time.Hour).Unix(), Device: device{Platform: "android", Driver: "adb", Capabilities: []string{"source", "replace_text"}}}
+	c.display = api.DisplaySize{Width: 100, Height: 200}
+	c.ttl = 900
+	guards := map[string]string{"header": "test-account", "bio": "Old bio"}
+	if _, err := c.NativeGuarded("native_replace", "com.example", []string{"header"}, "bio", "New bio", guards, 0); err != nil {
+		t.Fatal(err)
+	}
+	if guards["bio"] != "Old bio" {
+		t.Fatal("caller guards mutated")
+	}
+}
+
+func TestAndroidSecureSelectorRequiresOnePasswordField(t *testing.T) {
+	source := strings.Replace(androidFixture("test-account"), `text="Old bio"`, `password="true" text=""`, 1)
+	nodes, err := androidTree(source, "com.example", 100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	field, err := matchAndroid(nodes, []string{"header"}, "android.widget.EditText[password=true]", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes = append(nodes, field)
+	if _, err = matchAndroid(nodes, []string{"header"}, "android.widget.EditText[password=true]", false, false, nil); err == nil {
+		t.Fatal("ambiguous password target accepted")
+	}
+}

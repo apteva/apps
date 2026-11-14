@@ -89,6 +89,9 @@ type androidNode struct {
 }
 
 func (n androidNode) matches(target string, badged bool) bool {
+	if target == "android.widget.EditText[password=true]" {
+		return n.password && n.kind == "android.widget.EditText"
+	}
 	for _, v := range []string{n.id, n.value, n.desc} {
 		if v == target || (badged && strings.HasPrefix(v, target+", ")) {
 			return true
@@ -322,6 +325,16 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 	}
 	if err = c.invoke(c.ctx(), "mobile_action", args, &out); err != nil {
 		return "", err
+	}
+	// A guard on the edited field is a precondition; verify the new value
+	// afterward while retaining all other account guards.
+	if _, guarded := values[target]; guarded {
+		next := make(map[string]string, len(values))
+		for field, value := range values {
+			next[field] = value
+		}
+		next[target] = text
+		values = next
 	}
 	changed, err := observe()
 	if err != nil || changed.value != text {

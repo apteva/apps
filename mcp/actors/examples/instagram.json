@@ -1443,6 +1443,59 @@
               "locator": {}
             }
           ]
+        },
+        "android": {
+          "private_screen": true,
+          "required_explicit_inputs": [
+            "username",
+            "expected_username"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                },
+                "expected_username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_replace",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Username, email or mobile number,",
+                "Password",
+                "Log in"
+              ],
+              "native_target": "Username, email or mobile number,",
+              "native_values": {
+                "Username, email or mobile number,": "{{expected_username}}"
+              },
+              "text": "{{username}}"
+            },
+            {
+              "action": "native_assert",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Username, email or mobile number,",
+                "Password",
+                "Log in"
+              ],
+              "native_values": {
+                "Username, email or mobile number,": "{{username}}"
+              }
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       },
       "steps": null,
@@ -2606,8 +2659,13 @@
               "native_target": "Log into existing account"
             },
             {
-              "action": "wait",
-              "duration_ms": 1000
+              "action": "native_wait",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Instagram from Meta",
+                "Use another profile"
+              ],
+              "duration_ms": 10000
             }
           ],
           "browser": {
@@ -4064,6 +4122,100 @@
               "locator": {}
             }
           ]
+        },
+        "android": {
+          "private_screen": true,
+          "required_explicit_inputs": [
+            "username",
+            "password_ref"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_type_secret",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Username, email or mobile number,",
+                "Password",
+                "Log in"
+              ],
+              "native_target": "android.widget.EditText[password=true]",
+              "native_values": {
+                "Username, email or mobile number,": "{{username}}"
+              },
+              "secret_ref": "{{password_ref}}"
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Username, email or mobile number,",
+                "Password",
+                "Log in"
+              ],
+              "native_target": "Log in",
+              "native_values": {
+                "Username, email or mobile number,": "{{username}}"
+              }
+            },
+            {
+              "action": "wait",
+              "duration_ms": 1800
+            },
+            {
+              "action": "native_tap_if_present",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now"
+            },
+            {
+              "action": "native_wait",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "duration_ms": 12000
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "native_target": "com.instagram.android:id/profile_tab"
+            },
+            {
+              "action": "native_wait",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{username}}"
+              },
+              "duration_ms": 12000
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       },
       "steps": null,
