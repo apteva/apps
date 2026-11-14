@@ -565,7 +565,7 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
 			if str(args, "action") == "secure_text" {
 				var count int
-				if err := e.db.QueryRow(`SELECT COUNT(*) FROM mobile_recordings WHERE device_id=? AND status IN ('starting','recording','stopping')`, s.Device.ID).Scan(&count); err != nil {
+				if err := e.db.QueryRow(`SELECT COUNT(*) FROM mobile_recordings WHERE device_id=? AND status IN ('starting','recording','stopping','processing')`, s.Device.ID).Scan(&count); err != nil {
 					return nil, problem("invalid_state", "cannot confirm recording state")
 				}
 				if count > 0 {

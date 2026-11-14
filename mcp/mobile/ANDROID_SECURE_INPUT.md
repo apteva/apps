@@ -8,7 +8,7 @@ are omitted by the collector.
 `mobile_action(action=secure_text)` requires `password`, `expected_package`,
 `expected_resource_id` (may be empty for Compose), `expected_bounds`, 1–12 exact
 `native_required` markers and 1–12 `native_values` regular-field guards. Call it
-through a live exclusive device session. Active device recordings reject entry.
+through a live exclusive device session. Active and finalizing device recordings reject entry.
 The helper waits briefly for the accessibility root, validates all guards, and
 requires exactly one focused, visible, enabled, editable password EditText with
 no existing text. It uses Android's ACTION_SET_TEXT and checks the resulting

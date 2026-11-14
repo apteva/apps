@@ -98,17 +98,21 @@ func TestAndroidPrivateSourceNeverCapturesImage(t *testing.T) {
 }
 
 func TestSecureInputRejectsActiveDeviceRecording(t *testing.T) {
-	e, b := fixture(t)
-	s := openFixture(t, e, "p")
-	if err := e.insertRecording(Recording{ID: "rec-private", ProjectID: "p", SessionID: s.ID, DeviceID: s.DeviceID, Status: "recording"}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := e.Execute(context.Background(), "p", "mobile_action", map[string]any{"session_id": s.ID, "action": "secure_text", "password": "fixture-only"})
-	b.mu.Lock()
-	calls := b.actions
-	b.mu.Unlock()
-	if err == nil || calls != 0 {
-		t.Fatalf("recorded secure input was dispatched: calls=%d err=%v", calls, err)
+	for _, status := range []string{"recording", "processing"} {
+		t.Run(status, func(t *testing.T) {
+			e, b := fixture(t)
+			s := openFixture(t, e, "p")
+			if err := e.insertRecording(Recording{ID: "rec-private", ProjectID: "p", SessionID: s.ID, DeviceID: s.DeviceID, Status: status}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := e.Execute(context.Background(), "p", "mobile_action", map[string]any{"session_id": s.ID, "action": "secure_text", "password": "fixture-only"})
+			b.mu.Lock()
+			calls := b.actions
+			b.mu.Unlock()
+			if err == nil || calls != 0 {
+				t.Fatalf("recorded secure input was dispatched: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
 

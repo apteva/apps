@@ -1,10 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.7.1-local.login.2
+version: 0.8.0
 description: |
-  Adds Android Instagram login variants with encrypted context-bound password references, private secret input confirmation, guarded onboarding and verified account identity.
-  v0.7.1-local.login.2 adds guarded Android field reads, replacement and explicit clearing
+  v0.8.0 adds Android Instagram login variants with encrypted context-bound password references, private secret input confirmation, guarded onboarding and verified account identity.
+  v0.7.0 adds guarded Android field reads, replacement and explicit clearing
   for platform-specific actors. Native value checks bind the active account;
   confirmed reads enter datasets. Includes the shared Instagram example and
   preserves iOS workflows, guarded media examples and upload receipt validation.
@@ -109,7 +109,7 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.8.0"
+      version: ">=0.13.0"
       reason: Browser and Mobile screen control, saved contexts, explicit capabilities, extraction and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
@@ -186,8 +186,8 @@ provides:
 runtime:
   kind: source
   source:
-    repo: file:///Users/marcoschwartz/Documents/code/apps
-    ref: actors/v0.7.1-local.login.2
+    repo: https://github.com/apteva/apps.git
+    ref: actors/v0.8.0
     entry: mcp/actors
   port: 8080
   health_check: /health

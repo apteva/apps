@@ -3,7 +3,8 @@
 Check the exact foreground package, visible screen markers and unique target
 before native input. `native_values` asserts exact values of unique fields,
 such as the active account header. `native_read` returns only a selected,
-bounded regular field. Password fields are rejected.
+bounded regular field. Regular typing, replacement and reads reject password
+fields. Secure input uses the separate private path described in [the secure-input notes](internal/browser/mobile/ANDROID_SECURE_INPUT.md).
 
 For repeated Android form IDs, use an exact direct-child path such as
 `com.example:id/bio > com.example:id/form > android.widget.EditText`.
