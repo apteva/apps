@@ -185,6 +185,9 @@ type widgetAccount struct {
 	ID                 int64                   `json:"id"`
 	Name               string                  `json:"name"`
 	Platform           string                  `json:"platform"`
+	ProfileID          int64                   `json:"profile_id"`
+	ProfileName        string                  `json:"profile_name"`
+	Status             string                  `json:"status"`
 	UpdatedAt          string                  `json:"updated_at"`
 	Metrics            map[string]widgetMetric `json:"metrics"`
 	AggregateExclusion string                  `json:"aggregate_exclusion_reason,omitempty"`
@@ -201,33 +204,53 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	if projectScope(globalCtx, projectArgsFromRequest(r)) == "" {
+		http.Error(w, "project_id required", 400)
+		return
+	}
+	window, err := performanceDateWindow(r, time.Now())
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	selectedPlatforms, err := performancePlatforms(r)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	demo, err := performanceDemoRequested(r)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if demo {
+		a.handleDemoPerformance(w, r, window, selectedPlatforms)
+		return
+	}
 	scope, err := widgetScope(globalCtx, r)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	days := 28
-	if raw := r.URL.Query().Get("days"); raw != "" {
-		days, err = strconv.Atoi(raw)
+	start, today, previous := window.Start, window.End, window.Previous
+	q, args := `SELECT a.id,a.display_name,a.platform,COALESCE(a.provider_slug,'native')||':'||a.connection_id||':'||COALESCE(a.provider_account_id,''),a.account_kind,COALESCE(p.id,0),COALESCE(p.name,'Unassigned'),a.status FROM social_accounts a LEFT JOIN profiles p ON p.id=a.profile_id AND p.project_id=a.project_id WHERE a.project_id=?`, []any{scope.projectID}
+	if len(selectedPlatforms) > 0 {
+		q += ` AND a.platform IN (` + placeholders(len(selectedPlatforms)) + `)`
+		for _, name := range selectedPlatforms {
+			args = append(args, name)
+		}
 	}
-	if err != nil || (days != 7 && days != 28 && days != 90) {
-		http.Error(w, "days must be 7, 28, or 90", 400)
-		return
-	}
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	start, previous := today.AddDate(0, 0, -days), today.AddDate(0, 0, -2*days)
-	q, args := `SELECT id,display_name,platform,COALESCE(provider_slug,'native')||':'||connection_id||':'||COALESCE(provider_account_id,''),account_kind FROM social_accounts WHERE project_id=? AND status='active'`, []any{scope.projectID}
 	if scope.profileID > 0 {
-		q += ` AND profile_id=?`
+		q += ` AND a.profile_id=?`
 		args = append(args, scope.profileID)
 	}
 	if len(scope.accountIDs) > 0 {
-		q += ` AND id IN (` + placeholders(len(scope.accountIDs)) + `)`
+		q += ` AND a.id IN (` + placeholders(len(scope.accountIDs)) + `)`
 		for _, id := range scope.accountIDs {
 			args = append(args, id)
 		}
 	}
-	rows, err := globalCtx.AppDB().Query(q+` ORDER BY id`, args...)
+	rows, err := globalCtx.AppDB().Query(q+` ORDER BY a.id`, args...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -235,7 +258,7 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 	accounts := []widgetAccount{}
 	for rows.Next() {
 		var acct widgetAccount
-		if err := rows.Scan(&acct.ID, &acct.Name, &acct.Platform, &acct.binding, &acct.accountKind); err != nil {
+		if err := rows.Scan(&acct.ID, &acct.Name, &acct.Platform, &acct.binding, &acct.accountKind, &acct.ProfileID, &acct.ProfileName, &acct.Status); err != nil {
 			rows.Close()
 			http.Error(w, err.Error(), 500)
 			return
@@ -324,6 +347,11 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			acct.Metrics[name] = summarizeWidgetMetric([]widgetAccount{*acct}, name, start, today, previous)
 		}
 	}
+	writePerformanceSummary(w, accounts, window, false)
+}
+
+func writePerformanceSummary(w http.ResponseWriter, accounts []widgetAccount, window performanceWindow, demo bool) {
+	start, today, previous := window.Start, window.End, window.Previous
 	// A board preset and its parent account overlap. Show both rows, but
 	// aggregate only the parent when it is included in this widget scope.
 	parentBindings := map[string]bool{}
@@ -366,7 +394,7 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			updated = acct.UpdatedAt
 		}
 	}
-	writeJSON(w, map[string]any{"accounts": accounts, "metrics": metrics, "days": days, "start_date": start.Format("2006-01-02"), "end_date": today.AddDate(0, 0, -1).Format("2006-01-02"), "updated_at": updated})
+	writeJSON(w, map[string]any{"accounts": accounts, "metrics": metrics, "days": window.Days, "demo_data": demo, "start_date": start.Format("2006-01-02"), "end_date": today.AddDate(0, 0, -1).Format("2006-01-02"), "updated_at": updated})
 }
 
 func widgetDailyMetric(name string) string {

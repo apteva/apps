@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.10
+version: 0.24.11
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -195,7 +195,7 @@ provides:
       preview_props: { preview: true }
     - name: performance
       label: Social · Performance
-      description: Cached audience totals, daily performance trends, and account coverage.
+      description: Filter profiles, platforms, accounts and dates; compare each account in a sortable performance table.
       entry: /ui/SocialPerformanceWidget.mjs
       slots: [dashboard.home]
       suggested: true
@@ -209,6 +209,10 @@ provides:
           profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
           account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
           days: { type: integer, title: Complete days, enum: [7, 28, 90], default: 28 }
+          platform: { type: string, title: Platform, enum: [all, facebook, instagram, youtube, tiktok, twitter, linkedin, pinterest, threads, reddit], default: all }
+          start_date: { type: string, title: Custom start date, description: 'YYYY-MM-DD; set both dates for a custom window of at most 366 complete UTC days.', default: '' }
+          end_date: { type: string, title: Custom end date, description: 'Inclusive YYYY-MM-DD, no later than yesterday UTC.', default: '' }
+          demo_data: { type: boolean, title: Demo data, description: 'Show four sample profiles with four synthetic accounts each; no providers or real metrics.', default: false }
           visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
           show_trends: { type: boolean, title: Show trends, default: true }
       preview_props: { preview: true }
@@ -241,7 +245,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.10
+    ref: social/v0.24.11
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -834,6 +838,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Read-only summaries for project Home widgets.
 		{Pattern: "/widgets/publishing-calendar", Handler: a.handlePublishingWidget},
 		{Pattern: "/widgets/performance", Handler: a.handlePerformanceWidget},
+		{Pattern: "/widgets/performance/options", Handler: a.handlePerformanceOptions},
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
 		// Profiles (brand/client/site containers — see profiles.go)

@@ -25,11 +25,12 @@ export interface WidgetMetric {
   trend: MetricPoint[];
 }
 export interface PerformanceSummary {
+  demo_data?: boolean;
   days: number;
   start_date: string;
   end_date: string;
   updated_at: string;
-  accounts: { id: number; name: string; platform: string; updated_at: string; aggregate_exclusion_reason?: string; metrics: Record<string, WidgetMetric> }[];
+  accounts: { id: number; name: string; platform: string; profile_id?: number; profile_name?: string; status?: string; updated_at: string; aggregate_exclusion_reason?: string; metrics: Record<string, WidgetMetric> }[];
   metrics: Record<string, WidgetMetric>;
 }
 
@@ -85,12 +86,13 @@ export function publishingWindow(now: Date, mode: string, horizon: number, curso
 
 // Old project/settings data is hidden immediately, even if an aborted request
 // finishes later. Host event revisions and a polling fallback refresh reads.
-export function useWidgetData<T>(url: string, props: HomeWidgetProps, previewData: () => T) {
-  const key = `${props.preview ? "preview" : props.projectId || "missing"}:${url}`;
+export function useWidgetData<T>(url: string, props: HomeWidgetProps, previewData: () => T, enabled = true) {
+  const key = `${enabled}:${props.preview ? "preview" : props.projectId || "missing"}:${url}`;
   const [state, setState] = useState<{ key: string; data?: T; error?: string }>({ key });
   const [revision, setRevision] = useState(0);
   const previewRef = useRef(previewData); previewRef.current = previewData;
   useEffect(() => {
+    if (!enabled) { setState({ key }); return; }
     if (props.preview) { setState({ key, data: previewRef.current() }); return; }
     if (!props.projectId) { setState({ key, error: "Select a project to view Social data." }); return; }
     let alive = true;
@@ -118,7 +120,7 @@ export function useWidgetData<T>(url: string, props: HomeWidgetProps, previewDat
     void load();
     const poll = setInterval(() => void load(), 60_000);
     return () => { alive = false; requestID++; controller?.abort(); clearTimeout(timeout); clearInterval(poll); };
-  }, [key, url, props.preview, props.projectId, props.eventRevision, revision]);
+  }, [key, url, props.preview, props.projectId, props.eventRevision, revision, enabled]);
   return { data: state.key === key ? state.data : undefined, error: state.key === key ? state.error : undefined, retry: () => setRevision(value => value + 1) };
 }
 

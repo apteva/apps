@@ -78,7 +78,7 @@ test("publishing widget loads a private summary and changes to a full week", asy
   expect(new URL(create!.href).searchParams.get("compose")).toBe("1");
 });
 
-test("performance shows coverage, unavailable metrics, and account rows on full width", async () => {
+test("performance shows coverage, unavailable metrics, and account rows at both widths", async () => {
   const metric = { value: 0, accounts: 1, trend: [] };
   const missing = { value: null, accounts: 0, trend: [] };
   const response: PerformanceSummary = { days: 28, start_date: "2026-09-02", end_date: "2026-09-29", updated_at: "2026-09-30T08:00:00Z",
@@ -94,8 +94,8 @@ test("performance shows coverage, unavailable metrics, and account rows on full 
   expect(browser.document.querySelector("table")?.textContent).toContain("Studio");
   expect(requests.every(path => path.includes("/widgets/performance"))).toBe(true);
   await render(<Performance projectId="brand" widgetSize="half" eventRevision={1} />);
-  expect(requests.length).toBe(2);
-  expect(browser.document.querySelector("table")).toBeNull();
+  expect(requests.filter(path => !path.includes("/options?")).length).toBe(2);
+  expect(browser.document.querySelector("table")?.textContent).toContain("Studio");
 });
 
 test("switching projects hides prior data and rejects a late response", async () => {
