@@ -47,6 +47,7 @@ type fakeRecorder struct {
 	done    chan struct{}
 	closes  func() int
 	stopped chan int
+	stopErr error
 }
 
 func (r *fakeRecorder) Done() <-chan struct{} { return r.done }
@@ -59,7 +60,10 @@ func (r *fakeRecorder) Stop(context.Context) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(r.path, b, 0600)
+	if err := os.WriteFile(r.path, b, 0600); err != nil {
+		return err
+	}
+	return r.stopErr
 }
 
 type fakeRecordBackend struct {
@@ -71,6 +75,7 @@ type fakeRecordBackend struct {
 	backend    *fakeBackend
 	stopped    chan int
 	readyDelay time.Duration
+	stopErr    error
 }
 
 func (f *fakeRecordBackend) RecordPlan(_ Device, o recordOptions) (recordPlan, error) {
@@ -86,7 +91,7 @@ func (f *fakeRecordBackend) StartRecording(_ context.Context, _ Session, _ recor
 		time.Sleep(f.readyDelay)
 	}
 	f.starts++
-	f.last = &fakeRecorder{src: f.src, path: path, done: make(chan struct{}), stopped: f.stopped, closes: func() int {
+	f.last = &fakeRecorder{src: f.src, path: path, done: make(chan struct{}), stopped: f.stopped, stopErr: f.stopErr, closes: func() int {
 		f.backend.mu.Lock()
 		defer f.backend.mu.Unlock()
 		return f.backend.closes
@@ -419,8 +424,8 @@ func TestRecordPlanChoosesAvailableMethods(t *testing.T) {
 	old := lookTool
 	defer func() { lookTool = old }()
 	lookTool = func(name string) (string, error) {
-		if name == "adb" {
-			return "/usr/bin/adb", nil
+		if name == "adb" || name == "ffmpeg" || name == "ffprobe" {
+			return "/usr/bin/" + name, nil
 		}
 		return "", errors.New("missing")
 	}
@@ -439,8 +444,11 @@ func TestRecordPlanChoosesAvailableMethods(t *testing.T) {
 	if _, err := d.RecordPlan(Device{Platform: "ios", Physical: true}, recordOptions{Quality: "standard"}); errorCode(err) != "setup_required" {
 		t.Fatalf("ios without appium: %v", err)
 	}
-	if args := strings.Join(scrcpyArgs("SER", "/x.mp4", false), " "); !strings.Contains(args, "--no-playback --record /x.mp4") || !strings.Contains(args, "--no-audio") {
+	if args := strings.Join(scrcpyArgs("SER", "/x.mp4", false, 5), " "); !strings.Contains(args, "--no-playback --record /x.mp4") || !strings.Contains(args, "--no-audio") || !strings.Contains(args, "--no-window") || !strings.Contains(args, "--no-control") {
 		t.Fatalf("scrcpy args: %s", args)
+	}
+	if args := strings.Join(scrcpyArgs("SER", "/x.mp4", true, 2), " "); strings.Contains(args, "--no-window") || !strings.Contains(args, "--require-audio") {
+		t.Fatalf("scrcpy 2 compatibility/audio requirement: %s", args)
 	}
 }
 

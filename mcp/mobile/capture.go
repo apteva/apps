@@ -107,6 +107,13 @@ func (d *drivers) RecordPlan(v Device, o recordOptions) (recordPlan, error) {
 		}
 		return recordPlan{}, problem("setup_required", "screen recording is unavailable for this device: "+hint)
 	}
+	if v.Platform == "android" {
+		for _, tool := range []string{"ffmpeg", "ffprobe"} {
+			if _, err := lookTool(tool); err != nil {
+				return recordPlan{}, problem("setup_required", tool+" is required for accurate Android recording timelines")
+			}
+		}
+	}
 	plan := recordPlan{Method: method, Ext: ".mp4"}
 	if method == high {
 		plan.Audio = highAudio && o.Audio
@@ -136,10 +143,11 @@ func (d *drivers) StartRecording(ctx context.Context, s Session, p recordPlan, o
 // process wraps a capture child that is stopped with SIGINT so it can finish
 // its container (moov atom) instead of being killed mid-write.
 type process struct {
-	cmd    *exec.Cmd
-	done   chan struct{}
-	err    error
-	stderr *limitedBuffer
+	cmd      *exec.Cmd
+	done     chan struct{}
+	err      error
+	stderr   *limitedBuffer
+	terminal *os.File
 }
 
 func startProcess(name string, args []string, stdout io.Writer) (*process, error) {
@@ -167,10 +175,27 @@ func (p *process) interrupt(ctx context.Context, grace time.Duration) error {
 	select {
 	case <-p.done:
 	case <-timer.C:
+		if p.terminal != nil {
+			// A terminal interrupt reaches scrcpy's ADB child as well. Recent
+			// headless builds normally finish on the first (parent-only) signal.
+			_, _ = p.terminal.Write([]byte{3})
+			select {
+			case <-p.done:
+				if strings.Contains(p.stderr.String(), "Recording complete to") {
+					return nil
+				}
+				return p.exitError()
+			case <-time.After(2 * time.Second):
+			}
+			_ = p.terminal.Close()
+		}
 		_ = p.cmd.Process.Kill()
 		<-p.done
 		return errors.New("capture did not stop in time and was killed")
 	case <-ctx.Done():
+		if p.terminal != nil {
+			_ = p.terminal.Close()
+		}
 		_ = p.cmd.Process.Kill()
 		<-p.done
 		return ctx.Err()
@@ -348,15 +373,19 @@ type procRecorder struct{ p *process }
 
 func (r *procRecorder) Done() <-chan struct{} { return r.p.done }
 func (r *procRecorder) Stop(ctx context.Context) error {
-	return r.p.interrupt(ctx, 30*time.Second)
+	return r.p.interrupt(ctx, 5*time.Second)
 }
 
 var scrcpyVersion = regexp.MustCompile(`scrcpy (\d+)\.(\d+)`)
 
-func scrcpyArgs(serial, path string, audio bool) []string {
-	args := []string{"--serial", serial, "--no-playback", "--record", path, "--record-format", "mp4", "--video-bit-rate", "16M"}
+func scrcpyArgs(serial, path string, audio bool, major int) []string {
+	args := []string{"--serial", serial, "--no-playback", "--record", path, "--record-format", "mp4", "--video-bit-rate", "16M", "--no-control"}
+	if major >= 3 {
+		// --no-playback alone can still create a window in recent scrcpy.
+		args = append(args, "--no-window")
+	}
 	if audio {
-		return append(args, "--audio-codec", "aac", "--audio-bit-rate", "256K")
+		return append(args, "--require-audio", "--audio-codec", "aac", "--audio-bit-rate", "256K")
 	}
 	return append(args, "--no-audio")
 }
@@ -376,17 +405,43 @@ func (d *drivers) startScrcpy(ctx context.Context, s Session, p recordPlan, _ re
 	if major < 2 || major == 2 && minor < 1 {
 		return nil, problem("setup_required", "scrcpy 2.1 or newer is required for recording")
 	}
-	proc, err := startProcess(bin, scrcpyArgs(s.Device.UDID, path, p.Audio), io.Discard)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		proc, ready, startErr := startScrcpyProcess(bin, scrcpyArgs(s.Device.UDID, path, p.Audio, major))
+		if startErr != nil {
+			return nil, startErr
+		}
+		// Codec/server cleanup can briefly race a new take on Samsung devices.
+		// Retry preparation once, before declaring readiness or starting a timer.
+		timer := time.NewTimer(12 * time.Second)
+		select {
+		case <-ready:
+			timer.Stop()
+			return &procRecorder{proc}, nil
+		case <-proc.done:
+			err = problem("device_unavailable", "Android recorder stopped: "+lastLine(proc.stderr.String()))
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-timer.C:
+			err = problem("device_unavailable", "Android recorder did not become ready; unlock the phone and check its encoder/audio support")
+		}
+		timer.Stop()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		_ = proc.interrupt(stopCtx, 2*time.Second)
+		cancel()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if attempt == 0 {
+			pause := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-pause.C:
+			case <-ctx.Done():
+				pause.Stop()
+				return nil, ctx.Err()
+			}
+		}
 	}
-	// scrcpy exits quickly on a bad device or encoder; report that directly.
-	select {
-	case <-proc.done:
-		return nil, fmt.Errorf("scrcpy stopped: %s", lastLine(proc.stderr.String()))
-	case <-time.After(2 * time.Second):
-	}
-	return &procRecorder{proc}, nil
+	return nil, err
 }
 
 // --- iOS: Appium start/stop_recording_screen -------------------------------

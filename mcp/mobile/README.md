@@ -33,7 +33,7 @@ test authoring, run history, and per-step screenshots. Live view is
 
 | Recording | Android | iOS |
 |---|---|---|
-| `standard` | `adb screenrecord`, joined across its 170 s limit (needs ffmpeg past 170 s). No audio. | Appium `start/stop_recording_screen` (ffmpeg on the Appium host). No audio. |
+| `standard` | `adb screenrecord`, joined across its 170 s limit. Requires ffmpeg and ffprobe. No audio. | Appium `start/stop_recording_screen` (ffmpeg on the Appium host). No audio. |
 | `high` | scrcpy 2.1+ on the runner: full resolution, audio on Android 11+. | USB capture on the Mac running Mobile, the path QuickTime uses: full resolution, up to 60 fps, with audio. |
 | Simulator | — | `simctl io recordVideo`: full resolution H.264, no audio (both qualities). |
 
@@ -234,6 +234,27 @@ its label, `record_mark` adds a named one, and `wait` holds the shot:
 ```
 
 `mobile_test_get` then reports `recording_id`.
+
+Recorded tests require a verified, successfully finalized recording as well as
+passing steps. Capture failure, missing requested audio, an early recorder exit,
+or a finalization error fails the run while retaining its step evidence and any
+usable media. An existing assertion/cancellation failure keeps its classification.
+
+### Android capture timing
+
+Install ffmpeg and ffprobe on the runner for both recording qualities. Android
+captures are finalized against the monotonic take duration: encoder drain is
+trimmed, static tails hold the last image, and audio timing is preserved with
+silence only for gaps in an existing captured audio stream. Missing requested
+device audio fails capture. High quality waits for scrcpy's actual recording
+readiness and runs without a desktop window or input controller. Finalization
+re-encodes H.264 at 30 fps and may take a few seconds after stopping.
+
+An opt-in real-device regression test is available:
+
+```sh
+RUN_ANDROID_E2E=1 ANDROID_TEST_UDID=<adb-serial> GOWORK=off go test -run TestAndroidRecordingE2E -v
+```
 
 ### iOS USB capture
 
