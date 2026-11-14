@@ -1,9 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.6.0
+version: 0.6.1-local.login.1
 description: |
-  v0.6.0 collects bounded Android UI trees without waiting for animations
+  v0.6.1-local.login.1 collects bounded Android UI trees without waiting for animations
   to stop, and verifies focused-field text replacement and clearing by readback.
   Retains iOS/Android keep-awake controls, recording fixes and embedded panels.
   Operate physical Android and iOS devices through exclusive sessions.
@@ -96,8 +96,8 @@ provides:
 runtime:
   kind: source
   source:
-    repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.6.0
+    repo: file:///Users/marcoschwartz/Documents/code/apps
+    ref: mobile/v0.6.1-local.login.1
     entry: mcp/mobile
   port: 8080
   health_check: /health

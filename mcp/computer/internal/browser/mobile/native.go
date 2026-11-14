@@ -193,9 +193,11 @@ func (c *Computer) nativeSource() (string, error) {
 		return "", err
 	}
 	var out sdk.MCPResult
-	if err := c.invoke(c.ctx(), "mobile_observe", map[string]any{
-		"session_id": c.lease.ID, "source": true,
-	}, &out); err != nil {
+	args := map[string]any{"session_id": c.lease.ID, "source": true}
+	if c.lease.Device.Platform == "android" && slices.Contains(c.lease.Device.Capabilities, "source_only") {
+		args["image"] = false
+	}
+	if err := c.invoke(c.ctx(), "mobile_observe", args, &out); err != nil {
 		return "", err
 	}
 	source, _ := out.StructuredContent["source"].(string)

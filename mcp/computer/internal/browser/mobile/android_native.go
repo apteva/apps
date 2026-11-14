@@ -46,6 +46,9 @@ func (c *Computer) NativeGuarded(action, app string, required []string, target, 
 		}
 	}
 	if c.lease.Device.Platform == "android" {
+		if action == "native_type_secure" {
+			return "", c.androidSecure(app, required, target, text, values)
+		}
 		return c.androidNative(action, app, required, target, text, values)
 	}
 	for field, expected := range values {

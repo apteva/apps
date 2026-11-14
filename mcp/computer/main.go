@@ -63,9 +63,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.12.0
+version: 0.12.1-local.login.1
 description: |
-  v0.12.0 exposes native iOS and Android screen guards with exact app,
+  v0.12.1-local.login.1 exposes native iOS and Android screen guards with exact app,
   marker, account-field and unique-target checks. Supports bounded native reads,
   verified Android replacement/clearing, scoped repeated form controls and
   strict handling of duplicated Compose buttons without input replay.
@@ -299,8 +299,8 @@ provides:
 runtime:
   kind: source
   source:
-    repo: https://github.com/apteva/apps.git
-    ref: computer/v0.12.0
+    repo: file:///Users/marcoschwartz/Documents/code/apps
+    ref: computer/v0.12.1-local.login.1
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -778,6 +778,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"native_app":      map[string]any{"type": "string", "description": "Exact foreground app: Android package ID or iOS app label."},
 				"native_required": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 12},
 				"native_target":   map[string]any{"type": "string", "description": "One exact resource ID, accessibility label or visible text."},
+				"password":        map[string]any{"type": "string", "description": "Secret input for native_type_secure; never returned."},
 				"native_values":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Exact expected values for uniquely identified screen fields, e.g. the active account header."},
 				"session_id":      map[string]any{"type": "string"},
 				"read_only":       map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
@@ -2750,7 +2751,11 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		if action == "native_type_secure" && (!sess.extractionOnly || (stringArg(args, "observation") != "" && stringArg(args, "observation") != "none")) {
 			return nil, errors.New("native secure input requires a private session without observation")
 		}
-		value, err := native.NativeGuarded(action, stringArg(args, "native_app"), stringSliceArg(args, "native_required"), stringArg(args, "native_target"), stringArg(args, "text"), values, intArg(args, "duration"))
+		input := stringArg(args, "text")
+		if action == "native_type_secure" && stringArg(args, "password") != "" {
+			input = stringArg(args, "password")
+		}
+		value, err := native.NativeGuarded(action, stringArg(args, "native_app"), stringSliceArg(args, "native_required"), stringArg(args, "native_target"), input, values, intArg(args, "duration"))
 		if err != nil {
 			if action == "native_tap_if_present" && errors.Is(err, mobile.ErrNativeScreenMarkerAbsent) {
 				return map[string]any{"success": true, "skipped": true, "session_id": id}, nil

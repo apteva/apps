@@ -1129,7 +1129,7 @@
             {
               "native_app": "com.google.android.permissioncontroller",
               "native_required": [
-                "Allow Instagram to access this device’s location?",
+                "Allow Instagram to access this device\u2019s location?",
                 "com.android.permissioncontroller:id/permission_deny_button"
               ],
               "native_target": "com.android.permissioncontroller:id/permission_deny_button",
@@ -1577,6 +1577,32 @@
               "locator": {}
             }
           ]
+        },
+        "android": {
+          "private_screen": true,
+          "steps": [
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Instagram from Meta",
+                "Continue",
+                "Use another profile"
+              ],
+              "native_target": "Use another profile"
+            },
+            {
+              "action": "wait",
+              "duration_ms": 800
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       },
       "steps": null,
@@ -1945,6 +1971,31 @@
               "locator": {}
             }
           ]
+        },
+        "android": {
+          "private_screen": true,
+          "steps": [
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Dismiss",
+                "Add Instagram account"
+              ],
+              "native_target": "Add Instagram account"
+            },
+            {
+              "action": "wait",
+              "duration_ms": 500
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       },
       "steps": null,
@@ -2537,6 +2588,32 @@
               "locator": {}
             }
           ]
+        },
+        "android": {
+          "private_screen": true,
+          "steps": [
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Add account",
+                "Log into existing account",
+                "Create new account"
+              ],
+              "native_target": "Log into existing account"
+            },
+            {
+              "action": "wait",
+              "duration_ms": 1000
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       },
       "steps": null,
@@ -4439,6 +4516,36 @@
               }
             }
           ]
+        }
+      }
+    },
+    "dismiss_sign_in_password_manager": {
+      "variants": {
+        "android": {
+          "private_screen": true,
+          "steps": [
+            {
+              "action": "open"
+            },
+            {
+              "action": "native_tap",
+              "native_app": "com.android.credentialmanager",
+              "native_required": [
+                "Google Password Manager",
+                "Unlock Instagram to check for sign-in options?",
+                "Cancel"
+              ],
+              "native_target": "Cancel"
+            },
+            {
+              "action": "wait",
+              "duration_ms": 600
+            }
+          ],
+          "browser": {
+            "backend": "mobile",
+            "context_id": "{{android_context_id}}"
+          }
         }
       }
     }

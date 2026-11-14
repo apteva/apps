@@ -543,10 +543,35 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 		}
 	case "mobile_observe":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
+			if image, supplied := args["image"]; supplied {
+				if b, ok := image.(bool); !ok {
+					return nil, problem("invalid_argument", "image must be boolean")
+				} else if !b {
+					if !boolean(args, "source") {
+						return nil, problem("invalid_argument", "image=false requires source=true")
+					}
+					source, ok := e.backend.(interface {
+						SourceOnly(context.Context, Session) (Observation, error)
+					})
+					if !ok {
+						return nil, problem("unsupported", "private source unavailable")
+					}
+					return source.SourceOnly(ctx, s)
+				}
+			}
 			return e.backend.Observe(ctx, s, boolean(args, "source"))
 		})
 	case "mobile_action":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
+			if str(args, "action") == "secure_text" {
+				var count int
+				if err := e.db.QueryRow(`SELECT COUNT(*) FROM mobile_recordings WHERE device_id=? AND status IN ('starting','recording','stopping')`, s.Device.ID).Scan(&count); err != nil {
+					return nil, problem("invalid_state", "cannot confirm recording state")
+				}
+				if count > 0 {
+					return nil, problem("invalid_state", "stop recording before secure input")
+				}
+			}
 			return e.backend.Action(ctx, s, str(args, "action"), args)
 		})
 	case "mobile_app":

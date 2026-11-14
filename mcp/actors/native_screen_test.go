@@ -17,6 +17,9 @@ func nativeFake() *fakePlatform {
 	respond := p.readViewsResponse
 	p.readViewsResponse = func(tool string, in map[string]any) map[string]any {
 		out := respond(tool, in)
+		if tool == "computer.computer_use" && in["action"] == "native_type_secure" {
+			return map[string]any{"success": true}
+		}
 		if tool == "computer.browser_open" {
 			caps := out["capabilities"].(map[string]any)
 			caps["actions"] = append(caps["actions"].([]string), "native_tap", "native_tap_badged", "native_tap_if_present", "native_assert", "native_wait", "native_type", "native_type_secure", "native_replace")

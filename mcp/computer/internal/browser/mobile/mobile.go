@@ -337,6 +337,9 @@ func (c *Computer) Capabilities() api.Capabilities {
 			actions = append(actions, "native_replace", "native_clear")
 		}
 	}
+	if c.supportsAndroidSecure() {
+		actions = append(actions, "native_type_secure")
+	}
 	keys := []string{"home", "enter"}
 	if c.lease.Device.Platform == "android" {
 		keys = append(keys, "back")
