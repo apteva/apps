@@ -150,6 +150,9 @@ func sameWaitRetry(s StepRun, args map[string]any) bool {
 
 // Called under App.mu from the existing minute repair/deadline dispatcher.
 func (a *App) reconcileWorkerWaits(ctx context.Context, project string, now time.Time) error {
+	if err := a.repairSuspendedRuntimeHolds(ctx, project, now); err != nil {
+		return err
+	}
 	rows, err := a.db.QueryContext(ctx, `SELECT `+stepColumns+` FROM process_step_runs s WHERE project_id=? AND wait_wake_at<>'' AND rtrim(wait_wake_at,'Z')<=? AND state='blocked' AND delivery_suspended=1 AND retain_worker=0 AND EXISTS(SELECT 1 FROM process_runs r WHERE r.id=s.run_id AND r.state NOT IN ('completed','failed','cancelled')) ORDER BY wait_wake_at,id LIMIT 100`, project, deadlineKey(now))
 	if err != nil {
 		return err
@@ -205,13 +208,14 @@ const legacyWaitCandidate = `s.project_id=:project AND s.state IN ('waiting','bl
  AND s.retain_worker=1 AND s.wait_json='' AND s.updated_at<:cutoff AND s.target_thread_id<>''
  AND json_extract(s.executor_json,'$.kind')='agent'
  AND EXISTS(SELECT 1 FROM process_runs r WHERE r.id=s.run_id AND r.state NOT IN ('completed','failed','cancelled'))
- AND NOT EXISTS(SELECT 1 FROM process_wait_checks c WHERE c.step_id=s.id AND c.revision=s.revision)`
+ AND NOT EXISTS(SELECT 1 FROM process_wait_checks c WHERE c.step_id=s.id AND c.revision=s.revision
+ AND (c.attempts>=3 OR rtrim(c.checked_at,'Z')>:checkpoint_cutoff))`
 
 const legacyWaitRetryDue = `NOT EXISTS(SELECT 1 FROM process_wait_retries retry
  WHERE retry.step_id=s.id AND retry.revision=s.revision AND rtrim(retry.next_attempt_at,'Z')>:now)`
 
 func waitRevalidationArgs(project string, now time.Time) []any {
-	return []any{sql.Named("project", project), sql.Named("cutoff", now.Add(-10*time.Minute).UTC().Format(time.RFC3339Nano)), sql.Named("now", deadlineKey(now))}
+	return []any{sql.Named("project", project), sql.Named("cutoff", now.Add(-10*time.Minute).UTC().Format(time.RFC3339Nano)), sql.Named("now", deadlineKey(now)), sql.Named("checkpoint_cutoff", deadlineKey(now.Add(-15*time.Minute)))}
 }
 
 func waitRevalidationBackoff(attempt int) time.Duration {
@@ -299,12 +303,27 @@ func (a *App) revalidateLegacyWaits(ctx context.Context, project string, now tim
 			continue
 		}
 		id := fmt.Sprintf("process-wait:%s:%d", s.ID, s.Revision)
+		var checkedAt string
+		var attempts int
+		e := a.db.QueryRowContext(ctx, `SELECT checked_at,attempts FROM process_wait_checks WHERE step_id=? AND revision=?`, s.ID, s.Revision).Scan(&checkedAt, &attempts)
+		if e != nil && e != sql.ErrNoRows {
+			failures = append(failures, e)
+			continue
+		}
+		if e == nil {
+			at, parseErr := time.Parse(time.RFC3339Nano, checkedAt)
+			if parseErr != nil {
+				failures = append(failures, parseErr)
+				continue
+			}
+			id += fmt.Sprintf(":recheck:%d", at.UnixNano())
+		}
 		var process string
 		if err = a.db.QueryRowContext(ctx, `SELECT process_id FROM process_runs WHERE id=?`, s.RunID).Scan(&process); err != nil {
 			failures = append(failures, err)
 			continue
 		}
-		message := fmt.Sprintf("Processes wait ownership revalidation for process_id=%s run_id=%s step_id=%s. Inspect the saved checkpoint and actual dependency records, then call processes_step_update to register wait ownership or record the already-known terminal result. This is not authorization to replay external work. %s", process, s.RunID, s.ID, workerWaitContract)
+		message := fmt.Sprintf("Processes wait ownership revalidation for process_id=%s run_id=%s step_id=%s. Inspect the saved checkpoint and actual dependency records, then call processes_step_update to register wait ownership or record the already-known terminal result. This is not authorization to replay external work. This inspection is complete only after saving step_update with wait.kind or an already-known terminal result; do not merely respond or pace. An unresolved dependency owned by another worker is not proof that this thread owns a live callback. %s", process, s.RunID, s.ID, workerWaitContract)
 		receipt, e := api.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: s.Executor.AgentID, ThreadID: s.ThreadID, SourceEventID: id, Message: message})
 		if e == nil && (receipt == nil || (!receipt.Accepted && !receipt.Duplicate)) {
 			e = errors.New("wait revalidation not accepted")
@@ -315,7 +334,7 @@ func (a *App) revalidateLegacyWaits(ctx context.Context, project string, now tim
 			failures = append(failures, fmt.Errorf("revalidate wait %s: %w", s.ID, e), a.deferWaitCheck(ctx, s, now, e))
 			continue
 		}
-		_, err = a.db.ExecContext(ctx, `INSERT INTO process_wait_checks(step_id,revision,event_id,checked_at) VALUES(?,?,?,?) ON CONFLICT(step_id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,checked_at=excluded.checked_at`, s.ID, s.Revision, id, now.UTC().Format(time.RFC3339Nano))
+		_, err = a.db.ExecContext(ctx, `INSERT INTO process_wait_checks(step_id,revision,event_id,checked_at,attempts) VALUES(?,?,?,?,?) ON CONFLICT(step_id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,checked_at=excluded.checked_at,attempts=excluded.attempts`, s.ID, s.Revision, id, now.UTC().Format(time.RFC3339Nano), attempts+1)
 		if err != nil {
 			failures = append(failures, err)
 			continue

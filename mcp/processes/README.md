@@ -768,3 +768,11 @@ start, then checks each minute with a one-hour overlap and durable cursor/backof
 The v0.18.5 repair keeps a separate cursor and retry deadline for each known
 cleanup owner, queries one agent at a time, and defers stopped owners without
 waking them. This keeps busy-project metadata reads within the host query budget.
+
+In v0.18.6, an accepted legacy inspection without a saved ownership checkpoint
+may be requested again after fifteen minutes, at most three accepted requests
+per revision. Ambiguous delivery retries keep the same request identity; a new
+inspection gets a fresh identity. Known runtime failure holds overwritten with
+a running label are repaired only when the exact original runtime audit event,
+suspended delivery and no retained dependency all agree. Evidence stays intact
+and recovery remains explicit.

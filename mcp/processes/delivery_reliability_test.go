@@ -432,7 +432,9 @@ func TestDeliveryMigrationSuspendsKnownLegacyConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, file := range files {
-		if file.Name() == "013_delivery_reliability.sql" {
+		// Reproduce the schema immediately before migration 013. Later
+		// migrations may depend on the columns that this test has not added yet.
+		if file.Name() >= "013_" {
 			continue
 		}
 		raw, err := os.ReadFile("migrations/" + file.Name())

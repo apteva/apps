@@ -199,7 +199,7 @@ func TestDurableWaitLegacyRevalidationIsBoundedAndFailClosed(t *testing.T) {
 		t.Fatal("revalidation duplicated identity")
 	}
 	a = &App{ctx: a.ctx, db: a.db}
-	if err := a.tickDirect(context.Background(), now.Add(time.Hour)); err != nil {
+	if err := a.tickDirect(context.Background(), now.Add(5*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.events) != before+2 {
