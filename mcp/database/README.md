@@ -1,15 +1,17 @@
 # Database
 
-Independent Apteva sidecar app, version 0.18.1. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.18.2. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.18.1.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.18.2.md) · [Realtime API](REALTIME.md)
 
 ## Shared read batches
 
 Set `aggregate_reuse_mode` or `DATABASE_AGGREGATE_REUSE_MODE` to `off`
 (default), `coalesce`, or `cache`. On AptevaDB, concurrent identical
-authorized batches containing direct `get`, `find`, and `aggregate`
-operations can share one snapshot and execution. Cache mode also retains
+authorized batches containing `get`, `find`, and `aggregate` operations
+can share one snapshot and execution. Deterministic version-1 pipelines
+with scan, compute, join and intermediate aggregate nodes participate
+alongside ordinary reads. Cache mode also retains
 successful results in an immutable binary representation for 30 seconds,
 up to 32 MiB per Database process and 512 KiB per entry. Matching requires
 the same resolved database, ordered query, and data revision. Writes, schema changes and
@@ -24,7 +26,9 @@ and `aggregateExecutions` as 1 or 0. Skipped batches report
 still be coalesced. Joiners report `coalescedWaitMs`. Execution and queue
 timings describe the caller that registered the work. Ordinary aggregates
 include computed distinct merges. Batches with lookups, timezone buckets, exists
-predicates, child diagnostics, or unsupported operations run normally.
+predicates, child diagnostics, unsupported operations, or explicitly empty
+pipeline containers run normally. Pipeline eligibility preserves the entire
+plan, including expressions, source filters, joins, pagination and limits.
 
 ## Working in this version
 

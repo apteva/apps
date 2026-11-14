@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -83,8 +84,13 @@ func reusableAggregateBatch(r Request, cursorKey []byte) ([]byte, string) {
 		}
 		if child.Diagnostics || child.TimeoutMS != 0 || child.ComputedCollection != nil ||
 			(child.Database != "" && child.Database != r.Database) ||
-			QueryKind(op.Op, child) != op.Op || len(child.Lookups) != 0 || len(child.Buckets) != 0 {
+			(child.Pipeline == nil && QueryKind(op.Op, child) != op.Op) || len(child.Lookups) != 0 || len(child.Buckets) != 0 {
 			return nil, "unsupported_query"
+		}
+		if child.Pipeline != nil {
+			if (op.Op != "find" && op.Op != "aggregate") || !reusablePipeline(child.Pipeline) {
+				return nil, "unsupported_query"
+			}
 		}
 		if op.Op == "get" {
 			for _, value := range child.Key {
@@ -118,6 +124,78 @@ func reusableAggregateBatch(r Request, cursorKey []byte) ([]byte, string) {
 		return nil, "request_too_large"
 	}
 	return data, ""
+}
+
+// Only these deterministic node operations participate in reuse. Schema,
+// expression and cardinality validation still runs on the execution snapshot.
+func reusablePipeline(p *ReadPipeline) bool {
+	if p.Version != 1 || len(p.Nodes) == 0 || len(p.Nodes) > maxQueryNodes {
+		return false
+	}
+	for _, node := range p.Nodes {
+		switch node.Op {
+		case "scan", "compute", "join", "aggregate":
+		default:
+			return false
+		}
+		if !reusableFilter(node.Where, 0) {
+			return false
+		}
+		for _, metric := range node.Metrics {
+			if !reusableFilter(metric.Where, 0) {
+				return false
+			}
+		}
+		for _, join := range node.Joins {
+			if !reusableFilter(join.Where, 0) {
+				return false
+			}
+		}
+	}
+	return reusablePipelineValue(reflect.ValueOf(p), 0)
+}
+
+// omitempty erases non-nil empty expression/filter containers that validation
+// can distinguish from omitted inputs. Keep these requests on the normal path.
+// Inspect the entire pipeline, including nested constants, before serializing.
+func reusablePipelineValue(v reflect.Value, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return v.IsNil() || reusablePipelineValue(v.Elem(), depth+1)
+	case reflect.Slice, reflect.Map:
+		if v.IsNil() {
+			return true
+		}
+		if v.Len() == 0 {
+			return false
+		}
+		if v.Kind() == reflect.Map {
+			iter := v.MapRange()
+			for iter.Next() {
+				if !reusablePipelineValue(iter.Key(), depth+1) || !reusablePipelineValue(iter.Value(), depth+1) {
+					return false
+				}
+			}
+			return true
+		}
+		for i := 0; i < v.Len(); i++ {
+			if !reusablePipelineValue(v.Index(i), depth+1) {
+				return false
+			}
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if !reusablePipelineValue(v.Field(i), depth+1) {
+				return false
+			}
+		}
+	case reflect.String:
+		return utf8.ValidString(v.String())
+	}
+	return true
 }
 
 func (m *Manager) executeUnsharedReadBatch(ctx context.Context, d *database, r Request, reason string) (any, error) {
