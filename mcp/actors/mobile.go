@@ -197,6 +197,15 @@ func resolveMobileBrowser(callCtx context.Context, ctx *sdk.AppCtx, def *actorDe
 	if b.Backend == "mobile" && b.Target.DeviceID == "" {
 		b.Target.DeviceID = b.DeviceID
 	}
+	if def.SelectedPlatform != "" {
+		platform, err := actorBrowserPlatform(*b)
+		if err != nil {
+			return err
+		}
+		if platform != def.SelectedPlatform {
+			return errors.New("saved device/context platform changed from the pinned platform variant")
+		}
+	}
 	return validateMobileActor(*def, false)
 }
 func mobileQueueKey(b actorBrowser) string {

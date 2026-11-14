@@ -42,15 +42,16 @@ func (e *actorExecution) releaseContextLock(keep bool) {
 }
 
 type actorOperation struct {
-	PrivateScreen          bool                 `json:"private_screen,omitempty"`
-	Browser                *actorBrowser        `json:"browser,omitempty"`
-	RequiredExplicitInputs []string             `json:"required_explicit_inputs,omitempty"`
-	RecoveryOnly           bool                 `json:"recovery_only,omitempty"`
-	Recovery               *actorRecoveryPolicy `json:"recovery,omitempty"`
-	Limits                 *actorLimits         `json:"limits,omitempty"`
-	ReadOnly               bool                 `json:"read_only,omitempty"`
-	Steps                  []actorStep          `json:"steps"`
-	OutputSchema           map[string]string    `json:"output_schema"`
+	Variants               map[string]actorPlatformVariant `json:"variants,omitempty"`
+	PrivateScreen          bool                            `json:"private_screen,omitempty"`
+	Browser                *actorBrowser                   `json:"browser,omitempty"`
+	RequiredExplicitInputs []string                        `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                            `json:"recovery_only,omitempty"`
+	Recovery               *actorRecoveryPolicy            `json:"recovery,omitempty"`
+	Limits                 *actorLimits                    `json:"limits,omitempty"`
+	ReadOnly               bool                            `json:"read_only,omitempty"`
+	Steps                  []actorStep                     `json:"steps"`
+	OutputSchema           map[string]string               `json:"output_schema"`
 }
 
 func selectOperation(def actorDefinition, name string) (actorDefinition, error) {
@@ -78,6 +79,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	def.Recovery = op.Recovery
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
+	def.Variants = op.Variants
 	return def, nil
 }
 
@@ -521,6 +523,11 @@ func (a *App) toolTaskSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Task saves use the same template/definition validation as run admission.
 	snapshot, _ := json.Marshal(def)
 	runInput, _ := json.Marshal(map[string]any{"input": input, "preset": stringArg(args, "preset")})
+	def, err = resolvePlatformSnapshot(ctx, def, string(runInput))
+	if err != nil {
+		return nil, err
+	}
+	snapshot, _ = json.Marshal(def)
 	if _, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(runInput), DefinitionSnapshot: string(snapshot)}); err != nil {
 		return nil, err
 	}

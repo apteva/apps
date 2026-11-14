@@ -1,5 +1,7 @@
 # Actors
 
+Actors v0.6.0 adds platform variants: one operation can have iOS, Android and web implementations, selected before queueing with the chosen implementation and device pinned in the run snapshot.
+
 Actors v0.5.2 requires a valid Computer upload receipt before an upload step can complete, with filename and byte-count evidence plus configured filename/checksum checks. Missing or rejected receipts fail with `upload_not_confirmed` and stop before publication, including optional steps, without automatic replay. Upload traces retain bounded sanitized diagnostics. Staging remains separate, successful `output.media` stays compatible, and actor definitions must still verify the site's ready attachment before publishing.
 
 Actors v0.5.1 declares `inspect_views` navigations read-only to Computer, so Computer 0.9.2+ can retry a transient Browserbase navigation failure once in a fresh page; a navigation result with `success:false` or `failed:true` now fails the run with incomplete coverage, and Actors no longer adds its own HTTP/2 retry on top of a structured Computer failure. Actors v0.5.0 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run), bounds saved pagination ID lists, and adds private native Mobile screen steps. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
@@ -129,7 +131,7 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.115.1` (`a9ba634`), verified against fetched tags as a descendant of `v0.115.0`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.115.2` (`71094ff`), verified against fetched tags as a descendant of `v0.115.1`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
 Read-view identity can use a unique native link (`href`) or image (`src`). Image identity is useful for full-screen tables that hide navigation; declare an anchored URL pattern containing the expected account/profile identity. Every page must contain exactly one matching image with a nonempty source URL on the declared identity host. Empty or ambiguous identity evidence fails the read. Existing URL, loading, filter, total-count and pagination guards continue to apply.
 
@@ -529,3 +531,59 @@ saves no screenshots and requests no observations after input. Its
 optional secret steps are rejected. These steps need a Computer release that
 reports the native actions in its Mobile capabilities; otherwise the
 capability preflight fails the run before any input.
+
+
+## Platform variants (v0.6.0)
+
+One actor keeps the same operation names across iOS, Android and web. An operation
+uses either `steps` or a `variants` map keyed by `ios`, `android`, or `web`.
+Each variant supplies its complete `steps`, an optional full `browser` override,
+optional `required_explicit_inputs`, and an optional `output_schema` override.
+Variant `read_only` and `private_screen` flags can strengthen the shared policy;
+they cannot turn off a shared restriction. Schema version 2 crawls and recovery
+policies are not supported in variant operations. Existing operations are unchanged.
+
+```json
+{
+  "schema_version": 1,
+  "presets": {
+    "iphone": {"platform": "ios"},
+    "android_phone": {"platform": "android"}
+  },
+  "operations": {
+    "open_instagram": {
+      "variants": {
+        "ios": {
+          "browser": {"backend": "mobile", "context_id": "YOUR_IOS_CONTEXT"},
+          "steps": [{"action": "open"}, {"action": "launch_app", "app_id": "com.burbn.instagram"}]
+        },
+        "android": {
+          "browser": {"backend": "mobile", "target": {"kind": "mobile", "device_id": "android:YOUR_SERIAL", "platform": "android", "mode": "screen"}},
+          "steps": [{"action": "open"}, {"action": "launch_app", "app_id": "com.instagram.android"}]
+        }
+      }
+    }
+  }
+}
+```
+
+Call `actors_run` with the same actor ID and operation, using
+`input: {"platform": "android"}` or `preset: "android_phone"`. The usual
+input precedence applies: defaults, preset, schedule overrides, explicit input.
+If no platform value is supplied, selection uses the shared effective browser's
+saved context or target platform (including `ios:`/`android:` device IDs).
+Without a usable common target, supply the platform explicitly. Other browser
+backends select `web`. There is no fallback to another platform's steps.
+
+Selection occurs before template expansion of the chosen steps, so unused
+implementations do not require their inputs. The selected variant and resolved
+context/device are saved in the immutable run snapshot. Retries reuse it;
+context retargeting is rejected before opening a session. Saved tasks and Jobs
+schedules carry the same selection through their input or preset. Run output,
+compact receipts and traces report the selected `platform`.
+
+`actors_get` with `operation` lists supported `platforms` and separate input
+requirements per platform. Add `platform: "android"` for that implementation's
+complete contract; immutable exports support the same selector. Response and
+export bounds remain enforced. Variants do not add device capabilities: each
+implementation must use actions supported by its Computer/Mobile session.

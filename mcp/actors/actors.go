@@ -38,21 +38,23 @@ const (
 )
 
 type actorDefinition struct {
-	PrivateScreen          bool                      `json:"private_screen,omitempty"`
-	RequiredExplicitInputs []string                  `json:"required_explicit_inputs,omitempty"`
-	RecoveryOnly           bool                      `json:"recovery_only,omitempty"`
-	ReadOnly               bool                      `json:"read_only,omitempty"`
-	Recovery               *actorRecoveryPolicy      `json:"recovery,omitempty"`
-	Operations             map[string]actorOperation `json:"operations,omitempty"`
-	SchemaVersion          int                       `json:"schema_version"`
-	Crawl                  *crawlDefinition          `json:"crawl,omitempty"`
-	Defaults               map[string]any            `json:"defaults,omitempty"`
-	Presets                map[string]map[string]any `json:"presets,omitempty"`
-	Browser                actorBrowser              `json:"browser"`
-	AllowedHosts           []string                  `json:"allowed_hosts"`
-	Limits                 actorLimits               `json:"limits"`
-	Steps                  []actorStep               `json:"steps"`
-	OutputSchema           map[string]string         `json:"output_schema"`
+	Variants               map[string]actorPlatformVariant `json:"variants,omitempty"`
+	SelectedPlatform       string                          `json:"selected_platform,omitempty"`
+	PrivateScreen          bool                            `json:"private_screen,omitempty"`
+	RequiredExplicitInputs []string                        `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                            `json:"recovery_only,omitempty"`
+	ReadOnly               bool                            `json:"read_only,omitempty"`
+	Recovery               *actorRecoveryPolicy            `json:"recovery,omitempty"`
+	Operations             map[string]actorOperation       `json:"operations,omitempty"`
+	SchemaVersion          int                             `json:"schema_version"`
+	Crawl                  *crawlDefinition                `json:"crawl,omitempty"`
+	Defaults               map[string]any                  `json:"defaults,omitempty"`
+	Presets                map[string]map[string]any       `json:"presets,omitempty"`
+	Browser                actorBrowser                    `json:"browser"`
+	AllowedHosts           []string                        `json:"allowed_hosts"`
+	Limits                 actorLimits                     `json:"limits"`
+	Steps                  []actorStep                     `json:"steps"`
+	OutputSchema           map[string]string               `json:"output_schema"`
 }
 
 type actorBrowser struct {
@@ -223,7 +225,7 @@ type actorQueuedRun struct {
 }
 
 func (a *App) actorTools() []sdk.Tool {
-	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
+	definitionSchema := map[string]any{"type": "object", "description": "Version 1 operations accept steps or platform variants (ios/android/web); variants contain steps and optional browser settings. Select with input.platform or a preset, or infer from the configured device/context. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
 	return append([]sdk.Tool{
 		{Name: "actors_read_close", Description: "Close an unused read-only continuation and release its browser session. A consumed reference must be replaced by its successor.", InputSchema: schemaObject(map[string]any{"ref": map[string]any{"type": "string"}}, []string{"ref"}), Handler: a.toolReadContinuationClose},
 		{
@@ -235,21 +237,21 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Bounded metadata/operation discovery by default. Supply operation for one complete immutable operation contract. Full definitions require actors_definition_export for editing/debugging.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Bounded metadata/operation discovery by default. Supply operation for one complete immutable operation contract; add platform to inspect one platform variant. Full definitions require actors_definition_export for editing/debugging.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
 			Name: "actors_list", Description: "Bounded metadata discovery without definitions; follow next_cursor as after while has_more.",
 			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "after": map[string]any{"type": "integer", "minimum": 0}}, nil), Handler: a.toolActorList,
 		},
-		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
+		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
 
 		{
 			Name: "actors_delete", Description: "Delete an actor definition. Existing run snapshots remain reproducible.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorDelete,
 		},
 		{
-			Name: "actors_run", Description: "Queue an actor run and return immediately. Precedence: defaults, selected preset, schedule_overrides, explicit input. Scheduled callers may pass preset_pool for deterministic per-occurrence profile rotation.",
+			Name: "actors_run", Description: "Queue an actor run and return immediately. For variant operations, input.platform (ios/android/web) or a preset selects the implementation; otherwise infer from the configured device/context. The selected variant and device are pinned before queueing. Precedence: defaults, selected preset, schedule_overrides, explicit input. Scheduled callers may pass preset_pool for deterministic per-occurrence profile rotation.",
 			InputSchema: schemaObject(map[string]any{
 				"idempotency_key": map[string]any{"type": "string", "maxLength": 200},
 				"actor_id":        map[string]any{"type": "integer"}, "operation": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer"}, "preset": map[string]any{"type": "string"},
@@ -317,6 +319,9 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	if def.SelectedPlatform != "" && !validActorPlatform(def.SelectedPlatform) {
+		return errors.New("selected_platform must be ios, android or web")
+	}
 	seenInputs := map[string]bool{}
 	for _, name := range def.RequiredExplicitInputs {
 		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) || seenInputs[name] {
@@ -330,6 +335,9 @@ func validateActorDefinition(def actorDefinition) error {
 		}
 	}
 	if def.SchemaVersion == 2 {
+		if len(def.Variants) > 0 {
+			return errors.New("platform variants require schema version 1 operations")
+		}
 		if len(def.Operations) > 0 || len(def.Steps) > 0 {
 			return errors.New("schema version 2 uses crawl and does not support steps or operations")
 		}
@@ -356,6 +364,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return nil
 	}
 	if len(def.Operations) > 0 {
+		if len(def.Variants) > 0 {
+			return errors.New("use operation variants or top-level variants, not both")
+		}
 		if len(def.Steps) > 0 {
 			return errors.New("use either steps or named operations")
 		}
@@ -381,11 +392,15 @@ func validateActorDefinition(def actorDefinition) error {
 			selected.Recovery = operation.Recovery
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
+			selected.Variants = operation.Variants
 			if err := validateActorDefinition(selected); err != nil {
 				return fmt.Errorf("operation %s: %w", name, err)
 			}
 		}
 		return nil
+	}
+	if len(def.Variants) > 0 {
+		return validateActorVariants(def)
 	}
 	if def.SchemaVersion != 1 {
 		return errors.New("definition.schema_version must be 1")
@@ -899,6 +914,9 @@ func (a *App) toolActorSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, supplied := args["platform"]; supplied && stringArg(args, "operation") == "" {
+		return nil, errors.New("platform selection requires an operation")
+	}
 	if _, supplied := args["operation"]; supplied {
 		return a.getActorOperation(ctx, args)
 	}

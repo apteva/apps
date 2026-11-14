@@ -135,7 +135,11 @@ func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if len(inputJSON) > maxActorInputBytes {
 		return nil, fmt.Errorf("run input exceeds %d bytes", maxActorInputBytes)
 	}
-	defJSON, _ := json.Marshal(rec.Definition)
+	resolved, err := resolvePlatformSnapshot(ctx, rec.Definition, string(inputJSON))
+	if err != nil {
+		return nil, err
+	}
+	defJSON, _ := json.Marshal(resolved)
 	// Resolve templates and validate before accepting work or allocating a browser.
 	if _, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(inputJSON), DefinitionSnapshot: string(defJSON)}); err != nil {
 		return nil, err
@@ -487,6 +491,9 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["run_id"] = queued.ID
 	out["actor_id"] = queued.ActorID
 	out["actor_revision"] = queued.ActorRevision
+	if exec.definition.SelectedPlatform != "" {
+		out["platform"] = exec.definition.SelectedPlatform
+	}
 	out["item_count"] = len(exec.items)
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
@@ -589,6 +596,9 @@ func renderQueuedActor(run *actorQueuedRun) (actorDefinition, map[string]any, st
 	}
 	if err := validateActorDefinition(def); err != nil {
 		return def, nil, "", err
+	}
+	if len(def.Variants) > 0 {
+		return def, nil, "", errors.New("platform variants must be resolved before run admission")
 	}
 	var runInput struct {
 		Preset            string         `json:"preset"`
@@ -694,6 +704,9 @@ func actorStepMayWrite(step actorStep) bool {
 }
 
 func (e *actorExecution) runSteps() (map[string]any, error) {
+	if e.definition.SelectedPlatform != "" {
+		e.addTrace("platform_variant", "selected", "", map[string]any{"platform": e.definition.SelectedPlatform, "browser": actorBrowserAudit(e.definition.Browser)})
+	}
 	if e.crawl != nil {
 		return e.runCrawl()
 	}

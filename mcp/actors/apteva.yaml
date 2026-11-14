@@ -1,8 +1,13 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.5.2
+version: 0.6.0
 description: |
+  v0.6.0 adds per-operation iOS, Android and web platform variants. Select
+  input.platform or a preset, or infer the configured device/context platform.
+  Runs pin the selected implementation and device before queueing; unsupported
+  or conflicting targets fail before opening a session. Discovery supports
+  platform-specific contracts. Existing step-based actors remain compatible.
   v0.5.2 requires confirmed Computer upload receipts with filenames and positive
   byte counts, validates configured filenames and checksums, and stops before
   publication on missing or rejected receipts. Retains bounded sanitized upload
@@ -177,7 +182,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.5.2
+    ref: actors/v0.6.0
     entry: mcp/actors
   port: 8080
   health_check: /health

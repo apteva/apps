@@ -15,7 +15,7 @@ const maxSummaryEvidenceChars = 300
 
 var (
 	actorRunSummaryKeys    = []string{"id", "kind", "status", "error", "summary", "actor_id", "actor_revision", "created_at", "started_at", "completed_at", "cancel_requested_at", "duration_ms", "queue_wait_ms", "execution_ms", "wait_reason"}
-	actorRunSummaryOutputs = []string{"item_count", "page_count", "inspection_complete", "failure_reason", "failed_condition", "reconciliation_required", "dataset_truncated", "current_url", "preset", "effects", "execution_progress", "dataset_artifact_id", "dataset_url", "csv_artifact_id", "csv_url"}
+	actorRunSummaryOutputs = []string{"platform", "item_count", "page_count", "inspection_complete", "failure_reason", "failed_condition", "reconciliation_required", "dataset_truncated", "current_url", "preset", "effects", "execution_progress", "dataset_artifact_id", "dataset_url", "csv_artifact_id", "csv_url"}
 	coverageSummaryKeys    = []string{"inspection_complete", "read_only", "more_results_remaining", "checked_views", "required_views", "creator_url", "creator_identity", "context_id", "read_scope", "resumed_from"}
 	viewSummaryKeys        = []string{"name", "covers", "url", "checked", "inspection_complete", "more_results_remaining", "pages_checked", "unique_items", "expected_total", "stop_reason", "error"}
 )

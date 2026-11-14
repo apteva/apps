@@ -199,3 +199,16 @@ exact `native_target`. Secret steps need `private_screen: true`, a saved
 `native_app` (no host). Private operations save no screenshots. Computer must
 report the native actions in its Mobile capabilities or the run fails before
 input.
+
+
+### Platform variants
+
+An operation may use `variants` keyed by `ios`, `android`, or `web` instead of
+`steps`. Inspect `actors_get` with actor ID, revision, operation and `platform`
+for that implementation. Run the same logical operation with `input.platform`
+or an existing platform preset. Omitted platform is inferred only from the
+configured browser/device/context. Missing variants and mismatches fail before
+session allocation; do not fall back to another platform or replay a write.
+Only the selected implementation needs its input variables. Runs pin its steps
+and exact context/device and report `platform` in receipts. Implementations
+still need supported Computer/Mobile actions and separate outcome verification.
