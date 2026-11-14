@@ -20,7 +20,7 @@ func TestEmbeddedMobileUIWithoutRuntimeDirectory(t *testing.T) {
 	// The SDK may also mount an empty runtime /ui/ directory. Exact assets win.
 	mux.Handle("/ui/", http.NotFoundHandler())
 	for _, tc := range []struct{ path, kind, content string }{
-		{"/ui/MobilePanel.mjs", "javascript", "Stay awake while charging"},
+		{"/ui/MobilePanel.mjs", "javascript", "Keep awake"},
 		{"/ui/MobilePanel.mjs.map", "json", "MobilePanel.tsx"},
 		{"/ui/icon.svg", "svg", "<svg"},
 	} {

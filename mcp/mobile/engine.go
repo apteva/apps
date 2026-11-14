@@ -435,6 +435,9 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 	switch tool {
 	case "mobile_power":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
+			if s.Device.Driver == driverXCTest && e.activeForSession(s.ID) != nil {
+				return nil, problem("invalid_argument", "Stop the recording before reading or changing iPhone power settings; this operation visits Settings")
+			}
 			return e.drivers.powerSettings(ctx, s, args)
 		})
 	case "mobile_setup":

@@ -213,7 +213,7 @@ func capabilities(driver string) []string {
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:
-		out = append(out, "elements")
+		out = append(out, "elements", "keep_awake")
 	}
 	return out
 }
