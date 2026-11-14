@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -33,38 +32,43 @@ const (
 	maxActorFields          = 100
 	maxActorDatasetBytes    = 32 * 1024 * 1024
 	maxActorItemBytes       = 256 * 1024
-	maxActorDefinitionBytes = 1024 * 1024
+	maxActorDefinitionBytes = 2 * 1024 * 1024
 	maxActorInputBytes      = 256 * 1024
 	maxActorPreviewBytes    = 32 * 1024
 )
 
 type actorDefinition struct {
-	RequiredExplicitInputs []string                  `json:"required_explicit_inputs,omitempty"`
-	RecoveryOnly           bool                      `json:"recovery_only,omitempty"`
-	ReadOnly               bool                      `json:"read_only,omitempty"`
-	Recovery               *actorRecoveryPolicy      `json:"recovery,omitempty"`
-	Operations             map[string]actorOperation `json:"operations,omitempty"`
-	SchemaVersion          int                       `json:"schema_version"`
-	Crawl                  *crawlDefinition          `json:"crawl,omitempty"`
-	Defaults               map[string]any            `json:"defaults,omitempty"`
-	Presets                map[string]map[string]any `json:"presets,omitempty"`
-	Browser                actorBrowser              `json:"browser"`
-	AllowedHosts           []string                  `json:"allowed_hosts"`
-	Limits                 actorLimits               `json:"limits"`
-	Steps                  []actorStep               `json:"steps"`
-	OutputSchema           map[string]string         `json:"output_schema"`
+	Variants               map[string]actorPlatformVariant `json:"variants,omitempty"`
+	SelectedPlatform       string                          `json:"selected_platform,omitempty"`
+	PrivateScreen          bool                            `json:"private_screen,omitempty"`
+	RequiredExplicitInputs []string                        `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                            `json:"recovery_only,omitempty"`
+	ReadOnly               bool                            `json:"read_only,omitempty"`
+	Recovery               *actorRecoveryPolicy            `json:"recovery,omitempty"`
+	Operations             map[string]actorOperation       `json:"operations,omitempty"`
+	SchemaVersion          int                             `json:"schema_version"`
+	Crawl                  *crawlDefinition                `json:"crawl,omitempty"`
+	Defaults               map[string]any                  `json:"defaults,omitempty"`
+	Presets                map[string]map[string]any       `json:"presets,omitempty"`
+	Browser                actorBrowser                    `json:"browser"`
+	AllowedHosts           []string                        `json:"allowed_hosts"`
+	Limits                 actorLimits                     `json:"limits"`
+	Steps                  []actorStep                     `json:"steps"`
+	OutputSchema           map[string]string               `json:"output_schema"`
 }
 
 type actorBrowser struct {
-	ContextID    string         `json:"context_id,omitempty"`
-	Backend      string         `json:"backend,omitempty"`
-	ProxyMode    string         `json:"proxy_mode,omitempty"`
-	ProxyProfile string         `json:"proxy_profile,omitempty"`
-	ProxyCountry string         `json:"proxy_country,omitempty"`
-	ProxySticky  string         `json:"proxy_sticky,omitempty"`
-	Persist      bool           `json:"persist,omitempty"`
-	Viewport     map[string]any `json:"viewport,omitempty"`
-	Environment  map[string]any `json:"environment,omitempty"`
+	DeviceID     string              `json:"device_id,omitempty"`
+	Target       *actorSessionTarget `json:"target,omitempty"`
+	ContextID    string              `json:"context_id,omitempty"`
+	Backend      string              `json:"backend,omitempty"`
+	ProxyMode    string              `json:"proxy_mode,omitempty"`
+	ProxyProfile string              `json:"proxy_profile,omitempty"`
+	ProxyCountry string              `json:"proxy_country,omitempty"`
+	ProxySticky  string              `json:"proxy_sticky,omitempty"`
+	Persist      bool                `json:"persist,omitempty"`
+	Viewport     map[string]any      `json:"viewport,omitempty"`
+	Environment  map[string]any      `json:"environment,omitempty"`
 }
 
 type actorLimits struct {
@@ -75,6 +79,15 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	NativeValues       map[string]string     `json:"native_values,omitempty"`
+	NativeApp          string                `json:"native_app,omitempty"`
+	NativeRequired     []string              `json:"native_required,omitempty"`
+	NativeTarget       string                `json:"native_target,omitempty"`
+	X                  any                   `json:"x,omitempty"`
+	Y                  any                   `json:"y,omitempty"`
+	ToX                any                   `json:"to_x,omitempty"`
+	ToY                any                   `json:"to_y,omitempty"`
+	AppID              string                `json:"app_id,omitempty"`
 	SecretRef          string                `json:"secret_ref,omitempty"`
 	Reveal             *actorReveal          `json:"reveal,omitempty"`
 	URLFromField       string                `json:"url_from_field,omitempty"`
@@ -108,24 +121,26 @@ type actorStep struct {
 	PathPrefix         string                `json:"path_prefix,omitempty"`
 	// Media inputs are generic; Computer resolves the source and attaches it
 	// to the semantic target selected by locator.
-	SourceURL   string               `json:"source_url,omitempty"`
-	Base64      string               `json:"base64,omitempty"`
-	FilePath    string               `json:"file_path,omitempty"`
-	Filename    string               `json:"filename,omitempty"`
-	MIMEType    string               `json:"mime_type,omitempty"`
-	Mode        string               `json:"mode,omitempty"`
-	NewlineMode string               `json:"newline_mode,omitempty"`
-	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
-	Match       string               `json:"match,omitempty"`
-	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
-	Checked     any                  `json:"checked,omitempty"`
-	Labels      any                  `json:"labels,omitempty"`
-	Value       string               `json:"value,omitempty"`
-	Values      []string             `json:"values,omitempty"`
-	Texts       []string             `json:"texts,omitempty"`
-	Readability *bool                `json:"readability,omitempty"`
-	OnceKey     string               `json:"once_key,omitempty"`
-	OnceScope   string               `json:"once_scope,omitempty"`
+	ExpectedSHA256  string               `json:"expected_sha256,omitempty"`
+	RequirePrepared bool                 `json:"require_prepared,omitempty"`
+	SourceURL       string               `json:"source_url,omitempty"`
+	Base64          string               `json:"base64,omitempty"`
+	FilePath        string               `json:"file_path,omitempty"`
+	Filename        string               `json:"filename,omitempty"`
+	MIMEType        string               `json:"mime_type,omitempty"`
+	Mode            string               `json:"mode,omitempty"`
+	NewlineMode     string               `json:"newline_mode,omitempty"`
+	Conditions      []actorWaitCondition `json:"conditions,omitempty"`
+	Match           string               `json:"match,omitempty"`
+	TimeoutMS       any                  `json:"timeout_ms,omitempty"`
+	Checked         any                  `json:"checked,omitempty"`
+	Labels          any                  `json:"labels,omitempty"`
+	Value           string               `json:"value,omitempty"`
+	Values          []string             `json:"values,omitempty"`
+	Texts           []string             `json:"texts,omitempty"`
+	Readability     *bool                `json:"readability,omitempty"`
+	OnceKey         string               `json:"once_key,omitempty"`
+	OnceScope       string               `json:"once_scope,omitempty"`
 	// MinItems/MaxItems turn an extraction into a cardinality gate. They are
 	// especially useful before a consequential click: a missing or ambiguous
 	// target must fail closed instead of producing an empty successful extract.
@@ -146,6 +161,7 @@ type actorAssertion struct {
 	LessThanOrEqual    any                `json:"less_than_or_equal,omitempty"`
 	GreaterThanField   string             `json:"greater_than_field,omitempty"`
 	EqualsURL          *actorURLAssertion `json:"equals_url,omitempty"`
+	NotMatches         string             `json:"not_matches,omitempty"`
 	Matches            string             `json:"matches,omitempty"`
 	Equals             any                `json:"equals,omitempty"`
 	EqualsField        string             `json:"equals_field,omitempty"`
@@ -210,7 +226,7 @@ type actorQueuedRun struct {
 }
 
 func (a *App) actorTools() []sdk.Tool {
-	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
+	definitionSchema := map[string]any{"type": "object", "description": "Version 1 operations accept steps or platform variants (ios/android/web); variants contain steps and optional browser settings. Select with input.platform or a preset, or infer from the configured device/context. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
 	return append([]sdk.Tool{
 		{Name: "actors_read_close", Description: "Close an unused read-only continuation and release its browser session. A consumed reference must be replaced by its successor.", InputSchema: schemaObject(map[string]any{"ref": map[string]any{"type": "string"}}, []string{"ref"}), Handler: a.toolReadContinuationClose},
 		{
@@ -222,21 +238,21 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Bounded metadata/operation discovery by default. Supply operation for one complete immutable operation contract. Full definitions require actors_definition_export for editing/debugging.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Bounded metadata/operation discovery by default. Supply operation for one complete immutable operation contract; add platform to inspect one platform variant. Full definitions require actors_definition_export for editing/debugging.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
 			Name: "actors_list", Description: "Bounded metadata discovery without definitions; follow next_cursor as after while has_more.",
 			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "after": map[string]any{"type": "integer", "minimum": 0}}, nil), Handler: a.toolActorList,
 		},
-		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
+		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
 
 		{
 			Name: "actors_delete", Description: "Delete an actor definition. Existing run snapshots remain reproducible.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorDelete,
 		},
 		{
-			Name: "actors_run", Description: "Queue an actor run and return immediately. Precedence: defaults, selected preset, schedule_overrides, explicit input. Scheduled callers may pass preset_pool for deterministic per-occurrence profile rotation.",
+			Name: "actors_run", Description: "Queue an actor run and return immediately. For variant operations, input.platform (ios/android/web) or a preset selects the implementation; otherwise infer from the configured device/context. The selected variant and device are pinned before queueing. Precedence: defaults, selected preset, schedule_overrides, explicit input. Scheduled callers may pass preset_pool for deterministic per-occurrence profile rotation.",
 			InputSchema: schemaObject(map[string]any{
 				"idempotency_key": map[string]any{"type": "string", "maxLength": 200},
 				"actor_id":        map[string]any{"type": "integer"}, "operation": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer"}, "preset": map[string]any{"type": "string"},
@@ -247,8 +263,8 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"actor_id"}), Handler: a.toolActorRun,
 		},
 		{
-			Name: "actors_run_get", Description: "Get one Actors run, including actor snapshot metadata, bounded output, and artifacts.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorRunGet,
+			Name: "actors_run_get", Description: "Get one Actors run. detail=full (default) includes the definition snapshot, input, bounded output, previews, traces and artifacts. detail=summary returns the compact terminal receipt: status, operation, revision, timings, dataset_count, failure/effect evidence and compact read coverage.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "detail": map[string]any{"type": "string", "enum": []string{"full", "summary"}, "default": "full"}}, []string{"id"}), Handler: a.toolActorRunGet,
 		},
 		{
 			Name: "actors_run_cancel", Description: "Request cancellation of a queued or running actor run.",
@@ -304,6 +320,9 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	if def.SelectedPlatform != "" && !validActorPlatform(def.SelectedPlatform) {
+		return errors.New("selected_platform must be ios, android or web")
+	}
 	seenInputs := map[string]bool{}
 	for _, name := range def.RequiredExplicitInputs {
 		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) || seenInputs[name] {
@@ -317,6 +336,9 @@ func validateActorDefinition(def actorDefinition) error {
 		}
 	}
 	if def.SchemaVersion == 2 {
+		if len(def.Variants) > 0 {
+			return errors.New("platform variants require schema version 1 operations")
+		}
 		if len(def.Operations) > 0 || len(def.Steps) > 0 {
 			return errors.New("schema version 2 uses crawl and does not support steps or operations")
 		}
@@ -343,6 +365,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return nil
 	}
 	if len(def.Operations) > 0 {
+		if len(def.Variants) > 0 {
+			return errors.New("use operation variants or top-level variants, not both")
+		}
 		if len(def.Steps) > 0 {
 			return errors.New("use either steps or named operations")
 		}
@@ -356,6 +381,7 @@ func validateActorDefinition(def actorDefinition) error {
 			selected := def
 			selected.Operations = nil
 			selected.ReadOnly = selected.ReadOnly || operation.ReadOnly
+			selected.PrivateScreen = selected.PrivateScreen || operation.PrivateScreen
 			selected.RecoveryOnly = operation.RecoveryOnly
 			if operation.Limits != nil {
 				selected.Limits = *operation.Limits
@@ -367,11 +393,15 @@ func validateActorDefinition(def actorDefinition) error {
 			selected.Recovery = operation.Recovery
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
+			selected.Variants = operation.Variants
 			if err := validateActorDefinition(selected); err != nil {
 				return fmt.Errorf("operation %s: %w", name, err)
 			}
 		}
 		return nil
+	}
+	if len(def.Variants) > 0 {
+		return validateActorVariants(def)
 	}
 	if def.SchemaVersion != 1 {
 		return errors.New("definition.schema_version must be 1")
@@ -379,7 +409,7 @@ func validateActorDefinition(def actorDefinition) error {
 	if len(def.Steps) == 0 || len(def.Steps) > maxActorSteps {
 		return fmt.Errorf("definition.steps must contain 1-%d steps", maxActorSteps)
 	}
-	if len(def.AllowedHosts) == 0 {
+	if len(def.AllowedHosts) == 0 && def.Browser.Backend != "mobile" {
 		return errors.New("definition.allowed_hosts must contain at least one host")
 	}
 	if len(def.AllowedHosts) > 100 || len(def.Presets) > 100 {
@@ -395,7 +425,7 @@ func validateActorDefinition(def actorDefinition) error {
 	}
 	if backend := def.Browser.Backend; backend != "" && !strings.Contains(backend, "{{") {
 		switch backend {
-		case "local", "browserbase", "steel", "browser-engine", "service":
+		case "local", "browserbase", "steel", "browser-engine", "service", "mobile":
 		default:
 			return fmt.Errorf("definition.browser.backend %q is unsupported", backend)
 		}
@@ -439,6 +469,9 @@ func validateActorDefinition(def actorDefinition) error {
 	if err := validateActorEnvironment(def.Browser.Environment); err != nil {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
+	if err := validateMobileActor(def, true); err != nil {
+		return err
+	}
 	for i, step := range def.Steps {
 		if err := validateReadRetries(step); err != nil {
 			return fmt.Errorf("steps[%d]: %w", i, err)
@@ -463,10 +496,21 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
 			}
 		}
-		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" {
-			return fmt.Errorf("steps[%d].secret_ref requires fill_secret or goto_secret", i)
+		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" && !nativeSecretAction(step.Action) {
+			return fmt.Errorf("steps[%d].secret_ref requires a secret action", i)
+		}
+		if step.ConfirmConsequence == "navigation_only" {
+			return errors.New("navigation_only is not an irreversible consequence acknowledgement")
 		}
 		switch step.Action {
+		case "goto_record":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || step.VerifiedField == "" {
+				return errors.New("goto_record requires a read-only non-optional step and verified_field")
+			}
+		case "read_navigation":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" {
+				return errors.New("read_navigation requires a read-only, non-optional exact som_only name")
+			}
 		case "goto_secret":
 			if strings.TrimSpace(step.SecretRef) == "" || step.URL != "" || step.Text != "" || step.Optional {
 				return fmt.Errorf("steps[%d]: goto_secret requires secret_ref without literal URL, text or optional", i)
@@ -556,8 +600,11 @@ func validateActorDefinition(def actorDefinition) error {
 			} else if step.Value == "" {
 				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
 			}
-		case "upload_file":
-			if !locatorHasTarget(step.Locator) {
+		case "prepare_upload", "upload_file":
+			if step.Action == "prepare_upload" && (step.Optional || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" || step.EffectPhase != "") {
+				return errors.New("prepare_upload cannot be optional or dispatch a site effect")
+			}
+			if step.Action == "upload_file" && !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for upload_file", i)
 			}
 			sources := 0
@@ -610,7 +657,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
-			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect && !(step.ExpectedEffect == "navigation_only" && step.ConfirmConsequence == ""))) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
 		case "observe_page", "extract":
@@ -628,11 +675,11 @@ func validateActorDefinition(def actorDefinition) error {
 					return fmt.Errorf("steps[%d].fields[%q]: %w", i, name, err)
 				}
 			}
-		case "select_record":
+		case "select_record", "assert_no_record":
 			if step.VerifiedField == "" || step.Value == "" {
-				return errors.New("select_record requires verified_field and value")
+				return errors.New("record checks require verified_field and value")
 			}
-		case "assert_values":
+		case "assert_values", "assert_inputs":
 			if len(step.Assertions) == 0 {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
@@ -640,12 +687,17 @@ func validateActorDefinition(def actorDefinition) error {
 				if err := validateCanonicalAssertion(assertion); err != nil {
 					return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
 				}
-				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && assertion.NotMatches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
 				}
 				if assertion.EqualsURL != nil {
 					if err := assertion.EqualsURL.validate(); err != nil {
 						return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+					}
+				}
+				if assertion.NotMatches != "" {
+					if _, err := regexp.Compile(assertion.NotMatches); err != nil {
+						return fmt.Errorf("steps[%d] invalid not_matches: %w", i, err)
 					}
 				}
 				if assertion.Matches != "" {
@@ -680,7 +732,14 @@ func validateActorDefinition(def actorDefinition) error {
 			if err := validateWaitStep(step); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
+		case "open", "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private":
+			if err := validateScreenStep(step, true); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
 		case "wait", "screenshot":
+			if step.Action == "screenshot" && def.PrivateScreen {
+				return errors.New("private_screen operations cannot save screenshots")
+			}
 		default:
 			return fmt.Errorf("steps[%d].action %q is unsupported", i, step.Action)
 		}
@@ -856,6 +915,9 @@ func (a *App) toolActorSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, supplied := args["platform"]; supplied && stringArg(args, "operation") == "" {
+		return nil, errors.New("platform selection requires an operation")
+	}
 	if _, supplied := args["operation"]; supplied {
 		return a.getActorOperation(ctx, args)
 	}
@@ -1084,7 +1146,11 @@ func (a *App) handleActors(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeActorHTTPArgs(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+	return decodeActorHTTPArgsWithLimit(w, r, 2*1024*1024)
+}
+
+func decodeActorHTTPArgsWithLimit(w http.ResponseWriter, r *http.Request, limit int64) (map[string]any, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	defer r.Body.Close()
 	var args map[string]any
 	decoder := json.NewDecoder(r.Body)
@@ -1127,7 +1193,7 @@ func (a *App) handleActorSave(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	args, ok := decodeActorHTTPArgs(w, r)
+	args, ok := decodeActorHTTPArgsWithLimit(w, r, maxActorDefinitionBytes+1024*1024)
 	if !ok {
 		return
 	}
@@ -1165,7 +1231,7 @@ func (a *App) handleRunItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	out, err := a.toolActorRunGet(ctx, map[string]any{"id": actorHTTPID(r)})
+	out, err := a.toolActorRunGet(ctx, map[string]any{"id": actorHTTPID(r), "detail": r.URL.Query().Get("detail")})
 	writeJSON(w, out, err)
 }
 
@@ -1423,56 +1489,6 @@ func hostAllowed(rawURL string, hosts []string) bool {
 		}
 	}
 	return false
-}
-
-func (a *App) runActorWorker(workerCtx context.Context, app *sdk.AppCtx) (workerErr error) {
-	run, err := claimActorRun(app)
-	if err != nil || run == nil {
-		return err
-	}
-	ctx := app.WithProject(run.ProjectID)
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			workerErr = finishActorRun(ctx, run.ID, "failed", nil, errors.New("actor worker interrupted by internal error; inspect server logs"))
-			ctx.Logger().Error("actor worker panic", "run_id", run.ID, "panic", fmt.Sprint(recovered))
-		}
-	}()
-	return a.executeActorRun(workerCtx, ctx, run)
-}
-
-func claimActorRun(ctx *sdk.AppCtx) (*actorQueuedRun, error) {
-	tx, err := ctx.AppDB().BeginTx(context.Background(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	query := `SELECT id,project_id,actor_id,actor_revision,input_json,definition_snapshot_json,COALESCE(trigger_json,'{}') FROM actors_runs WHERE status='queued' AND actor_id IS NOT NULL`
-	args := []any{}
-	if pid := ctx.CurrentProject(); pid != "" {
-		query += ` AND project_id=?`
-		args = append(args, pid)
-	}
-	query += ` ORDER BY created_at,id LIMIT 1`
-	var run actorQueuedRun
-	if err := tx.QueryRow(query, args...).Scan(&run.ID, &run.ProjectID, &run.ActorID, &run.ActorRevision, &run.InputJSON, &run.DefinitionSnapshot, &run.TriggerJSON); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	res, err := tx.Exec(`UPDATE actors_runs SET status='running' WHERE id=? AND status='queued'`, run.ID)
-	if err != nil {
-		return nil, err
-	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
-		return nil, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	ctx.EmitWithProject("actor.run.started", run.ProjectID, map[string]any{"run_id": run.ID, "actor_id": run.ActorID})
-	return &run, nil
 }
 
 func (a *App) handleActorGet(w http.ResponseWriter, r *http.Request) {

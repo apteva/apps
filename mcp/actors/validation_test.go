@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -52,5 +53,29 @@ func TestValidateActorDefinitionSupportsCardinalityAndVerifiedClick(t *testing.T
 	def.Steps[0].MinItems = -1
 	if err := validateActorDefinition(def); err == nil {
 		t.Fatal("negative extraction cardinality accepted")
+	}
+}
+
+func TestActorDefinitionSizeLimit(t *testing.T) {
+	definition := actorDefinition{
+		SchemaVersion: 1,
+		AllowedHosts:  []string{"example.com"},
+		Defaults:      map[string]any{"fixture": ""},
+		Steps:         []actorStep{{Action: "goto", URL: "https://example.com"}},
+	}
+	empty, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limit = 2 * 1024 * 1024
+	definition.Defaults["fixture"] = strings.Repeat("x", limit-len(empty))
+	_, canonical, err := decodeActorDefinition(definition)
+	if err != nil || len(canonical) != limit {
+		t.Fatalf("definition at 2 MiB rejected: bytes=%d, err=%v", len(canonical), err)
+	}
+
+	definition.Defaults["fixture"] = definition.Defaults["fixture"].(string) + "x"
+	if _, _, err = decodeActorDefinition(definition); err == nil || !strings.Contains(err.Error(), "definition exceeds") {
+		t.Fatalf("definition above 2 MiB accepted: %v", err)
 	}
 }

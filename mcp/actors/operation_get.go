@@ -62,7 +62,7 @@ func (a *App) buildActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	operation := ops[name]
 	if len(ops) == 0 && name == "run" {
 		implicit := map[string]json.RawMessage{}
-		for _, key := range []string{"steps", "crawl", "output_schema", "read_only", "recovery", "limits"} {
+		for _, key := range []string{"steps", "variants", "crawl", "output_schema", "read_only", "recovery", "limits"} {
 			if value, exists := root[key]; exists {
 				implicit[key] = value
 			}
@@ -105,6 +105,28 @@ func (a *App) buildActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	if value, supplied := args["platform"]; supplied {
+		platform, ok := value.(string)
+		if !ok || !validActorPlatform(platform) {
+			return nil, errors.New("platform must be ios, android or web")
+		}
+		selected, err = selectActorVariant(selected, platform)
+		if err != nil {
+			return nil, err
+		}
+		var variants map[string]map[string]json.RawMessage
+		if err = json.Unmarshal(storedOp["variants"], &variants); err != nil {
+			return nil, err
+		}
+		delete(storedOp, "variants")
+		for key, value := range variants[platform] {
+			storedOp[key] = value
+		}
+		storedOp["read_only"], _ = json.Marshal(selected.ReadOnly)
+		storedOp["private_screen"], _ = json.Marshal(selected.PrivateScreen)
+		storedOp["required_explicit_inputs"], _ = json.Marshal(selected.RequiredExplicitInputs)
+		operation, _ = json.Marshal(storedOp)
+	}
 	var steps []json.RawMessage
 	if err = json.Unmarshal(storedOp["steps"], &steps); err != nil && len(storedOp["steps"]) > 0 {
 		return nil, err
@@ -117,6 +139,9 @@ func (a *App) buildActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	config["browser"] = selected.Browser
 	config["required_explicit_inputs"] = selected.RequiredExplicitInputs
+	if selected.SelectedPlatform != "" {
+		config["selected_platform"] = selected.SelectedPlatform
+	}
 	if selected.Recovery != nil {
 		config["recovery"] = selected.Recovery
 	}
@@ -136,6 +161,22 @@ func (a *App) buildActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"input_requirements": actorOperationInputs(selected),
 		"complete":           true, "step_count": len(steps), "operation_sha256": hex.EncodeToString(digest[:]),
 	}
+	if len(selected.Variants) > 0 {
+		base := selected
+		base.Variants = nil
+		out["input_requirements"] = actorOperationInputs(base)
+		out["platforms"] = actorVariantPlatforms(selected)
+		out["platform_selection"] = "input.platform or preset; otherwise configured device/context. Unsupported platforms fail before session allocation."
+		requirements := map[string]any{}
+		stepCounts := map[string]int{}
+		for _, platform := range actorVariantPlatforms(selected) {
+			variant, _ := selectActorVariant(selected, platform)
+			requirements[platform] = actorOperationInputs(variant)
+			stepCounts[platform] = len(variant.Steps)
+		}
+		out["input_requirements_by_platform"] = requirements
+		out["step_count_by_platform"] = stepCounts
+	}
 	return out, nil
 }
 func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -150,7 +191,11 @@ func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if len(encoded) > maxActorOperationResponseBytes {
 		m := out.(map[string]any)
 		actor := m["actor"].(map[string]any)
-		return map[string]any{"found": true, "actor": actor, "retrieved_revision": m["retrieved_revision"], "latest_revision": m["latest_revision"], "operation_name": m["operation_name"], "complete": false, "inline_complete": false, "required_bytes": len(encoded), "operation_sha256": m["operation_sha256"], "reason": "operation_contract_exceeds_inline_budget", "definition_export": exportHint(actor["id"].(int64), m["retrieved_revision"].(int), stringArg(args, "operation"))}, nil
+		hint := exportHint(actor["id"].(int64), m["retrieved_revision"].(int), stringArg(args, "operation"))
+		if platform, supplied := args["platform"]; supplied {
+			hint["arguments"].(map[string]any)["platform"] = platform
+		}
+		return map[string]any{"found": true, "actor": actor, "retrieved_revision": m["retrieved_revision"], "latest_revision": m["latest_revision"], "operation_name": m["operation_name"], "complete": false, "inline_complete": false, "required_bytes": len(encoded), "operation_sha256": m["operation_sha256"], "reason": "operation_contract_exceeds_inline_budget", "definition_export": hint}, nil
 	}
 	return out, nil
 }

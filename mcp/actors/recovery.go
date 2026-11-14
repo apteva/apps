@@ -51,6 +51,9 @@ func proveUncommitted(run map[string]any, def actorDefinition) error {
 		return errors.New("recovery requires a failed run; successful, active, cancelled or unknown outcomes block")
 	}
 	output := mapFromAny(run["output"])
+	if output["reconciliation_required"] == true {
+		return errors.New("original run may have changed external state; reconcile its outcome before retrying")
+	}
 	if effects, ok := output["effects"].([]any); ok && len(effects) > 0 {
 		return errors.New("original run attempted a guarded consequence; reconcile its result instead")
 	}

@@ -44,6 +44,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
+	"github.com/apteva/apps/mcp/computer/internal/browser/mobile"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
@@ -62,8 +63,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.11.0
+version: 0.12.0
 description: |
+  v0.12.0 exposes native iOS and Android screen guards with exact app,
+  marker, account-field and unique-target checks. Supports bounded native reads,
+  verified Android replacement/clearing, scoped repeated form controls and
+  strict handling of duplicated Compose buttons without input replay.
   v0.11.0 adds structured scroll/screenshot recovery and opt-in bounded,
   deduplicated observations, with a real DeepSeek view-handoff regression.
   v0.10.0 adds persistent browser-view resources, install-scoped routing,
@@ -294,8 +299,8 @@ provides:
 runtime:
   kind: source
   source:
-    repo: github.com/apteva/apps
-    ref: computer/v0.11.0
+    repo: https://github.com/apteva/apps.git
+    ref: computer/v0.12.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -770,9 +775,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id": map[string]any{"type": "string"},
-				"read_only":  map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
-				"action":     map[string]any{"type": "string", "enum": []string{"swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"native_app":      map[string]any{"type": "string", "description": "Exact foreground app: Android package ID or iOS app label."},
+				"native_required": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 12},
+				"native_target":   map[string]any{"type": "string", "description": "One exact resource ID, accessibility label or visible text."},
+				"native_values":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Exact expected values for uniquely identified screen fields, e.g. the active account header."},
+				"session_id":      map[string]any{"type": "string"},
+				"read_only":       map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
+				"action":          map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -2711,6 +2720,47 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		return nil, err
 	}
 	if out := navigationActionGuard(id, sess, args); out != nil {
+		return out, nil
+	}
+
+	if strings.HasPrefix(action, "native_") {
+		native, ok := sess.comp.(interface {
+			NativeGuarded(string, string, []string, string, string, map[string]string, int) (string, error)
+		})
+		if !ok {
+			return nil, errors.New("native actions require a supported Mobile session")
+		}
+		values := map[string]string{}
+		if raw, supplied := args["native_values"]; supplied {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				return nil, errors.New("native_values must be an object of strings")
+			}
+			if len(m) > 12 {
+				return nil, errors.New("at most 12 native value guards are supported")
+			}
+			for key, value := range m {
+				text, ok := value.(string)
+				if !ok || key == "" || len(key) > 500 || len(text) > 4096 {
+					return nil, errors.New("invalid native value guard")
+				}
+				values[key] = text
+			}
+		}
+		if action == "native_type_secure" && (!sess.extractionOnly || (stringArg(args, "observation") != "" && stringArg(args, "observation") != "none")) {
+			return nil, errors.New("native secure input requires a private session without observation")
+		}
+		value, err := native.NativeGuarded(action, stringArg(args, "native_app"), stringSliceArg(args, "native_required"), stringArg(args, "native_target"), stringArg(args, "text"), values, intArg(args, "duration"))
+		if err != nil {
+			if action == "native_tap_if_present" && errors.Is(err, mobile.ErrNativeScreenMarkerAbsent) {
+				return map[string]any{"success": true, "skipped": true, "session_id": id}, nil
+			}
+			return nil, err
+		}
+		out := map[string]any{"success": true, "session_id": id}
+		if action == "native_read" {
+			out["native_value"] = value
+		}
 		return out, nil
 	}
 	if action == "prepare_upload" {

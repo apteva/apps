@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/andybalholm/cascadia"
 	sdk "github.com/apteva/app-sdk"
@@ -26,6 +27,8 @@ import (
 )
 
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
+var actorIntegerPattern = regexp.MustCompile(`[-+]?[0-9][0-9.,\p{Zs}\t]*`)
+var actorExponentSuffix = regexp.MustCompile(`^[eE][-+]?[0-9]`)
 
 type actorExecution struct {
 	secretNavigation     bool
@@ -55,6 +58,7 @@ type actorExecution struct {
 	maxItems             int
 	retries              int
 	session              *browserSession
+	collectionItems      []map[string]any
 	items                []map[string]any
 	pageCount            int
 	trace                []map[string]any
@@ -73,6 +77,9 @@ type actorExecution struct {
 	datasetFull          bool
 	selectedPreset       string
 	crawl                *crawlDefinition
+
+	possibleExternalWrite bool
+	keepContextLock       bool
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -128,7 +135,11 @@ func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if len(inputJSON) > maxActorInputBytes {
 		return nil, fmt.Errorf("run input exceeds %d bytes", maxActorInputBytes)
 	}
-	defJSON, _ := json.Marshal(rec.Definition)
+	resolved, err := resolvePlatformSnapshot(ctx, rec.Definition, string(inputJSON))
+	if err != nil {
+		return nil, err
+	}
+	defJSON, _ := json.Marshal(resolved)
 	// Resolve templates and validate before accepting work or allocating a browser.
 	if _, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(inputJSON), DefinitionSnapshot: string(defJSON)}); err != nil {
 		return nil, err
@@ -187,6 +198,11 @@ func enqueueActorSnapshot(ctx *sdk.AppCtx, actorID int64, revision int, inputJSO
 		return 0, "", false, errors.New("operation requires actors_run_recover with original saved-resource evidence")
 	}
 	triggerJSON, _ := json.Marshal(trigger)
+	queued := &actorQueuedRun{InputJSON: inputJSON, DefinitionSnapshot: definitionJSON}
+	queueKey, err := resolveActorQueueKey(ctx, queued)
+	if err != nil {
+		return 0, "", false, err
+	}
 	triggerKey := stringFromAny(trigger["trigger_key"])
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -210,8 +226,8 @@ func enqueueActorSnapshot(ctx *sdk.AppCtx, actorID int64, revision int, inputJSO
 			return 0, "", false, err
 		}
 	}
-	res, err := tx.Exec(`INSERT INTO actors_runs(project_id,kind,input_json,status,actor_id,actor_revision,definition_snapshot_json,trigger_json) VALUES(?,?,?,'queued',?,?,?,?)`,
-		projectID(ctx), "actor", inputJSON, actorID, revision, definitionJSON, string(triggerJSON))
+	res, err := tx.Exec(`INSERT INTO actors_runs(project_id,kind,input_json,status,actor_id,actor_revision,definition_snapshot_json,trigger_json,queue_key,created_at) VALUES(?,?,?,'queued',?,?,?,?,?,?)`,
+		projectID(ctx), "actor", inputJSON, actorID, revision, definitionJSON, string(triggerJSON), queueKey, time.Now().UTC())
 	if err != nil {
 		if triggerKey != "" {
 			_ = tx.Rollback()
@@ -241,9 +257,18 @@ func (a *App) toolActorRunGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
+	detail, err := actorRunDetail(args)
+	if err != nil {
+		return nil, err
+	}
 	run, err := getActorRun(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if run != nil && detail == "summary" {
+		if run, err = summarizeActorRun(ctx, run); err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{"run": run, "found": run != nil}, nil
 }
@@ -253,9 +278,10 @@ func getActorRun(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 	var actorID sql.NullInt64
 	var revision sql.NullInt64
 	var created time.Time
-	var completed, cancel sql.NullTime
-	err := ctx.AppDB().QueryRow(`SELECT kind,status,input_json,COALESCE(output_json,'{}'),COALESCE(error,''),COALESCE(summary,''),COALESCE(actor_id,0),COALESCE(actor_revision,0),COALESCE(definition_snapshot_json,'{}'),COALESCE(trigger_json,'{}'),created_at,completed_at,cancel_requested_at FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(
-		&kind, &status, &inputJSON, &outputJSON, &errText, &summary, &actorID, &revision, &definitionJSON, &triggerJSON, &created, &completed, &cancel)
+	var completed, cancel, enqueued, started sql.NullTime
+	var waitReason string
+	err := ctx.AppDB().QueryRow(`SELECT kind,status,input_json,COALESCE(output_json,'{}'),COALESCE(error,''),COALESCE(summary,''),COALESCE(actor_id,0),COALESCE(actor_revision,0),COALESCE(definition_snapshot_json,'{}'),COALESCE(trigger_json,'{}'),created_at,completed_at,cancel_requested_at,queued_at,started_at,`+actorWaitReason+` FROM actors_runs AS queued WHERE id=? AND project_id=?`, actorWorkerLimit(ctx), id, projectID(ctx)).Scan(
+		&kind, &status, &inputJSON, &outputJSON, &errText, &summary, &actorID, &revision, &definitionJSON, &triggerJSON, &created, &completed, &cancel, &enqueued, &started, &waitReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -263,6 +289,7 @@ func getActorRun(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 		return nil, err
 	}
 	run := map[string]any{"id": id, "kind": kind, "status": status, "error": errText, "summary": summary, "created_at": created.UTC().Format(time.RFC3339)}
+	setActorQueueTiming(run, enqueued, started, completed, created, waitReason)
 	for key, raw := range map[string]string{"input": inputJSON, "output": outputJSON, "definition_snapshot": definitionJSON, "trigger": triggerJSON} {
 		var decoded any
 		if json.Unmarshal([]byte(raw), &decoded) == nil {
@@ -333,7 +360,8 @@ func (a *App) toolActorRunRetry(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	var actorID int64
 	var revision int
 	var inputJSON, definitionJSON, status string
-	err := ctx.AppDB().QueryRow(`SELECT COALESCE(actor_id,0),COALESCE(actor_revision,0),input_json,COALESCE(definition_snapshot_json,''),status FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&actorID, &revision, &inputJSON, &definitionJSON, &status)
+	var reconciliationRequired bool
+	err := ctx.AppDB().QueryRow(`SELECT COALESCE(actor_id,0),COALESCE(actor_revision,0),input_json,COALESCE(definition_snapshot_json,''),status,COALESCE(json_extract(output_json,'$.reconciliation_required'),0) FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&actorID, &revision, &inputJSON, &definitionJSON, &status, &reconciliationRequired)
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +370,9 @@ func (a *App) toolActorRunRetry(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	if status == "queued" || status == "running" {
 		return nil, errors.New("active run cannot be retried")
+	}
+	if reconciliationRequired {
+		return nil, errors.New("run may have changed external state; reconcile the outcome before starting another run")
 	}
 	newID, newStatus, _, err := enqueueActorSnapshot(ctx, actorID, revision, inputJSON, definitionJSON, map[string]any{"kind": "retry", "retry_of": id, "queued_at": time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
@@ -387,19 +418,26 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 			}
 		}
 	}()
-	defer func() {
+	cleaned := false
+	cleanup := func() {
+		if cleaned {
+			return
+		}
+		cleaned = true
 		if exec.claimedReadRef != "" {
 			_, _ = ctx.AppDB().Exec(`UPDATE actors_read_continuations SET state='consumed' WHERE ref=? AND project_id=? AND state='claimed' AND claimed_by=?`, exec.claimedReadRef, projectID(ctx), queued.ID)
 		}
 		if exec.pendingReadRef != "" && !exec.retainedReadSession {
 			_, _ = ctx.AppDB().Exec(`DELETE FROM actors_read_continuations WHERE ref=? AND project_id=?`, exec.pendingReadRef, projectID(ctx))
 		}
+		keepLock := exec.session == nil && runCtx.Err() != nil
 		if exec.session != nil && !exec.retainedReadSession {
-			a.closeBrowser(ctx, exec.session.SessionID)
+			keepLock = a.closeBrowser(ctx, exec.session.SessionID) != nil
 			exec.session = nil
 		}
-		_, _ = ctx.AppDB().Exec(`DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`, projectID(ctx), queued.ID)
-	}()
+		exec.releaseContextLock(keepLock)
+	}
+	defer cleanup()
 	var out map[string]any
 	runErr := exec.recoveryPrecheck()
 	if runErr == nil {
@@ -418,25 +456,44 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	} else if runErr != nil {
 		status = "failed"
 	}
-	if exec.session != nil && !exec.secretInputUsed {
+	if runCtx.Err() == nil && exec.session != nil && !exec.secretInputUsed && !exec.definition.PrivateScreen {
 		if shot, shotErr := exec.storeCurrentScreenshot("final browser state"); shotErr == nil {
 			exec.screenshot = shot
 		} else {
 			exec.addTrace("screenshot", "warning", shotErr.Error(), nil)
 		}
 	}
-	if trace, traceErr := storeBytesArtifact(ctx, queued.ID, "trace", "actor trace", "application/json", mustJSON(exec.trace), ".json"); traceErr == nil {
-		exec.traceArtifact = trace
-	} else if runErr == nil {
-		runErr = fmt.Errorf("persist trace: %w", traceErr)
+	if runCtx.Err() == nil {
+		if trace, traceErr := storeBytesArtifact(runCtx, ctx, queued.ID, "trace", "actor trace", "application/json", mustJSON(exec.trace), ".json"); traceErr == nil {
+			exec.traceArtifact = trace
+		} else if runErr == nil {
+			runErr = fmt.Errorf("persist trace: %w", traceErr)
+			status = "failed"
+		}
+	}
+	timedOut := status != "cancelled" && (errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(runErr, errActorDeadline))
+	operationTimedOut := actorOperationTimedOut(runErr)
+	if timedOut {
+		runErr = errActorDeadline
 		status = "failed"
 	}
 	if out == nil {
 		out = map[string]any{}
 	}
+	if timedOut {
+		out["failure_reason"] = "execution_timeout"
+	} else if operationTimedOut {
+		out["failure_reason"] = "operation_timeout"
+	}
+	if exec.possibleExternalWrite && (timedOut || operationTimedOut || runCtx.Err() != nil || status == "cancelled" || (exec.definition.Browser.Backend == "mobile" && runErr != nil)) {
+		out["reconciliation_required"] = true
+	}
 	out["run_id"] = queued.ID
 	out["actor_id"] = queued.ActorID
 	out["actor_revision"] = queued.ActorRevision
+	if exec.definition.SelectedPlatform != "" {
+		out["platform"] = exec.definition.SelectedPlatform
+	}
 	out["item_count"] = len(exec.items)
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
@@ -467,6 +524,12 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	}
 	if exec.session != nil {
 		out["proxy"] = exec.session.Proxy
+		if exec.session.Capabilities != nil {
+			out["capabilities"] = exec.session.Capabilities
+		}
+		if exec.session.Target != nil {
+			out["target"] = exec.session.Target
+		}
 	}
 	if exec.selectedPreset != "" {
 		out["preset"] = exec.selectedPreset
@@ -502,10 +565,18 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 			out["continuation"] = cont
 		}
 	}
+	exec.retainedReadSession = status == "completed" && exec.pendingReadRef != ""
+	// Keep the run active until its browser is closed. A waiting run can
+	// then safely reuse the saved context as soon as this row is terminal.
+	cleanup()
 	if err := finishActorRun(ctx, queued.ID, status, out, runErr); err != nil {
+		if exec.retainedReadSession {
+			exec.retainedReadSession = false
+			cleaned = false
+			cleanup()
+		}
 		return err
 	}
-	exec.retainedReadSession = status == "completed" && exec.pendingReadRef != ""
 	topic := "actor.run." + status
 	payload := map[string]any{"run_id": queued.ID, "actor_id": queued.ActorID, "status": status, "item_count": len(exec.items), "page_count": exec.pageCount}
 	if runErr != nil {
@@ -516,14 +587,18 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 }
 
 var errActorCancelled = errors.New("actor run cancelled")
+var errActorDeadline = errors.New("actor execution timed out (max_duration_seconds exceeded)")
 
-func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run *actorQueuedRun) (*actorExecution, error) {
+func renderQueuedActor(run *actorQueuedRun) (actorDefinition, map[string]any, string, error) {
 	var def actorDefinition
 	if err := json.Unmarshal([]byte(run.DefinitionSnapshot), &def); err != nil {
-		return nil, fmt.Errorf("decode definition snapshot: %w", err)
+		return def, nil, "", fmt.Errorf("decode definition snapshot: %w", err)
 	}
 	if err := validateActorDefinition(def); err != nil {
-		return nil, err
+		return def, nil, "", err
+	}
+	if len(def.Variants) > 0 {
+		return def, nil, "", errors.New("platform variants must be resolved before run admission")
 	}
 	var runInput struct {
 		Preset            string         `json:"preset"`
@@ -532,19 +607,19 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 		Input             map[string]any `json:"input"`
 	}
 	if err := json.Unmarshal([]byte(run.InputJSON), &runInput); err != nil {
-		return nil, fmt.Errorf("decode run input: %w", err)
+		return def, nil, "", fmt.Errorf("decode run input: %w", err)
 	}
 	for _, key := range def.RequiredExplicitInputs {
 		value, exists := runInput.Input[key]
 		if !exists || value == nil || (reflect.TypeOf(value).Kind() == reflect.String && strings.TrimSpace(value.(string)) == "") {
-			return nil, fmt.Errorf("explicit input %q is required; defaults, presets and schedule overrides cannot supply it", key)
+			return def, nil, "", fmt.Errorf("explicit input %q is required; defaults, presets and schedule overrides cannot supply it", key)
 		}
 	}
 	vars := mergeActorMaps(nil, def.Defaults)
 	if runInput.Preset != "" {
 		preset, ok := def.Presets[runInput.Preset]
 		if !ok {
-			return nil, fmt.Errorf("preset %q not found", runInput.Preset)
+			return def, nil, "", fmt.Errorf("preset %q not found", runInput.Preset)
 		}
 		vars = mergeActorMaps(vars, preset)
 	}
@@ -552,11 +627,34 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	vars = mergeActorMaps(vars, runInput.Input)
 	rendered, err := renderActorDefinition(def, vars)
 	if err != nil {
+		return def, nil, "", err
+	}
+	return rendered, vars, runInput.Preset, nil
+}
+
+func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run *actorQueuedRun) (*actorExecution, error) {
+	now := time.Now().UTC()
+	rendered, vars, preset, err := renderQueuedActor(run)
+	if err != nil {
 		return nil, err
+	}
+	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
+	preflightCtx, cancel := context.WithDeadline(workerCtx, now.Add(time.Duration(maxSeconds)*time.Second))
+	defer cancel()
+	if err := resolveMobileBrowser(preflightCtx, ctx, &rendered); err != nil {
+		return nil, err
+	}
+	if rendered.Browser.Backend == "mobile" && run.ID > 0 {
+		var key string
+		if err := ctx.AppDB().QueryRow(`SELECT queue_key FROM actors_runs WHERE id=?`, run.ID).Scan(&key); err != nil {
+			return nil, err
+		}
+		if key != mobileQueueKey(rendered.Browser) {
+			return nil, errors.New("Mobile target changed after enqueue; create a fresh run")
+		}
 	}
 	maxPages := boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages)
 	maxItems := boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems)
-	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
 	if rendered.Crawl != nil {
 		maxPages = boundedInt(rendered.Crawl.Frontier.MaxPages, maxCrawlFrontierSize, 1, maxCrawlFrontierSize)
 		maxItems = boundedInt(rendered.Crawl.Frontier.MaxItems, maxActorItems, 1, maxActorItems)
@@ -571,12 +669,17 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	if rendered.Limits.StepRetries != nil {
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
-	now := time.Now().UTC()
-	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, lastStartedStep: -1, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
+	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, lastStartedStep: -1, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
 	out := map[string]any{}
+	if browser.Target != nil {
+		out["target"] = browser.Target
+	}
+	if browser.DeviceID != "" {
+		out["device_id"] = browser.DeviceID
+	}
 	if browser.Backend != "" {
 		out["backend"] = browser.Backend
 	}
@@ -589,7 +692,21 @@ func actorBrowserAudit(browser actorBrowser) map[string]any {
 	return out
 }
 
+func actorStepMayWrite(step actorStep) bool {
+	switch step.Action {
+	case "click", "click_verified":
+		return step.ExpectedEffect != "navigation_only" && (step.ExpectedEffect != "open_configuration" || step.OnceKey != "")
+	case "scroll", "paginate":
+		return false
+	default:
+		return !readOnlyActorAction(step.Action)
+	}
+}
+
 func (e *actorExecution) runSteps() (map[string]any, error) {
+	if e.definition.SelectedPlatform != "" {
+		e.addTrace("platform_variant", "selected", "", map[string]any{"platform": e.definition.SelectedPlatform, "browser": actorBrowserAudit(e.definition.Browser)})
+	}
 	if e.crawl != nil {
 		return e.runCrawl()
 	}
@@ -599,7 +716,8 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		step := e.definition.Steps[index]
 		e.lastStartedStep = index
-		priorCommit, priorPreparation := e.commitAttempted, e.preparationAttempted
+		priorCommit, priorPreparation, priorWrite := e.commitAttempted, e.preparationAttempted, e.possibleExternalWrite
+		e.possibleExternalWrite = priorWrite || actorStepMayWrite(step)
 		if step.EffectPhase == "prepare" {
 			e.preparationAttempted = true
 		} else if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
@@ -618,7 +736,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		for attempt := 0; attempt <= retries; attempt++ {
 			err = e.runStep(step)
-			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
+			if err == nil || errors.Is(err, errActorCancelled) || (actorStepMayWrite(step) && actorOperationTimedOut(err)) || !retryableActorError(err) || e.definition.Browser.Backend == "mobile" || screenInputAction(step.Action) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
 			if step.ReadRetries != nil && !transientReadNavigationError(err) {
@@ -634,7 +752,9 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 				// after a transport timeout. The saved context and run stay fixed;
 				// no earlier upload, fill, click or consequential step is replayed.
 				if step.ReadRetries != nil && e.session != nil {
-					e.app.closeBrowser(e.ctx, e.session.SessionID)
+					if closeErr := e.app.closeBrowser(e.ctx, e.session.SessionID); closeErr != nil {
+						return nil, fmt.Errorf("close browser before retry: %w", closeErr)
+					}
 					e.session = nil
 				}
 			}
@@ -642,9 +762,9 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		if errors.Is(err, errActorEffectReserved) || errors.Is(err, errActorRecoveryBinding) || errors.Is(err, errActorClickNotDispatched) {
 			// The durable guard proves this run never dispatched this effect.
 			// Earlier effects remain recorded; unknown dispatch failures stay true.
-			e.commitAttempted, e.preparationAttempted = priorCommit, priorPreparation
+			e.commitAttempted, e.preparationAttempted, e.possibleExternalWrite = priorCommit, priorPreparation, priorWrite
 		}
-		if err != nil && step.Optional && !errors.Is(err, errActorCancelled) {
+		if err != nil && step.Optional && step.Action != "upload_file" && e.definition.Browser.Backend != "mobile" && !errors.Is(err, errActorCancelled) && !(actorStepMayWrite(step) && actorOperationTimedOut(err)) {
 			e.addTrace(step.Action, "skipped", err.Error(), map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds()})
 			continue
 		}
@@ -662,7 +782,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 	}
 	if len(e.items) > 0 {
 		jsonl := encodeJSONL(e.items)
-		art, err := storeBytesArtifact(e.ctx, e.run.ID, "dataset-jsonl", "actor dataset", "application/x-ndjson", jsonl, ".jsonl")
+		art, err := storeBytesArtifact(e.workerCtx, e.ctx, e.run.ID, "dataset-jsonl", "actor dataset", "application/x-ndjson", jsonl, ".jsonl")
 		if err != nil {
 			return nil, fmt.Errorf("persist JSONL dataset: %w", err)
 		}
@@ -671,7 +791,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		art, err = storeBytesArtifact(e.ctx, e.run.ID, "dataset-csv", "actor dataset", "text/csv", csvBytes, ".csv")
+		art, err = storeBytesArtifact(e.workerCtx, e.ctx, e.run.ID, "dataset-csv", "actor dataset", "text/csv", csvBytes, ".csv")
 		if err != nil {
 			return nil, fmt.Errorf("persist CSV dataset: %w", err)
 		}
@@ -680,8 +800,24 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
+func actorOperationTimedOut(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"action_timeout", "deadline exceeded", "timed out", "timed_out=true"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func retryableActorError(err error) bool {
-	if err == nil || errors.Is(err, errActorCancelled) {
+	if err == nil || errors.Is(err, errActorCancelled) || errors.Is(err, errActorUploadNotConfirmed) {
 		return false
 	}
 	message := strings.ToLower(err.Error())
@@ -698,10 +834,20 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return errors.New("write action rejected in read_only operation")
 	}
 	switch step.Action {
+	case "open":
+		return e.gotoURL("")
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private":
+		return e.screenInteract(step)
+	case "prepare_upload":
+		return e.prepareUpload(step)
 	case "reveal_control":
 		return e.revealControl(step)
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
+	case "goto_record":
+		return e.gotoRecord(step)
+	case "read_navigation":
+		return e.clickReadNavigation(step.Locator)
 	case "inspect_control":
 		return e.inspectControl(step)
 	case "dismiss_inspection":
@@ -785,7 +931,14 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.extractPage(step)
 	case "select_record":
 		return e.selectRecord(step)
+	case "assert_no_record":
+		return e.assertNoRecord(step)
 	case "assert_values":
+		return e.assertValues(step)
+	case "assert_inputs":
+		previous := e.lastValues
+		e.lastValues = e.variables
+		defer func() { e.lastValues = previous }()
 		return e.assertValues(step)
 	case "paginate":
 		return e.paginate(step)
@@ -855,6 +1008,24 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if assertion.EqualsURL != nil {
 			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
 				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
+		if assertion.NotMatches != "" {
+			values := []any{actual}
+			switch v := actual.(type) {
+			case []any:
+				values = v
+			case []string:
+				values = nil
+				for _, item := range v {
+					values = append(values, item)
+				}
+			}
+			for _, value := range values {
+				text, ok := value.(string)
+				if !ok || regexp.MustCompile(assertion.NotMatches).MatchString(text) {
+					return fmt.Errorf("excluded pattern matched or unsupported value for %q", field)
+				}
 			}
 		}
 		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {
@@ -965,12 +1136,23 @@ func actorValuesEqual(left, right any, tolerance float64) bool {
 	return strings.EqualFold(strings.TrimSpace(stringFromAny(left)), strings.TrimSpace(stringFromAny(right)))
 }
 
-func (e *actorExecution) gotoURL(target string) error {
-	if !hostAllowed(target, e.definition.AllowedHosts) {
+func (e *actorExecution) gotoURL(target string) error { return e.gotoURLMode(target, false) }
+
+// gotoReadOnlyURL asserts a read-only GET to Computer (0.9.2+), which may then
+// retry a transient Browserbase failure once in a fresh page. Older Computer
+// versions ignore the flag.
+func (e *actorExecution) gotoReadOnlyURL(target string) error { return e.gotoURLMode(target, true) }
+
+func (e *actorExecution) gotoURLMode(target string, readOnly bool) error {
+	if target != "" && !hostAllowed(target, e.definition.AllowedHosts) {
 		return fmt.Errorf("URL host is not in allowed_hosts: %s", target)
 	}
-	if err := validateBrowserTarget(e.ctx, target); err != nil {
-		return err
+	if target != "" {
+		if err := validateBrowserTarget(e.ctx, target); err != nil {
+			return err
+		}
+	} else if e.definition.Browser.Backend != "mobile" {
+		return errors.New("open requires mobile backend")
 	}
 	if e.session == nil {
 		remainingSeconds := maxInt64(1, int64(math.Ceil(time.Until(e.deadline).Seconds())))
@@ -978,6 +1160,18 @@ func (e *actorExecution) gotoURL(target string) error {
 			remainingSeconds = maxInt64(60, remainingSeconds)
 		}
 		args := map[string]any{"persist": e.definition.Browser.Persist, "timeout": remainingSeconds}
+		if e.definition.PrivateScreen {
+			args["extraction_only"] = true
+		}
+		mobile := e.definition.Browser.Backend == "mobile"
+		if mobile {
+			args["persist"] = true
+			args["timeout"] = maxInt64(30, remainingSeconds)
+			args["target"] = e.definition.Browser.Target
+			if err := e.lockMobileDevice(); err != nil {
+				return err
+			}
+		}
 		if e.definition.Browser.ContextID != "" {
 			if err := e.lockContext(); err != nil {
 				return err
@@ -1006,11 +1200,22 @@ func (e *actorExecution) gotoURL(target string) error {
 		if e.definition.Browser.ProxySticky != "" {
 			args["proxy_sticky"] = e.definition.Browser.ProxySticky
 		}
-		session, err := e.app.openBrowser(e.workerCtx, e.ctx, target, args)
+		openURL := target
+		if mobile {
+			openURL = ""
+		}
+		session, err := e.app.openBrowser(e.workerCtx, e.ctx, openURL, args)
 		if err != nil {
 			return err
 		}
 		e.session = session
+		if mobile {
+			if err := validateMobileCapabilities(e.definition, session); err != nil {
+				return err
+			}
+		} else if session.Backend == "mobile" {
+			return errors.New("Mobile sessions require explicit browser.backend=mobile and target capability checks")
+		}
 		e.currentURL = firstNonEmpty(session.CurrentURL, target)
 		if e.definition.Browser.Backend != "" && session.Backend != e.definition.Browser.Backend {
 			e.app.closeBrowser(e.ctx, session.SessionID)
@@ -1023,11 +1228,26 @@ func (e *actorExecution) gotoURL(target string) error {
 			return err
 		}
 		e.persistProgress("browser opened")
+		if mobile && target != "" {
+			return e.gotoURLMode(target, readOnly)
+		}
 		return nil
 	}
+	if target == "" {
+		return nil
+	}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target}
+	if readOnly {
+		args["read_only"] = true
+	}
 	var out map[string]any
-	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target}), &out); err != nil {
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
+	}
+	// A structured failure is never a successful navigation, even when the
+	// client did not surface Computer's MCP error bit.
+	if out["success"] == false || out["failed"] == true {
+		return fmt.Errorf("Computer navigation failed: %s", firstNonEmpty(stringFromAny(out["error"]), "coverage incomplete; inspect before retrying"))
 	}
 	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), target)
 	e.persistProgress("navigated")
@@ -1378,7 +1598,7 @@ func (e *actorExecution) checkpoint() error {
 	default:
 	}
 	if time.Now().After(e.deadline) {
-		return errors.New("actor max_duration_seconds exceeded")
+		return errActorDeadline
 	}
 	var requested sql.NullTime
 	if err := e.ctx.AppDB().QueryRow(`SELECT cancel_requested_at FROM actors_runs WHERE id=? AND project_id=?`, e.run.ID, projectID(e.ctx)).Scan(&requested); err != nil {
@@ -1388,6 +1608,72 @@ func (e *actorExecution) checkpoint() error {
 		return errActorCancelled
 	}
 	return nil
+}
+
+var uploadDiagnosticURL = regexp.MustCompile(`(?i)(?:https?://|data:|file://|blobref://)[^\s"'<>]+`)
+var uploadDiagnosticBearer = regexp.MustCompile(`(?i)bearer\s+[^\s,;"'<>]+`)
+var uploadDiagnosticCredential = regexp.MustCompile(`(?i)(?:token|password|secret|authorization|cookie|api[_-]?key|signature|base64)["']?\s*[=:]\s*["']?[^\s,;"'<>]+`)
+
+func uploadDiagnosticText(step actorStep, text string) string {
+	// Redact known source values before bounding text so a truncated URL,
+	// payload or local path cannot leave part of a secret in the trace.
+	for _, sensitive := range []string{step.SourceURL, step.Base64, step.FilePath} {
+		if sensitive != "" {
+			text = strings.ReplaceAll(text, sensitive, "[redacted]")
+		}
+	}
+	text = uploadDiagnosticURL.ReplaceAllString(text, "[redacted URL]")
+	text = uploadDiagnosticBearer.ReplaceAllString(text, "[redacted credential]")
+	text = uploadDiagnosticCredential.ReplaceAllString(text, "[redacted credential]")
+	return truncateString(text, 256)
+}
+
+func uploadDiagnosticFields(step actorStep, source map[string]any, keys []string) map[string]any {
+	out := map[string]any{}
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		switch v := value.(type) {
+		case string:
+			out[key] = uploadDiagnosticText(step, v)
+		case nil, bool, float64, int, int64:
+			out[key] = v
+		default:
+			// Never copy arbitrary nested responses, headers or binary data.
+			out[key] = "[non-scalar omitted]"
+		}
+	}
+	return out
+}
+
+func (e *actorExecution) traceUploadReceipt(step actorStep, out map[string]any, err error) {
+	fields := []string{"uploaded", "success", "action_dispatched", "failed", "prepared", "filename", "size_bytes", "sha256", "mime_type", "file_source", "backend"}
+	expected := map[string]any{}
+	if step.Filename != "" {
+		expected["filename"] = uploadDiagnosticText(step, step.Filename)
+	}
+	if step.ExpectedSHA256 != "" {
+		expected["sha256"] = uploadDiagnosticText(step, step.ExpectedSHA256)
+	}
+	data := map[string]any{
+		"step": e.lastStartedStep, "expected": expected,
+		"observed": uploadDiagnosticFields(step, out, fields),
+		// A fixed scalar allowlist and 256-byte strings bound the retained
+		// Computer response even when it contains screenshots or file bytes.
+		"computer_response": uploadDiagnosticFields(step, out, append(fields, "error", "error_code", "message", "status", "retryable")),
+	}
+	status := "confirmed"
+	if err != nil {
+		status = "failed"
+		data["error"] = uploadDiagnosticText(step, err.Error())
+	}
+	// Keep the latest receipt/failure even when earlier steps filled the trace.
+	if len(e.trace) >= maxActorTraceEvents {
+		e.trace = e.trace[:maxActorTraceEvents-1]
+	}
+	e.addTrace("upload_file.receipt", status, "", data)
 }
 
 func (e *actorExecution) addTrace(action, status, message string, data map[string]any) {
@@ -1411,7 +1697,7 @@ func (e *actorExecution) persistProgress(message string) error {
 	progress := map[string]any{
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
-		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted, "preparation_attempted": e.preparationAttempted},
+		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted, "preparation_attempted": e.preparationAttempted, "possible_external_write": e.possibleExternalWrite},
 	}
 	if e.coverage != nil {
 		progress["coverage"] = e.coverage
@@ -1419,6 +1705,12 @@ func (e *actorExecution) persistProgress(message string) error {
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID
 		progress["backend"] = e.session.Backend
+		if e.session.Target != nil {
+			progress["target"] = e.session.Target
+		}
+		if browser := actorBrowserAudit(e.definition.Browser); len(browser) > 0 {
+			progress["browser_config"] = browser
+		}
 	}
 	b, _ := json.Marshal(progress)
 	result, err := e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))
@@ -1447,7 +1739,7 @@ func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary,
 	if err != nil {
 		return nil, err
 	}
-	return storeBytesArtifact(e.ctx, e.run.ID, "screenshot", title, "image/png", b, ".png")
+	return storeBytesArtifact(e.workerCtx, e.ctx, e.run.ID, "screenshot", title, "image/png", b, ".png")
 }
 
 func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL string) (map[string]any, error) {
@@ -1687,8 +1979,7 @@ func coerceActorValue(raw, typ, baseURL string) (any, error) {
 	case "money", "number":
 		return parseActorNumber(raw)
 	case "integer":
-		n, err := parseActorNumber(raw)
-		return int64(n), err
+		return parseActorInteger(raw)
 	case "boolean":
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "true", "yes", "1", "on":
@@ -1704,6 +1995,48 @@ func coerceActorValue(raw, typ, baseURL string) (any, error) {
 		}
 		return nil, fmt.Errorf("unsupported type %q", typ)
 	}
+}
+
+// Integer extraction accepts whole numbers and consistent three-digit grouping
+// (comma, dot or a Unicode space). It never truncates a decimal or round-trips
+// counts through float64: audience limits and record IDs must remain exact.
+func parseActorInteger(raw string) (int64, error) {
+	loc := actorIntegerPattern.FindStringIndex(raw)
+	if loc == nil {
+		return 0, fmt.Errorf("%q contains no integer", raw)
+	}
+	if (loc[0] > 0 && strings.ContainsRune(".,", rune(raw[loc[0]-1]))) || actorExponentSuffix.MatchString(raw[loc[1]:]) {
+		return 0, fmt.Errorf("%q is not a whole integer", raw)
+	}
+	s := strings.TrimSpace(raw[loc[0]:loc[1]])
+	sign := ""
+	if s[0] == '+' || s[0] == '-' {
+		sign, s = s[:1], s[1:]
+	}
+	var digits strings.Builder
+	separator, groupLength, grouped := rune(0), 0, false
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+			groupLength++
+			continue
+		}
+		if unicode.IsSpace(r) {
+			r = ' '
+		}
+		if (r != ',' && r != '.' && r != ' ') || (separator != 0 && separator != r) || (!grouped && (groupLength < 1 || groupLength > 3)) || (grouped && groupLength != 3) {
+			return 0, fmt.Errorf("%q has invalid integer grouping", raw)
+		}
+		separator, groupLength, grouped = r, 0, true
+	}
+	if grouped && groupLength != 3 {
+		return 0, fmt.Errorf("%q has invalid integer grouping", raw)
+	}
+	n, err := strconv.ParseInt(sign+digits.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is outside the integer range: %w", raw, err)
+	}
+	return n, nil
 }
 
 func parseActorNumber(raw string) (float64, error) {
@@ -1988,7 +2321,7 @@ func previewActorTrace(trace []map[string]any) []map[string]any {
 	return out
 }
 
-func storeBytesArtifact(ctx *sdk.AppCtx, runID int64, kind, title, contentType string, data []byte, extension string) (*artifactSummary, error) {
+func storeBytesArtifact(callCtx context.Context, ctx *sdk.AppCtx, runID int64, kind, title, contentType string, data []byte, extension string) (*artifactSummary, error) {
 	folder := "/.actors/" + kind + "/" + time.Now().UTC().Format("2006-01")
 	var up struct {
 		ID  int64  `json:"id"`
@@ -1996,12 +2329,14 @@ func storeBytesArtifact(ctx *sdk.AppCtx, runID int64, kind, title, contentType s
 	}
 	name := safeFilename(firstNonEmpty(title, kind)) + "-" + randName() + extension
 	args := withProjectID(ctx, map[string]any{"name": name, "content_base64": base64.StdEncoding.EncodeToString(data), "folder": folder, "content_type": contentType, "source": "actors:" + kind, "visibility": "private"})
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", args, &up); err != nil {
+	if err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "storage", "files_upload", args, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
 	art, err := insertArtifact(ctx, runID, kind, "", title, up.ID, up.URL, contentType, len(data), compactArtifactMetadata(kind, "", title, contentType, len(data)))
 	if err != nil {
-		rollbackStoredFile(ctx, up.ID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), actorCleanupTimeout)
+		defer cancel()
+		rollbackStoredFileContext(cleanupCtx, ctx, up.ID)
 		return nil, err
 	}
 	return art, nil

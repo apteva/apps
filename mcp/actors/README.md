@@ -1,6 +1,12 @@
 # Actors
 
-Actors v0.2.0 adds durable schema version 2 crawls with URL fan-out, route matching, bounded retries, resumable frontier state, keyed materialized datasets, and declarative normalization transforms. Computer remains the browser and JavaScript runtime.
+Actors v0.7.0 adds guarded Android native field reads, verified replacement and explicit clearing, alongside the existing iOS native guards. The shared [Instagram example](examples/instagram.md) provides both platform variants. This release retains confirmed upload receipts and adds the reviewed media-example guard regressions from the other Actors work.
+
+Actors v0.6.0 adds platform variants: one operation can have iOS, Android and web implementations, selected before queueing with the chosen implementation and device pinned in the run snapshot.
+
+Actors v0.5.2 requires a valid Computer upload receipt before an upload step can complete, with filename and byte-count evidence plus configured filename/checksum checks. Missing or rejected receipts fail with `upload_not_confirmed` and stop before publication, including optional steps, without automatic replay. Upload traces retain bounded sanitized diagnostics. Staging remains separate, successful `output.media` stays compatible, and actor definitions must still verify the site's ready attachment before publishing.
+
+Actors v0.5.1 declares `inspect_views` navigations read-only to Computer, so Computer 0.9.2+ can retry a transient Browserbase navigation failure once in a fresh page; a navigation result with `success:false` or `failed:true` now fails the run with incomplete coverage, and Actors no longer adds its own HTTP/2 retry on top of a structured Computer failure. Actors v0.5.0 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run), bounds saved pagination ID lists, and adds private native Mobile screen steps. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
 
 Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
 
@@ -29,7 +35,11 @@ After saving it:
 {"actor_id": 1, "operation": "read", "input": {"url": "https://example.com"}}
 ```
 
-Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows.
+Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows. Pass `"detail": "summary"` to `actors_run_get` for the compact terminal receipt (status, operation, revision, timings, `dataset_count`, failure/effect evidence and compact read coverage) without the definition snapshot, input, previews, traces or per-round pagination IDs. The final dataset page of a finished run (`has_more: false`) includes the same receipt as `run_summary`.
+
+Saved read-pagination evidence records `before_count`, `after_count` and `new_count` for every round. ID lists longer than 50 keep their first and last 25 IDs and set `ids_truncated`; the run dataset holds every observed record.
+
+Set the Actors installation’s `worker_limit` to control concurrent runs (default 4, range 1–32). Runs for the same saved browser context or read continuation wait for each other. Independent runs can use the other slots. Run details report `wait_reason` while queued, plus separate `queue_wait_ms` and `execution_ms` timings. The actor’s `max_duration_seconds` budget begins at execution. If a timed-out run may have changed external state, its result sets `reconciliation_required` and disables Retry for that run. Reconcile the outcome before explicitly queuing another run.
 
 For a saved login, add `browser.context_id` using a context created through Computer. Omit `backend` to defer to Computer; the saved context can determine its backend. The context remains owned by Computer, and Actors requests `persist: true`. Do not store credentials in inputs: input/definition snapshots are intentionally retained.
 
@@ -37,9 +47,17 @@ For a saved login, add `browser.context_id` using a context created through Comp
 
 `upload_file` attaches an image or file using a semantic locator and exactly one of `source_url`, `base64`, or `file_path`. See `examples/media-publisher.json`. For a hosted video, use ordinary `fill`/`set_text` to enter `{{video_url}}` in the site's video URL field; no upload or provider-specific code is needed. `examples/video-url-publisher.json` is a generic starting point. Replace the host and controls for your site. The saved Patreon actor can accept a Bunny Stream player URL such as `https://iframe.mediadelivery.net/embed/{videoLibraryId}/{guid}`, constructed from the integration's video metadata.
 
+An upload requires a Computer receipt with `uploaded: true`, a nonempty filename and a positive integral `size_bytes`. Explicit `success: false`, `action_dispatched: false` or `failed: true` rejects the receipt. When the step supplies `filename` or `expected_sha256`, the receipt must match. Missing or invalid receipts fail with `upload_not_confirmed`, stop even optional upload steps, and are never automatically retried. The run trace retains expected/observed file details and a bounded scalar allowlist of the Computer response with source values, URLs and credentials redacted. Successful uploads keep the existing `output.media` shape. `prepare_upload` remains staging (`prepared: true, uploaded: false`). A receipt proves delivery to the browser control; actor definitions must separately verify the site's ready attachment (including Patreon's) before publishing. Missing receipts alone do not explain the underlying upload failure.
+
 Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a bounded `timeout_ms` (500–30000). A timeout or unmatched result fails the actor before subsequent actions. `media_present` verifies a rendered audio/video player; combine it with a saved-draft text condition when needed. Successful embeds return provider, iframe and thumbnail URLs under run output `media`. This confirms the rendered embed, not continuous video playback. The same action supports URL, text, selector and semantic-target conditions for other sites.
 
 ## Verify saved copy
+
+Whole-number fields (`type: integer`) use exact signed 64-bit parsing. Comma,
+dot and Unicode-space thousands separators must form consistent three-digit
+groups (for example, `1,041` becomes `1041`). Fractional values, malformed groups
+and overflow fail extraction instead of truncating or rounding audience counts
+and IDs. Money and decimal fields keep their existing locale-aware parsing.
 
 Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Use an explicit `separator` when the editor represents paragraph boundaries differently from inline line breaks (for example, `"\n\n"` for ProseMirror paragraphs). Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
 
@@ -70,7 +88,7 @@ Routes are relative to the server's authenticated app mount, normally `/api/apps
 | GET | `/actors/{id}?revision=N` | Retrieve an exact immutable definition and operation names |
 | DELETE | `/actors/{id}` | Delete an actor after removing tasks and schedules |
 | POST | `/actors/run` | Queue a run; same input as `actors_run` |
-| GET | `/runs`, `/runs/{id}` | History and run detail |
+| GET | `/runs`, `/runs/{id}?detail=full\|summary` | History and run detail |
 | POST | `/runs/{id}/cancel`, `/runs/{id}/retry` | Cancel / explicitly repeat the snapshot |
 | POST | `/runs/{id}/recover` | Recover with a reviewed revision and fresh duplicate inspection |
 | GET | `/runs/{id}/dataset?after=0&limit=50` | Committed items |
@@ -115,7 +133,9 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.100.0`, derived from fetched tag ancestry (`v0.99.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.115.2` (`71094ff`), verified against fetched tags as a descendant of `v0.115.1`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+
+Read-view identity can use a unique native link (`href`) or image (`src`). Image identity is useful for full-screen tables that hide navigation; declare an anchored URL pattern containing the expected account/profile identity. Every page must contain exactly one matching image with a nonempty source URL on the declared identity host. Empty or ambiguous identity evidence fails the read. Existing URL, loading, filter, total-count and pagination guards continue to apply.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
@@ -190,7 +210,7 @@ preset.
 
 ## Verified record and media recovery (0.2.19)
 
-Definitions support up to 500 named operations within the existing 1 MiB definition limit. This does not raise the 100-step limit for an individual operation or its runtime/dataset limits. Use `actors_get` with an exact revision and `operation` to retrieve only the operation needed for execution.
+Definitions support up to 500 named operations within the 2 MiB definition limit. This does not raise the 100-step limit for an individual operation or its runtime/dataset limits. Use `actors_get` with an exact revision and `operation` to retrieve only the operation needed for execution.
 
 `select_option` accepts exactly one of `value`, `values`, `text` or `texts`, so browser dropdowns can be selected using either internal values or observed display labels. Optional `mode` is forwarded to Computer (`replace`, `add`, `remove` or `toggle`); it defaults to Computer's normal replace behavior.
 A write operation may declare an `inspect_views` step with `read_only:true`;
@@ -406,3 +426,166 @@ Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,
 A reviewed `goto` step can opt into `read_only: true, read_retries: 1` (maximum2). This overrides the legacy operation-wide retry limit only for that navigation. Transport timeouts may reopen the same saved browser context and repeat that read, within the original run deadline. It never replays earlier fills/uploads or subsequent clicks, and non-transient errors still stop. The field is rejected on writes, secret operations and consequential/effect-bearing steps. Existing definitions and global retry defaults are unchanged.
 
 The optional `examples/flights/` definitions and transaction fixtures document local checkout preparation and synthetic payment guards. They do not enable live ticket purchasing or install any site-specific actor automatically.
+## Native navigation and Clips4Sale example
+
+Read views may use `navigation` with one to five exact SOM-only native tab/button
+locators, mutually exclusive with `link_selector` and `use_entry_page`. Each hop
+requires a fresh control whose effect is `navigation_only`. `read_navigation`
+provides the same check for non-optional read-only steps.
+
+`assert_no_record` rejects an exact field/value duplicate only after complete
+collection coverage with no remaining results. `assert_inputs` checks execution
+variables before writes while preserving the previous extraction evidence.
+For searchable or controlled dropdowns, use the observed native control and
+an exact SOM option, then verify the saved label. `select_option` uses internal
+`value`/`values`.
+
+The [Clips4Sale Creator example](examples/clips4sale-control.md) covers account,
+current-month statistics, catalog coverage, draft preparation, read-only preflight
+and guarded submission for review. It is caller-configured and currently gates
+publication to explicitly declared no-real-person footage.
+
+A `navigation_only` opener can reserve a `once_key` without
+`confirm_consequence`. Navigation is not an irreversible acknowledgement class;
+consequential clicks continue to require a matching acknowledgement.
+
+`goto_record` follows an absolute HTTP URL selected from a complete verified
+collection. It requires a unique collected record, read-only non-optional
+navigation and the usual host checks. This supports reopening a persisted draft
+whose ID was assigned by the site during upload.
+
+Record selection and duplicate assertions use only the latest verified
+collection. Prior composer extractions and older catalog snapshots remain in
+the audit dataset but cannot satisfy those checks.
+
+
+## Mobile screen workflows (v0.4.0)
+
+Requires Computer 0.8.0 and its Mobile binding (Mobile 0.3.2+). Select
+`browser.backend: mobile` with `device_id`, `target`, or a Computer-owned
+Mobile `context_id`. A target uses `kind: mobile`, `device_id`, optional
+`platform`, `physical`, and `mode: screen`. Saved contexts bind the exact device
+and project. They reuse shared device/app data; they do not isolate accounts
+or restore snapshots. Use explicit `launch_app` steps instead of target.app_id.
+Browser proxy, viewport and emulation settings are unavailable for Mobile.
+
+```json
+{
+  "schema_version": 1,
+  "browser": {"backend": "mobile", "target": {"kind": "mobile", "device_id": "YOUR_DEVICE_ID", "mode": "screen"}},
+  "allowed_hosts": ["example.com"],
+  "limits": {"max_duration_seconds": 180, "step_retries": 0},
+  "steps": [
+    {"action": "open"},
+    {"action": "goto", "url": "https://example.com/"},
+    {"action": "screenshot", "label": "Mobile page"}
+  ]
+}
+```
+
+`open` acquires a session without navigating; a first `goto` also opens one.
+Actors checks the complete operation against Computer's returned capabilities
+before sending navigation or input. Supported steps: `open`, `goto`,
+`screenshot`, `wait`, `tap` (`x`, `y`), `swipe` (`x`, `y`, `to_x`, `to_y`),
+`type` (`text`), `key` (`key`), `scroll` (`direction`, `amount`), `home`,
+`launch_app`/`stop_app` (`app_id`), and local `assert_inputs`.
+Coordinates are integer pixels in a fresh Computer screenshot, including zero;
+they may be templated. Keys are capability-dependent (`home`, `enter`, and
+Android `back`). Empty allowed_hosts is permitted for native-only operations;
+web navigation still requires an allowed host. Screen inputs are unavailable
+in read_only operations.
+
+DOM/SoM locators, extraction, form controls, uploads, semantic consequence
+guards and crawls are rejected for Mobile. Existing selector-based actors,
+including KDP, require a browser backend. Screen inputs have no semantic target
+verification; inspect screenshots to choose coordinates. Mobile steps are not
+automatically retried. A failed or timed-out input retains possible external
+write/reconciliation evidence before any explicit retry.
+
+Runs resolve saved contexts to device IDs before enqueueing. Different contexts
+for the same phone share a device queue lock across projects; unrelated devices
+and browser sessions can use other worker slots. If a saved target changes while
+queued, execution fails before opening a session. Failed cleanup quarantines the
+device until its existing lease expires. Mobile itself also owns device leases
+across other callers. Run details show the resolved device and normal queue and
+execution timing. Closing a session preserves device app data.
+
+### Native screen steps (v0.5.0)
+
+Native steps act on accessibility elements of the foreground app instead of
+pixel coordinates. Each one names `native_app` and 1–12 `native_required`
+markers that must all be on screen before Computer acts:
+
+- `native_assert` and `native_wait` (`duration_ms`, 1–28000) only check markers.
+- `native_tap`, `native_tap_badged` and `native_tap_if_present` tap the exact
+  `native_target`.
+- `native_type` and `native_replace` enter 1–256 bytes of single-line `text`
+  into `native_target`.
+- `native_type_secret` enters a `secret_ref` into `native_target`;
+  `native_type_private` with `mode: "keypad"` taps a numeric secret digit by
+  digit.
+
+Secret steps require `private_screen: true` on the operation and a saved
+`browser.context_id`. A private operation opens the session extraction-only,
+saves no screenshots and requests no observations after input. Its
+`browser_secrets` entry must name the same `context_id` and `native_app` and no
+`host`; browser `fill_secret` rejects native-bound entries. Literal text and
+optional secret steps are rejected. These steps need a Computer release that
+reports the native actions in its Mobile capabilities; otherwise the
+capability preflight fails the run before any input.
+
+
+## Platform variants (v0.6.0)
+
+One actor keeps the same operation names across iOS, Android and web. An operation
+uses either `steps` or a `variants` map keyed by `ios`, `android`, or `web`.
+Each variant supplies its complete `steps`, an optional full `browser` override,
+optional `required_explicit_inputs`, and an optional `output_schema` override.
+Variant `read_only` and `private_screen` flags can strengthen the shared policy;
+they cannot turn off a shared restriction. Schema version 2 crawls and recovery
+policies are not supported in variant operations. Existing operations are unchanged.
+
+```json
+{
+  "schema_version": 1,
+  "presets": {
+    "iphone": {"platform": "ios"},
+    "android_phone": {"platform": "android"}
+  },
+  "operations": {
+    "open_instagram": {
+      "variants": {
+        "ios": {
+          "browser": {"backend": "mobile", "context_id": "YOUR_IOS_CONTEXT"},
+          "steps": [{"action": "open"}, {"action": "launch_app", "app_id": "com.burbn.instagram"}]
+        },
+        "android": {
+          "browser": {"backend": "mobile", "target": {"kind": "mobile", "device_id": "android:YOUR_SERIAL", "platform": "android", "mode": "screen"}},
+          "steps": [{"action": "open"}, {"action": "launch_app", "app_id": "com.instagram.android"}]
+        }
+      }
+    }
+  }
+}
+```
+
+Call `actors_run` with the same actor ID and operation, using
+`input: {"platform": "android"}` or `preset: "android_phone"`. The usual
+input precedence applies: defaults, preset, schedule overrides, explicit input.
+If no platform value is supplied, selection uses the shared effective browser's
+saved context or target platform (including `ios:`/`android:` device IDs).
+Without a usable common target, supply the platform explicitly. Other browser
+backends select `web`. There is no fallback to another platform's steps.
+
+Selection occurs before template expansion of the chosen steps, so unused
+implementations do not require their inputs. The selected variant and resolved
+context/device are saved in the immutable run snapshot. Retries reuse it;
+context retargeting is rejected before opening a session. Saved tasks and Jobs
+schedules carry the same selection through their input or preset. Run output,
+compact receipts and traces report the selected `platform`.
+
+`actors_get` with `operation` lists supported `platforms` and separate input
+requirements per platform. Add `platform: "android"` for that implementation's
+complete contract; immutable exports support the same selector. Response and
+export bounds remain enforced. Variants do not add device capabilities: each
+implementation must use actions supported by its Computer/Mobile session.

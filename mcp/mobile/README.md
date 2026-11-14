@@ -494,3 +494,13 @@ Use dedicated phones/accounts. Ordinary screen interaction does not promise
 undetectable automation. The device's actual network carries browser/app traffic;
 it must be able to reach any preview URL being tested. `localhost` on a phone
 refers to the phone itself.
+
+
+## Android guarded input
+
+Mobile v0.6.0 supports guarded Android field readback and verified replacement.
+Android inputs check the foreground package, exact markers and unique targets.
+Field value guards bind account identity; password fields are never read.
+ADB replacements verify the focused field and resulting text and accept printable
+ASCII only (excluding percent); unsupported bytes fail before clearing a field.
+No input is automatically retried by the Instagram Android operations.

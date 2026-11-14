@@ -216,7 +216,7 @@ func merge(a, b map[string]any) map[string]any {
 	return m
 }
 func actionFields() map[string]any {
-	return map[string]any{"action": enumSchema("navigate", "tap", "swipe", "text", "key", "tap_element", "context"), "session_id": stringSchema(), "url": stringSchema(), "x": coordsSchema(), "y": coordsSchema(), "to_x": coordsSchema(), "to_y": coordsSchema(), "text": stringSchema(), "key": enumSchema("home", "back", "enter"), "using": enumSchema("accessibility id", "id", "xpath", "css selector"), "value": stringSchema(), "context": stringSchema()}
+	return map[string]any{"action": enumSchema("navigate", "tap", "swipe", "text", "key", "tap_element", "context"), "session_id": stringSchema(), "url": stringSchema(), "x": coordsSchema(), "y": coordsSchema(), "to_x": coordsSchema(), "to_y": coordsSchema(), "text": stringSchema(), "replace": boolSchema(), "expected_package": stringSchema(), "expected_resource_id": stringSchema(), "expected_class": stringSchema(), "expected_bounds": stringSchema(), "expected_current": stringSchema(), "key": enumSchema("home", "back", "enter"), "using": enumSchema("accessibility id", "id", "xpath", "css selector"), "value": stringSchema(), "context": stringSchema()}
 }
 func (a *App) MCPTools() []sdk.Tool {
 	deviceFields := map[string]any{"platform": enumSchema("android", "ios"), "physical": boolSchema()}
