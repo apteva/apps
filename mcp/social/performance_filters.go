@@ -64,17 +64,6 @@ func performancePlatforms(r *http.Request) ([]string, error) {
 	}
 	return out, nil
 }
-func performanceDemoRequested(r *http.Request) (bool, error) {
-	raw := r.URL.Query().Get("demo_data")
-	if raw == "" {
-		return false, nil
-	}
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, fmt.Errorf("invalid demo_data")
-	}
-	return value, nil
-}
 
 type performanceProfileOption struct {
 	ID   int64  `json:"id"`
@@ -92,7 +81,6 @@ type performanceOptions struct {
 	Profiles  []performanceProfileOption `json:"profiles"`
 	Accounts  []performanceAccountOption `json:"accounts"`
 	Platforms []string                   `json:"platforms"`
-	Demo      bool                       `json:"demo_data"`
 }
 
 func (a *App) handlePerformanceOptions(w http.ResponseWriter, r *http.Request) {
@@ -104,15 +92,6 @@ func (a *App) handlePerformanceOptions(w http.ResponseWriter, r *http.Request) {
 	project := projectScope(globalCtx, projectArgsFromRequest(r))
 	if project == "" {
 		http.Error(w, "project_id required", 400)
-		return
-	}
-	demo, err := performanceDemoRequested(r)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	if demo {
-		writeJSON(w, demoPerformanceOptions())
 		return
 	}
 	options, err := loadPerformanceOptions(globalCtx, project)
@@ -160,70 +139,4 @@ func loadPerformanceOptions(ctx *sdk.AppCtx, project string) (performanceOptions
 	}
 	sort.Strings(out.Platforms)
 	return out, rows.Err()
-}
-func demoPerformanceOptions() performanceOptions {
-	out := performanceOptions{Profiles: []performanceProfileOption{}, Accounts: []performanceAccountOption{}, Platforms: []string{"facebook", "instagram", "tiktok", "youtube"}, Demo: true}
-	for i, name := range []string{"Aurora Studio", "Cedar Outdoors", "Ember Kitchen", "Lunar Fitness"} {
-		id := int64(i + 1)
-		out.Profiles = append(out.Profiles, performanceProfileOption{id, "Demo · " + name})
-		for j, platform := range out.Platforms {
-			out.Accounts = append(out.Accounts, performanceAccountOption{int64(i*4 + j + 1), name + " · " + platforms[platform].DisplayName, platform, id, "Demo · " + name, "demo"})
-		}
-	}
-	return out
-}
-func (a *App) handleDemoPerformance(w http.ResponseWriter, r *http.Request, window performanceWindow, selectedPlatforms []string) {
-	// Synthetic data never creates accounts, connections or metric rows, and
-	// never enters provider polling, inbox or publication workflows.
-	options := demoPerformanceOptions()
-	profile, err := strconv.ParseInt(nonEmpty(r.URL.Query().Get("profile_id"), "0"), 10, 64)
-	if err != nil || profile < 0 || profile > 4 {
-		http.Error(w, "demo profile not found", 400)
-		return
-	}
-	ids := map[int64]bool{}
-	if raw := r.URL.Query().Get("account_ids"); raw != "" {
-		for _, part := range strings.Split(raw, ",") {
-			id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
-			if err != nil || id < 1 || id > 16 || profile > 0 && (id-1)/4+1 != profile {
-				http.Error(w, "demo account not found in this scope", 400)
-				return
-			}
-			ids[id] = true
-		}
-	}
-	accounts := []widgetAccount{}
-	for _, option := range options.Accounts {
-		if profile > 0 && option.ProfileID != profile || len(ids) > 0 && !ids[option.ID] || !performancePlatformMatches(option.Platform, selectedPlatforms) {
-			continue
-		}
-		followers := int64(2400 + option.ID*1370)
-		acct := widgetAccount{ID: option.ID, Name: option.Name, Platform: option.Platform, ProfileID: option.ProfileID, ProfileName: option.ProfileName, Status: "demo", UpdatedAt: time.Now().UTC().Format(time.RFC3339), Metrics: map[string]widgetMetric{"followers": {Value: &followers, Accounts: 1, Trend: []widgetMetricPoint{}}}, daily: map[string]map[string]int64{}, binding: fmt.Sprint("demo:", option.ID)}
-		for _, name := range []string{"views", "impressions", "interactions"} {
-			acct.daily[name] = map[string]int64{}
-		}
-		for day := window.Previous; day.Before(window.End); day = day.AddDate(0, 0, 1) {
-			stamp := day.Format("2006-01-02")
-			views := int64(160+option.ID*47) + int64(day.Unix()/86400%31)*int64(5+option.ID)
-			acct.daily["views"][stamp] = views
-			acct.daily["impressions"][stamp] = views*3/2 + 77
-			acct.daily["interactions"][stamp] = views/12 + option.ID
-		}
-		for _, name := range widgetMetricNames[1:] {
-			acct.Metrics[name] = summarizeWidgetMetric([]widgetAccount{acct}, name, window.Start, window.End, window.Previous)
-		}
-		accounts = append(accounts, acct)
-	}
-	writePerformanceSummary(w, accounts, window, true)
-}
-func performancePlatformMatches(platform string, selected []string) bool {
-	if len(selected) == 0 {
-		return true
-	}
-	for _, name := range selected {
-		if name == platform {
-			return true
-		}
-	}
-	return false
 }

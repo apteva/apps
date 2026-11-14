@@ -52,8 +52,7 @@ async function select(label: string, value: string) {
   });
 }
 const options: PerformanceOptions = {
-  demo_data: true,
-  profiles: [1, 2, 3, 4].map((id) => ({ id, name: `Demo · Profile ${id}` })),
+  profiles: [1, 2, 3, 4].map((id) => ({ id, name: `Profile ${id}` })),
   platforms: ["facebook", "instagram", "tiktok", "youtube"],
   accounts: [],
 };
@@ -64,7 +63,7 @@ for (let profile = 1; profile <= 4; profile++)
       name: `Brand ${profile} ${platform}`,
       platform,
       profile_id: profile,
-      profile_name: `Demo · Profile ${profile}`,
+      profile_name: `Profile ${profile}`,
     });
 function summary(accounts = options.accounts): PerformanceSummary {
   const metric = (value: number) => ({
@@ -79,7 +78,6 @@ function summary(accounts = options.accounts): PerformanceSummary {
     start_date: "2026-10-17",
     end_date: "2026-11-13",
     updated_at: "2026-11-14T08:00:00Z",
-    demo_data: true,
     accounts: accounts.map((account) => ({
       ...account,
       updated_at: "",
@@ -120,19 +118,18 @@ function mockResponses(requests: URL[]) {
   }) as typeof fetch;
 }
 
-test("performance shows all sixteen demo accounts and filters by named profile and platform", async () => {
+test("performance shows all sixteen persisted accounts and filters by named profile and platform", async () => {
   const requests: URL[] = [];
   mockResponses(requests);
   await render({
     projectId: "brand",
     installId: 34,
     widgetSize: "half",
-    widgetSettings: { demo_data: true },
   });
   expect(browser.document.querySelectorAll("tbody tr")).toHaveLength(16);
-  expect(browser.document.body.textContent).toContain(
-    "4 profiles, 16 synthetic accounts",
-  );
+  expect(
+    browser.document.querySelector('input[aria-label="Demo data"]'),
+  ).toBeNull();
   expect(
     browser.document.querySelectorAll('select[aria-label="Profile"] option'),
   ).toHaveLength(5);
@@ -155,13 +152,13 @@ test("performance shows all sixteen demo accounts and filters by named profile a
         url.searchParams.get("install_id") === "34",
     ),
   ).toBe(true);
-  expect(browser.document.querySelector("tbody a")).toBeNull();
+  expect(browser.document.querySelectorAll("tbody a")).toHaveLength(1);
 });
 
 test("account selection narrows rows and changing profile clears the incompatible selection", async () => {
   const requests: URL[] = [];
   mockResponses(requests);
-  await render({ projectId: "brand", widgetSettings: { demo_data: true } });
+  await render({ projectId: "brand", widgetSettings: {} });
   const check = browser.document.querySelector(
     'input[aria-label="Include Brand 1 facebook"]',
   ) as HTMLInputElement;
@@ -181,7 +178,6 @@ test("date presets and custom UTC dates reach the summary endpoint without ambig
   await render({
     projectId: "brand",
     widgetSettings: {
-      demo_data: true,
       start_date: "2026-11-01",
       end_date: "2026-11-10",
     },
@@ -212,43 +208,35 @@ test("invalid custom dates show a validation error without loading an unfiltered
   expect(browser.document.querySelector("table")).toBeNull();
 });
 
-test("turning demo mode off discards synthetic filters and hides the old sample rows", async () => {
+test("switching projects clears account filters and the previous project's rows", async () => {
   const requests: URL[] = [];
   mockResponses(requests);
   await render({
     projectId: "brand",
-    widgetSettings: { demo_data: true, profile_id: 2, account_ids: "5" },
+    installId: 34,
+    widgetSettings: { profile_id: 2, account_ids: "5" },
   });
+  expect(browser.document.body.textContent).toContain("Brand 2");
   globalThis.fetch = (async (input) => {
     const url = new URL(String(input), browser.location.origin);
     requests.push(url);
     return Response.json(
       url.pathname.endsWith("/options")
         ? { profiles: [], accounts: [], platforms: [] }
-        : { ...summary([]), demo_data: false },
+        : summary([]),
     );
   }) as typeof fetch;
-  const toggle = browser.document.querySelector(
-    'input[aria-label="Demo data"]',
-  ) as HTMLInputElement;
-  await act(async () => toggle.click());
+  await render({ projectId: "other", installId: 34, widgetSettings: {} });
   expect(browser.document.body.textContent).not.toContain("Brand 2");
-  expect(browser.document.body.textContent).not.toContain(
-    "16 synthetic accounts",
-  );
   const latest = requests
     .filter((url) => !url.pathname.endsWith("/options"))
     .at(-1)!;
-  expect(latest.searchParams.get("demo_data")).toBe("false");
+  expect(latest.searchParams.get("project_id")).toBe("other");
   expect(latest.searchParams.has("profile_id")).toBe(false);
   expect(latest.searchParams.has("account_ids")).toBe(false);
 });
 
 test("account metrics sort numerically with missing values last and preserve real zero", () => {
-  expect(
-    performanceDefaults({ preview: true, widgetSettings: { demo_data: true } })
-      .demo,
-  ).toBe(false);
   const accounts = summary(options.accounts.slice(0, 3)).accounts;
   accounts[0].metrics.views.value = null;
   accounts[1].metrics.views.value = 0;

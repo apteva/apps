@@ -64,7 +64,7 @@ func TestPerformanceFiltersIntersectProfilesPlatformsAccountsAndDates(t *testing
 	if len(response.Accounts) != 1 || response.Accounts[0].ID != fb || response.Accounts[0].ProfileName != "Studio A" || response.Days != 2 || response.Metrics["views"].Value == nil || *response.Metrics["views"].Value != 30 {
 		t.Fatalf("%s", w.Body)
 	}
-	for _, bad := range []url.Values{{"account_ids": {fmt.Sprint(foreign)}}, {"platforms": {"unknown"}}, {"profile_id": {"999999"}}, {"demo_data": {"maybe"}}} {
+	for _, bad := range []url.Values{{"account_ids": {fmt.Sprint(foreign)}}, {"platforms": {"unknown"}}, {"profile_id": {"999999"}}} {
 		w = httptest.NewRecorder()
 		a.handlePerformanceWidget(w, httptest.NewRequest("GET", "/widgets/performance?"+bad.Encode(), nil))
 		if w.Code != 400 {
@@ -83,7 +83,7 @@ func TestPerformanceOptionsAreProjectScoped(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || len(options.Accounts) != 1 || options.Accounts[0].ID != account || options.Demo {
+	if w.Code != 200 || len(options.Accounts) != 1 || options.Accounts[0].ID != account {
 		t.Fatalf("scope leak: %s", w.Body)
 	}
 	for _, method := range []string{"POST", "DELETE"} {
@@ -128,63 +128,64 @@ func TestPerformanceKeepsInactiveAccountsAndCachedMetrics(t *testing.T) {
 	}
 }
 
-func TestPerformanceDemoHasFourProfilesAndSixteenIsolatedAccounts(t *testing.T) {
+func TestPerformanceReadsPersistedProfilesAccountsAndMetrics(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)
-	a := &App{}
-	w := httptest.NewRecorder()
-	a.handlePerformanceOptions(w, httptest.NewRequest("GET", "/widgets/performance/options?demo_data=true", nil))
-	var options performanceOptions
-	if err := json.Unmarshal(w.Body.Bytes(), &options); err != nil {
-		t.Fatal(err)
-	}
-	if len(options.Profiles) != 4 || len(options.Accounts) != 16 || len(options.Platforms) != 4 || !options.Demo {
-		t.Fatalf("%s", w.Body)
-	}
-	counts := map[int64]int{}
-	for _, account := range options.Accounts {
-		counts[account.ProfileID]++
-	}
-	for _, profile := range options.Profiles {
-		if counts[profile.ID] != 4 {
-			t.Fatal("profile does not have four accounts")
+	var profileIDs, accountIDs []int64
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	for i, brand := range []string{"Aurora Studio", "Cedar Outdoors", "Ember Kitchen", "Lunar Fitness"} {
+		res, err := ctx.AppDB().Exec(`INSERT INTO profiles(project_id,name,slug) VALUES('test-proj',?,?)`, brand, fmt.Sprintf("sample-%d", i))
+		if err != nil {
+			t.Fatal(err)
 		}
+		profile, _ := res.LastInsertId()
+		profileIDs = append(profileIDs, profile)
+		for _, platform := range []string{"facebook", "instagram", "tiktok", "youtube"} {
+			res, err := ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,profile_id,platform,connection_id,display_name,status) VALUES('test-proj',?,?,0,?,'disconnected')`, profile, platform, brand+" "+platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			account, _ := res.LastInsertId()
+			accountIDs = append(accountIDs, account)
+			if err := insertSocialMetricPoint(ctx, "test-proj", profile, account, 0, 0, platform, "account", "followers", "snapshot", today.Format(time.RFC3339), 1000, "seed", "ok", ""); err != nil {
+				t.Fatal(err)
+			}
+			for offset := 14; offset > 0; offset-- {
+				for _, metric := range []string{"views", "impressions", "likes", "comments", "shares"} {
+					if err := insertSocialMetricPoint(ctx, "test-proj", profile, account, 0, 0, platform, "account", metric, "day", today.AddDate(0, 0, -offset).Format(time.RFC3339), 10, "seed", "ok", ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+	}
+	options, err := loadPerformanceOptions(ctx, "test-proj")
+	if err != nil || len(options.Profiles) != 4 || len(options.Accounts) != 16 || len(options.Platforms) != 4 {
+		t.Fatalf("persisted choices: %+v, %v", options, err)
 	}
 	for _, tc := range []struct {
 		query string
 		count int
-	}{{"demo_data=true&days=28", 16}, {"demo_data=true&profile_id=2&days=7", 4}, {"demo_data=true&platforms=instagram&days=90", 4}, {"demo_data=true&profile_id=2&platforms=instagram&days=28", 1}, {"demo_data=true&account_ids=1,16&days=7", 2}} {
-		w = httptest.NewRecorder()
-		a.handlePerformanceWidget(w, httptest.NewRequest("GET", "/widgets/performance?"+tc.query, nil))
+	}{{"days=7", 16}, {fmt.Sprintf("days=7&profile_id=%d", profileIDs[1]), 4}, {"days=7&platforms=instagram", 4}, {fmt.Sprintf("days=7&profile_id=%d&platforms=instagram", profileIDs[1]), 1}, {fmt.Sprintf("days=7&account_ids=%d,%d", accountIDs[0], accountIDs[15]), 2}} {
+		w := httptest.NewRecorder()
+		(&App{}).handlePerformanceWidget(w, httptest.NewRequest("GET", "/widgets/performance?"+tc.query, nil))
 		var data struct {
-			Demo     bool                    `json:"demo_data"`
 			Accounts []widgetAccount         `json:"accounts"`
 			Metrics  map[string]widgetMetric `json:"metrics"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
 			t.Fatal(err)
 		}
-		if w.Code != 200 || !data.Demo || len(data.Accounts) != tc.count || data.Metrics["followers"].Value == nil || data.Metrics["views"].Value == nil {
+		if w.Code != 200 || len(data.Accounts) != tc.count || data.Metrics["followers"].Value == nil || *data.Metrics["followers"].Value != int64(tc.count*1000) || data.Metrics["views"].Value == nil || *data.Metrics["views"].Value != int64(tc.count*70) || data.Metrics["interactions"].Value == nil || *data.Metrics["interactions"].Value != int64(tc.count*210) {
 			t.Fatalf("%s: %s", tc.query, w.Body)
 		}
-		if tc.count == 16 && *data.Metrics["followers"].Value != 224720 {
-			t.Fatal("incorrect demo total")
-		}
-	}
-	for _, query := range []string{"demo_data=true&profile_id=5", "demo_data=true&account_ids=17", "demo_data=true&profile_id=2&account_ids=1"} {
-		w = httptest.NewRecorder()
-		a.handlePerformanceWidget(w, httptest.NewRequest("GET", "/widgets/performance?"+query, nil))
-		if w.Code != 400 {
-			t.Fatalf("bad demo scope: %s", query)
-		}
-	}
-	for _, table := range []string{"social_accounts", "social_metric_points"} {
-		var count int
-		if err := ctx.AppDB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("demo wrote real %s", table)
+		for _, account := range data.Accounts {
+			if account.Status != "disconnected" || account.Metrics["views"].Change == nil || *account.Metrics["views"].Change != 0 {
+				t.Fatalf("persisted status or previous-period comparison lost: %+v", account)
+			}
 		}
 	}
 	if len(pf.executeCalls) != 0 || len(pf.callAppCalls) != 0 {
-		t.Fatal("demo contacted a provider")
+		t.Fatal("reading seeded records contacted a provider")
 	}
 }
