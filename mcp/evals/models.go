@@ -377,3 +377,14 @@ func encodeJSON(value any) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
 }
+
+// Lists intentionally cannot carry a specification. Detail calls keep using EnvironmentDefinition.
+type EnvironmentSummary struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+type EnvironmentPage struct {
+	Items      []EnvironmentSummary `json:"items"`
+	NextCursor *string              `json:"next_cursor"`
+	HasMore    bool                 `json:"has_more"`
+}

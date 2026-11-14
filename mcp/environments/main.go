@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.9.0
-description: Isolated environments with deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
+version: 0.10.0
+description: Isolated environments with bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -29,7 +29,7 @@ requires:
 provides:
   http_routes: [{ prefix: /fixtures/, no_auth: true }, { prefix: / }]
   mcp_tools:
-    - { name: environment_list, description: "List environment definitions and active runs." }
+    - { name: environment_list, description: "List one bounded page of environment summaries; use environment_get for specifications." }
     - { name: environment_get, description: "Get one environment definition and live runtime state." }
     - { name: environment_create, description: "Create a durable environment definition." }
     - { name: environment_update, description: "Update a durable environment definition." }
@@ -78,7 +78,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.9.0, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.10.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

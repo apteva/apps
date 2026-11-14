@@ -243,3 +243,55 @@ the running runtime and the run's persisted target snapshot. Later definition
 edits do not change active run targets. Seeds can use `{"$target":"frontend"}`
 to inject the new URL, alongside earlier-seed `$ref` syntax. Unknown target
 references and path traversal are rejected before startup.
+
+## Paginated definition lists (0.10.0 contract change)
+
+`environment_list` and `GET /api/environments` now return a page object, not an
+array. There is no legacy unbounded mode. The default limit is 50; explicit
+limits must be integers from 1 through 200. Omit the cursor on the first request
+(or use JSON `null` for MCP), then pass the returned opaque `next_cursor`:
+
+```json
+{"limit":50,"cursor":null}
+```
+
+```json
+{"items":[{"id":"env_example","name":"Example","desired_state":"stopped","reconcile_status":"healthy","spec_version":1,"created_at":"2026-11-14T08:00:00Z","updated_at":"2026-11-14T08:05:00Z","active_run":null}],"next_cursor":null,"has_more":false}
+```
+
+HTTP uses `?limit=50&cursor=<url-encoded-token>`. Invalid limits, empty or
+malformed cursors are rejected. Listings select only summary columns and at most
+`limit + 1` definitions in SQL. A partial unique run index permits at most one
+compact active-run summary per definition. Listing never loads specifications,
+fixture payloads, error bodies, transcripts, recordings or the runtime inventory.
+`environment_get`, the single-definition HTTP GET and lifecycle operations
+continue to read the complete original specification.
+
+Pages use indexed, immutable `(created_at DESC, id DESC)` ordering. Lifecycle
+updates do not move records between pages. Deletions disappear, including a
+removed cursor anchor without invalidating its continuation. New creations ahead
+of the cursor are visible after restarting traversal; inserts behind it can
+appear later. This is keyset pagination, not a snapshot of concurrent writes.
+
+The 512 KiB budget conservatively includes direct JSON and its escaped MCP
+JSON-as-text representation, with an 8 KiB reserve for pagination metadata and
+ordinary protocol-envelope overhead. The response can contain fewer items than
+requested; continue using `next_cursor` until `has_more` is false. Byte-budget
+cuts always resume after the last emitted item. IDs are limited to 512 bytes and
+names to 16,384 bytes. SQL bounds legacy fields before loading them into Go;
+oversized legacy summaries fail explicitly rather than being truncated or
+silently omitted. Retrieve and update such a definition by its known ID.
+
+The dashboard navigates summary pages and fetches detail only for the selected
+environment. Resource counts and fixture configuration live in the detail view.
+Request diagnostics record item count, payload bytes, duration and rejection
+reason, without logging specifications or credentials. Evals 0.10.0 supports the
+new contract; upgrade the two apps together.
+
+Regression coverage includes 1,000 structured 201,254-byte specifications,
+allocation bounds, forbidden payload-column access, cursor traversal across
+lifecycle changes, byte-budget continuations, unchanged detail specifications,
+per-install isolation, and concurrent HTTP/MCP requests through a real sidecar.
+Run with `GOWORK=off go test ./...`; `-short` skips the sidecar subprocess test.
+`GOWORK=off go test -run '^$' -bench BenchmarkDefinitionListLargeSpecifications
+-benchmem` compares the same page size across 10 and 1,000 stored definitions.

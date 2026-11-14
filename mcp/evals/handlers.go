@@ -296,8 +296,38 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		input := map[string]any{}
+		query := r.URL.Query()
+		if values, ok := query["limit"]; ok {
+			if len(values) != 1 {
+				httpError(w, 400, errors.New("invalid limit"))
+				return
+			}
+			limit, err := strconv.Atoi(values[0])
+			if err != nil || limit < 1 || limit > 200 {
+				httpError(w, 400, errors.New("limit must be between 1 and 200"))
+				return
+			}
+			input["limit"] = limit
+		}
+		if values, ok := query["cursor"]; ok {
+			if len(values) != 1 || len(values[0]) == 0 || len(values[0]) > 1024 {
+				httpError(w, 400, errors.New("invalid cursor"))
+				return
+			}
+			input["cursor"] = values[0]
+		}
+		value, err := a.svc.listEnvironments(input)
+		if err != nil {
+			httpError(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, value)
+		return
+	}
 	if r.Method != http.MethodPost {
-		httpError(w, 405, errors.New("POST only"))
+		httpError(w, 405, errors.New("GET or POST only"))
 		return
 	}
 	var input map[string]any
@@ -378,4 +408,26 @@ func pathParts(path, prefix string) []string {
 		return nil
 	}
 	return strings.Split(rest, "/")
+}
+
+func (a *App) handleEnvironment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, errors.New("GET only"))
+		return
+	}
+	parts := pathParts(r.URL.Path, "/api/environments/")
+	if len(parts) != 1 || len(parts[0]) > 512 {
+		http.NotFound(w, r)
+		return
+	}
+	var value EnvironmentDefinition
+	if err := a.svc.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": parts[0]}, &value); err != nil {
+		httpError(w, 502, err)
+		return
+	}
+	if value.ID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, 200, value)
 }

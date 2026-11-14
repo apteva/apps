@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.9.7
+version: 0.10.0
 description: Behavioral evaluation with unpaused voice targets, durable cancellation, and preserved attempt and cleanup evidence.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
@@ -17,7 +17,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.7.15" }
+    - { name: environments, version: ">=0.10.0" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -38,6 +38,7 @@ provides:
     - { name: eval_run_get, description: "Inspect one run, including target and collaborator traces, metrics, assertions, and judge verdict." }
     - { name: eval_run_retry, description: "Queue a fresh retry of one run." }
     - { name: eval_compare, description: "Compare target performance within an experiment." }
+    - { name: eval_environment_list, description: "List one page of saved environment summaries with limit and cursor." }
     - { name: eval_catalog, description: "List available agents, models, Environments, and supported assertion types." }
     - { name: eval_suggestion_apply, description: "Apply an accepted directive suggestion with optimistic concurrency." }
   publishes:
@@ -60,7 +61,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.9.7
+    ref: evals/v0.10.0
     entry: mcp/evals
   port: 8080
   health_check: /health

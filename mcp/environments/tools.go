@@ -114,7 +114,7 @@ func containsPseudoEvaluationArgs(args map[string]any) bool {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "environment_list", Description: "List environment definitions and active runs.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.listDefinitions() }},
+		{Name: "environment_list", Description: "List one bounded page of environment summaries; use environment_get for specifications.", InputSchema: environmentListSchema, Handler: a.toolList},
 		{Name: "environment_get", Description: "Get one environment definition and runtime.", InputSchema: requiredSchema("id"), Handler: a.toolGet},
 		{Name: "environment_create", Description: "Create a durable environment definition.", InputSchema: requiredSchema("name"), Handler: a.toolSave(false)},
 		{Name: "environment_update", Description: "Update a durable environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolSave(true)},
@@ -485,4 +485,24 @@ func (a *App) toolVoiceRecordingGet(_ *sdk.AppCtx, args map[string]any) (any, er
 		"encoding":     "base64",
 		"data":         base64.StdEncoding.EncodeToString(raw),
 	}, nil
+}
+
+var environmentListSchema = map[string]any{"type": "object", "properties": map[string]any{
+	"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+	"cursor": map[string]any{"type": []string{"string", "null"}, "maxLength": 1024},
+}, "additionalProperties": false}
+
+func (a *App) toolList(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	var options ListOptions
+	if err := decodeStrictArgs(args, &options); err != nil {
+		err := errors.New("invalid list arguments")
+		a.svc.logListRejection(err, time.Now())
+		return nil, err
+	}
+	if value, exists := args["limit"]; exists && value == nil {
+		err := errors.New("limit must be an integer between 1 and 200")
+		a.svc.logListRejection(err, time.Now())
+		return nil, err
+	}
+	return a.svc.listDefinitions(options)
 }

@@ -37,3 +37,20 @@ workers to delegate on existing Core versions. Environments also leaves the
 simulated caller unpaused. Main may run during the test. Text cases retain the
 startup pause, inject their task and then release the instance gate as before.
 No manual resume or caller-opening injection is added by this startup change.
+
+## Environment listing contract (0.10.0)
+
+Evals 0.10.0 requires Environments >=0.10.0. `eval_catalog.environments` now holds
+only the first bounded page of `{id,name}` summaries. Its
+`environment_next_cursor` and `environment_has_more` fields describe continuation.
+MCP clients can use `eval_environment_list` with `limit` (default 50, maximum 200)
+and `cursor` to retrieve individual pages. The app's `GET /api/environments`
+forwards the same pagination arguments; it never collects all upstream pages.
+There is no unbounded array fallback.
+
+Both saved-environment selectors navigate one summary page at a time. A known
+saved environment ID remains selected even when it is outside the current page.
+Carrier voice configuration loads the selected environment's full specification
+through `GET /api/environments/:id`; ordinary selectors never request every
+specification. Existing experiment execution still resolves full definitions
+through `environment_get`.

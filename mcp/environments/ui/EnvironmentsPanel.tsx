@@ -30,6 +30,8 @@ interface VoiceCall {
 }
 interface Spec { version: number; ttl_seconds: number; app_install_ids: number[]; connection_ids: number[]; connection_bindings: ConnectionBinding[]; mcp_server_ids: number[]; network_mode: string; integration_mode: string; integration_bindings: any[]; seeds: Seed[]; web_fixtures: WebFixtureSpec[]; protocol_fixtures: ProtocolFixtureSpec[]; snapshot_id?: string }
 interface Run { id: string; runtime_id: string; status: string; started_at: string; error?: string; web_fixtures?: WebFixtureRun[]; protocol_fixtures?: ProtocolFixtureRun[] }
+interface EnvironmentSummary { id: string; name: string; desired_state: string; reconcile_status: string; active_run?: { id: string; runtime_id: string; status: string } | null }
+interface EnvironmentPage { items: EnvironmentSummary[]; next_cursor: string | null; has_more: boolean }
 interface Environment { id: string; name: string; description?: string; desired_state: string; spec: Spec; reconcile_status: string; reconcile_failures: number; reconcile_error?: string; reconcile_next_at?: string; degraded_at?: string; active_run?: Run; runtime?: { status: string; apps: any[]; managed_mcps: RuntimeManagedMCP[]; agents: any[]; expires_at: string } }
 interface Catalog { apps: CatalogApp[]; connections: Connection[]; integrations: Integration[]; managed_mcps: ManagedMCP[]; web_fixtures: WebFixtureCatalog[]; protocol_fixtures: ProtocolFixtureCatalog[]; realtime_providers: RealtimeProvider[]; agents: any[]; snapshots: any[] }
 
@@ -333,19 +335,43 @@ function Detail({ environment, catalog, onEdit, onRefresh }: { environment: Envi
 export default function EnvironmentsPanel({ installId, projectId }: NativePanelProps) {
   activeInstallId = installId;
   activeProjectId = projectId;
-  const [rows, setRows] = useState<Environment[]>([]);
+  const [rows, setRows] = useState<EnvironmentSummary[]>([]);
   const [catalog, setCatalog] = useState<Catalog>({ apps: [], connections: [], integrations: [], managed_mcps: [], web_fixtures: [], protocol_fixtures: [], realtime_providers: [], agents: [], snapshots: [] });
   const [builder, setBuilder] = useState<Environment | true | null>(null);
   const [selectedID, setSelectedID] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const load = useCallback(async () => { try { setRows(await request<Environment[]>("/environments")); setError(""); } catch (caught: any) { setError(caught.message); } }, [installId, projectId]);
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [loading, setLoading] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Environment | null>(null);
+  const cursor = cursors[cursors.length - 1];
+  const listGeneration = useRef(0);
+  const load = useCallback(async () => {
+    const generation = ++listGeneration.current;
+    setLoading(true);
+    try {
+      const page = await request<EnvironmentPage>(`/environments?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (generation !== listGeneration.current) return;
+      setRows(page.items); setNextCursor(page.next_cursor); setError("");
+    } catch (caught: any) { if (generation === listGeneration.current) setError(caught.message); }
+    finally { if (generation === listGeneration.current) setLoading(false); }
+  }, [installId, projectId, cursor]);
+  useEffect(() => { setCursors([null]); setSelectedID(""); setRows([]); setDetail(null); }, [installId, projectId]);
+  useEffect(() => {
+    let stopped = false;
+    if (!selectedID) { setDetail(null); return; }
+    request<Environment>(`/environments/${encodeURIComponent(selectedID)}`).then(value => {
+      if (!stopped) setDetail(value);
+    }).catch(caught => { if (!stopped) setError(caught.message); });
+    return () => { stopped = true; };
+  }, [selectedID, rows, installId, projectId]);
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => { await load(); if (!stopped) timer = setTimeout(poll, 5000); };
     poll();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; ++listGeneration.current; clearTimeout(timer); };
   }, [load]);
   useEffect(() => {
     let stopped = false;
@@ -359,11 +385,27 @@ export default function EnvironmentsPanel({ installId, projectId }: NativePanelP
     return () => { stopped = true; clearTimeout(timer); };
   }, [installId, projectId]);
   const act = async (id: string, action: string) => { setBusy(id + action); try { await request(`/environments/${id}/${action}`, { method: "POST" }); await load() } catch (caught: any) { setError(caught.message) } finally { setBusy("") } };
-  const selected = rows.find(item => item.id === selectedID);
+  const selected = detail?.id === selectedID ? detail : null;
   return <div className="h-full overflow-auto bg-bg text-text"><div className="w-full p-5">
     <header className="mb-5 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h1 className="text-xl font-semibold">Environments</h1><p className="text-sm text-text-dim">Apps, MCP servers, agents, websites, and protocol fixtures in isolated runtimes.</p></div><button onClick={() => setBuilder(true)} className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-bg hover:bg-accent-hover">New environment</button></header>
     {error && <div className="mb-4 flex items-center justify-between rounded-md border border-red/40 bg-red/10 px-3 py-2 text-xs text-red"><span>{error}</span><button onClick={() => setError("")} title="Dismiss">x</button></div>}
-    <div className="overflow-hidden rounded-md border border-border"><div className="hidden grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] gap-3 border-b border-border bg-surface px-4 py-2 text-[11px] font-semibold uppercase text-text-dim sm:grid"><span>Environment</span><span>Status</span><span>Resources</span><span className="text-right">Actions</span></div>{rows.length === 0 ? <div className="p-10 text-center"><p className="text-sm text-text-muted">No environments yet</p><p className="mt-1 text-xs text-text-dim">Create one from this project.</p></div> : rows.map(row => { const running = !!row.active_run && row.active_run.status === "running"; const status = row.reconcile_status === "degraded" ? "degraded" : row.active_run?.status || (row.reconcile_status === "retrying" ? "retrying" : "stopped"); return <div key={row.id} className={`grid grid-cols-1 items-center gap-2 border-b border-border px-4 py-3 last:border-0 hover:bg-surface/50 sm:grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] sm:gap-3 ${selectedID === row.id ? "bg-surface" : ""}`}><button onClick={() => setSelectedID(row.id)} className="min-w-0 text-left"><span className="block truncate text-sm font-medium">{row.name}</span><span className="block truncate text-xs text-text-dim">{row.description || row.id}</span></button><span className={`text-xs font-medium ${running ? "text-green" : status === "degraded" ? "text-red" : "text-text-dim"}`}>{status}</span><div className="flex min-w-0 flex-wrap gap-2 text-xs text-text-dim"><span>{row.spec.app_install_ids?.length || 0} apps</span><span>{row.spec.mcp_server_ids?.length || 0} MCPs</span><span>{(row.spec.connection_ids?.length || 0) + (row.spec.integration_bindings?.filter(binding => binding.expose_to_agents)?.length || 0)} connections</span><span>{row.spec.web_fixtures?.length || 0} websites</span><span>{row.spec.protocol_fixtures?.length || 0} protocols</span></div><div className="flex justify-start gap-1 sm:justify-end">{running ? <><button onClick={() => act(row.id, "snapshot")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:bg-surface" title="Create snapshot">Snapshot</button><button onClick={() => act(row.id, "stop")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:border-red hover:text-red">Stop</button></> : <button onClick={() => act(row.id, "start")} disabled={!!busy} className="rounded bg-accent px-3 py-1 text-xs font-semibold text-bg">{status === "degraded" ? "Retry" : "Start"}</button>}</div></div> })}</div>
+    <div className="overflow-hidden rounded-md border border-border">
+      <div className="hidden grid-cols-[minmax(0,1fr)_100px_150px] gap-3 border-b border-border bg-surface px-4 py-2 text-[11px] font-semibold uppercase text-text-dim sm:grid"><span>Environment</span><span>Status</span><span className="text-right">Actions</span></div>
+      {rows.length === 0 ? <p className="p-10 text-center text-sm text-text-muted">{loading ? "Loading environments..." : "No environments on this page."}</p> : rows.map(row => {
+        const running = row.active_run?.status === "running";
+        const status = row.reconcile_status === "degraded" ? "degraded" : row.active_run?.status || (row.reconcile_status === "retrying" ? "retrying" : "stopped");
+        return <div key={row.id} className={`grid grid-cols-1 items-center gap-2 border-b border-border px-4 py-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_100px_150px] ${selectedID === row.id ? "bg-surface" : ""}`}>
+          <button onClick={() => { if (selectedID !== row.id) { setDetail(null); setSelectedID(row.id); } }} className="min-w-0 text-left"><span className="block truncate text-sm font-medium">{row.name}</span><span className="block truncate text-xs text-text-dim">{row.id}</span></button>
+          <span className={`text-xs font-medium ${running ? "text-green" : status === "degraded" ? "text-red" : "text-text-dim"}`}>{status}</span>
+          <div className="flex justify-start gap-1 sm:justify-end">{running ? <><button onClick={() => act(row.id, "snapshot")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs">Snapshot</button><button onClick={() => act(row.id, "stop")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs">Stop</button></> : <button onClick={() => act(row.id, "start")} disabled={!!busy} className="rounded bg-accent px-3 py-1 text-xs font-semibold text-bg">{status === "degraded" ? "Retry" : "Start"}</button>}</div>
+        </div>;
+      })}
+    </div>
+    <nav aria-label="Environment pages" className="my-3 flex items-center gap-3 text-xs">
+      <button disabled={loading || cursors.length === 1} onClick={() => { setRows([]); setSelectedID(""); setCursors(values => values.slice(0,-1)); }}>Previous page</button>
+      <span>Page {cursors.length}</span>
+      <button disabled={loading || !nextCursor} onClick={() => { if (nextCursor) { setRows([]); setSelectedID(""); setCursors(values => [...values,nextCursor]); } }}>Next page</button>
+    </nav>
     {selected && <Detail key={`${projectId}:${installId}:${selected.id}:${selected.active_run?.id || "stopped"}`} environment={selected} catalog={catalog} onEdit={() => setBuilder(selected)} onRefresh={load} />}
   </div>{builder && <Builder initial={builder === true ? undefined : builder} catalog={catalog} onClose={() => setBuilder(null)} onSaved={load} />}</div>;
 }

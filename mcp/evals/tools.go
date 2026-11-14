@@ -61,6 +61,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "eval_run_get", Description: "Inspect one evaluation run.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.svc.db.getRun(str(args, "id")) }},
 		{Name: "eval_run_retry", Description: "Queue a fresh retry of one run.", InputSchema: requiredSchema("id"), Handler: a.toolRetryRun},
 		{Name: "eval_compare", Description: "Compare targets in an experiment.", InputSchema: requiredSchema("experiment_id"), Handler: a.toolCompare},
+		{Name: "eval_environment_list", Description: "List one page of saved environment summaries. Use environment_get on Environments for specifications.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}, "cursor": map[string]any{"type": []string{"string", "null"}, "maxLength": 1024}}, "additionalProperties": false}, Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.svc.listEnvironments(args) }},
 		{Name: "eval_catalog", Description: "List agents, models, Environments, and supported assertion types.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.catalog() }},
 		{Name: "eval_suggestion_apply", Description: "Apply an accepted directive suggestion.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.svc.applySuggestion(str(args, "id")) }},
 	}

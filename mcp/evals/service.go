@@ -459,8 +459,8 @@ func (s *service) catalog() (map[string]any, error) {
 	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &environmentCatalog); err != nil {
 		return nil, err
 	}
-	var environments []EnvironmentDefinition
-	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_list", map[string]any{}, &environments); err != nil {
+	environments, err := s.listEnvironments(map[string]any{})
+	if err != nil {
 		return nil, err
 	}
 	var models LLMModels
@@ -471,7 +471,9 @@ func (s *service) catalog() (map[string]any, error) {
 		environmentCatalog = map[string]any{}
 	}
 	environmentCatalog["assertion_types"] = evalAssertionTypes(environmentCatalog)
-	environmentCatalog["environments"] = environments
+	environmentCatalog["environments"] = environments.Items
+	environmentCatalog["environment_next_cursor"] = environments.NextCursor
+	environmentCatalog["environment_has_more"] = environments.HasMore
 	environmentCatalog["models"] = models.Models
 	return environmentCatalog, nil
 }
@@ -617,4 +619,13 @@ func validID(value string) bool {
 		}
 	}
 	return true
+}
+
+// Forward exactly one page. Never drain the upstream list into the catalog.
+func (s *service) listEnvironments(input map[string]any) (*EnvironmentPage, error) {
+	var page EnvironmentPage
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_list", input, &page); err != nil {
+		return nil, err
+	}
+	return &page, nil
 }
