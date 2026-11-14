@@ -208,6 +208,8 @@ func adbState(s string) string {
 func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
 	switch driver {
+	case "adb":
+		out = append(out, "keep_awake")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:

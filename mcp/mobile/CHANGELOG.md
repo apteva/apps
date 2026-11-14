@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-11-14
+
+- Add an Android **Stay awake while charging** option under session controls.
+  Read and verify the actual phone preference; changes persist on the device
+  after the session closes. AC, USB, wireless and dock charging are supported.
+- Add the mobile_power status/set tool and keep_awake capability for Android
+  ADB sessions. Require an owned active session, explicit boolean changes,
+  and successful readback; surface policy/permission failures.
+- Keep the normal unplugged timeout unchanged and leave manual locking available.
+  Opening a session does not automatically alter power preferences.
+
+Validation: race-enabled Go suite, vet, macOS/Linux builds, nine UI tests,
+panel bundle/import checks, and a physical Samsung SM-A176B preference toggle
+off/on with persistence verified after closing and reopening its session.
+
 ## 0.3.3 — 2026-11-14
 
 - Fix Android take duration by freezing the monotonic stop boundary before

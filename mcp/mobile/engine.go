@@ -433,6 +433,10 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 	e.mu.Unlock()
 	defer e.opWG.Done()
 	switch tool {
+	case "mobile_power":
+		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
+			return e.drivers.powerSettings(ctx, s, args)
+		})
 	case "mobile_setup":
 		return e.drivers.iosSetup(ctx, args)
 	case "mobile_devices":

@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.3.3
+version: 0.4.0
 description: |
   Operate physical Android and iOS devices through exclusive sessions.
   Navigate websites, install and launch apps, inspect screens and UI trees,
@@ -51,6 +51,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: mobile_power, description: "Read or set persistent Stay awake while charging for an active Android ADB session. Args: session_id, action? (status|set), enabled? (required for set). AC, USB, wireless and dock charging are supported. Unplugged uses the phone's normal timeout; closing Mobile keeps the setting." }
     - { name: mobile_setup, description: "Inspect and complete native iPhone signing setup. Args: action? (status|select_team|open_xcode), team_id?; no existing certificate is needed. Apple sign-in, phone trust and Developer Mode require operator interaction." }
     - { name: mobile_devices, description: "List discovered/configured devices and host setup diagnostics. Args: platform?, physical?." }
     - { name: mobile_session, description: "Open, list, get, renew or close an exclusive device session. Recover releases an unknown Appium creation outcome after manual cleanup and confirm=true. Args: action, device_id? or platform?, physical?, session_id?, ttl_seconds?, mode? (screen|structured), confirm?. Close preserves app data." }
@@ -93,7 +94,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: mobile/v0.3.3
+    ref: mobile/v0.4.0
     entry: mcp/mobile
   port: 8080
   health_check: /health

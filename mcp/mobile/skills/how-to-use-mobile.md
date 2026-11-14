@@ -31,6 +31,11 @@
    action=status until installed=true. Phones must already be signed in.
 7. Close sessions when done, or renew before expiry. Closing preserves phone data.
    Sessions are exclusive across projects; do not create a second controller.
+   For an Android ADB device with keep_awake capability, mobile_power(status,
+   session_id) reads Stay awake while charging. Use action=set, enabled=true
+   only when requested: this changes a persistent phone preference, kept after
+   closing the session. enabled=false restores normal idle timeout behavior.
+   Unplugged the phone uses its normal timeout; manual locking still works.
 8. For repeatable testing, close interactive sessions first and call
    `mobile_test_run` with device_id and 1..50 steps. Steps have action, optional
    label and params. The test owns its session and captures per-step screenshots.
