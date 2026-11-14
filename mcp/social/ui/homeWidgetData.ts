@@ -22,6 +22,10 @@ export interface WidgetMetric {
   accounts: number;
   days?: number;
   change_percent?: number;
+  observed_at?: string;
+  growth?: { status: "available" | "unavailable"; reason?: string; start_date: string; end_date: string;
+    baseline_value: number | null; end_value: number | null; net_change: number | null;
+    baseline_observed_at?: string; end_observed_at?: string; accounts: number };
   trend: MetricPoint[];
 }
 export interface PerformanceSummary {

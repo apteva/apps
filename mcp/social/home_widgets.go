@@ -170,11 +170,13 @@ func (a *App) handlePublishingWidget(w http.ResponseWriter, r *http.Request) {
 }
 
 type widgetMetric struct {
-	Value    *int64              `json:"value"`
-	Accounts int                 `json:"accounts"`
-	Days     int                 `json:"days,omitempty"`
-	Change   *float64            `json:"change_percent,omitempty"`
-	Trend    []widgetMetricPoint `json:"trend"`
+	Value      *int64                `json:"value"`
+	Accounts   int                   `json:"accounts"`
+	Days       int                   `json:"days,omitempty"`
+	Change     *float64              `json:"change_percent,omitempty"`
+	Trend      []widgetMetricPoint   `json:"trend"`
+	ObservedAt string                `json:"observed_at,omitempty"`
+	Growth     *widgetFollowerGrowth `json:"growth,omitempty"`
 }
 type widgetMetricPoint struct {
 	Date     string `json:"date"`
@@ -208,7 +210,8 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project_id required", 400)
 		return
 	}
-	window, err := performanceDateWindow(r, time.Now())
+	now := time.Now().UTC()
+	window, err := performanceDateWindow(r, now)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -275,12 +278,17 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 				pointScope = "destination:" + b.DefaultID
 			}
 		}
+		followers, err := loadWidgetFollowers(globalCtx, scope.projectID, *acct, pointScope, window, now)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		acct.Metrics["followers"] = followers
 		points, err := globalCtx.AppDB().Query(`SELECT metric,period,point_time,value FROM social_metric_points
 			WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key=''
 			AND ((period='day' AND metric IN ('views','impressions','page_impressions','likes','comments','shares') AND date(point_time)>=date(?) AND date(point_time)<date(?))
-			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key='' AND period='snapshot' AND metric='followers' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1)
 			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key='' AND metric='_refresh' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1))
-			ORDER BY datetime(created_at) DESC,datetime(point_time) DESC,id DESC`, scope.projectID, acct.ID, pointScope, previous.Format("2006-01-02"), today.Format("2006-01-02"), scope.projectID, acct.ID, pointScope, scope.projectID, acct.ID, pointScope)
+			ORDER BY datetime(created_at) DESC,datetime(point_time) DESC,id DESC`, scope.projectID, acct.ID, pointScope, previous.Format("2006-01-02"), today.Format("2006-01-02"), scope.projectID, acct.ID, pointScope)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -296,13 +304,6 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			if metric == "_refresh" {
 				if acct.UpdatedAt == "" {
 					acct.UpdatedAt = stamp
-				}
-				continue
-			}
-			if metric == "followers" && period == "snapshot" {
-				if _, ok := acct.Metrics["followers"]; !ok {
-					v := value
-					acct.Metrics["followers"] = widgetMetric{Value: &v, Accounts: 1, Trend: []widgetMetricPoint{}}
 				}
 				continue
 			}
@@ -364,18 +365,7 @@ func writePerformanceSummary(w http.ResponseWriter, accounts []widgetAccount, wi
 	var updated string
 	for _, name := range widgetMetricNames {
 		if name == "followers" {
-			m := widgetMetric{Trend: []widgetMetricPoint{}}
-			var total int64
-			for _, acct := range summaryAccounts {
-				if v := acct.Metrics[name].Value; v != nil {
-					total += *v
-					m.Accounts++
-				}
-			}
-			if m.Accounts > 0 {
-				m.Value = &total
-			}
-			metrics[name] = m
+			metrics[name] = summarizeWidgetFollowers(summaryAccounts, window)
 		} else {
 			metrics[name] = summarizeWidgetMetric(summaryAccounts, name, start, today, previous)
 		}

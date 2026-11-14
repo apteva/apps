@@ -382,7 +382,7 @@ function PerformanceView(props: HomeWidgetProps) {
                   ? `${sort.descending && sortedMetric ? "Top" : "Showing"} ${rows.length} of ${sortedRows.length} accounts`
                   : `${rows.length} ${rows.length === 1 ? "account" : "accounts"}`}
                 {sortedMetric &&
-                  ` · ${labels[sortedMetric]} ${sort.descending ? "↓" : "↑"}${sortedMetric === "followers" ? " · Current snapshot" : ` · % vs previous ${data.days} days`}`}
+                  ` · ${labels[sortedMetric]} ${sort.descending ? "↓" : "↑"}${sortedMetric === "followers" ? ` · Growth during ${data.start_date} – ${data.end_date}` : ` · % vs previous ${data.days} days`}`}
               </p>
               {rows.length === 0 ? (
                 <p className="py-4 text-xs text-text-dim">
@@ -459,7 +459,7 @@ function PerformanceView(props: HomeWidgetProps) {
                                   metric?.value == null
                                     ? "Unavailable"
                                     : key === "followers"
-                                      ? "Current follower snapshot"
+                                      ? `Latest follower observation${metric.observed_at ? `: ${metric.observed_at}` : ""}`
                                       : `${metric.days || 0}/${data.days} days of data`
                                 }
                               >
@@ -471,7 +471,22 @@ function PerformanceView(props: HomeWidgetProps) {
                                         change={metric.change_percent}
                                         label={labels[key]}
                                         days={data.days}
+                                        growth={metric.growth}
                                       />
+                                    )}
+                                  {sort.key === "followers" &&
+                                    key === "followers" &&
+                                    metric?.value != null &&
+                                    metric?.change_percent == null && (
+                                      <span
+                                        className="text-[10px] text-text-dim"
+                                        aria-label="Followers growth unavailable"
+                                        title={followerGrowthUnavailable(
+                                          metric?.growth?.reason,
+                                        )}
+                                      >
+                                        —
+                                      </span>
                                     )}
                                 </span>
                                 {key !== "followers" &&
@@ -536,13 +551,47 @@ function Headline({
       {change != null && Number.isFinite(change) && (
         <p
           className={`mt-1 text-[10px] ${change > 0 ? "text-success" : change < 0 ? "text-error" : "text-text-dim"}`}
-          title="Compared with the previous equal period, using the same accounts and complete daily data"
+          title={
+            name === "followers"
+              ? "Follower balance change during the selected dates, using matched boundary observations"
+              : "Compared with the previous equal period, using the same accounts and complete daily data"
+          }
         >
           {change > 0 ? "+" : ""}
-          {change.toFixed(1)}% vs prior period
+          {change.toFixed(1)}%{" "}
+          {name === "followers" ? "during selected dates" : "vs prior period"}
+        </p>
+      )}
+      {name === "followers" && metric?.value != null && change == null && (
+        <p
+          className="mt-1 text-[10px] text-text-dim"
+          title={followerGrowthUnavailable(metric.growth?.reason)}
+        >
+          Growth unavailable
         </p>
       )}
     </div>
+  );
+}
+
+function followerGrowthUnavailable(reason?: string) {
+  const reasons: Record<string, string> = {
+    missing_baseline:
+      "No follower observation at the start of the selected dates.",
+    missing_end_count:
+      "No follower observation at the end of the selected dates.",
+    stale_baseline:
+      "The starting follower observation is more than 24 hours old.",
+    stale_end_count:
+      "The ending follower observation is more than 24 hours old.",
+    no_distinct_observations:
+      "Two distinct follower observations are required.",
+    zero_baseline: "Percentage growth is undefined from zero followers.",
+    incomplete_account_coverage: "Some accounts lack valid follower history.",
+  };
+  return (
+    reasons[reason || ""] ||
+    "Not enough follower history for the selected dates."
   );
 }
 
@@ -550,10 +599,12 @@ function MetricChange({
   change,
   label,
   days,
+  growth,
 }: {
   change?: number;
   label: string;
   days: number;
+  growth?: WidgetMetric["growth"];
 }) {
   if (change == null || !Number.isFinite(change)) return null;
   const text = `${change > 0 ? "+" : ""}${change.toFixed(1)}%`;
@@ -561,7 +612,11 @@ function MetricChange({
     <span
       className={`text-[10px] font-normal ${change > 0 ? "text-success" : change < 0 ? "text-error" : "text-text-dim"}`}
       aria-label={`${label} change: ${text}`}
-      title={`Compared with the previous ${days} days, using complete data`}
+      title={
+        growth
+          ? `Follower growth during ${growth.start_date} – ${growth.end_date}; observed ${growth.baseline_observed_at || "at the start"} to ${growth.end_observed_at || "the end"}`
+          : `Compared with the previous ${days} days, using complete data`
+      }
     >
       {text}
     </span>
