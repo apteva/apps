@@ -50,6 +50,12 @@ func actorSummary(rec *actorRecord, latest int, after string, limit int) map[str
 	steps := len(rec.Definition.Steps)
 	for _, op := range rec.Definition.Operations {
 		steps += len(op.Steps)
+		for _, variant := range op.Variants {
+			steps += len(variant.Steps)
+		}
+	}
+	for _, variant := range rec.Definition.Variants {
+		steps += len(variant.Steps)
 	}
 	routes, datasets := 0, 0
 	if rec.Definition.Crawl != nil {
@@ -182,6 +188,9 @@ func (a *App) discoverActors(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolActorDefinitionExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, supplied := args["platform"]; supplied && stringArg(args, "operation") == "" {
+		return nil, errors.New("platform selection requires an operation")
+	}
 	if _, supplied := args["revision"]; !supplied {
 		return nil, errors.New("explicit immutable revision required for definition export")
 	}

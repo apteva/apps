@@ -209,7 +209,7 @@ func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
 	switch driver {
 	case "adb":
-		out = append(out, "keep_awake")
+		out = append(out, "keep_awake", "replace_text")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:
@@ -379,17 +379,10 @@ func (d *drivers) Observe(ctx context.Context, s Session, source bool) (Observat
 			return Observation{}, err
 		}
 		if source {
-			remote := "/data/local/tmp/apteva-" + s.ID + ".xml"
-			_, err = d.shell(ctx, s.Device.UDID, "uiautomator", "dump", remote)
+			tree, err = d.androidSource(ctx, s)
 			if err != nil {
 				return Observation{}, err
 			}
-			b, e := d.shell(ctx, s.Device.UDID, "cat", remote)
-			_, _ = d.shell(ctx, s.Device.UDID, "rm", "-f", remote)
-			if e != nil {
-				return Observation{}, e
-			}
-			tree = string(b)
 		}
 	} else {
 		v, e := d.sessionWire(ctx, s, "GET", "/screenshot", nil)
@@ -443,6 +436,15 @@ func appID(args map[string]any) (string, error) {
 }
 
 func (d *drivers) Action(ctx context.Context, s Session, action string, args map[string]any) (any, error) {
+	if raw, supplied := args["replace"]; supplied {
+		replace, ok := raw.(bool)
+		if !ok {
+			return nil, problem("invalid_argument", "replace must be a boolean")
+		}
+		if replace && (action != "text" || s.Device.Driver != "adb") {
+			return nil, problem("unsupported", "verified replacement is supported only for Android ADB text actions")
+		}
+	}
 	if action == "navigate" {
 		if err := validateURL(str(args, "url")); err != nil {
 			return nil, err
@@ -607,6 +609,13 @@ func (d *drivers) adbAction(ctx context.Context, s Session, action string, args 
 			command = append(command, strconv.Itoa(int(tx*float64(obs.Width-1))), strconv.Itoa(int(ty*float64(obs.Height-1))), "400")
 		}
 	case "text":
+		if boolean(args, "replace") {
+			text, supplied := args["text"].(string)
+			if !supplied {
+				return nil, problem("invalid_argument", "replacement requires explicit text, including an empty string to clear")
+			}
+			return d.adbReplaceText(ctx, s, args, text)
+		}
 		text, e := requireString(args, "text")
 		if e != nil {
 			return nil, e

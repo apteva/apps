@@ -73,6 +73,11 @@ func (e *actorExecution) resumeReadContinuation(c actorReadViews) error {
 	if checkpoint.Session.SessionID == "" || len(checkpoint.SeenIDs) > maxActorItems {
 		return errors.New("invalid read continuation payload")
 	}
+	if e.definition.Browser.ContextID != "" {
+		if err := e.lockContext(); err != nil {
+			return err
+		}
+	}
 	r, err := e.ctx.AppDB().Exec(`UPDATE actors_read_continuations SET state='claimed',claimed_by=? WHERE ref=? AND project_id=? AND state='available' AND expires_at>?`, e.run.ID, c.ContinuationRef, projectID(e.ctx), time.Now().Unix())
 	if err != nil {
 		return err

@@ -1,0 +1,4471 @@
+{
+  "operations": {
+    "advance_email_signup_birthday": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "birthday_ready"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "birthday_ready": {
+                  "equals_exact": "birthday_entered"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "What's your date of birth?",
+                "Why do I need to provide my date of birth?",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "advance_email_signup_code": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Enter the confirmation code",
+                "Code input entry field",
+                "I didn't receive the code"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "advance_linked_signup_username": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "username"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a username",
+                "Username",
+                "{{username}}"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "advance_photo_picker": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "picker_marker",
+            "editor_marker"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{picker_marker}}"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{editor_marker}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "begin_linked_signup": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Add account",
+                "Log in to existing account",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Create New Account",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "begin_signup": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "signup_entry_marker",
+            "signup_button",
+            "signup_form_marker"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "signup_button": {
+                  "matches": "^(Create new account|Create an account|Sign up|Crear cuenta nueva|Registrarte)$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{signup_entry_marker}}"
+              ],
+              "native_target": "{{signup_button}}",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1200
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{signup_form_marker}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "cancel_profile_photo_review": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/crop_image_view",
+                "Cancel",
+                "Recents"
+              ],
+              "native_target": "com.instagram.android:id/profile_picture_cancel_button > android.widget.Button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "cancel_signup": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Do you want to stop creating your account?"
+              ],
+              "native_target": "Stop creating account",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "choose_linked_signup_method": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "signup_method"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "signup_method": {
+                  "matches": "^(Allow and continue|Use mobile number or email address)$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "To create a new Instagram account in this Accounts Centre, allow the following",
+                "Allow and continue",
+                "Use mobile number or email address"
+              ],
+              "native_target": "{{signup_method}}",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "clear_profile_bio": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "confirm_clear"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "confirm_clear": {
+                  "equals_exact": "clear_profile_bio"
+                },
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/action_bar_title",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_clear",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText": ""
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/action_bar_button_action",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/action_bar_title",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText": ""
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_read",
+              "locator": {},
+              "verified_field": "bio"
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "Close",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "close_bio_editor": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "Close",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "close_profile_editor": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "continue_device_setup": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Set up on new device",
+                "To use Location Services, allow Instagram to access your location",
+                "Continue"
+              ],
+              "native_target": "Continue",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android device setup permission choice"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "create_and_switch_back": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "source_handle",
+            "username",
+            "confirm_creation"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "confirm_creation": {
+                  "equals_exact": "create_in_accounts_centre"
+                },
+                "source_handle": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                },
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{source_handle}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "native_target": "user-switch-title-button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 700
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "direction": "down",
+              "amount": 750,
+              "action": "scroll",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background",
+                "Add Instagram Account"
+              ],
+              "native_target": "Add Instagram Account",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Add account",
+                "Create New Account"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Add account",
+                "Log in to existing account",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Create New Account",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a username",
+                "Username",
+                "Next"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 14000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a username",
+                "Next"
+              ],
+              "native_target": "Username",
+              "text": "{{username}}",
+              "action": "native_replace",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 900
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a username",
+                "Username",
+                "{{username}}"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "To create a new Instagram account in this Accounts Centre, allow the following"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 14000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "To create a new Instagram account in this Accounts Centre, allow the following",
+                "Use mobile number or email address"
+              ],
+              "native_target": "Allow and continue",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Agree to Instagram's terms and policies",
+                "I agree"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 12000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Agree to Instagram's terms and policies",
+                "bottom_sheet_background"
+              ],
+              "native_target": "I agree",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 5000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Add a profile picture",
+                "Add picture",
+                "bottom_sheet_background"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 28000
+            },
+            {
+              "app_id": "com.burbn.instagram",
+              "action": "stop_app",
+              "locator": {}
+            },
+            {
+              "app_id": "com.burbn.instagram",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 3600
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Allow the use of cookies by Instagram and Facebook?"
+              ],
+              "native_target": "Decline optional cookies",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "profile-tab"
+              ],
+              "native_target": "profile-tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{username}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "native_target": "user-switch-title-button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 700
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background"
+              ],
+              "native_target": "INSTAGRAM profile, {{source_handle}}",
+              "action": "native_tap_badged",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1400
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{source_handle}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "create_linked_account": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "confirm_creation"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "confirm_creation": {
+                  "equals_exact": "create_instagram_account"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Agree to Instagram's terms and policies",
+                "bottom_sheet_background"
+              ],
+              "native_target": "I agree",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "decline_location_permission": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.google.android.permissioncontroller",
+              "native_required": [
+                "Allow Instagram to access this device’s location?",
+                "com.android.permissioncontroller:id/permission_deny_button"
+              ],
+              "native_target": "com.android.permissioncontroller:id/permission_deny_button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 700
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Declined unneeded location access"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "decline_notification_permission": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.google.android.permissioncontroller",
+              "native_required": [
+                "Allow Instagram to send you notifications?",
+                "com.android.permissioncontroller:id/permission_deny_and_dont_ask_again_button"
+              ],
+              "native_target": "com.android.permissioncontroller:id/permission_deny_and_dont_ask_again_button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram notification permission declined"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "decline_signup_optional_cookies": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Allow the use of cookies by Instagram and Facebook?",
+                "Allow all cookies"
+              ],
+              "native_target": "Decline optional cookies",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "dismiss_notification_prompt": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Turn on notifications",
+                "com.instagram.android:id/igds_headline_secondary_action_text_button"
+              ],
+              "native_target": "com.instagram.android:id/igds_headline_secondary_action_text_button",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Declined Instagram notification reminder"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "dismiss_post_sharing_notice": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Sharing posts",
+                "OK"
+              ],
+              "native_target": "Dismiss",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "enter_caption": {
+      "variants": {
+        "ios": {
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "caption_screen_marker",
+            "caption_field",
+            "caption"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{caption_screen_marker}}"
+              ],
+              "native_target": "{{caption_field}}",
+              "text": "{{caption}}",
+              "action": "native_type",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{caption}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram caption for review"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "enter_email_signup_address": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "email_ref"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "What's your email address?",
+                "Email address",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Email address",
+              "secret_ref": "{{email_ref}}",
+              "action": "native_type_private",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "enter_email_signup_code": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "code_ref"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Enter the confirmation code",
+                "Code input entry field",
+                "I didn't receive the code",
+                "Delete"
+              ],
+              "secret_ref": "{{code_ref}}",
+              "action": "native_type_private",
+              "locator": {},
+              "mode": "keypad"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "fill_sign_in_username": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "sign_in_form_marker",
+            "sign_in_username_field",
+            "username"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{sign_in_form_marker}}"
+              ],
+              "native_target": "{{sign_in_username_field}}",
+              "text": "{{username}}",
+              "action": "native_type",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{username}}",
+                "{{sign_in_form_marker}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "fill_signup_name": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "signup_name_marker",
+            "signup_name_field",
+            "display_name"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "display_name": {
+                  "matches": "^\\S[^\\r\\n\\t]{0,59}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{signup_name_marker}}"
+              ],
+              "native_target": "{{signup_name_field}}",
+              "text": "{{display_name}}",
+              "action": "native_type",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{display_name}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "fill_signup_username": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "signup_username_marker",
+            "signup_username_field",
+            "username"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{signup_username_marker}}"
+              ],
+              "native_target": "{{signup_username_field}}",
+              "text": "{{username}}",
+              "action": "native_type",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{username}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "focus_sign_in_username": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "sign_in_form_marker",
+            "sign_in_username_field"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{sign_in_form_marker}}"
+              ],
+              "native_target": "{{sign_in_username_field}}",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "grant_selected_profile_photo": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "photo_marker"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "photo_marker": {
+                  "matches": "^Photo taken on .{1,100}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.google.android.photopicker",
+              "native_required": [
+                "Manage photos and videos Instagram has access to",
+                "0 photos or videos selected",
+                "{{photo_marker}}"
+              ],
+              "native_target": "{{photo_marker}}",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.google.android.photopicker",
+              "native_required": [
+                "1 photos or videos selected",
+                "Done"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 5000
+            },
+            {
+              "native_app": "com.google.android.photopicker",
+              "native_required": [
+                "1 photos or videos selected",
+                "Done"
+              ],
+              "native_target": "Done",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 700
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram limited photo access granted to chosen test image"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "import_selected_photo": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Photos",
+              "native_required": [
+                "Sharing as {{handle}}",
+                "Reel",
+                "Story",
+                "Message"
+              ],
+              "native_target": "Post",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "inspect_screen": {
+      "variants": {
+        "android": {
+          "read_only": true,
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android screen for operator review"
+            }
+          ]
+        },
+        "ios": {
+          "read_only": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram screen for operator review"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "limit_profile_photo_access": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.google.android.permissioncontroller",
+              "native_required": [
+                "Allow Instagram to access photos and videos on this device?",
+                "com.android.permissioncontroller:id/permission_allow_selected_button"
+              ],
+              "native_target": "com.android.permissioncontroller:id/permission_allow_selected_button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android selected-photo access picker"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_account_switcher": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "handle": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "app_id": "com.instagram.android",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Turn on notifications",
+                "com.instagram.android:id/igds_headline_secondary_action_text_button"
+              ],
+              "native_target": "com.instagram.android:id/igds_headline_secondary_action_text_button",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Set up on new device",
+                "Allow access to contacts to find people to follow",
+                "Skip"
+              ],
+              "native_target": "Skip",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "native_target": "com.instagram.android:id/profile_tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "com.instagram.android:id/action_bar_username_container",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android Instagram account switcher"
+            }
+          ]
+        },
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{handle}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "native_target": "user-switch-title-button",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_add_account_menu": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background",
+                "Add Instagram Account"
+              ],
+              "native_target": "Add Instagram Account",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_bio_editor": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android bio editor"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_current_profile": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "handle": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "app_id": "com.instagram.android",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Turn on notifications",
+                "com.instagram.android:id/igds_headline_secondary_action_text_button"
+              ],
+              "native_target": "com.instagram.android:id/igds_headline_secondary_action_text_button",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Set up on new device",
+                "Allow access to contacts to find people to follow",
+                "Skip"
+              ],
+              "native_target": "Skip",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "native_target": "com.instagram.android:id/profile_tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Verified Android current profile"
+            }
+          ]
+        },
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "profile-tab"
+              ],
+              "native_target": "profile-tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{handle}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_email_signup": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "What's your mobile number?",
+                "Mobile number",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Sign up with email address",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_instagram": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "app_id": "com.instagram.android",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram Android after guarded startup"
+            }
+          ]
+        },
+        "ios": {
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "app_id": "com.burbn.instagram",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_photo_composer": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{handle}}",
+                "Edit profile"
+              ],
+              "native_target": "profile-add-button",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_photo_picker": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "creation-post",
+                "creation-reel"
+              ],
+              "native_target": "creation-post",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_profile_editor": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android test account profile editor"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_profile_photo_editor": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "Edit picture or avatar"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Edit picture or avatar",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 600
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android test account profile picture choices"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_profile_photo_picker": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Choose from library",
+                "Take photo"
+              ],
+              "native_target": "Choose from library",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 700
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android profile photo picker or permission prompt"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_sign_in": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "sign_in_entry_marker",
+            "sign_in_button",
+            "sign_in_form_marker"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "sign_in_button": {
+                  "matches": "^(I already have a profile|I already have an account|Log into existing account|Log in)$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{sign_in_entry_marker}}"
+              ],
+              "native_target": "{{sign_in_button}}",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{sign_in_form_marker}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "open_signup_intro": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "I already have a profile"
+              ],
+              "native_target": "Get started",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1200
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "prepare_photo_post": {
+      "variants": {
+        "ios": {
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "filter-button",
+                "edit-button",
+                "aspect-ratio-button"
+              ],
+              "native_target": "next-button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 800
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "New post",
+                "caption-cell-text-view",
+                "share-button"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram photo ready for review"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "read_open_bio_editor": {
+      "variants": {
+        "android": {
+          "read_only": true,
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_read",
+              "locator": {},
+              "verified_field": "bio"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "read_profile_bio": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/action_bar_title",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_read",
+              "locator": {},
+              "verified_field": "bio"
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "Close",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "request_email_signup_code": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "What's your email address?",
+                "Email address",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "restart_and_open_profile": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "handle": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "app_id": "com.instagram.android",
+              "action": "stop_app",
+              "locator": {}
+            },
+            {
+              "app_id": "com.instagram.android",
+              "action": "launch_app",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1500
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Turn on notifications",
+                "com.instagram.android:id/igds_headline_secondary_action_text_button"
+              ],
+              "native_target": "com.instagram.android:id/igds_headline_secondary_action_text_button",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Set up on new device",
+                "Allow access to contacts to find people to follow",
+                "Skip"
+              ],
+              "native_target": "Skip",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "native_target": "com.instagram.android:id/profile_tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Verified Android current profile"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "review_signup_permissions": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Review the settings for your new profile",
+                "secondary_quick_permissions_contacts_title",
+                "secondary_quick_permissions_location_title"
+              ],
+              "native_target": "secondary_quick_permissions_next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "scroll_account_switcher": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "visible_account"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "visible_account": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Dismiss",
+                "{{visible_account}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "x": 540,
+              "y": 1950,
+              "to_x": 540,
+              "to_y": 950,
+              "action": "swipe",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 400
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android account switcher after guarded scroll"
+            }
+          ]
+        },
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "direction": "down",
+              "amount": 750,
+              "action": "scroll",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "scroll_account_switcher_up": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "visible_account"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "visible_account": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Dismiss",
+                "{{visible_account}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "x": 540,
+              "y": 950,
+              "to_x": 540,
+              "to_y": 1950,
+              "action": "swipe",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 400
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android account switcher after guarded upward scroll"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "set_linked_signup_password": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "password_ref"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a password",
+                "Show password",
+                "Next"
+              ],
+              "native_target": "Password",
+              "secret_ref": "{{password_ref}}",
+              "action": "native_type_secret",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a password",
+                "Show password"
+              ],
+              "native_target": "Next",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "set_linked_signup_username": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "username"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Create a username",
+                "Next"
+              ],
+              "native_target": "Username",
+              "text": "{{username}}",
+              "action": "native_replace",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "set_profile_bio": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "bio"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "bio": {
+                  "matches": "^[ -$&-~]{1,150}$"
+                },
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/action_bar_title",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "text": "{{bio}}",
+              "action": "native_replace",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText": "{{bio}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/action_bar_button_action",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "com.instagram.android:id/bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "com.instagram.android:id/bio > com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/action_bar_title",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText": "{{bio}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "com.instagram.android:id/prism_form_field_container > android.widget.EditText",
+              "action": "native_read",
+              "locator": {},
+              "verified_field": "bio"
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "Bio"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Bio",
+                "com.instagram.android:id/prism_form_field_container > android.widget.EditText"
+              ],
+              "native_target": "Close",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        },
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "bio"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "bio": {
+                  "matches": "^\\S[^\\r\\n\\t]{0,149}$"
+                },
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{target_handle}}",
+                "user-switch-title-button",
+                "Edit profile"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "profile-bio"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name"
+              ],
+              "native_target": "profile-bio",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Bio",
+                "Write a profile bio",
+                "done-button"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Bio",
+                "Write a profile bio",
+                "done-button"
+              ],
+              "native_target": "Write a profile bio",
+              "text": "{{bio}}",
+              "action": "native_replace",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Bio",
+                "Write a profile bio",
+                "done-button",
+                "{{bio}}"
+              ],
+              "native_target": "done-button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "profile-bio",
+                "{{bio}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "{{bio}}"
+              ],
+              "native_target": "BackButton",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{target_handle}}",
+                "user-switch-title-button",
+                "Edit profile"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "set_profile_display_name": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "display_name"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "display_name": {
+                  "matches": "^\\S[^\\r\\n\\t]{0,59}$"
+                },
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{target_handle}}",
+                "user-switch-title-button",
+                "Edit profile"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "profile-full-name"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name"
+              ],
+              "native_target": "profile-full-name",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "edit-profile-name-text-field",
+                "done-button"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "edit-profile-name-text-field",
+                "done-button"
+              ],
+              "native_target": "edit-profile-name-text-field",
+              "text": "{{display_name}}",
+              "action": "native_replace",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "edit-profile-name-text-field",
+                "done-button",
+                "{{display_name}}"
+              ],
+              "native_target": "done-button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Are you sure you want to change your name to {{display_name}}?",
+                "Change name",
+                "Cancel"
+              ],
+              "native_target": "Change name",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "profile-full-name",
+                "{{display_name}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Edit profile",
+                "{{target_handle}}",
+                "profile-user-name",
+                "{{display_name}}"
+              ],
+              "native_target": "BackButton",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{target_handle}}",
+                "user-switch-title-button",
+                "Edit profile",
+                "{{display_name}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "set_profile_picture": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "selected_photo_marker",
+            "confirm_change"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "confirm_change": {
+                  "equals_exact": "change_profile_picture"
+                },
+                "selected_photo_marker": {
+                  "matches": "^Selected Photo thumbnail created on .{1,100}$"
+                },
+                "target_handle": {
+                  "not_matches": "(?i)^marcoschwartz$",
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "native_target": "Edit profile",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}",
+                "Edit picture or avatar"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Edit picture or avatar",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Choose from library",
+                "Take photo"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Choose from library",
+                "Take photo"
+              ],
+              "native_target": "Choose from library",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/crop_image_view",
+                "{{selected_photo_marker}}",
+                "Recents"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 10000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/crop_image_view",
+                "{{selected_photo_marker}}"
+              ],
+              "native_target": "{{selected_photo_marker}}",
+              "action": "native_read",
+              "locator": {},
+              "verified_field": "selected_photo"
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Selected profile photo before save"
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/crop_image_view",
+                "{{selected_photo_marker}}",
+                "Recents",
+                "Cancel"
+              ],
+              "native_target": "com.instagram.android:id/profile_picture_done_button > android.widget.Button",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Profile editor after picture upload settling"
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 20000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "Username",
+                "{{target_handle}}"
+              ],
+              "native_target": "Back",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 20000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Android profile after saved picture change"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "sign_in": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "username",
+            "password_ref"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "username": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{username}}",
+                "Show password",
+                "Log in"
+              ],
+              "native_target": "Password",
+              "secret_ref": "{{password_ref}}",
+              "action": "native_type_secret",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{username}}",
+                "Show password"
+              ],
+              "native_target": "Log in",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "skip_contact_sync": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Set up on new device",
+                "Allow access to contacts to find people to follow",
+                "Skip"
+              ],
+              "native_target": "Skip",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 500
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Skipped unnecessary Instagram contact syncing"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "skip_signup_profile_picture": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Add a profile picture",
+                "Add picture",
+                "bottom_sheet_background"
+              ],
+              "native_target": "Skip",
+              "action": "native_tap",
+              "locator": {}
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "switch_account": {
+      "variants": {
+        "android": {
+          "browser": {
+            "context_id": "{{android_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "target_handle": {
+                  "matches": "^[a-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Dismiss",
+                "{{target_handle}}"
+              ],
+              "native_target": "{{target_handle}}",
+              "action": "native_tap_badged",
+              "locator": {}
+            },
+            {
+              "action": "wait",
+              "locator": {},
+              "duration_ms": 1200
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Turn on notifications",
+                "com.instagram.android:id/igds_headline_secondary_action_text_button"
+              ],
+              "native_target": "com.instagram.android:id/igds_headline_secondary_action_text_button",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Save your login info?",
+                "Not now"
+              ],
+              "native_target": "Not now",
+              "action": "native_tap_if_present",
+              "locator": {}
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "com.instagram.android:id/profile_tab",
+                "com.instagram.android:id/feed_tab"
+              ],
+              "native_target": "com.instagram.android:id/profile_tab",
+              "action": "native_tap",
+              "locator": {}
+            },
+            {
+              "native_values": {
+                "com.instagram.android:id/action_bar_title": "{{target_handle}}"
+              },
+              "native_app": "com.instagram.android",
+              "native_required": [
+                "Edit profile",
+                "com.instagram.android:id/action_bar_title"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Verified Android switched account"
+            }
+          ]
+        },
+        "ios": {
+          "private_screen": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "target_handle"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "locator": {},
+              "assertions": {
+                "target_handle": {
+                  "matches": "^[A-Za-z0-9._]{1,30}$"
+                }
+              }
+            },
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "bottom_sheet_background"
+              ],
+              "native_target": "INSTAGRAM profile, {{target_handle}}",
+              "action": "native_tap_badged",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{target_handle}}",
+                "Edit profile",
+                "user-switch-title-button"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "verify_account": {
+      "variants": {
+        "ios": {
+          "read_only": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "required_explicit_inputs": [
+            "handle",
+            "profile_marker"
+          ],
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "{{handle}}",
+                "{{profile_marker}}"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Verified Instagram profile"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "verify_email_signup_review": {
+      "variants": {
+        "ios": {
+          "private_screen": true,
+          "read_only": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "Agree to Instagram's terms and policies",
+                "I agree"
+              ],
+              "action": "native_wait",
+              "locator": {},
+              "duration_ms": 15000
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "verify_photo_review": {
+      "variants": {
+        "ios": {
+          "read_only": true,
+          "browser": {
+            "context_id": "{{ios_context_id}}",
+            "backend": "mobile"
+          },
+          "steps": [
+            {
+              "action": "open",
+              "locator": {}
+            },
+            {
+              "native_app": "Instagram",
+              "native_required": [
+                "New post",
+                "caption-cell-text-view",
+                "share-button"
+              ],
+              "action": "native_assert",
+              "locator": {}
+            },
+            {
+              "action": "screenshot",
+              "locator": {},
+              "label": "Instagram photo ready for review"
+            }
+          ]
+        }
+      },
+      "steps": null,
+      "output_schema": null
+    },
+    "disable_profile_suggestions": {
+      "variants": {
+        "web": {
+          "private_screen": true,
+          "browser": {
+            "backend": "local",
+            "context_id": "{{web_context_id}}",
+            "persist": true,
+            "viewport": {
+              "width": 1440,
+              "height": 1000
+            }
+          },
+          "required_explicit_inputs": [
+            "target_handle",
+            "web_context_id"
+          ],
+          "steps": [
+            {
+              "action": "assert_inputs",
+              "assertions": {
+                "target_handle": {
+                  "matches": "^[a-z0-9._]{1,30}$",
+                  "not_matches": "(?i)^marcoschwartz$"
+                }
+              }
+            },
+            {
+              "action": "goto",
+              "url": "https://www.instagram.com/accounts/edit/"
+            },
+            {
+              "action": "wait_for",
+              "match": "all",
+              "timeout_ms": 15000,
+              "conditions": [
+                {
+                  "type": "url_equals",
+                  "value": "https://www.instagram.com/accounts/edit/"
+                },
+                {
+                  "type": "selector_present",
+                  "selector": "a[href=\"/{{target_handle}}/\"]:has(img[alt$=\"profile picture\" i], svg[aria-label=\"Profile\"]), a[href=\"/{{target_handle}}/\"][aria-label=\"Profile\"]"
+                }
+              ]
+            },
+            {
+              "action": "assert_element",
+              "readability": false,
+              "locator": {
+                "selector": "main :matchesown(^Show account suggestions on profiles$), [role=\"main\"] :matchesown(^Show account suggestions on profiles$)"
+              }
+            },
+            {
+              "action": "extract",
+              "readability": false,
+              "items": "main [role=\"switch\"][aria-checked], main [role=\"checkbox\"][aria-checked], main input[type=\"checkbox\"], [role=\"main\"] [role=\"switch\"][aria-checked], [role=\"main\"] [role=\"checkbox\"][aria-checked], [role=\"main\"] input[type=\"checkbox\"]",
+              "min_items": 1,
+              "max_items": 1,
+              "fields": {
+                "switch_role": {
+                  "attribute": "role"
+                }
+              }
+            },
+            {
+              "action": "set_checked",
+              "locator": {
+                "selector": "body:has(a[href=\"/{{target_handle}}/\"]:has(img[alt$=\"profile picture\" i], svg[aria-label=\"Profile\"]), a[href=\"/{{target_handle}}/\"][aria-label=\"Profile\"]) :is(main, [role=\"main\"]) :is([role=\"switch\"][aria-checked], [role=\"checkbox\"][aria-checked], input[type=\"checkbox\"])"
+              },
+              "checked": false
+            },
+            {
+              "action": "click",
+              "locator": {
+                "text": "Submit",
+                "role": "button",
+                "exact": true,
+                "som_only": true
+              },
+              "expected_text": "Submit",
+              "optional": true
+            },
+            {
+              "action": "wait_for",
+              "timeout_ms": 5000,
+              "conditions": [
+                {
+                  "type": "text_present",
+                  "value": "Profile saved"
+                }
+              ],
+              "optional": true
+            },
+            {
+              "action": "goto",
+              "url": "https://www.instagram.com/accounts/edit/"
+            },
+            {
+              "action": "wait_for",
+              "match": "all",
+              "timeout_ms": 15000,
+              "conditions": [
+                {
+                  "type": "url_equals",
+                  "value": "https://www.instagram.com/accounts/edit/"
+                },
+                {
+                  "type": "selector_present",
+                  "selector": "a[href=\"/{{target_handle}}/\"]:has(img[alt$=\"profile picture\" i], svg[aria-label=\"Profile\"]), a[href=\"/{{target_handle}}/\"][aria-label=\"Profile\"]"
+                },
+                {
+                  "type": "selector_present",
+                  "selector": ":is(main, [role=\"main\"]) :is([role=\"switch\"][aria-checked=\"false\"], [role=\"checkbox\"][aria-checked=\"false\"], input[type=\"checkbox\"]:not(:checked))"
+                },
+                {
+                  "type": "selector_absent",
+                  "selector": ":is(main, [role=\"main\"]) :is([role=\"switch\"][aria-checked=\"true\"], [role=\"checkbox\"][aria-checked=\"true\"], input[type=\"checkbox\"]:checked)"
+                }
+              ]
+            },
+            {
+              "action": "assert_element",
+              "readability": false,
+              "locator": {
+                "selector": "main :matchesown(^Show account suggestions on profiles$), [role=\"main\"] :matchesown(^Show account suggestions on profiles$)"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "schema_version": 1,
+  "presets": {
+    "android": {
+      "platform": "android"
+    },
+    "ios": {
+      "platform": "ios"
+    },
+    "web": {
+      "platform": "web"
+    }
+  },
+  "browser": {
+    "context_id": "{{ios_context_id}}",
+    "backend": "mobile"
+  },
+  "allowed_hosts": [
+    "www.instagram.com"
+  ],
+  "limits": {
+    "max_duration_seconds": 120,
+    "step_retries": 0
+  },
+  "steps": null,
+  "output_schema": null
+}

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +18,7 @@ import (
 var operationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 func (e *actorExecution) lockContext() error {
-	res, err := e.ctx.AppDB().Exec(`INSERT INTO actors_context_locks(project_id,context_id,run_id,expires_at) VALUES(?,?,?,?) ON CONFLICT(project_id,context_id) DO UPDATE SET run_id=excluded.run_id,expires_at=excluded.expires_at WHERE actors_context_locks.expires_at<? OR actors_context_locks.run_id=excluded.run_id`, projectID(e.ctx), e.definition.Browser.ContextID, e.run.ID, e.deadline.Add(time.Minute).Unix(), time.Now().Unix())
+	res, err := e.ctx.AppDB().Exec(`INSERT INTO actors_context_locks(project_id,context_id,run_id,expires_at) VALUES(?,?,?,?) ON CONFLICT(project_id,context_id) DO UPDATE SET run_id=excluded.run_id,expires_at=excluded.expires_at,cleanup_pending=0 WHERE actors_context_locks.expires_at<=? OR actors_context_locks.run_id=excluded.run_id`, projectID(e.ctx), strings.TrimSpace(e.definition.Browser.ContextID), e.run.ID, e.deadline.Add(time.Minute).Unix(), time.Now().Unix())
 	if err != nil {
 		return err
 	}
@@ -27,15 +29,29 @@ func (e *actorExecution) lockContext() error {
 	return nil
 }
 
+func (e *actorExecution) releaseContextLock(keep bool) {
+	query := `DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`
+	if keep {
+		// A cancelled open/close may still be running at Computer. Keep
+		// the saved context reserved until the existing lease expires.
+		query = `UPDATE actors_context_locks SET cleanup_pending=1 WHERE project_id=? AND run_id=?`
+	}
+	if _, err := e.ctx.AppDB().Exec(query, projectID(e.ctx), e.run.ID); err != nil {
+		e.ctx.Logger().Warn("release actor context lock", "run_id", e.run.ID, "err", err.Error())
+	}
+}
+
 type actorOperation struct {
-	Browser                *actorBrowser        `json:"browser,omitempty"`
-	RequiredExplicitInputs []string             `json:"required_explicit_inputs,omitempty"`
-	RecoveryOnly           bool                 `json:"recovery_only,omitempty"`
-	Recovery               *actorRecoveryPolicy `json:"recovery,omitempty"`
-	Limits                 *actorLimits         `json:"limits,omitempty"`
-	ReadOnly               bool                 `json:"read_only,omitempty"`
-	Steps                  []actorStep          `json:"steps"`
-	OutputSchema           map[string]string    `json:"output_schema"`
+	Variants               map[string]actorPlatformVariant `json:"variants,omitempty"`
+	PrivateScreen          bool                            `json:"private_screen,omitempty"`
+	Browser                *actorBrowser                   `json:"browser,omitempty"`
+	RequiredExplicitInputs []string                        `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                            `json:"recovery_only,omitempty"`
+	Recovery               *actorRecoveryPolicy            `json:"recovery,omitempty"`
+	Limits                 *actorLimits                    `json:"limits,omitempty"`
+	ReadOnly               bool                            `json:"read_only,omitempty"`
+	Steps                  []actorStep                     `json:"steps"`
+	OutputSchema           map[string]string               `json:"output_schema"`
 }
 
 func selectOperation(def actorDefinition, name string) (actorDefinition, error) {
@@ -51,6 +67,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	}
 	def.Operations = nil
 	def.ReadOnly = def.ReadOnly || op.ReadOnly
+	def.PrivateScreen = def.PrivateScreen || op.PrivateScreen
 	def.RecoveryOnly = op.RecoveryOnly
 	if op.Limits != nil {
 		def.Limits = *op.Limits
@@ -62,6 +79,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	def.Recovery = op.Recovery
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
+	def.Variants = op.Variants
 	return def, nil
 }
 
@@ -149,6 +167,9 @@ func (e *actorExecution) interact(step actorStep) error {
 	case "scroll":
 		args["direction"] = step.Direction
 		args["amount"] = boundedInt(step.Amount, 300, 1, 10000)
+		if e.definition.PrivateScreen && e.session.Backend == "mobile" {
+			args["observation"] = "none"
+		}
 		if step.TargetID != "" {
 			shot, err := e.readScrollSnapshot()
 			if err != nil {
@@ -181,6 +202,9 @@ func (e *actorExecution) interact(step actorStep) error {
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
 	}
+	if e.session.Backend == "mobile" {
+		return finishScreenInteraction(out)
+	}
 	return e.finishInteraction(out)
 }
 
@@ -195,8 +219,7 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 			return err
 		}
-		e.recordMediaResult(out)
-		return e.finishInteraction(out)
+		return e.finishSemanticInteraction(step, args, out)
 	}
 	var shot computerSOMScreenshot
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{
@@ -239,24 +262,112 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
 	}
+	return e.finishSemanticInteraction(step, args, out)
+}
+
+func (e *actorExecution) finishSemanticInteraction(step actorStep, args, out map[string]any) error {
+	if args["action"] == "upload_file" {
+		err := validateUploadReceipt(step, out)
+		e.traceUploadReceipt(step, out, err)
+		if err != nil {
+			return err
+		}
+	}
 	e.recordMediaResult(out)
 	return e.finishInteraction(out)
+}
+
+// prepareUpload stages and hashes exact bytes in the existing Computer session.
+// This must precede destructive replacement; it never switches login contexts.
+func (e *actorExecution) prepareUpload(step actorStep) error {
+	if e.session == nil {
+		return errors.New("prepare_upload requires an open browser")
+	}
+	args := withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "prepare_upload"})
+	for key, value := range map[string]string{"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath, "filename": step.Filename, "mime_type": step.MIMEType, "expected_sha256": step.ExpectedSHA256} {
+		if value != "" {
+			args[key] = value
+		}
+	}
+	var out map[string]any
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", args, &out); err != nil {
+		return err
+	}
+	backend := firstNonEmpty(e.session.EffectiveBackend, e.session.Backend)
+	if (step.ExpectedSHA256 != "" && out["sha256"] != step.ExpectedSHA256) || out["prepared"] != true || out["uploaded"] != false || stringFromAny(out["backend"]) != backend || len(stringFromAny(out["sha256"])) != 64 {
+		return errors.New("Computer did not prove a staged upload for the current backend; replacement blocked")
+	}
+	e.addTrace("prepare_upload", "prepared", "", map[string]any{"filename": out["filename"], "size_bytes": out["size_bytes"], "sha256": out["sha256"], "backend": backend, "site_upload_dispatched": false})
+	return nil
 }
 
 func (e *actorExecution) upload(step actorStep) error {
 	if e.session == nil {
 		return errors.New("upload_file requires an open browser")
 	}
-	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file"}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file", "require_prepared": step.RequirePrepared}
 	for key, value := range map[string]string{
 		"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath,
-		"filename": step.Filename, "mime_type": step.MIMEType,
+		"filename": step.Filename, "mime_type": step.MIMEType, "expected_sha256": step.ExpectedSHA256,
 	} {
 		if strings.TrimSpace(value) != "" {
 			args[key] = value
 		}
 	}
-	return e.dispatchSemantic(step, args)
+	if err := e.dispatchSemantic(step, args); err != nil {
+		if errors.Is(err, errActorUploadNotConfirmed) {
+			return err
+		}
+		// Keep the cause for cancellation/deadline handling, but never expose
+		// raw Computer errors (which can contain signed URLs or upload bytes).
+		e.traceUploadReceipt(step, nil, err)
+		return &actorUploadError{cause: err}
+	}
+	return nil
+}
+
+var errActorUploadNotConfirmed = errors.New("upload_not_confirmed")
+
+type actorUploadError struct{ cause error }
+
+func (e *actorUploadError) Error() string {
+	if actorOperationTimedOut(e.cause) {
+		return "upload_not_confirmed: Computer upload action timed out"
+	}
+	return "upload_not_confirmed: Computer upload action failed"
+}
+func (e *actorUploadError) Unwrap() []error { return []error{errActorUploadNotConfirmed, e.cause} }
+
+func validateUploadReceipt(step actorStep, out map[string]any) error {
+	reject := func(reason string) error { return fmt.Errorf("%w: %s", errActorUploadNotConfirmed, reason) }
+	if out["uploaded"] != true {
+		return reject("Computer did not return uploaded=true")
+	}
+	if out["success"] == false || out["action_dispatched"] == false || out["failed"] == true {
+		return reject("Computer rejected the upload or its dispatch")
+	}
+	filename, _ := out["filename"].(string)
+	if strings.TrimSpace(filename) == "" {
+		return reject("Computer receipt is missing a filename")
+	}
+	// Computer's JSON response must contain a positive integral byte count,
+	// not a numeric string, boolean, fraction, or overflowing integer.
+	rawSize, err := json.Marshal(out["size_bytes"])
+	size, sizeErr := strconv.ParseInt(string(rawSize), 10, 64)
+	if err != nil || sizeErr != nil || size <= 0 {
+		return reject("Computer receipt is missing a positive byte count")
+	}
+	if step.Filename != "" && filename != step.Filename {
+		return reject("Computer receipt filename does not match the expected filename")
+	}
+	if step.ExpectedSHA256 != "" {
+		observed, _ := out["sha256"].(string)
+		digest, err := hex.DecodeString(observed)
+		if err != nil || len(digest) != 32 || !strings.EqualFold(observed, step.ExpectedSHA256) {
+			return reject("Computer receipt checksum does not match expected_sha256")
+		}
+	}
+	return nil
 }
 
 func (e *actorExecution) recordMediaResult(out map[string]any) {
@@ -357,7 +468,7 @@ func (a *App) platformTools() []sdk.Tool {
 		{Name: "actors_task_list", Description: "List saved tasks in the current project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolTaskList},
 		{Name: "actors_task_run", Description: "Queue a saved task using its pinned revision and inputs.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskRun},
 		{Name: "actors_task_delete", Description: "Delete a saved task; actor definitions and historical runs remain.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskDelete},
-		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
+		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page. The last page (has_more=false) of a finished run includes run_summary: the compact terminal receipt with status, revision, dataset_count and read coverage.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
 	}
 }
 
@@ -412,6 +523,11 @@ func (a *App) toolTaskSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Task saves use the same template/definition validation as run admission.
 	snapshot, _ := json.Marshal(def)
 	runInput, _ := json.Marshal(map[string]any{"input": input, "preset": stringArg(args, "preset")})
+	def, err = resolvePlatformSnapshot(ctx, def, string(runInput))
+	if err != nil {
+		return nil, err
+	}
+	snapshot, _ = json.Marshal(def)
 	if _, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(runInput), DefinitionSnapshot: string(snapshot)}); err != nil {
 		return nil, err
 	}
@@ -592,7 +708,23 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cursor = rowID
 		size += len(raw)
 	}
-	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	out := map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}
+	// The last page of a finished run carries its compact receipt, so a reader
+	// that consumes every row also gets the coverage needed to trust them.
+	if !more && terminalActorRunStatus(status) {
+		run, err := getActorRun(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if out["run_summary"], err = summarizeActorRun(ctx, run); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (a *App) platformRoutes() []sdk.Route {

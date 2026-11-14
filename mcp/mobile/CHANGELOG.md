@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — 2026-11-14
+
+- Collect bounded, read-only Android UI source during animations, with a stock
+  collector fallback. Embed the collector and its reproducible SDK build script.
+- Add opt-in verified text replacement and explicit clearing. Check foreground
+  package, focused field identity and current value before input; require exact
+  readback afterward. Bind anonymous EditText fields to their class and bounds.
+- Reject unsupported bytes before modifying fields. ADB input supports printable
+  ASCII excluding percent; structured drivers remain required for other text.
+- Preserve the iOS/Android Keep awake controls, recording timing and embedded UI
+  assets from 0.5.0 and earlier releases. Pin app-sdk v0.115.2 by tag ancestry.
+
 ## 0.5.0 — 2026-11-14
 
 - Share the Keep awake control and `mobile_power` status/set API between Android

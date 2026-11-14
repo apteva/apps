@@ -8,6 +8,7 @@ import (
 )
 
 type actorReveal struct {
+	FullyVisible     bool   `json:"fully_visible,omitempty"`
 	ScrollTargetName string `json:"scroll_target_name"`
 	Direction        string `json:"direction"`
 	MaxScrolls       int    `json:"max_scrolls"`
@@ -51,7 +52,22 @@ func (e *actorExecution) revealControl(s actorStep) error {
 		if len(matches) > 1 {
 			return errors.New("reveal_control target is ambiguous")
 		}
-		if len(matches) == 1 {
+		visible := len(matches) == 1
+		if visible && s.Reveal.FullyVisible {
+			t := matches[0]
+			if t.W <= 0 || t.H <= 0 || shot.Width <= 0 || shot.Height <= 0 {
+				return errors.New("reveal_control requires observed viewport and target geometry")
+			}
+			visible = t.X >= 0 && t.Y >= 0 && t.X+t.W <= shot.Width && t.Y+t.H <= shot.Height
+			if !visible {
+				if t.Y < 0 {
+					direction = "up"
+				} else {
+					direction = "down"
+				}
+			}
+		}
+		if visible {
 			t := matches[0]
 			if t.ID == "" || t.Loading {
 				return errors.New("reveal_control target has no stable semantic identity or is loading")

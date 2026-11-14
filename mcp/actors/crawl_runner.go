@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -18,10 +19,12 @@ var errCrawlLimit = errors.New("crawl budget reached; committed partial data and
 var errCrawlFence = errors.New("crawl page lease is no longer owned by this worker")
 
 func (a *App) executeCrawlRun(exec *actorExecution) error {
-	defer func() {
-		_, _ = exec.ctx.AppDB().Exec(`DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`, projectID(exec.ctx), exec.run.ID)
-	}()
+	defer func() { exec.releaseContextLock(exec.keepContextLock) }()
 	out, runErr := exec.runCrawl()
+	timedOut := errors.Is(exec.workerCtx.Err(), context.DeadlineExceeded) || errors.Is(runErr, errActorDeadline)
+	if timedOut {
+		runErr = errActorDeadline
+	}
 	status := "completed"
 	if errors.Is(runErr, errActorCancelled) {
 		status = "cancelled"
@@ -38,6 +41,9 @@ func (a *App) executeCrawlRun(exec *actorExecution) error {
 	}
 	if out == nil {
 		out = map[string]any{}
+	}
+	if timedOut {
+		out["failure_reason"] = "execution_timeout"
 	}
 	out["run_id"] = exec.run.ID
 	out["actor_id"] = exec.run.ActorID
@@ -75,6 +81,7 @@ func (e *actorExecution) runCrawl() (map[string]any, error) {
 	limiter := &crawlLimiter{delay: time.Duration(c.Frontier.DelayMS) * time.Millisecond, next: map[string]time.Time{}}
 	var wg sync.WaitGroup
 	errs := make(chan error, concurrency)
+	var cleanupFailed atomic.Bool
 	for slot := 0; slot < concurrency; slot++ {
 		wg.Add(1)
 		go func() {
@@ -85,8 +92,12 @@ func (e *actorExecution) runCrawl() (map[string]any, error) {
 			worker.trace = nil
 			worker.items = nil
 			defer func() {
-				if worker.session != nil {
-					worker.app.closeBrowser(worker.ctx, worker.session.SessionID)
+				if worker.session == nil {
+					if worker.workerCtx.Err() != nil {
+						cleanupFailed.Store(true)
+					}
+				} else if worker.app.closeBrowser(worker.ctx, worker.session.SessionID) != nil {
+					cleanupFailed.Store(true)
 				}
 			}()
 			if err := worker.crawlLoop(limiter); err != nil {
@@ -96,6 +107,7 @@ func (e *actorExecution) runCrawl() (map[string]any, error) {
 		}()
 	}
 	wg.Wait()
+	e.keepContextLock = cleanupFailed.Load()
 	close(errs)
 	var runErr error
 	for err := range errs {

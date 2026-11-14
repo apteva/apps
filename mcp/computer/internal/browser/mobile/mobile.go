@@ -329,6 +329,14 @@ func (c *Computer) CurrentURL() string           { return "" }
 func (c *Computer) Target() api.SessionTarget    { return c.target }
 func (c *Computer) Capabilities() api.Capabilities {
 	actions := []string{"screenshot", "click", "swipe", "scroll", "type", "key", "home", "navigate", "wait", "launch_app", "stop_app"}
+	if c.supportsNativeScreen() {
+		actions = append(actions, "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_read")
+		if c.lease.Device.Platform == "ios" {
+			actions = append(actions, "native_type_secure", "native_replace")
+		} else if slices.Contains(c.lease.Device.Capabilities, "replace_text") {
+			actions = append(actions, "native_replace", "native_clear")
+		}
+	}
 	keys := []string{"home", "enter"}
 	if c.lease.Device.Platform == "android" {
 		keys = append(keys, "back")

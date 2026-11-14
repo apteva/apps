@@ -1,8 +1,59 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.0
+version: 0.7.0
 description: |
+  v0.7.0 adds guarded Android field reads, replacement and explicit clearing
+  for platform-specific actors. Native value checks bind the active account;
+  confirmed reads enter datasets. Includes the shared Instagram example and
+  preserves iOS workflows, guarded media examples and upload receipt validation.
+  v0.6.0 adds per-operation iOS, Android and web platform variants. Select
+  input.platform or a preset, or infer the configured device/context platform.
+  Runs pin the selected implementation and device before queueing; unsupported
+  or conflicting targets fail before opening a session. Discovery supports
+  platform-specific contracts. Existing step-based actors remain compatible.
+  v0.5.2 requires confirmed Computer upload receipts with filenames and positive
+  byte counts, validates configured filenames and checksums, and stops before
+  publication on missing or rejected receipts. Retains bounded sanitized upload
+  diagnostics; prepare_upload remains staging and site readiness is verified
+  separately. Unconfirmed uploads cannot be skipped or automatically retried.
+  v0.5.1 marks inspect_views navigations read_only so Computer 0.9.2+ can
+  retry a transient Browserbase failure once in a fresh page, and treats a
+  success=false or failed=true navigation result as a failed, incomplete read
+  that never continues into writes. Actors does not add its own HTTP/2 retry
+  on top of a structured Computer navigation failure.
+  v0.5.0 adds a compact run receipt: actors_run_get detail=summary and
+  run_summary on the final dataset page of a finished run carry status,
+  revision, dataset count and read coverage without snapshots or previews.
+  Saved pagination evidence keeps counts and bounds long ID lists. It also
+  adds private native Mobile steps guarded by on-screen markers, with secret
+  references bound to a saved context and native app; they need a Computer
+  release that supports native input.
+  v0.4.0 adds Computer Mobile targets, saved device contexts, screenshot and
+  screen-input workflows, capability preflight, and per-device queue locks.
+  Requires Computer 0.8.0. Mobile reuses shared device data; DOM/form/upload
+  operations remain browser-only.
+  v0.3.7 allows time for Computer to close persisted Browserbase sessions and
+  keeps the context locked when Computer reports cleanup is pending.
+  v0.3.6 runs independent browser jobs concurrently with a configurable worker
+  limit, serializes shared contexts, and exposes queue wait, execution time,
+  and timeout reconciliation in run details.
+  v0.3.5 raises the actor definition limit to 2 MiB so larger workflows can
+  retain their operations in one actor.
+  v0.3.4 stages exact upload bytes before destructive replacement, forwards
+  require_prepared to Computer, supports excluded-pattern assertions and
+  reveals fully visible controls before guarded saves. Requires Computer 0.7.98.
+  v0.3.3 permits native image URLs as explicit read-view identity evidence for
+  full-screen reports without navigation links. Identity selectors remain unique,
+  URLs must be present and match the declared host/profile pattern on every page.
+  Existing href identity, full-collection coverage and action guards are preserved.
+  v0.3.2 parses whole-number extraction with exact signed integers and validated
+  thousands grouping. Rejects fractional, malformed and overflowing counts;
+  money and decimal parsing keep their existing locale behavior.
+  v0.3.1 restores guarded input assertions, complete-collection duplicate checks,
+  verified saved-record navigation and native read-only tabs used by the
+  Clips4Sale Actor. Keeps bounded discovery, same-resource recovery, readiness
+  diagnostics and durable once guards from v0.3.0.
   v0.3.0 makes MCP discovery bounded by default: metadata and paginated operation
   names, complete exact-operation contracts, and explicit hash-verifiable JSON
   exports for editing/debugging. The editor explicitly downloads its pinned
@@ -57,8 +108,8 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.97"
-      reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
+      version: ">=0.8.0"
+      reason: Browser and Mobile screen control, saved contexts, explicit capabilities, extraction and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
     - name: jobs
@@ -83,7 +134,7 @@ provides:
     - name: actors_run
       description: Queue a named operation with optional revision, preset, input and idempotency key.
     - name: actors_run_get
-      description: Get run status, bounded output, immutable snapshot and export references.
+      description: Get run status, bounded output, immutable snapshot and export references; detail=summary returns the compact terminal receipt with read coverage.
     - name: actors_run_cancel
       description: Cancel queued work or request cancellation of an active run.
     - name: actors_run_retry
@@ -105,7 +156,7 @@ provides:
     - name: actors_task_delete
       description: Delete a saved task.
     - name: actors_dataset_read
-      description: Read a run dataset with cursor pagination, including partial results.
+      description: Read a run dataset with cursor pagination, including partial results; the final page of a finished run includes its compact run_summary receipt.
     - name: actors_crawl_save
       description: Create or update a schema version 2 crawl actor with routes and datasets.
     - name: actors_crawl_run
@@ -134,8 +185,8 @@ provides:
 runtime:
   kind: source
   source:
-    repo: github.com/apteva/apps
-    ref: actors/v0.3.0
+    repo: https://github.com/apteva/apps.git
+    ref: actors/v0.7.0
     entry: mcp/actors
   port: 8080
   health_check: /health
@@ -144,10 +195,15 @@ db:
   path: /data/actors.db
   migrations: migrations/
 config_schema:
+  - name: worker_limit
+    type: number
+    default: 4
+    label: Concurrent actor runs
+    description: Maximum concurrent queued actor runs per installation (1 to 32). Runs sharing a saved browser context, Mobile device or continuation still run in order.
   - name: browser_secrets
     type: secret
-    label: Browser secret references
-    description: "Operator-managed JSON map of project ID to secret references. Each entry requires value, context_id, exact HTTPS host and expires_at (RFC3339). Stored in encrypted install settings; never put raw credentials in actor definitions or run input."
+    label: Actor secret references
+    description: "Encrypted JSON map of project IDs to secret references. Each entry requires value, context_id, expires_at (RFC3339), and either host for HTTPS or native_app for a private Mobile operation. Use references in definitions and run inputs."
   - name: allow_private_networks
     type: bool
     default: false
