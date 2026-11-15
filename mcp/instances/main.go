@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.17.0
+version: 0.17.1
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -229,7 +229,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.17.0
+    ref: instances/v0.17.1
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -257,6 +257,11 @@ func (a *App) Manifest() sdk.Manifest {
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("instances requires a db block")
+	}
+	// Migrate and authenticate every persisted credential before starting any
+	// reconcilers, monitoring, SSH sessions or runtime workers.
+	if err := initializeSSHCredentials(ctx.AppDB(), ctx.DataDir(), os.Getenv(sshCredentialKeyEnv)); err != nil {
+		return fmt.Errorf("initialize SSH credentials: %w", err)
 	}
 	workerMutex.Lock()
 	delete(stoppedWorkers, ctx.AppDB())
@@ -318,6 +323,7 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	stopInstanceWorkers(ctx)
 	globalTunnelRegistry.closeAll()
 	globalSSHPool.closeAll()
+	sshCredentialVaults.Delete(ctx.AppDB())
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }

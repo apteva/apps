@@ -71,7 +71,7 @@ func TestStorageCapabilities_DistinguishesBootAndData(t *testing.T) {
 
 func TestVolumeCreate_AttachesAndRecordsDigitalOceanVolume(t *testing.T) {
 	platform := &recordingVolumePlatform{slug: "digitalocean"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "vm-1", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Region: "ams3", Status: "ready",
 	})
@@ -110,7 +110,7 @@ func TestVolumeDelete_RequiresDetachAndConfirmation(t *testing.T) {
 		t.Fatal("volume should be attached")
 	}
 	app := &App{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean"}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean"}))
 	if _, err := app.toolVolumeDelete(ctx, map[string]any{"id": volume.ID}); err == nil || !strings.Contains(err.Error(), "confirm=true") {
 		t.Fatalf("delete without confirmation err = %v", err)
 	}

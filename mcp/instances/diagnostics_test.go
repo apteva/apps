@@ -53,7 +53,7 @@ func TestCompareInstanceProviderRepairsScientificHetznerID(t *testing.T) {
 			"public_net": {"ipv4": {"ip": "91.99.2.117"}, "ipv6": {"ip": "2a01:4f8::1"}}
 		}
 	}`)}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "processing", Provider: "hetzner", ProviderConnectionID: 7,
 		ProviderID: "1.32664013e+08", PublicIPv4: "91.99.2.117", Status: "ready",
@@ -91,7 +91,7 @@ func TestCompareInstanceProviderRepairsScientificHetznerID(t *testing.T) {
 
 func TestCompareInstanceProviderRejectsInvalidStoredHetznerID(t *testing.T) {
 	platform := &hetznerReconcilePlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "broken", Provider: "hetzner", ProviderConnectionID: 7,
 		ProviderID: "not-an-id", PublicIPv4: "192.0.2.10", Status: "ready",
@@ -110,7 +110,7 @@ func TestCompareInstanceProviderRejectsInvalidStoredHetznerID(t *testing.T) {
 
 func TestReconcileTrackedProviderStateLabelsInvalidHetznerID(t *testing.T) {
 	platform := &hetznerReconcilePlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "broken", Provider: "hetzner", ProviderConnectionID: 7,
 		ProviderID: "not-an-id", PublicIPv4: "192.0.2.10", Status: "ready",
@@ -138,7 +138,7 @@ func TestCompareInstanceProviderRefusesUnverifiedHetznerRepair(t *testing.T) {
 	platform := &hetznerReconcilePlatform{response: json.RawMessage(`{
 		"server": {"id":132664013,"name":"different","status":"running","public_net":{"ipv4":{"ip":"91.99.2.117"}}}
 	}`)}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "processing", Provider: "hetzner", ProviderConnectionID: 7,
 		ProviderID: "1.32664013e+08", PublicIPv4: "91.99.2.117", Status: "error",

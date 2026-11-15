@@ -80,7 +80,7 @@ func TestParseScalewayStorageConstraints(t *testing.T) {
 
 func TestScalewayBootStorageRequestsMapLocalAndBlock(t *testing.T) {
 	platform := &scalewayStoragePlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	tests := []struct {
 		name         string
 		size         string
@@ -133,7 +133,7 @@ func TestScalewayBootStorageRequestsMapLocalAndBlock(t *testing.T) {
 }
 
 func TestScalewayRejectsLocalStorageOnBlockOnlyType(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&scalewayStoragePlatform{}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&scalewayStoragePlatform{}))
 	in := CreateInstanceInput{Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par-1", Size: "POP2-HC-2C-4G", Image: "image-local", Storage: InstanceStorageRequest{Boot: &BootStorageRequest{SizeGB: 80, StorageClass: "local"}}}
 	if err := validateScalewayBootStorage(ctx, &in); err == nil || !strings.Contains(err.Error(), "does not support local") {
 		t.Fatalf("error = %v", err)
@@ -141,7 +141,7 @@ func TestScalewayRejectsLocalStorageOnBlockOnlyType(t *testing.T) {
 }
 
 func TestScalewayRejectsIncompatibleBootImage(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&scalewayStoragePlatform{}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&scalewayStoragePlatform{}))
 	in := CreateInstanceInput{Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par-1", Size: "DEV1-L", Image: "image-sbs", Storage: InstanceStorageRequest{Boot: &BootStorageRequest{SizeGB: 80, StorageClass: "local"}}}
 	if err := validateScalewayBootStorage(ctx, &in); err == nil || !strings.Contains(err.Error(), "cannot create a l_ssd") {
 		t.Fatalf("error = %v", err)
@@ -153,7 +153,7 @@ func TestScalewayPersistsVerifiedBootVolume(t *testing.T) {
 		serverData: json.RawMessage(`{"server":{"volumes":{"0":{"id":"local-1","volume_type":"l_ssd","boot":true}}}}`),
 		volumeData: json.RawMessage(`{"volume":{"id":"local-1","size":80000000000,"volume_type":"l_ssd"}}`),
 	}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{Name: "dev", Provider: "scaleway", ProviderConnectionID: 7, ProviderID: "server-1", Region: "fr-par-1", Status: "provisioning", Storage: InstanceStorageRequest{Boot: &BootStorageRequest{SizeGB: 80, StorageClass: "local", Tier: "local", ProviderType: "l_ssd", DeletePolicy: "with_instance"}}})
 	if err != nil {
 		t.Fatal(err)

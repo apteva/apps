@@ -1,5 +1,7 @@
 # Instances
 
+SSH credential storage and upgrade behavior: [encrypted SSH vault](docs/ssh-credential-storage.md).
+
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 

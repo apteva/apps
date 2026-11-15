@@ -30,7 +30,7 @@ func (failingHetznerPlatform) ExecuteIntegrationTool(int64, string, map[string]a
 
 func TestHetznerProvision_EmitsCreatedProvisioningAndError(t *testing.T) {
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml",
+	ctx := newInstancesTestCtx(t, "apteva.yaml",
 		tk.WithProjectID("project-1"),
 		tk.WithEmitter(rec),
 		tk.WithPlatform(failingHetznerPlatform{}),
@@ -68,7 +68,7 @@ func TestHetznerProvision_EmitsCreatedProvisioningAndError(t *testing.T) {
 
 func TestUpdateInstanceAndEmit_Ready(t *testing.T) {
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-1"), tk.WithEmitter(rec))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithProjectID("project-1"), tk.WithEmitter(rec))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "test-1", Provider: "hetzner", ProviderID: "42", Status: "provisioning",
 	})
@@ -92,7 +92,7 @@ func TestUpdateInstanceAndEmit_Ready(t *testing.T) {
 
 func TestDeleteInstanceAndEmit_Destroyed(t *testing.T) {
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-1"), tk.WithEmitter(rec))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithProjectID("project-1"), tk.WithEmitter(rec))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "test-1", Provider: "hetzner", ProviderID: "42", Status: "ready",
 	})

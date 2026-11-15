@@ -175,7 +175,7 @@ func TestDirectObjectSetupRetryReturnsCredentialsWithoutConnections(t *testing.T
 	f := newDirectFixture(t, false)
 	f.fail = "cors"
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
 	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
@@ -230,7 +230,7 @@ func TestDirectObjectSetupAcrossProviders(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			newDirectFixture(t, provider == "scaleway")
 			p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: provider}}
-			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+			ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 			args := directSetupArgs()
 			args["provider"] = provider
 			if provider == "scaleway" {
@@ -254,7 +254,7 @@ func TestDirectObjectSetupAcrossProviders(t *testing.T) {
 func TestDirectObjectSetupExistingSubscription(t *testing.T) {
 	newDirectFixture(t, false)
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	item, creds, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "Existing", Provider: "vultr", ProviderConnectionID: 7, Region: "2"})
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestDirectObjectSetupExistingSubscription(t *testing.T) {
 func TestDirectSetupRejectsUnsafeInputBeforePurchase(t *testing.T) {
 	for _, setup := range []any{map[string]any{"private": false}, map[string]any{"cors_origins": []string{"*"}}, map[string]any{"create_connection": true}, map[string]any{"connection_id": 99}, nil} {
 		p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-		ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+		ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 		args := directSetupArgs()
 		args["setup"] = setup
 		if _, err := (&App{}).toolObjectStorageCreate(ctx, args); err == nil {
@@ -284,7 +284,7 @@ func TestDirectSetupRejectsUnsafeInputBeforePurchase(t *testing.T) {
 func TestDirectSetupDoesNotAdoptExistingBucket(t *testing.T) {
 	f := newDirectFixture(t, true)
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	r, err := (&App{}).toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
 		t.Fatal(err)
@@ -302,7 +302,7 @@ func TestDirectSetupDoesNotAdoptExistingBucket(t *testing.T) {
 func TestDirectSetupExplicitRotationOnReadyResource(t *testing.T) {
 	newDirectFixture(t, false)
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
 	result, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
@@ -326,7 +326,7 @@ func TestVultrPendingCreateRefreshesBeforeSuppliedCredentials(t *testing.T) {
 		t.Run(hostname, func(t *testing.T) {
 			f := newDirectFixture(t, false)
 			p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true, pendingGet: true, hostname: hostname}
-			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+			ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 			a := &App{}
 			args := directSetupArgs()
 			args["region"] = "6"
@@ -381,7 +381,7 @@ func TestVultrPartialBucketSetupReusesBucketAndRecoversProviderCredentials(t *te
 	f := newDirectFixture(t, false)
 	f.fail = "cors"
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
 	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
@@ -419,7 +419,7 @@ func TestVultrPartialBucketSetupReusesBucketAndRecoversProviderCredentials(t *te
 func TestVultrInvalidSuppliedCredentialsAreActionableWithoutRotation(t *testing.T) {
 	newDirectFixture(t, false)
 	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
 	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {

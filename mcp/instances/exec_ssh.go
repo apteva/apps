@@ -2,13 +2,13 @@ package main
 
 // SSH-based execution for remote instances. Same shape as the local
 // path (run + upload + output) but goes over an authenticated SSH
-// channel using the per-instance keypair stored in the DB.
+// channel using the per-instance keypair from the encrypted credential vault.
 //
 // Trust model: each instance has its own keypair, generated at
 // provisioning time. Public key seeded into the VPS via cloud-init's
-// authorized_keys; private key stored in the DB (plaintext in v0.1,
-// encrypted in v0.2). To revoke access: destroy the instance — the
-// VPS goes with it. There's no "rotate this key" path in v0.1.
+// authorized_keys; the database contains only a reference to an AES-GCM
+// encrypted credential file. Existing exposed keys still require rotation on
+// every host trusting them; encrypting storage does not revoke authorized_keys.
 
 import (
 	"bytes"

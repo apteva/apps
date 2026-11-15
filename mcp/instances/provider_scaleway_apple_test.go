@@ -118,7 +118,7 @@ func (p *scalewayConfiguredPlatform) GetConnectionPublicConfig(id int64) (*sdk.C
 func TestScalewayProjectDefaultsFromAPIKey(t *testing.T) {
 	base := &scalewayApplePlatform{}
 	platform := &scalewayConfiguredPlatform{scalewayApplePlatform: base}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 
 	projectID, err := scalewayDefaultProject(ctx)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestScalewayAppleProvisionAndDestroyUseOwnedResources(t *testing.T) {
 	t.Cleanup(func() { probeSSHReadyFn = previousProbe })
 
 	platform := &scalewayApplePlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := apiProviderProvision(ctx, CreateInstanceInput{
 		Name: "mac-test", Provider: "scaleway", Region: "fr-par-1",
 		Size: "apple-silicon/M4-S", Image: "apple-silicon/os-macos",

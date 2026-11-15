@@ -8,13 +8,12 @@ import (
 	"testing"
 	"time"
 
-	tk "github.com/apteva/app-sdk/testkit"
 	"github.com/apteva/apps/mcp/instances/internal/monitor"
 )
 
 func TestMonitoringRESTAndMCPShareSnapshot(t *testing.T) {
 	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	old := globalCtx
 	globalCtx = ctx
 	defer func() { globalCtx = old; stopMonitoring(ctx) }()

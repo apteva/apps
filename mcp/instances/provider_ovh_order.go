@@ -36,7 +36,8 @@ type ovhOrderState struct {
 	InstallStarted       bool            `json:"install_started,omitempty"`
 	TerminateStarted     bool            `json:"terminate_started,omitempty"`
 	TerminationConfirmed bool            `json:"termination_confirmed,omitempty"`
-	PrivateKey           string          `json:"private_key"`
+	PrivateKey           string          `json:"-"`
+	CredentialRef        string          `json:"ssh_credential_ref,omitempty"`
 	PublicKey            string          `json:"public_key"`
 	Quote                json.RawMessage `json:"quote,omitempty"`
 	QuoteDigest          string          `json:"quote_digest,omitempty"`
@@ -51,6 +52,9 @@ type ovhOrderRecord struct {
 	Input        CreateInstanceInput
 	State        ovhOrderState
 }
+
+func (s ovhOrderState) String() string   { return fmt.Sprintf("ovhOrderState{phase:%q}", s.Phase) }
+func (s ovhOrderState) GoString() string { return s.String() }
 
 func ovhOrderArg(args map[string]any) *OVHOrderOptions {
 	raw, ok := args["ovh"].(map[string]any)
@@ -106,12 +110,22 @@ func ovhReadOrder(ctx *sdk.AppCtx, id string) (*ovhOrderRecord, error) {
 	if e = json.Unmarshal([]byte(state), &r.State); e != nil {
 		return nil, e
 	}
+	if r.State.PrivateKey, e = loadSSHCredential(ctx.AppDB(), orderCredentialOwner(r.ID), r.State.CredentialRef); e != nil {
+		return nil, e
+	}
 	if _, e = storageBinding(ctx, "ovhcloud", r.ConnectionID); e != nil {
 		return nil, e
 	}
 	return r, nil
 }
 func ovhSaveOrder(ctx *sdk.AppCtx, r *ovhOrderRecord) error {
+	if r.State.PrivateKey != "" && r.State.CredentialRef == "" {
+		ref, err := storeSSHCredential(ctx.AppDB(), orderCredentialOwner(r.ID), r.State.PrivateKey)
+		if err != nil {
+			return err
+		}
+		r.State.CredentialRef = ref
+	}
 	b, e := json.Marshal(r.State)
 	if e != nil {
 		return e
@@ -324,6 +338,9 @@ func ovhQuote(ctx *sdk.AppCtx, in CreateInstanceInput) (*ovhOrderRecord, error) 
 		return nil, e
 	}
 	r := &ovhOrderRecord{ID: newRequestID(), ConnectionID: bound.ConnectionID, Input: in, State: ovhOrderState{Phase: "preparing", PrivateKey: private, PublicKey: public, ExpiresAt: time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339), InputDigest: digest}}
+	if r.State.CredentialRef, e = storeSSHCredential(ctx.AppDB(), orderCredentialOwner(r.ID), private); e != nil {
+		return nil, e
+	}
 	b, _ := json.Marshal(in)
 	state, _ := json.Marshal(r.State)
 	if _, e = ctx.AppDB().Exec(`INSERT INTO provider_orders(id,provider,connection_id,request_key,input_json,state_json,created_at,updated_at)VALUES(?,'ovhcloud',?,?,?,?,?,?)`, r.ID, r.ConnectionID, in.OVH.RequestKey, string(b), string(state), nowUTC(), nowUTC()); e != nil {

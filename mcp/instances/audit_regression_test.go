@@ -57,7 +57,7 @@ func (p *auditPlatform) ExecuteIntegrationTool(id int64, tool string, args map[s
 }
 func auditCtx(t *testing.T, p *auditPlatform) *sdk.AppCtx {
 	t.Helper()
-	return tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	return newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 }
 
 func TestAuditNetworkFailureMustNotCrashProcess(t *testing.T) {

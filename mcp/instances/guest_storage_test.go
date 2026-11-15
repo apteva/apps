@@ -30,7 +30,7 @@ func TestValidateVolumePrepareRequest_UsesSafeDefaults(t *testing.T) {
 }
 
 func TestVolumePrepare_UpdatesVerifiedGuestMetadata(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Region: "ams3",
 		Status: "ready", Platform: "linux", SSHUser: "apteva", SSHHost: "host.test", SSHPrivateKey: "test",
@@ -80,7 +80,7 @@ func TestVolumePrepare_UpdatesVerifiedGuestMetadata(t *testing.T) {
 }
 
 func TestVolumePrepare_FailureLeavesVolumeAttached(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderID: "123", Region: "ams3", Status: "ready", Platform: "linux", SSHUser: "root",
 	})
@@ -113,7 +113,7 @@ func TestVolumePrepare_FailureLeavesVolumeAttached(t *testing.T) {
 
 func TestVolumeCreate_AutoPreparesWhenRequested(t *testing.T) {
 	platform := &recordingVolumePlatform{slug: "digitalocean"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Region: "ams3",
 		Status: "ready", Platform: "linux", SSHUser: "root",
@@ -147,7 +147,7 @@ func TestVolumeCreate_AutoPreparesWhenRequested(t *testing.T) {
 
 func TestVolumeDetach_UnmountsGuestBeforeProvider(t *testing.T) {
 	platform := &recordingVolumePlatform{slug: "digitalocean"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Region: "ams3",
 		Status: "ready", Platform: "linux", SSHUser: "root",

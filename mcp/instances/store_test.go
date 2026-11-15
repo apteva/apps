@@ -166,6 +166,7 @@ func openTestDB(t *testing.T) *sql.DB {
 			t.Fatalf("apply %s: %v", f, err)
 		}
 	}
+	initTestSSHCredentials(t, db, dir)
 	if err := ensureLocalInstance(db); err != nil {
 		t.Fatalf("seed local: %v", err)
 	}

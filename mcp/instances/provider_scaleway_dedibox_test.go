@@ -118,7 +118,7 @@ func TestScalewayDediboxProvisionInstallAndDestroy(t *testing.T) {
 	t.Cleanup(func() { probeSSHReadyFn = previousProbe })
 
 	platform := &scalewayDediboxPlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	inst, err := apiProviderProvision(ctx, CreateInstanceInput{
 		Name: "dedibox-test", Provider: "scaleway", Region: "fr-par-1",
 		Size: "dedibox/1531", Image: "dedibox/ubuntu-24.04",

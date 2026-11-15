@@ -31,7 +31,7 @@ func TestEmbeddedManifestVersionMatchesDistribution(t *testing.T) {
 
 func TestRotationRetainsFailedRevocationAndRecovers(t *testing.T) {
 	p := &objectStoragePlatform{provider: "scaleway"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	item, _, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "keys", Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par", Bucket: "rotation-test"})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestSSHLostResponseDoesNotReplayCommand(t *testing.T) {
 
 func TestObjectCreateFailureRetainsAcquiredIAMIdentity(t *testing.T) {
 	p := &objectStoragePlatform{provider: "scaleway", failTool: "iam_policy_create"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	_, _, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "interrupted", Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par", Bucket: "partial-create"})
 	if err == nil {
 		t.Fatal("injected failure should fail creation")
@@ -272,7 +272,7 @@ func TestObjectCreateFailureRetainsAcquiredIAMIdentity(t *testing.T) {
 
 func TestVolumeCreateAttachmentIntentSurvivesRestartBoundary(t *testing.T) {
 	p := &recordingVolumePlatform{slug: "digitalocean"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	inst, _ := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{Name: "target", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Status: "ready"})
 	v, _ := dbCreateVolume(ctx.AppDB(), CreateVolumeInput{Name: "disk", Provider: "digitalocean", ProviderConnectionID: 7, SizeGB: 80, DeletePolicy: "retain"}, "volume-1", "block", "creating", "{}")
 	intent := volumeIntent{InstanceID: inst.ID, SizeGB: 80}

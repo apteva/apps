@@ -78,7 +78,7 @@ func (p *recordingDeletePlatform) ExecuteIntegrationTool(_ int64, tool string, i
 func TestToolDestroy_NormalizesStoredHetznerIDBeforeDelete(t *testing.T) {
 	platform := &recordingDeletePlatform{}
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml",
+	ctx := newInstancesTestCtx(t, "apteva.yaml",
 		tk.WithProjectID("project-1"),
 		tk.WithEmitter(rec),
 		tk.WithPlatform(platform),
@@ -158,7 +158,7 @@ func TestToolUpgrade_HetznerInPlaceSequence(t *testing.T) {
 	t.Cleanup(func() { probeSSHReadyFn = previousProbe })
 	platform := &recordingUpgradePlatform{}
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml",
+	ctx := newInstancesTestCtx(t, "apteva.yaml",
 		tk.WithProjectID("project-1"),
 		tk.WithEmitter(rec),
 		tk.WithPlatform(platform),

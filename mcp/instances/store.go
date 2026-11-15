@@ -35,8 +35,9 @@ type Instance struct {
 	SSHUser              string `json:"ssh_user,omitempty"`
 	SSHHost              string `json:"ssh_host,omitempty"`
 	SSHPort              int    `json:"ssh_port,omitempty"`
-	// SSH keys are kept server-side only — never returned to MCP /
-	// REST callers. Cleared in API responses by stripSecrets().
+	// SSHPrivateKey exists only in memory. The legacy ssh_private_key DB
+	// column now contains an opaque reference into the encrypted vault.
+	SSHCredentialRef      string               `json:"-"`
 	SSHPrivateKey         string               `json:"-"`
 	SSHPublicKey          string               `json:"ssh_public_key,omitempty"`
 	SSHHostKey            string               `json:"-"`
@@ -74,6 +75,12 @@ type InstanceCapabilities struct {
 	Upgrade  bool `json:"upgrade"`
 }
 
+// Formatting structs must not accidentally disclose the in-memory key in logs.
+func (i Instance) String() string {
+	return fmt.Sprintf("Instance{id:%d provider:%q status:%q}", i.ID, i.Provider, i.Status)
+}
+func (i Instance) GoString() string { return i.String() }
+
 // IsLocal returns true for the built-in localhost instance (id=0,
 // provider=local). Used by the run/upload paths to switch between
 // in-process exec and SSH.
@@ -85,6 +92,7 @@ func (i *Instance) IsLocal() bool { return i.Provider == "local" }
 func (i *Instance) stripSecrets() *Instance {
 	c := *i
 	c.SSHPrivateKey = ""
+	c.SSHCredentialRef = ""
 	c.SSHHostKey = ""
 	c.Capabilities = instanceCapabilities(&c)
 	return &c
@@ -131,6 +139,19 @@ type CreateInstanceInput struct {
 	scalewayUseImageDefaultBoot bool
 }
 
+func (i CreateInstanceInput) String() string {
+	return fmt.Sprintf("CreateInstanceInput{provider:%q}", i.Provider)
+}
+func (i CreateInstanceInput) GoString() string { return i.String() }
+
+func (i CreateInstanceInput) MarshalJSON() ([]byte, error) {
+	// Keep the historical empty field and field order so existing OVH quote
+	// input digests remain valid, while never serializing secret material.
+	type publicInput CreateInstanceInput
+	i.SSHPrivateKey = ""
+	return json.Marshal(publicInput(i))
+}
+
 // ─── Errors ────────────────────────────────────────────────────────
 
 var ErrInstanceNotFound = errors.New("instance not found")
@@ -165,7 +186,7 @@ const instanceCols = `id, name, provider, provider_connection_id, provider_id, p
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
 	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderConnectionID, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
-		&i.Status, &i.Region, &i.Size, &i.Image, &i.Platform, &i.ResourceClass, &i.DeletableAt, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey, &i.SSHHostKey,
+		&i.Status, &i.Region, &i.Size, &i.Image, &i.Platform, &i.ResourceClass, &i.DeletableAt, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHCredentialRef, &i.SSHPublicKey, &i.SSHHostKey,
 		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
 		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
@@ -189,6 +210,9 @@ func dbGetInstance(db *sql.DB, id int64) (*Instance, error) {
 	inst, err := scanInstance(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrInstanceNotFound
+	}
+	if err == nil {
+		inst.SSHPrivateKey, err = loadSSHCredential(db, instanceCredentialOwner(inst.ID), inst.SSHCredentialRef)
 	}
 	return inst, err
 }
@@ -223,6 +247,10 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	credentialRef, err := storeSSHCredential(db, instanceCredentialOwner(id), in.SSHPrivateKey)
+	if err != nil {
+		return nil, err
+	}
 	_, err = db.Exec(`
 		INSERT INTO instances (
 			id, create_pending, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
@@ -231,7 +259,7 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Status == "provisioning" && in.ProviderID == "",
 		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
-		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
+		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, credentialRef, in.SSHPublicKey, in.SSHHostKey,
 		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(), initialSetupJSON(in.Setup),
 	)
 	if err != nil {
@@ -259,6 +287,18 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 	}
 	if len(fields) == 0 {
 		return nil
+	}
+	if value, ok := fields["ssh_private_key"]; ok {
+		key, ok := value.(string)
+		if !ok {
+			return errors.New("SSH private key must be a string")
+		}
+		ref, err := storeSSHCredential(db, instanceCredentialOwner(id), key)
+		if err != nil {
+			return err
+		}
+		fields = cloneFields(fields)
+		fields["ssh_private_key"] = ref
 	}
 	cols := []string{}
 	args := []any{}
@@ -394,6 +434,10 @@ func dbListInstances(db *sql.DB, providerFilter, statusFilter string) ([]*Instan
 	var out []*Instance
 	for rows.Next() {
 		inst, err := scanInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		inst.SSHPrivateKey, err = loadSSHCredential(db, instanceCredentialOwner(inst.ID), inst.SSHCredentialRef)
 		if err != nil {
 			return nil, err
 		}

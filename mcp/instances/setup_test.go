@@ -106,7 +106,7 @@ func registeredHost(t *testing.T, ctx *sdk.AppCtx, setup map[string]any) *Instan
 func TestExternalReadinessRunsSharedSetupAndPersistsCapabilities(t *testing.T) {
 	mockHost(t, healthyHost)
 	platform := &onboardingPlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	defer stopInstanceWorkers(ctx)
 	inst := registeredHost(t, ctx, map[string]any{"docker": true, "runtimes": true})
 	if instanceCapabilities(inst).Docker {
@@ -144,7 +144,7 @@ func TestSetupFailureRetryAndProviderParity(t *testing.T) {
 		}
 		return healthyHost(inst, script, timeout)
 	})
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	defer stopInstanceWorkers(ctx)
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{Name: "cloud", Provider: "hetzner", ProviderID: "123", Status: "provisioning", Setup: &SetupOptions{Docker: true}})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestSetupDoesNotInstallOnUnsupportedOS(t *testing.T) {
 		calls++
 		return "Darwin\narm64\nmacos\n", 0, nil
 	})
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&onboardingPlatform{}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(&onboardingPlatform{}))
 	inst := registeredHost(t, ctx, map[string]any{"docker": true})
 	_, _, err := transitionInstanceAndEmit(ctx, inst.ID, []string{"provisioning"}, "ready", nil)
 	if err == nil || calls != 1 {
@@ -185,7 +185,7 @@ func TestSetupDoesNotInstallOnUnsupportedOS(t *testing.T) {
 }
 func TestResumeEnrollmentReusesKeyAndVPNPeerWithoutPersistingCredential(t *testing.T) {
 	p := &onboardingPlatform{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	result, err := registerHost(ctx, map[string]any{"name": "Home", "ssh_user": "apteva", "vpn": true, "setup": map[string]any{"docker": true}})
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func TestWireGuardConfigurationRejectsHooksAndLimitsRoutes(t *testing.T) {
 }
 func TestReadinessResumesExternalRegistrationAfterRestart(t *testing.T) {
 	mockHost(t, healthyHost)
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	defer stopInstanceWorkers(ctx)
 	inst := registeredHost(t, ctx, map[string]any{})
 	reconcileExternalHosts(ctx)
@@ -250,7 +250,7 @@ func TestReadinessResumesExternalRegistrationAfterRestart(t *testing.T) {
 	}
 }
 func TestSetupCannotResurrectDestroyingHost(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	mockHost(t, func(i *Instance, s string, d time.Duration) (string, int, error) {
 		_ = dbUpdateInstance(ctx.AppDB(), i.ID, map[string]any{"status": "destroying"})
 		return healthyHost(i, s, d)
@@ -266,7 +266,7 @@ func TestSetupCannotResurrectDestroyingHost(t *testing.T) {
 	}
 }
 func TestEnrollmentHTTPAndMCPReturnSameShape(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	old := globalCtx
 	globalCtx = ctx
 	defer func() { globalCtx = old }()
@@ -298,7 +298,7 @@ func TestAllSetupScriptsParse(t *testing.T) {
 }
 
 func TestPublicCommandsStillRequireReadyDuringSetup(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	inst := registeredHost(t, ctx, map[string]any{})
 	inst.Setup.Status = "running"
 	inst.Setup.Stage = "Docker"
@@ -314,7 +314,7 @@ func TestPublicCommandsStillRequireReadyDuringSetup(t *testing.T) {
 // Exercise the real discovery, SSH command, upload/download and metrics code
 // over the local SSH fixture. No installation options are enabled in this test.
 func TestDiscoveryOnlySetupThroughRealSSHTransport(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	oldDial := dialAdministrativeSSH
 	dialAdministrativeSSH = func(*Instance, time.Duration) (*ssh.Client, error) { return auditSSHClient(t, t.TempDir()), nil }
 	defer func() { dialAdministrativeSSH = oldDial }()

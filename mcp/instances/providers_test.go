@@ -44,7 +44,7 @@ func (p multiProviderBindingPlatform) GetConnection(id int64) (*sdk.PlatformConn
 }
 
 func TestResolveInstanceProvider_DefaultsToBoundProvider(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(providerBindingPlatform{slug: "digitalocean"}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(providerBindingPlatform{slug: "digitalocean"}))
 
 	got, err := resolveInstanceProvider(ctx, "")
 	if err != nil {
@@ -56,7 +56,7 @@ func TestResolveInstanceProvider_DefaultsToBoundProvider(t *testing.T) {
 }
 
 func TestResolveInstanceProvider_RejectsMismatchedExplicitProvider(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(providerBindingPlatform{slug: "linode"}))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(providerBindingPlatform{slug: "linode"}))
 
 	_, err := resolveInstanceProvider(ctx, "hetzner")
 	if err == nil || !strings.Contains(err.Error(), `bound to "linode"`) {
@@ -69,7 +69,7 @@ func TestResolveInstanceProvider_SelectsExplicitNonDefaultBinding(t *testing.T) 
 		bindings:  map[int64]string{7: "digitalocean", 8: "hetzner"},
 		defaultID: 8,
 	}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 
 	got, err := resolveInstanceProvider(ctx, "digitalocean")
 	if err != nil {
@@ -92,7 +92,7 @@ func TestBoundInstanceProviders_ReportsConfiguredDefault(t *testing.T) {
 		bindings:  map[int64]string{7: "digitalocean", 8: "hetzner"},
 		defaultID: 8,
 	}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 
 	providers := boundInstanceProviders(ctx)
 	if len(providers) != 2 {

@@ -8,7 +8,7 @@ import (
 )
 
 func TestRegisterExternalHostGeneratesDedicatedKey(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-1"))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithProjectID("project-1"))
 	result, err := (&App{}).toolRegister(ctx, map[string]any{
 		"name": "mac-studio", "ssh_host": "mac.example.test", "ssh_user": "runner",
 	})
@@ -42,7 +42,7 @@ func TestRegisterExternalHostGeneratesDedicatedKey(t *testing.T) {
 }
 
 func TestRegisterExternalHostRejectsShellLikeHost(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := newInstancesTestCtx(t, "apteva.yaml")
 	_, err := (&App{}).toolRegister(ctx, map[string]any{
 		"name": "bad", "ssh_host": "host; reboot", "ssh_user": "runner",
 	})

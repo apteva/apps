@@ -91,7 +91,7 @@ func TestUploadLocal_WriteRoundTrip(t *testing.T) {
 
 func TestDownloadLocal_ReadRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEnv("APTEVA_DATA_DIR", tmp))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithEnv("APTEVA_DATA_DIR", tmp))
 	root := filepath.Join(tmp, "local-files")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)

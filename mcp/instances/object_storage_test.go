@@ -69,7 +69,7 @@ func (p *objectStoragePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 
 func TestScalewayObjectStorageLifecycleDoesNotPersistSecret(t *testing.T) {
 	platform := &objectStoragePlatform{provider: "scaleway"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 
 	item, credentials, err := createObjectStorage(ctx, CreateObjectStorageInput{
 		Name: "Media", Provider: "scaleway", ProviderConnectionID: 7,
@@ -110,7 +110,7 @@ func TestScalewayObjectStorageLifecycleDoesNotPersistSecret(t *testing.T) {
 
 func TestVultrObjectStorageCreateAndRotate(t *testing.T) {
 	platform := &objectStoragePlatform{provider: "vultr"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	item, credentials, err := createObjectStorage(ctx, CreateObjectStorageInput{
 		Name: "Backups", Provider: "vultr", ProviderConnectionID: 7, Region: "2", Plan: "1",
 	})
@@ -135,7 +135,7 @@ func TestVultrObjectStorageCreateAndRotate(t *testing.T) {
 
 func TestScalewayDestroyRetainsRecordWhenCredentialCleanupFails(t *testing.T) {
 	platform := &objectStoragePlatform{provider: "scaleway"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	item, _, err := createObjectStorage(ctx, CreateObjectStorageInput{
 		Name: "Retry cleanup", Provider: "scaleway", ProviderConnectionID: 7,
 		Region: "fr-par", Bucket: "apteva-cleanup-retry-test",
@@ -155,7 +155,7 @@ func TestScalewayDestroyRetainsRecordWhenCredentialCleanupFails(t *testing.T) {
 
 func TestObjectStorageCatalogNormalizesProviders(t *testing.T) {
 	platform := &objectStoragePlatform{provider: "vultr"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	ctx := newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	catalog, err := objectStorageCatalog(ctx, "vultr", 7)
 	if err != nil {
 		t.Fatal(err)

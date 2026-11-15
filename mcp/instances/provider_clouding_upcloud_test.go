@@ -21,7 +21,7 @@ func (p *cloudingUpcloudTestPlatform) GetConnectionPublicConfig(id int64) (*sdk.
 }
 func cloudingUpcloudTestCtx(t *testing.T, slug string, hook func(int64, string, map[string]any) (*sdk.ExecuteResult, error)) (*sdk.AppCtx, *cloudingUpcloudTestPlatform) {
 	p := &cloudingUpcloudTestPlatform{auditPlatform: auditPlatform{slugs: map[int64]string{7: slug}, hook: hook}}
-	return tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p)), p
+	return newInstancesTestCtx(t, "apteva.yaml", tk.WithPlatform(p)), p
 }
 func providerJSON(value string) *sdk.ExecuteResult {
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(value)}

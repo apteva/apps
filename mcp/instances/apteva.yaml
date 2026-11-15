@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.17.0
+version: 0.17.1
 description: |
+  v0.17.1 encrypts SSH credentials in a per-install AES-256-GCM vault.
+  Existing instance and OVH order keys migrate transactionally after a
+  verified encrypted database snapshot, preserving records and SSH identity.
   v0.17.0 installs host profiles on native targets. A release that declares
   runtime.package.host_profiles (chrome-headless: the system libraries and
   base fonts headless Chrome needs) gets them installed with apt before
@@ -279,7 +282,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.17.0
+    ref: instances/v0.17.1
     entry: mcp/instances
   port: 8080
   health_check: /health
