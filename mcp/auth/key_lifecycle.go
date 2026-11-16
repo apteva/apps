@@ -8,7 +8,7 @@ import (
 
 // Graceful rotation drains existing access tokens for at most their maximum
 // permitted TTL. Emergency rotation removes every old key and online session.
-func rotateSigningKey(db *sql.DB, pid string, oid int64, emergency bool) error {
+func rotateSigningKey(db *sql.DB, pid string, oid int64, emergency bool, src auditSource) error {
 	tx, err := beginAuthTx(db, pid, oid)
 	if err != nil {
 		return err
@@ -39,7 +39,7 @@ func rotateSigningKey(db *sql.DB, pid string, oid int64, emergency bool) error {
 			return err
 		}
 	}
-	dbAudit(tx, pid, oid, nil, "", "signing_key_rotated", "", "admin", map[string]any{"emergency": emergency})
+	dbAudit(tx, pid, oid, nil, "", "signing_key_rotated", src, map[string]any{"emergency": emergency})
 	return tx.Commit()
 }
 func (a *App) handleAdminRotateSigningKey(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +54,7 @@ func (a *App) handleAdminRotateSigningKey(w http.ResponseWriter, r *http.Request
 		httpErr(w, 400, "invalid JSON")
 		return
 	}
-	if err := rotateSigningKey(getAppCtx(r).AppDB(), pid, org.ID, body.Emergency); err != nil {
+	if err := rotateSigningKey(getAppCtx(r).AppDB(), pid, org.ID, body.Emergency, auditFromRequest(r)); err != nil {
 		httpErr(w, 500, "rotation failed")
 		return
 	}
@@ -73,6 +73,7 @@ func (a *App) handleAdminClientsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	args["_project_id"] = pid
 	args["client_id"] = r.PathValue("client_id")
+	args[auditSourceArgKey] = auditFromRequest(r)
 	out, err := a.toolClientsUpdate(getAppCtx(r), args)
 	if err != nil {
 		httpErr(w, 400, err.Error())

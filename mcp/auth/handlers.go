@@ -131,8 +131,9 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	body.IP = r.RemoteAddr
+	body.IP, body.IPTrusted = clientAddr(r)
 	body.UserAgent = r.UserAgent()
+	body.Source = auditFromRequest(r)
 	body.Origin = r.Header.Get("Origin")
 	if id, secret, ok := r.BasicAuth(); ok {
 		if id != body.ClientID {
@@ -172,10 +173,10 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 
 // signupRequest is the shared input to performSignup — used by both
 // the /signup HTTP handler (json-decoded body) and the
-// auth_public_signup MCP tool (args-decoded body). IP / UserAgent are
-// set by the caller from r.RemoteAddr / r.UserAgent() in the HTTP
-// path; MCP callers either pass them through from the originating
-// request or accept the "mcp" defaults.
+// auth_public_signup MCP tool (args-decoded body). In the HTTP path IP is
+// the platform-signed client IP (IPTrusted) and Source attributes the audit
+// rows; MCP callers may relay the end user's IP, which is recorded but never
+// trusted for per-IP limits.
 type signupRequest struct {
 	RequestContext   context.Context `json:"-"`
 	Email            string          `json:"email"`
@@ -186,7 +187,9 @@ type signupRequest struct {
 	OrganizationSlug string          `json:"organization_slug"`
 	ContinueURL      string          `json:"continue_url"`
 	IP               string          `json:"-"`
+	IPTrusted        bool            `json:"-"`
 	UserAgent        string          `json:"-"`
+	Source           auditSource     `json:"-"`
 	Origin           string          `json:"-"`
 }
 
@@ -243,8 +246,22 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if len(body.DisplayName) > 256 {
 		return nil, 400, errors.New("display_name too long")
 	}
+	src := body.Source
+	if src.IP == "" {
+		src.IP = body.IP
+	}
+	if src.UserAgent == "" {
+		src.UserAgent = body.UserAgent
+	}
 	if err := consumeRate(ctx.AppDB(), pid+":signup:"+client.ClientID, 600, time.Hour); err != nil {
 		return nil, 429, err
+	}
+	// Per-IP limits only apply to a platform-signed address: without one every
+	// request appears to come from the proxy and would share one bucket.
+	if body.IPTrusted && body.IP != "" {
+		if err := consumeRate(ctx.AppDB(), pid+":signup-ip:"+body.IP, cfgInt(ctx, "signups_per_ip_per_hour", 20), time.Hour); err != nil {
+			return nil, 429, err
+		}
 	}
 	if err := requireAllowedOrigin(client, body.Origin); err != nil {
 		return nil, http.StatusForbidden, err
@@ -256,6 +273,17 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if orgErr != nil {
 		return nil, http.StatusBadRequest, orgErr
 	}
+	if emailDomainBlocked(cfgStr(ctx, "blocked_email_domains", ""), body.Email) {
+		dbAudit(ctx.AppDB(), pid, org.ID, nil, client.ClientID, "signup_rejected", src,
+			map[string]any{"reason": "email_domain_blocked", "domain": emailDomain(body.Email)})
+		return nil, http.StatusBadRequest, errors.New("email_domain_not_allowed")
+	}
+	if err := consumeRate(ctx.AppDB(), pid+":signup-email:"+strconv.FormatInt(org.ID, 10)+":"+body.Email, cfgInt(ctx, "signups_per_email_per_hour", 5), time.Hour); err != nil {
+		return nil, 429, err
+	}
+	if err := consumeRate(ctx.AppDB(), pid+":signup-org:"+strconv.FormatInt(org.ID, 10), cfgInt(ctx, "signups_per_org_per_hour", 1000), time.Hour); err != nil {
+		return nil, 429, err
+	}
 	if err := checkPasswordPolicy(ctx, org, body.Password); err != nil {
 		return nil, 400, err
 	}
@@ -265,7 +293,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	}
 	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, body.Email); err == nil && existing != nil {
 		dbAudit(ctx.AppDB(), pid, org.ID, &existing.ID, client.ClientID, "signup_conflict",
-			body.IP, body.UserAgent, nil)
+			src, nil)
 		return nil, http.StatusConflict, errors.New("email already registered")
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, http.StatusInternalServerError, err
@@ -292,7 +320,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 		return nil, 400, err
 	}
 	verificationRequired := policy.Verify
-	uid, err := dbCreateUser(tx, pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired, "{}")
+	uid, err := dbCreateUser(tx, pid, org.ID, body.Email, pwHash, body.DisplayName, verificationStateFor(verificationRequired), "{}")
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -300,7 +328,10 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	dbAudit(tx, pid, org.ID, &uid, client.ClientID, "signup", body.IP, body.UserAgent, nil)
+	dbAudit(tx, pid, org.ID, &uid, client.ClientID, "signup", src, map[string]any{
+		"email_verification": verificationStateFor(verificationRequired),
+		"ip_trusted":         body.IPTrusted,
+	})
 
 	if verificationRequired {
 		if err = tx.Commit(); err != nil {
@@ -413,19 +444,19 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dbAudit(ctx.AppDB(), pid, org.ID, nil, client.ClientID, "login_failed",
-			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "no_user", "email": body.Email})
+			auditFromRequest(r), map[string]any{"reason": "no_user", "email": body.Email})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
 	if locked := userLocked(user); locked {
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_locked",
-			r.RemoteAddr, r.UserAgent(), nil)
+			auditFromRequest(r), nil)
 		httpStatus(w, http.StatusLocked, map[string]string{"error": "account_locked"})
 		return
 	}
 	if user.Status != "active" {
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
-			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "status:" + user.Status})
+			auditFromRequest(r), map[string]any{"reason": "status:" + user.Status})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
@@ -436,7 +467,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if pwHash == "" {
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
-			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "no_password"})
+			auditFromRequest(r), map[string]any{"reason": "no_password"})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
@@ -451,13 +482,13 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
-			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "bad_password"})
+			auditFromRequest(r), map[string]any{"reason": "bad_password"})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
 	if policy.Verify && user.EmailVerifiedAt == "" {
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
-			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "email_unverified"})
+			auditFromRequest(r), map[string]any{"reason": "email_unverified"})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "email_unverified"})
 		return
 	}
@@ -481,7 +512,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login", auditFromRequest(r), nil)
 
 	user, _ = dbGetUserByID(ctx.AppDB(), pid, org.ID, user.ID)
 
@@ -552,7 +583,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "refresh", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "refresh", auditFromRequest(r), nil)
 
 	resp := map[string]any{
 		"user":          user,
@@ -670,7 +701,7 @@ func (a *App) handleMeMetadata(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, "", "user_metadata_updated", r.RemoteAddr, r.UserAgent(), map[string]any{
+	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, "", "user_metadata_updated", auditSelf(r, user.ID), map[string]any{
 		"self_service": true,
 	})
 	httpJSON(w, map[string]any{"user": updated, "org": org.Slug})

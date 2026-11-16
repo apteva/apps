@@ -37,7 +37,7 @@ func seedRecoveryUser(t *testing.T, email, password string) (*App, string, *Orga
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
-	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", org.ID, email, hash, "Recovery User", false, "{}")
+	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", org.ID, email, hash, "Recovery User", emailPending, "{}")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

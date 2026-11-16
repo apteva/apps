@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -178,7 +179,7 @@ func dbDefaultOrgID(db DBTX, projectID string) int64 {
 
 func dbGetUserByID(db DBTX, projectID string, orgID, id int64) (*User, error) {
 	row := db.QueryRow(`
-		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
+		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(email_verification,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
 		       COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL,
 		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
@@ -190,7 +191,7 @@ func dbGetUserByID(db DBTX, projectID string, orgID, id int64) (*User, error) {
 
 func dbGetUserByEmail(db DBTX, projectID string, orgID int64, email string) (*User, error) {
 	row := db.QueryRow(`
-		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
+		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(email_verification,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
 		       COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL,
 		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
@@ -204,7 +205,7 @@ func scanUser(db DBTX, projectID string, row *sql.Row) (*User, error) {
 	var u User
 	var hasPw int
 	var metadata string
-	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
+	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.EmailVerification, &u.DisplayName, &u.AvatarURL,
 		&metadata, &u.Status, &u.Kind, &hasPw, &u.AuthorizationVersion,
 		&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
@@ -232,11 +233,25 @@ func dbUserHasConfirmedMFA(db DBTX, userID int64) (bool, error) {
 	return n > 0, err
 }
 
-func dbCreateUser(db DBTX, projectID string, orgID int64, email, passwordHash, displayName string, emailVerified bool, metadataJSON string) (int64, error) {
+// Email verification states. Only emailVerified and emailAdminAsserted set
+// email_verified_at; a signup made while verification is switched off is
+// recorded as emailNotRequired and never claims a proven mailbox.
+const (
+	emailVerified      = "verified"
+	emailAdminAsserted = "admin_asserted"
+	emailNotRequired   = "not_required"
+	emailPending       = "pending"
+)
+
+func dbCreateUser(db DBTX, projectID string, orgID int64, email, passwordHash, displayName, verification string, metadataJSON string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	verifiedAt := sql.NullString{}
-	if emailVerified {
+	switch verification {
+	case emailVerified, emailAdminAsserted:
 		verifiedAt = sql.NullString{Valid: true, String: now}
+	case emailNotRequired, emailPending:
+	default:
+		return 0, errors.New("invalid email verification state")
 	}
 	pw := sql.NullString{}
 	if passwordHash != "" {
@@ -246,9 +261,9 @@ func dbCreateUser(db DBTX, projectID string, orgID int64, email, passwordHash, d
 		metadataJSON = "{}"
 	}
 	res, err := db.Exec(`
-		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, metadata_json, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		projectID, orgID, strings.ToLower(strings.TrimSpace(email)), pw, displayName, verifiedAt, metadataJSON, now, now)
+		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, email_verification, metadata_json, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		projectID, orgID, strings.ToLower(strings.TrimSpace(email)), pw, displayName, verifiedAt, verification, metadataJSON, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -328,11 +343,11 @@ func dbUpdateUserProfile(db DBTX, projectID string, orgID, userID int64,
 		args = append(args, *displayName)
 	}
 	if markEmailVerified != nil {
-		sets = append(sets, "email_verified_at = ?")
+		sets = append(sets, "email_verified_at = ?", "email_verification = ?")
 		if *markEmailVerified {
-			args = append(args, time.Now().UTC().Format(time.RFC3339))
+			args = append(args, time.Now().UTC().Format(time.RFC3339), emailAdminAsserted)
 		} else {
-			args = append(args, sql.NullString{})
+			args = append(args, sql.NullString{}, emailPending)
 		}
 	}
 	if metadataJSON != nil {
@@ -392,7 +407,7 @@ func dbSearchUsersPage(db DBTX, projectID string, orgID int64, q, status, create
 		args = append(args, before)
 	}
 	args = append(args, limit)
-	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL, authorization_version, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,''), EXISTS(SELECT 1 FROM mfa_factors f WHERE f.user_id=users.id AND f.confirmed_at IS NOT NULL) FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY id DESC LIMIT ?"
+	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(email_verification,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL, authorization_version, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,''), EXISTS(SELECT 1 FROM mfa_factors f WHERE f.user_id=users.id AND f.confirmed_at IS NOT NULL) FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY id DESC LIMIT ?"
 	rows, err := db.Query(q1, args...)
 	if err != nil {
 		return nil, err
@@ -406,7 +421,7 @@ func dbSearchUsersPage(db DBTX, projectID string, orgID int64, q, status, create
 		var u User
 		var hasPw int
 		var metadata string
-		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.EmailVerification, &u.DisplayName, &u.AvatarURL,
 			&metadata, &u.Status, &u.Kind, &hasPw, &u.AuthorizationVersion,
 			&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt, &u.MFAEnabled); err != nil {
 			rows.Close()
@@ -693,6 +708,9 @@ func dbActiveSigningKey(db DBTX, projectID string, orgID int64) (kid string, pri
 	if err != nil {
 		return "", nil, err
 	}
+	if privPEM, err = openSigningKey(projectID, orgID, kid, privPEM); err != nil {
+		return "", nil, err
+	}
 	priv, err = parseEd25519Private(privPEM)
 	return
 }
@@ -794,7 +812,7 @@ func consumeVerificationTokenTx(tx *sql.Tx, projectID, tokenHash string, expecte
 
 func dbMarkEmailVerified(db DBTX, projectID string, orgID, userID int64) error {
 	_, err := db.Exec(
-		`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ? WHERE project_id = ? AND organization_id = ? AND id = ?`,
+		`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), email_verification = 'verified', updated_at = ? WHERE project_id = ? AND organization_id = ? AND id = ?`,
 		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), projectID, orgID, userID)
 	return err
 }
@@ -802,8 +820,10 @@ func dbMarkEmailVerified(db DBTX, projectID string, orgID, userID int64) error {
 // ─── Audit log ───────────────────────────────────────────────────────
 
 // dbAudit — orgID may be 0 for genuinely project-wide events (install
-// start, org create); user-scoped events should pass the user's org.
-func dbAudit(db DBTX, projectID string, orgID int64, userID *int64, clientID, event, ip, ua string, metadata map[string]any) {
+// start, org create); user-scoped events should pass the user's org. src
+// records who acted, through which app or credential, and the request's
+// correlation ID; result is derived from the event name.
+func dbAudit(db DBTX, projectID string, orgID int64, userID *int64, clientID, event string, src auditSource, metadata map[string]any) {
 	var meta sql.NullString
 	if len(metadata) > 0 {
 		if b, err := json.Marshal(metadata); err == nil {
@@ -818,13 +838,44 @@ func dbAudit(db DBTX, projectID string, orgID int64, userID *int64, clientID, ev
 	if orgID > 0 {
 		oid = orgID
 	}
+	actorType, actorID := src.ActorType, src.ActorID
+	if actorType == "" {
+		// Public end-user flows always name the OAuth client. Without a
+		// client, an unattributed row means no signed principal reached an
+		// admin route; it must not be mistaken for the user acting on itself.
+		switch {
+		case clientID != "" && userID != nil:
+			actorType, actorID = "self", strconv.FormatInt(*userID, 10)
+		case clientID != "":
+			actorType = "anonymous"
+		default:
+			actorType = "unattributed"
+		}
+	}
+	var install sql.NullInt64
+	if src.SourceInstallID > 0 {
+		install = sql.NullInt64{Valid: true, Int64: src.SourceInstallID}
+	}
 	_, err := db.Exec(`
-		INSERT INTO audit_log(project_id, organization_id, user_id, client_id, event, ip, user_agent, metadata)
-		VALUES(?,?,?,?,?,?,?,?)`,
-		projectID, oid, uid, nullStr(clientID), event, nullStr(ip), nullStr(ua), meta)
+		INSERT INTO audit_log(project_id, organization_id, user_id, client_id, event, ip, user_agent, metadata,
+		                      actor_type, actor_id, source_app, source_install_id, credential_id, result, correlation_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		projectID, oid, uid, nullStr(clientID), event, nullStr(src.IP), nullStr(src.UserAgent), meta,
+		actorType, nullStr(actorID), nullStr(src.SourceApp), install, nullStr(src.CredentialID), auditResult(event), nullStr(src.CorrelationID))
 	if err != nil {
 		log.Printf("auth audit write failed: event=%q project=%q", event, projectID)
 	}
+}
+
+// auditResult classifies an event as a success or a failure so the trail can
+// be filtered for rejected and failed attempts without parsing metadata.
+func auditResult(event string) string {
+	for _, suffix := range []string{"_failed", "_rejected", "_locked", "_conflict", "_denied"} {
+		if strings.HasSuffix(event, suffix) {
+			return "failure"
+		}
+	}
+	return "success"
 }
 
 // dbAuditSearch — orgID = 0 = project-wide.
@@ -859,7 +910,7 @@ func dbAuditSearch(db DBTX, projectID string, orgID, userID int64, event, since,
 		args = append(args, until)
 	}
 	args = append(args, limit)
-	q := "SELECT id, organization_id, user_id, IFNULL(client_id,''), event, IFNULL(ip,''), IFNULL(user_agent,''), IFNULL(metadata,''), occurred_at FROM audit_log WHERE " + strings.Join(conds, " AND ") + " ORDER BY occurred_at DESC LIMIT ?"
+	q := "SELECT id, organization_id, user_id, IFNULL(client_id,''), event, IFNULL(ip,''), IFNULL(user_agent,''), IFNULL(metadata,''), IFNULL(actor_type,''), IFNULL(actor_id,''), IFNULL(source_app,''), source_install_id, IFNULL(credential_id,''), IFNULL(result,''), IFNULL(correlation_id,''), occurred_at FROM audit_log WHERE " + strings.Join(conds, " AND ") + " ORDER BY occurred_at DESC, id DESC LIMIT ?"
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -868,8 +919,9 @@ func dbAuditSearch(db DBTX, projectID string, orgID, userID int64, event, since,
 	var out []AuditEvent
 	for rows.Next() {
 		var a AuditEvent
-		var uid, oid sql.NullInt64
-		if err := rows.Scan(&a.ID, &oid, &uid, &a.ClientID, &a.Event, &a.IP, &a.UserAgent, &a.Metadata, &a.OccurredAt); err != nil {
+		var uid, oid, install sql.NullInt64
+		if err := rows.Scan(&a.ID, &oid, &uid, &a.ClientID, &a.Event, &a.IP, &a.UserAgent, &a.Metadata,
+			&a.ActorType, &a.ActorID, &a.SourceApp, &install, &a.CredentialID, &a.Result, &a.CorrelationID, &a.OccurredAt); err != nil {
 			return nil, err
 		}
 		if uid.Valid {
@@ -879,6 +931,9 @@ func dbAuditSearch(db DBTX, projectID string, orgID, userID int64, event, since,
 		if oid.Valid {
 			v := oid.Int64
 			a.OrganizationID = &v
+		}
+		if install.Valid {
+			a.SourceInstallID = install.Int64
 		}
 		out = append(out, a)
 	}
@@ -948,4 +1003,21 @@ func nullInt(n int) any {
 		return nil
 	}
 	return n
+}
+
+// verificationStateFor maps the effective policy at account creation to the
+// stored state: pending when the mailbox must still be proven, not_required
+// when the organization skips verification.
+func verificationStateFor(required bool) string {
+	if required {
+		return emailPending
+	}
+	return emailNotRequired
+}
+
+func adminVerificationState(asserted bool) string {
+	if asserted {
+		return emailAdminAsserted
+	}
+	return emailPending
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -271,11 +270,15 @@ func publicGuard(next http.HandlerFunc) http.HandlerFunc {
 		if r.Method != "GET" && r.Method != "HEAD" {
 			ctx := getAppCtx(r)
 			if ctx != nil {
-				ip, _, err := net.SplitHostPort(r.RemoteAddr)
-				if err != nil {
-					ip = r.RemoteAddr
+				// Keyed on the platform-signed client IP, so one client exhausts only
+				// its own bucket. Without a signed IP every request carries the
+				// proxy's loopback address and shares the project-wide bucket.
+				ip, trusted := clientAddr(r)
+				key := envProject() + ":request:" + ip
+				if !trusted {
+					key = envProject() + ":request-unattributed"
 				}
-				if err := consumeRate(ctx.AppDB(), envProject()+":request:"+ip, 300, time.Minute); err != nil {
+				if err := consumeRate(ctx.AppDB(), key, 300, time.Minute); err != nil {
 					w.Header().Set("Retry-After", "60")
 					httpErr(w, 429, "rate_limited")
 					return
@@ -347,4 +350,33 @@ func requireRecoveryOrigin(ctx *sdk.AppCtx, c *Client, r *http.Request) error {
 		return nil
 	}
 	return requireAllowedOrigin(c, origin)
+}
+
+func emailDomain(email string) string {
+	at := strings.LastIndexByte(email, '@')
+	if at < 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(email[at+1:]))
+}
+
+// emailDomainBlocked matches the address's domain, or any parent domain, against
+// the operator's blocked_email_domains list (comma or whitespace separated).
+// Use it to refuse disposable-mail providers.
+func emailDomainBlocked(list, email string) bool {
+	domain := emailDomain(email)
+	if domain == "" || strings.TrimSpace(list) == "" {
+		return false
+	}
+	for _, raw := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == ';' }) {
+		blocked := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "@")
+		blocked = strings.TrimPrefix(blocked, "*.")
+		if blocked == "" {
+			continue
+		}
+		if domain == blocked || strings.HasSuffix(domain, "."+blocked) {
+			return true
+		}
+	}
+	return false
 }

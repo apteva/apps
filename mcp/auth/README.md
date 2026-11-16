@@ -1,15 +1,63 @@
-# Auth v0.13.0
+# Auth v0.14.0
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.13.0 adds private bearer-session verification for bound apps.
-This release preserves existing sessions and requires no database migration.
+permissions. v0.14.0 hardens client IP handling, audit attribution, email
+verification provenance, access-token lifetime and signing-key storage, and adds
+user containment; see below. Existing sessions stay valid. v0.13.0 added private
+bearer-session verification for bound apps.
 v0.12.1 distinguishes retryable refresh failures from uncertain
 rotation outcomes for persistent SDK sessions. v0.12.0 added opt-in role-bound
 platform credentials and a renewal
 endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
 migration and preserves existing Auth sessions. Configure explicit role bindings
 and platform policies before enabling delegated access.
+
+## v0.14.0 security hardening
+
+Migration `007_hardening.sql` keeps existing sessions. Behaviour changes:
+
+- **Client IP.** Auth uses the platform-signed client IP (`sdk.ClientIPFromRequest`)
+  for audit rows, session rows and rate limits; `X-Forwarded-For` and forged IP
+  metadata are ignored. The public rate limit (300 requests a minute) and the
+  new signup limits are per client IP. Requests without a signed IP (older
+  Server) share one project-wide bucket, as before.
+- **Email verification provenance.** `email_verified_at` is set only when a
+  mailbox token was used or an admin asserted it. Users carry
+  `email_verification`: `verified`, `admin_asserted`, `not_required` (signed up
+  while verification was off), `pending`, or `legacy_assumed`. The migration
+  reclassifies earlier fake-verified signups (proven by their `signup` audit row)
+  as `not_required` and clears their `email_verified_at`; if an organization
+  requires verification, those users must verify before signing in.
+  `auth_verification_report` / `GET /admin/verification-report` lists each
+  organization's effective setting, account counts by state, and attributed
+  changes to the setting (changes before this release were not attributed).
+- **Audit attribution.** Every audit row records `actor_type`/`actor_id`
+  (`platform_user` from the signed principal, `agent`, `app`, `self`,
+  `anonymous`, `system`, or `unattributed`), `source_app`, `source_install_id`,
+  `credential_id`, `result` and `correlation_id`. Failed admin actions are
+  audited (`*_failed`), and `org_updated` records what changed.
+- **Access-token lifetime.** Issued access tokens live at most one hour, whatever
+  the configured TTL. Apps that only check the JWT signature accept a revoked
+  user's token until it expires; apps handling sensitive data should call
+  `auth_verify_session` (or `/me`) so revocation applies immediately.
+- **Signing keys encrypted at rest.** Private keys are sealed with AES-256-GCM
+  under a key kept outside the database: `AUTH_SIGNING_KEK` (base64, 32 bytes)
+  or `<data dir>/auth-signing.kek`, created 0600 on first start. Existing keys
+  are encrypted on mount. A database copy alone can no longer mint tokens.
+  Back up the KEK with the database; if it is lost, Auth replaces each
+  organization's key with an emergency rotation and users sign in again.
+- **Containment.** `auth_users_contain` / `POST /admin/users/{id}/contain`
+  (`reason` required, `disable` default true) lists live session families, then
+  in one transaction disables the user, revokes all sessions, burns recovery
+  links and queued recovery mail, and bumps `authorization_version`. The
+  result reports what Auth cannot revoke: signed access tokens (≤ 1 hour) and
+  platform delegated tokens (≤ 60 seconds).
+- **Signup controls.** `signups_per_ip_per_hour` (20, signed IPs only),
+  `signups_per_email_per_hour` (5), `signups_per_org_per_hour` (1000) and
+  `blocked_email_domains` (domains and their subdomains) join the existing
+  per-client limit. Signup audit rows record the verification state and whether
+  the IP was signed.
 
 ## Upgrading from versions before v0.11.0
 
@@ -180,7 +228,7 @@ The `/me` endpoint continues to return `user`, `org`, and `authorization`.
 
 ## Development and tests
 
-Use the pinned Go 1.26.10+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
+Use the pinned Go 1.26.11+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
 workspace overlay from replacing the release SDK dependency.
 
 ```sh

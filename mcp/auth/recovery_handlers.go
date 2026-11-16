@@ -100,7 +100,7 @@ func (a *App) confirmRecovery(w http.ResponseWriter, r *http.Request, kind strin
 		httpErr(w, 500, "recovery_failed")
 		return
 	}
-	dbAudit(tx, pid, org.ID, &uid, client.ClientID, kind+"_completed", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(tx, pid, org.ID, &uid, client.ClientID, kind+"_completed", auditFromRequest(r), nil)
 	if err = tx.Commit(); err != nil {
 		httpErr(w, 500, "recovery_failed")
 		return

@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.13.0
+version: 0.14.0
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -11,7 +11,10 @@ description: |
   implemented; accounts requiring MFA fail closed. v0.11.0 invalidates old
   sessions and recovery links and requires login after recovery.
   v0.13.0 adds private bearer-session verification for bound apps, with
-  verified expiry and current permissions.
+  verified expiry and current permissions. v0.14.0 uses the platform-signed
+  client IP, records who performed each audited action, stops marking
+  unverified signups as verified, caps access tokens at one hour, encrypts
+  signing keys at rest, and adds user containment and signup abuse limits.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
 icon: /ui/icon.svg
@@ -104,6 +107,10 @@ provides:
       description: Re-enable a disabled user (requires org).
     - name: auth_users_revoke_sessions
       description: Force-logout one user (requires org).
+    - name: auth_users_contain
+      description: Incident containment for one user — list and revoke all sessions, recovery links and queued mail, optionally disable, with an audited reason (requires org).
+    - name: auth_verification_report
+      description: Effective email-verification policy per organization, account counts by verification state, and attributed changes to the setting.
     - name: auth_users_set_password
       description: Set a new password for one user (requires org).
     - name: auth_roles_list
@@ -162,7 +169,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: auth/v0.13.0
+    ref: auth/v0.14.0
     entry: mcp/auth
   port: 8080
   health_check: /health
@@ -183,7 +190,7 @@ config_schema:
     type: text
     default: "900"
     label: Access token TTL (seconds)
-    description: Default 15 minutes. Per-client overrides supported.
+    description: Default 15 minutes. Per-client overrides supported. Issued tokens never live longer than 1 hour (3600); larger values are capped so a revoked user's token expires within the hour even in apps that only check the signature.
   - name: jwt_refresh_ttl_days
     type: text
     default: "30"
@@ -229,4 +236,24 @@ config_schema:
     default: "600"
     label: Identity signups per client per hour
     description: Maximum new guest or external-identity users one OAuth client may create per hour through auth_public_login_identity. Returning logins are not counted. 0 disables the limit.
+  - name: signups_per_ip_per_hour
+    type: text
+    default: "20"
+    label: Signups per client IP per hour
+    description: Maximum password signups from one client IP per hour. Applies only when the platform supplies a signed client IP. 0 disables the limit.
+  - name: signups_per_email_per_hour
+    type: text
+    default: "5"
+    label: Signup attempts per email per hour
+    description: Maximum signup attempts for one email address in one organization per hour. 0 disables the limit.
+  - name: signups_per_org_per_hour
+    type: text
+    default: "1000"
+    label: Signups per organization per hour
+    description: Maximum password signups into one organization per hour, across all clients. 0 disables the limit.
+  - name: blocked_email_domains
+    type: text
+    default: ""
+    label: Blocked signup email domains
+    description: Comma-separated domains refused at signup, including their subdomains (for example disposable-mail providers). Empty allows all domains.
 upgrade_policy: auto-patch

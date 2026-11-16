@@ -2,7 +2,7 @@ module github.com/apteva/apps/mcp/auth
 
 go 1.25.13
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/apteva/app-sdk v0.115.1

@@ -84,6 +84,11 @@ func mintSessionTx(ctx *sdk.AppCtx, tx *sql.Tx, pid string, oid, uid int64, cid 
 	if accessSeconds < 60 || accessSeconds > 86400 || refreshSeconds < 60 || refreshSeconds > 90*86400 {
 		return tokenPair{}, errors.New("invalid client token lifetime")
 	}
+	// Bound how long a revoked user's signed token keeps working in apps that
+	// only verify the signature. Older configs above the cap stay valid.
+	if accessSeconds > maxAccessTokenTTL {
+		accessSeconds = maxAccessTokenTTL
+	}
 	now := time.Now().UTC()
 	if absolute.IsZero() {
 		absolute = now.Add(time.Duration(refreshSeconds) * time.Second)
@@ -293,9 +298,4 @@ func requestUA(r *http.Request) string {
 	}
 	return r.UserAgent()
 }
-func requestIP(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	return r.RemoteAddr
-}
+func requestIP(r *http.Request) string { return clientIP(r) }
