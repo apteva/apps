@@ -28,6 +28,13 @@ v0.12.0 closes that gap:
   accept that scope let Fleet's key call containment and nothing else
   privileged. Until a tenant runs such a server, containment there reports
   `partial`.
+  Since v0.12.1, servers that gate the scope grant it only to a key that
+  already holds it or to a recently reauthenticated session. Fleet's
+  auto-setup mints the first key from a fresh login, so new tenants get it;
+  for existing tenants rotation falls back to an unscoped key and
+  `tenant_contain` reports `partial` with the fix: mint a key with the
+  `security.containment` scope from the tenant dashboard and attach it with
+  `tenant_attach_key`.
 - **`tenant_contain_all`** runs `tenant_contain` on every tenant and reports
   `complete` only when every tenant is `confirmed`.
 - **`tenant_security_overview` / `tenant_security_events`** are read-only
