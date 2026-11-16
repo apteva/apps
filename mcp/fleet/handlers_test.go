@@ -8,7 +8,7 @@ package main
 //   v0.2.3: duplicate /health panic         → TestHTTPRoutes_NoHealth
 //   v0.2.5: apteva binary resolution        → TestResolveAptevaBin_*
 //   slug validation regressions             → TestToolCreate_Slug*
-//   setup_pending guards on remote ops      → TestRunRemote / TestSupportLogin
+//   setup_pending guards on remote ops      → TestRunRemote
 //
 // Local-process spawn is not covered here — that's the integration
 // test (sidecar build tag). What we CAN test cheaply at tier 2 is
@@ -943,21 +943,6 @@ func TestRunRemote_RefusesSetupPending(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("run_remote should refuse setup_pending tenants")
-	}
-	if !contains(err.Error(), "setup_pending") {
-		t.Errorf("error %q should mention setup_pending", err.Error())
-	}
-}
-
-func TestSupportLogin_RefusesSetupPending(t *testing.T) {
-	app, ctx := newTestApp(t)
-	id := seedTenant(t, app, "acme", StatusSetupPending)
-	_, err := app.toolSupportLogin(ctx, map[string]any{
-		"tenant_id": id,
-		"reason":    "audit test",
-	})
-	if err == nil {
-		t.Fatal("support_login should refuse setup_pending tenants")
 	}
 	if !contains(err.Error(), "setup_pending") {
 		t.Errorf("error %q should mention setup_pending", err.Error())

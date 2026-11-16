@@ -190,7 +190,7 @@ func (a *App) toolTenantAppCallContext(parent context.Context, appCtx *sdk.AppCt
 	if err != nil {
 		return nil, err
 	}
-	_ = a.store.recordEvent(tenantID, "remote_call", "user", map[string]any{
+	_ = a.store.recordEvent(tenantID, "remote_call", actorOf(args), map[string]any{
 		"app":        appName,
 		"tool":       tool,
 		"install_id": installID,
@@ -226,7 +226,7 @@ func (a *App) toolTenantPlatformCall(appCtx *sdk.AppCtx, args map[string]any) (a
 	if err := tenantJSON(context.Background(), baseURL, key, method, path, body, &result); err != nil {
 		return nil, err
 	}
-	_ = a.store.recordEvent(tenantID, "platform_call", "user", map[string]any{
+	_ = a.store.recordEvent(tenantID, "platform_call", actorOf(args), map[string]any{
 		"resource": resource,
 		"action":   action,
 		"method":   method,

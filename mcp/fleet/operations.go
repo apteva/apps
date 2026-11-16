@@ -18,8 +18,8 @@ type operationLease struct {
 }
 
 // Only release the stop fence after stopped status has been committed.
-func (a *App) completeStop(id string) error {
-	if err := a.store.setStatus(id, StatusStopped, "user"); err != nil {
+func (a *App) completeStop(id, actor string) error {
+	if err := a.store.setStatus(id, StatusStopped, actor); err != nil {
 		return fmt.Errorf("persist stopped state; recovery required: %w", err)
 	}
 	return a.checkpointOperation(id, "completed", nil)

@@ -246,7 +246,10 @@ func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`UPDATE fleet_tenants SET api_key_enc=?,setup_token_enc=NULL,status=CASE WHEN status IN ('stopped','suspended') THEN status ELSE 'active' END,updated_at=? WHERE id=?`, apiKeyEnc, time.Now().UTC(), id); err != nil {
+	// A newly attached key replaces any rotation state: its tenant-side ID
+	// is resolved lazily (by prefix) on the next rotation.
+	if _, err = tx.Exec(`UPDATE fleet_tenants SET api_key_enc=?,setup_token_enc=NULL,status=CASE WHEN status IN ('stopped','suspended') THEN status ELSE 'active' END,updated_at=?,
+		api_key_id=0,api_key_prefix='',pending_key_enc=NULL,pending_key_id=0,pending_key_prefix='',revoke_key_prefix='' WHERE id=?`, apiKeyEnc, time.Now().UTC(), id); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`UPDATE fleet_tenant_state SET setup_complete=1,setup_password_enc=NULL,setup_phase='complete' WHERE tenant_id=?`, id); err != nil {

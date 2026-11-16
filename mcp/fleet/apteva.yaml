@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.11.0
+version: 0.12.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -65,6 +65,16 @@ description: |
   tracks the tenant's update job across restarts and verifies the running
   version. This feature requires a compatible Apteva server and CLI on the
   client host, with a separately issued and revocable update credential.
+
+  v0.12.0 adds tenant incident containment. tenant_rotate_control_key replaces
+  Fleet's admin key on a tenant and revokes the old one (resumable after a
+  crash); tenant_contain / tenant_contain_all rotate it and revoke sessions and
+  keys through the tenant's security API; tenant_security_overview /
+  tenant_security_events proxy that API read-only; fleet_incident_report lists
+  sensitive actions per tenant. Every audit event now records the real caller
+  (user, agent/thread or app). tenant_reveal_api_key is off unless
+  allow_api_key_reveal is set, and the never-working tenant_support_login is
+  removed.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -143,8 +153,6 @@ provides:
       description: "Stop a running local tenant (process SIGTERM → SIGKILL). Registry only for remote-connected tenants. Args: tenant_id."
     - name: tenant_delete
       description: "Stop and remove a tenant. For local tenants also wipes the data dir (only with confirm=true). Args: tenant_id, confirm? (required for data wipe)."
-    - name: tenant_support_login
-      description: "Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason."
     - name: tenant_run_remote
       description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
     - name: tenant_inventory
@@ -200,9 +208,21 @@ provides:
     - name: tenant_set_target_version
       description: "Pin a tenant's desired apteva version without applying — the panel surfaces drift between current and target. Args: tenant_id, version (empty to clear)."
     - name: tenant_reveal_api_key
-      description: "Return the tenant's api_key. Fleet keeps the key sealed (AES-GCM); this tool unseals + returns. Sensitive — records an api_key_revealed event on the tenant. Args: tenant_id."
+      description: "Return the tenant's control api_key. Disabled unless Fleet config allow_api_key_reveal=true; prefer tenant_rotate_control_key. Sensitive — records an api_key_revealed event with the caller. Args: tenant_id."
     - name: tenant_reset_admin_password
       description: "Rotate the tenant admin user's password to a fresh random value via PATCH /api/users/<id>/password (auth'd with the stored api_key). Revokes every existing session for that user. Returns admin_email + admin_password. Use when the operator needs admin credentials again — fleet does not persist the original password. Args: tenant_id."
+    - name: tenant_rotate_control_key
+      description: "Replace Fleet's admin api_key on a tenant: mint, verify, store with its key ID, then revoke the old key by prefix. Voids any revealed key. Safe to re-run after an interruption. Args: tenant_id, reason?."
+    - name: tenant_security_overview
+      description: "Read-only proxy to the tenant's GET /api/security/overview; status=unsupported with the tenant version on older servers. Args: tenant_id."
+    - name: tenant_security_events
+      description: "Read-only proxy to the tenant's GET /api/security/events; status=unsupported on older servers. Args: tenant_id, category?, action?, principal_type?, principal_id?, source_ip?, result?, since?, before_seq?, limit?."
+    - name: tenant_contain
+      description: "Rotate Fleet's control key, then revoke sessions and API keys on the tenant (keeping the new control key). Targets the tenant admin, user_ids, or all_users. Reports confirmed, partial, unsupported or failed. Args: tenant_id, reason, user_ids?, all_users?, sessions?, api_keys?, disable_users?."
+    - name: tenant_contain_all
+      description: "Run tenant_contain on every tenant; complete only when every tenant is confirmed. Args: reason, all_users?, sessions?, api_keys?."
+    - name: fleet_incident_report
+      description: "Read-only: sensitive Fleet actions per tenant in a window (key reveals, password resets, remote runs, user/key/connection changes, rotations, containment) with the caller of each. Args: since?, until?, tenant_id?, actor?, include_reads?."
     - name: fleet_tenant_backup_plan
       description: "Report backup coverage and Backup-app scope arguments for one tenant. Args: tenant_id."
     - name: fleet_tenant_snapshot
@@ -224,7 +244,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.11.0
+    ref: fleet/v0.12.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -246,6 +266,13 @@ config_schema:
     type: text
     description: JSON list of attached tenant agent names, IDs, card IDs, or "*". Defaults to all tenant agents, which Fleet attaches to their tenant A2A install.
     default: '["*"]'
+    required: false
+
+  - name: allow_api_key_reveal
+    label: Allow revealing tenant control keys
+    type: bool
+    description: When true, tenant_reveal_api_key returns a tenant's admin api_key. Off by default; tenant_rotate_control_key replaces a key without revealing it.
+    default: false
     required: false
 
 upgrade_policy: auto-patch

@@ -204,13 +204,13 @@ func (a *App) toolTenantApplyTemplate(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	result, err := a.applyTemplateSnapshot(context.Background(), baseURL, key, *pending, getStr(args, "target_project_id"))
 	if err != nil {
-		_ = a.store.recordEvent(tenantID, "template_apply_failed", "user", map[string]any{
+		_ = a.store.recordEvent(tenantID, "template_apply_failed", actorOf(args), map[string]any{
 			"source_project_id": pending.SourceProjectID, "template_id": pending.Template.ID, "error": err.Error(),
 		})
 		return nil, err
 	}
 	_ = a.store.deletePendingTemplate(tenantID)
-	_ = a.store.recordEvent(tenantID, "template_applied", "user", result)
+	_ = a.store.recordEvent(tenantID, "template_applied", actorOf(args), result)
 	return result, nil
 }
 
@@ -231,7 +231,7 @@ func (a *App) applyPendingTemplateBestEffort(ctx *sdk.AppCtx, tenant *Tenant, ap
 		return a.pendingTemplateFailure(tenant.ID, pending, err)
 	}
 	_ = a.store.deletePendingTemplate(tenant.ID)
-	_ = a.store.recordEvent(tenant.ID, "template_applied", "user", result)
+	_ = a.store.recordEvent(tenant.ID, "template_applied", "fleet:pending_template", result)
 	return result
 }
 
@@ -241,7 +241,7 @@ func (a *App) pendingTemplateFailure(tenantID string, pending *pendingTenantTemp
 		SourceTemplateID: pending.Template.ID, SourceRevision: pending.Template.Revision,
 		Error: err.Error(),
 	}
-	_ = a.store.recordEvent(tenantID, "template_apply_failed", "user", result)
+	_ = a.store.recordEvent(tenantID, "template_apply_failed", "fleet:pending_template", result)
 	return result
 }
 

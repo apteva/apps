@@ -142,7 +142,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			_ = a.store.hardDelete(clone.ID)
 		}
 	}()
-	_ = a.store.recordEvent(clone.ID, "clone_transfer_started", "user", map[string]any{
+	_ = a.store.recordEvent(clone.ID, "clone_transfer_started", actorOf(args), map[string]any{
 		"source_tenant_id": source.ID,
 		"from_instance_id": source.InstanceID,
 		"to_instance_id":   targetID,
@@ -175,7 +175,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reset cloned A2A identity: %w", err)
 	}
-	_ = a.store.recordEvent(clone.ID, "cloned", "user", map[string]any{
+	_ = a.store.recordEvent(clone.ID, "cloned", actorOf(args), map[string]any{
 		"source_tenant_id":   source.ID,
 		"source_slug":        source.Slug,
 		"source_instance":    source.InstanceID,
@@ -201,18 +201,18 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"a2a_identity_reset":  a2aIdentityReset,
 		}, nil
 	}
-	_ = a.store.setStatus(clone.ID, StatusStarting, "user")
+	_ = a.store.setStatus(clone.ID, StatusStarting, actorOf(args))
 	targetStarted = true // Starting can fail after a process was launched.
 	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone, targetDir, cloneVersion, port, source.Status, true)
 	if err != nil {
-		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
-		_ = a.store.recordEvent(clone.ID, "clone_start_failed", "user", map[string]any{"error": err.Error()})
+		_ = a.store.setStatus(clone.ID, StatusFailed, actorOf(args))
+		_ = a.store.recordEvent(clone.ID, "clone_start_failed", actorOf(args), map[string]any{"error": err.Error()})
 		return nil, fmt.Errorf("start cloned tenant: %w", err)
 	}
 	targetStarted = true
 	if err := a.waitForQuarantinedRuntimes(ctx, targetHost, targetDir, requiredApps, 10*time.Minute); err != nil {
-		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
-		_ = a.store.recordEvent(clone.ID, "clone_validation_failed", "user", map[string]any{"error": err.Error()})
+		_ = a.store.setStatus(clone.ID, StatusFailed, actorOf(args))
+		_ = a.store.recordEvent(clone.ID, "clone_validation_failed", actorOf(args), map[string]any{"error": err.Error()})
 		return nil, fmt.Errorf("validate cloned app runtimes: %w", err)
 	}
 	if err := a.stopTenantOnHost(ctx, clone, port); err != nil {
@@ -222,8 +222,8 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.store.setLocation(clone.ID, targetID, baseURL, targetDir); err != nil {
 		return nil, err
 	}
-	_ = a.store.setStatus(clone.ID, StatusStopped, "user")
-	_ = a.store.recordEvent(clone.ID, "clone_rehearsal_validated", "user", map[string]any{"source_tenant_id": source.ID, "port": port})
+	_ = a.store.setStatus(clone.ID, StatusStopped, actorOf(args))
+	_ = a.store.recordEvent(clone.ID, "clone_rehearsal_validated", actorOf(args), map[string]any{"source_tenant_id": source.ID, "port": port})
 	cleanup = false
 	ctx.Logger().Info("fleet: tenant cloned", "source", source.ID, "clone", clone.ID, "slug", slug, "instance_id", targetID, "port", port)
 	return map[string]any{

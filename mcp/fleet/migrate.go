@@ -107,7 +107,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("inventory source app runtimes: %w", err)
 	}
 
-	_ = a.store.recordEvent(t.ID, "migrate_start", "user", map[string]any{
+	_ = a.store.recordEvent(t.ID, "migrate_start", actorOf(args), map[string]any{
 		"from_instance_id": t.InstanceID,
 		"to_instance_id":   targetID,
 		"from_port":        sourcePort,
@@ -138,22 +138,22 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			}
 		}
 
-		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
+		_ = a.store.recordEvent(t.ID, "migrate_failed", actorOf(args),
 			map[string]any{"stage": stage, "error": cause.Error()})
 		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t, sourceDir, version, sourcePort, prevStatus); rerr == nil {
 			sourceTenant := *t
 			sourceTenant.BaseURL = baseURL
 			if routeErr := a.refreshTenantIngress(ctx, &sourceTenant); routeErr != nil {
-				_ = a.store.recordEvent(t.ID, "migrate_rollback_route_failed", "user",
+				_ = a.store.recordEvent(t.ID, "migrate_rollback_route_failed", actorOf(args),
 					map[string]any{"error": routeErr.Error()})
 				cause = fmt.Errorf("%w; restore source ingress: %v", cause, routeErr)
 			}
-			_ = a.store.setStatus(t.ID, status, "user")
-			_ = a.store.recordEvent(t.ID, "migrate_rolled_back", "user",
+			_ = a.store.setStatus(t.ID, status, actorOf(args))
+			_ = a.store.recordEvent(t.ID, "migrate_rolled_back", actorOf(args),
 				map[string]any{"base_url": baseURL, "port": sourcePort, "instance_id": t.InstanceID})
 		} else {
-			_ = a.store.setStatus(t.ID, StatusFailed, "user")
-			_ = a.store.recordEvent(t.ID, "migrate_rollback_failed", "user",
+			_ = a.store.setStatus(t.ID, StatusFailed, actorOf(args))
+			_ = a.store.recordEvent(t.ID, "migrate_rollback_failed", actorOf(args),
 				map[string]any{"error": rerr.Error()})
 		}
 		return nil, fmt.Errorf("migrate %s: %w (source tenant restart attempted)", stage, cause)
@@ -183,8 +183,8 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err := a.store.setLocation(t.ID, targetID, baseURL, sourceDir); err != nil {
 			return rollback("persist", err)
 		}
-		_ = a.store.setStatus(t.ID, newStatus, "user")
-		_ = a.store.recordEvent(t.ID, "migrated", "user", map[string]any{
+		_ = a.store.setStatus(t.ID, newStatus, actorOf(args))
+		_ = a.store.recordEvent(t.ID, "migrated", actorOf(args), map[string]any{
 			"from_instance_id": t.InstanceID,
 			"to_instance_id":   targetID,
 			"base_url":         baseURL,
@@ -248,7 +248,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return rollback("persist", err)
 	}
-	_ = a.store.setStatus(t.ID, newStatus, "user")
+	_ = a.store.setStatus(t.ID, newStatus, actorOf(args))
 	if !retainSource && (sourceHost.InstanceID != targetHost.InstanceID || sourceDir != targetDir) {
 		if err := a.removeTenantData(ctx, sourceHost, t.Slug, sourceDir); err != nil {
 			return nil, fmt.Errorf("migration committed but source cleanup failed; retry with tenant_migrate_finalize: %w", err)
@@ -261,7 +261,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		retained = nil
 	}
-	_ = a.store.recordEvent(t.ID, "migrated", "user", map[string]any{
+	_ = a.store.recordEvent(t.ID, "migrated", actorOf(args), map[string]any{
 		"from_instance_id": t.InstanceID,
 		"to_instance_id":   targetID,
 		"base_url":         baseURL,

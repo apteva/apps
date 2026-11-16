@@ -912,7 +912,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 			return nil, fmt.Errorf("save requested template: %w", err)
 		}
 	}
-	_ = a.store.recordEvent(t.ID, "spawn_start", "user",
+	_ = a.store.recordEvent(t.ID, "spawn_start", actorOf(args),
 		map[string]any{"instance_id": instanceID, "instance_ip": info.PublicIPv4, "port": port})
 
 	setupToken, baseURL, spawnErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
@@ -928,15 +928,15 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 			_ = a.store.hardDelete(t.ID)
 			return nil, spawnErr
 		}
-		_ = a.store.setStatus(t.ID, StatusFailed, "user")
-		_ = a.store.recordEvent(t.ID, "spawn_failed", "user",
+		_ = a.store.setStatus(t.ID, StatusFailed, actorOf(args))
+		_ = a.store.recordEvent(t.ID, "spawn_failed", actorOf(args),
 			map[string]any{"error": spawnErr.Error()})
 		// Leave the data dir + any rows on the VPS in place — operator
 		// can use tenant_delete with confirm=true to wipe, or
 		// re-run create after fixing whatever broke.
 		return nil, spawnErr
 	}
-	_ = a.store.recordEvent(t.ID, "spawned", "user",
+	_ = a.store.recordEvent(t.ID, "spawned", actorOf(args),
 		map[string]any{"base_url": baseURL, "instance_id": instanceID, "port": port})
 
 	if err := a.persistSetupToken(t.ID, setupToken); err != nil {
@@ -963,7 +963,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		); dbErr != nil {
 			return nil, dbErr
 		}
-		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user",
+		_ = a.store.recordEvent(t.ID, "auto_setup_failed", actorOf(args),
 			map[string]any{"error": err.Error()})
 		out := map[string]any{
 			"tenant_id":        t.ID,
@@ -989,7 +989,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	if err := a.store.attachAPIKey(t.ID, enc); err != nil {
 		return nil, fmt.Errorf("attach api_key: %w", err)
 	}
-	_ = a.store.recordEvent(t.ID, "auto_setup_complete", "user",
+	_ = a.store.recordEvent(t.ID, "auto_setup_complete", actorOf(args),
 		map[string]any{"admin_email": owner})
 	out := map[string]any{
 		"tenant_id":      t.ID,
