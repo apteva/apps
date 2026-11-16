@@ -10,6 +10,31 @@ inline status and coverage markers; hover for account status, exact partial-day
 coverage (`*`) or an aggregate-exclusion explanation (`†`). A compact footer
 provides the cache timestamp and marker legend.
 
+The existing graph has **Combined** and **By account** modes, with a shared
+metric selector for followers, views, impressions and interactions. It uses
+the same profile/platform/account/date filters as the table. Inline graph
+choices persist across filter changes for that mounted widget; Configure saves
+their defaults. Legend buttons toggle individual lines, whose account colors
+stay stable across filters. Hover or touch the graph to inspect exact values
+on a date; keyboard users can focus the plot and use Left/Right or Home/End.
+All lines share one numeric scale, and missing dates remain gaps, not zeros.
+
+Combined mode covers all matching accounts, following existing metric coverage
+and overlapping-Pinterest-board exclusions. The hover panel identifies partial
+account coverage. By account mode defaults to at most 20 accounts (configurable
+to 100), ranked by the selected graph metric, with an explicit displayed/total
+count. It can show more accounts than the table's independent row limit.
+Boards can appear as separate lines with their exclusion-from-totals note.
+
+Follower graph points are observed daily closing balances, distinct from the
+latest count in the table. Each day selects the newest snapshot strictly after
+its UTC start and no later than the next midnight; midnight closes the previous
+day. No snapshot is carried into another day, and daily follower-gain series
+are never mistaken for balances. Combined follower history uses a fixed cohort
+of current-count contributors and leaves a gap if any contributor lacks that
+day's observation. Per-account points expose `observed_at` alongside the date,
+value and account coverage. Other metrics retain their daily-activity meaning.
+
 Use the widget's **Configure** action for persisted SDK settings. Display lets
 you choose the ranking metric, account limit (10 by default, configurable from
 1 to 100), totals, graph, account table and filter bar independently. Turn off

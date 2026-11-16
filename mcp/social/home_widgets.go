@@ -179,9 +179,10 @@ type widgetMetric struct {
 	Growth     *widgetFollowerGrowth `json:"growth,omitempty"`
 }
 type widgetMetricPoint struct {
-	Date     string `json:"date"`
-	Value    *int64 `json:"value"`
-	Accounts int    `json:"accounts"`
+	Date       string `json:"date"`
+	Value      *int64 `json:"value"`
+	Accounts   int    `json:"accounts"`
+	ObservedAt string `json:"observed_at,omitempty"`
 }
 type widgetAccount struct {
 	ID                 int64                   `json:"id"`

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import PerformanceGraph from "./PerformanceGraph";
 import { BarChart3 } from "lucide-react";
 import { platformPresentation } from "./platformPresentation";
 import {
@@ -7,7 +8,6 @@ import {
   useWidgetData,
   widgetPreferences,
   widgetURL,
-  trendPath,
   type HomeWidgetProps,
   type PerformanceSummary,
   type WidgetMetric,
@@ -17,6 +17,7 @@ import {
   performanceDateError,
   performanceDefaults,
   performanceDisplay,
+  type PerformanceMetric,
   performanceURL,
   sortPerformanceAccounts,
   type PerformanceFilters,
@@ -58,6 +59,14 @@ export default function SocialPerformanceWidget(props: HomeWidgetProps) {
 
 function PerformanceView(props: HomeWidgetProps) {
   const prefs = widgetPreferences(props);
+  const [graphMode, setGraphMode] = useState<"combined" | "by_account">(
+    props.widgetSettings?.graph_mode === "by_account"
+      ? "by_account"
+      : "combined",
+  );
+  const [graphMetric, setGraphMetric] = useState<PerformanceMetric>(
+    prefs.visibilityMetric,
+  );
   const display = performanceDisplay(props);
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [filters, setFilters] = useState<PerformanceFilters>(() =>
@@ -408,15 +417,16 @@ function PerformanceView(props: HomeWidgetProps) {
             </div>
           )}
           {prefs.showTrends && (
-            <div
-              aria-label="Performance graph"
-              className="mt-3 rounded border border-border p-2"
-            >
-              <Trend
-                metric={data.metrics[prefs.visibilityMetric]}
-                label={labels[prefs.visibilityMetric]}
-              />
-            </div>
+            <PerformanceGraph
+              key={`${props.projectId}:${props.installId}:${JSON.stringify(filters)}`}
+              data={data}
+              settings={props.widgetSettings}
+              full={full}
+              mode={graphMode}
+              metric={graphMetric}
+              onMode={setGraphMode}
+              onMetric={setGraphMetric}
+            />
           )}
           {display.showAccounts && (
             <>
@@ -681,42 +691,5 @@ function MetricChange({
     >
       {text}
     </span>
-  );
-}
-
-function Trend({
-  metric,
-  label,
-  tall = false,
-}: {
-  metric?: WidgetMetric;
-  label: string;
-  tall?: boolean;
-}) {
-  const path = trendPath(metric?.trend || []);
-  if (!path)
-    return (
-      <p className="py-2 text-[10px] text-text-dim">
-        More daily history needed
-      </p>
-    );
-  return (
-    <svg
-      viewBox="0 0 280 64"
-      className={`w-full text-accent ${tall ? "h-28" : "h-12"}`}
-      role="img"
-      aria-label={`${label} daily trend; gaps indicate missing data`}
-      preserveAspectRatio="none"
-    >
-      <path
-        d={path}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        vectorEffect="non-scaling-stroke"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
