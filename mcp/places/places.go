@@ -70,8 +70,13 @@ func addPlace(db *sql.DB, pid string, geo geocoder, settings Settings, args map[
 				*lookupsLeft--
 			}
 			q := lookupQuery{Text: in.Name, Kind: cleanToken(in.Kind, ""), Limit: 5}
-			if in.City != "" && !strings.Contains(strings.ToLower(in.Name), strings.ToLower(in.City)) {
-				q.Text += ", " + in.City
+			if in.City != "" {
+				// More results so the in-city match is among them; a
+				// same-named place elsewhere in the province often ranks first.
+				q.Limit = 10
+				if !strings.Contains(strings.ToLower(in.Name), strings.ToLower(in.City)) {
+					q.Text += ", " + in.City
+				}
 			}
 			if in.Lat != nil {
 				q.Near = &[2]float64{*in.Lat, *in.Lng}
@@ -84,7 +89,15 @@ func addPlace(db *sql.DB, pid string, geo geocoder, settings Settings, args map[
 				res.LookupError = err.Error()
 			case len(cands) == 0:
 				res.LookupError = "no match found; saved without lookup details"
+			case in.City != "" && in.Lat == nil && len(filterInCity(cands, in.City)) == 0:
+				// Never take a same-named place in another town: saving it
+				// without a location is better than a pin 40 km away.
+				res.LookupError = fmt.Sprintf("no match in %s; saved without a location", in.City)
 			default:
+				if in.City != "" && in.Lat == nil {
+					cands = filterInCity(cands, in.City)
+				}
+				cands = preferKind(cands, cleanToken(in.Kind, ""))
 				c := pickCandidate(cands, in.Lat, in.Lng)
 				if c == nil {
 					res.LookupError = "no match near the given coordinates; saved as given"
@@ -143,6 +156,99 @@ func addToNamedList(db *sql.DB, pid, name string, p *Place, res *addResult) erro
 		res.Place = refreshed
 	}
 	return nil
+}
+
+// filterInCity keeps candidates located in city. It trusts the
+// candidate's own city field; the full address is only consulted when
+// that field is empty, because addresses also name the province
+// ("…, Sant Feliu de Codines, Vallès Oriental, Barcelona, …").
+func filterInCity(cands []Candidate, city string) []Candidate {
+	want := foldName(city)
+	out := []Candidate{}
+	for _, c := range cands {
+		if c.City != "" {
+			if foldName(c.City) == want {
+				out = append(out, c)
+			}
+			continue
+		}
+		parts := strings.Split(c.Address, ",")
+		for _, part := range parts {
+			// "08002 Barcelona" → "barcelona"
+			fields := strings.Fields(part)
+			kept := []string{}
+			for _, f := range fields {
+				if strings.IndexFunc(f, func(r rune) bool { return r >= '0' && r <= '9' }) < 0 {
+					kept = append(kept, f)
+				}
+			}
+			if foldName(strings.Join(kept, " ")) == want {
+				out = append(out, c)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// rankInCity moves candidates in city to the front, keeping order otherwise.
+func rankInCity(cands []Candidate, city string) []Candidate {
+	if strings.TrimSpace(city) == "" {
+		return cands
+	}
+	in := filterInCity(cands, city)
+	seen := map[int]bool{}
+	for _, c := range in {
+		for i := range cands {
+			if !seen[i] && cands[i].Name == c.Name && cands[i].Address == c.Address {
+				seen[i] = true
+				break
+			}
+		}
+	}
+	out := append([]Candidate{}, in...)
+	for i, c := range cands {
+		if !seen[i] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// foldName lowercases and strips common Latin accents so "Barcelona",
+// "barcelona" and "Barcelóna" compare equal, as do "Lisboa"/"lisboa".
+func foldName(s string) string {
+	r := strings.NewReplacer(
+		"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a",
+		"é", "e", "è", "e", "ê", "e", "ë", "e",
+		"í", "i", "ì", "i", "î", "i", "ï", "i",
+		"ó", "o", "ò", "o", "ô", "o", "ö", "o", "õ", "o",
+		"ú", "u", "ù", "u", "û", "u", "ü", "u",
+		"ç", "c", "ñ", "n", "·", "", "'", "", "’", "",
+	)
+	return strings.Join(strings.Fields(r.Replace(strings.ToLower(strings.TrimSpace(s)))), " ")
+}
+
+// preferKind reorders candidates when the caller said what kind of place
+// it is: exact kind matches first, then any typed place, then "other"
+// (manors, houses, localities that merely share the name). Order within
+// each group is kept.
+func preferKind(cands []Candidate, kind string) []Candidate {
+	if kind == "" || kind == "other" {
+		return cands
+	}
+	var exact, typed, rest []Candidate
+	for _, c := range cands {
+		switch {
+		case c.Kind == kind:
+			exact = append(exact, c)
+		case c.Kind != "" && c.Kind != "other":
+			typed = append(typed, c)
+		default:
+			rest = append(rest, c)
+		}
+	}
+	return append(append(exact, typed...), rest...)
 }
 
 // pickCandidate takes the first result, or — when we already know the

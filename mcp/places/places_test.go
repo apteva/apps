@@ -431,3 +431,87 @@ func TestManifestParses(t *testing.T) {
 		t.Errorf("handlers %d vs manifest %d", len(tools), len(m.Provides.MCPTools))
 	}
 }
+
+func TestLookupRequiresGivenCity(t *testing.T) {
+	db := testDB(t)
+	wrongTown := Candidate{Source: "osm", Name: "Can Solé", Kind: "restaurant", Lat: fp(41.6801), Lng: fp(2.1558),
+		Address: "Can Solé, la Quintana, Sant Feliu de Codines, Vallès Oriental, Barcelona, Catalonia, Spain",
+		City:    "Sant Feliu de Codines", Country: "Spain", OSMID: "node/1"}
+	inCity := Candidate{Source: "osm", Name: "Can Solé", Kind: "restaurant", Lat: fp(41.3790), Lng: fp(2.1884),
+		Address: "Can Solé, Carrer de Sant Carles, la Barceloneta, Barcelona, Spain", City: "Barcelona", Country: "Spain", OSMID: "node/2"}
+
+	// The wrong town ranks first; the in-city match must win.
+	geo := &fakeGeo{cands: []Candidate{wrongTown, inCity}}
+	r := mustAdd(t, db, geo, map[string]any{"name": "Can Solé", "city": "Barcelona"})
+	if r.Place.OSMID != "node/2" || *r.Place.Lat != 41.3790 {
+		t.Fatalf("picked the wrong town: %+v", r.Place)
+	}
+	if geo.calls[0].Limit != 10 {
+		t.Fatalf("city lookups should ask for more candidates, got %d", geo.calls[0].Limit)
+	}
+
+	// Only the wrong town: save without a location rather than a bad pin.
+	geo = &fakeGeo{cands: []Candidate{wrongTown}}
+	r = mustAdd(t, db, geo, map[string]any{"name": "Can Solé", "city": "Barcelona", "allow_duplicate": true})
+	if r.Place.Lat != nil || !strings.Contains(r.LookupError, "no match in Barcelona") {
+		t.Fatalf("expected no location + lookup_error, got %+v / %q", r.Place, r.LookupError)
+	}
+	if r.Place.City != "Barcelona" {
+		t.Fatalf("city should stay as given, got %q", r.Place.City)
+	}
+
+	// No city given: first result is still taken.
+	geo = &fakeGeo{cands: []Candidate{wrongTown, inCity}}
+	r = mustAdd(t, db, geo, map[string]any{"name": "Can Solé", "allow_duplicate": true})
+	if r.Place.OSMID != "node/1" {
+		t.Fatalf("without a city the first match is used, got %+v", r.Place)
+	}
+}
+
+func TestFilterInCityFallsBackToAddress(t *testing.T) {
+	cands := []Candidate{
+		{Name: "A", Address: "Carrer de Sant Sever, 5, 08002 Barcelona, Spain"},                  // Google, no components
+		{Name: "B", Address: "Plaça Major, 08001 Lisboa, Portugal"},                              // other city
+		{Name: "C", City: "Barcelóna"},                                                           // accent folding
+		{Name: "D", City: "Sant Feliu de Codines", Address: "Vallès Oriental, Barcelona, Spain"}, // province only
+	}
+	got := filterInCity(cands, "barcelona")
+	names := []string{}
+	for _, c := range got {
+		names = append(names, c.Name)
+	}
+	if strings.Join(names, ",") != "A,C" {
+		t.Fatalf("got %v", names)
+	}
+	ranked := rankInCity(cands, "Barcelona")
+	if ranked[0].Name != "A" || ranked[1].Name != "C" || len(ranked) != 4 {
+		t.Fatalf("rank: %+v", ranked)
+	}
+}
+
+func TestLookupPrefersRequestedKind(t *testing.T) {
+	db := testDB(t)
+	manor := Candidate{Source: "osm", Name: "Can Solé", Kind: "other", Lat: fp(41.4180), Lng: fp(2.1080),
+		Address: "Can Solé, Passeig de Solé i Pla, Vallvidrera, Barcelona, Spain", City: "Barcelona", OSMID: "way/1"}
+	resto := Candidate{Source: "osm", Name: "Can Solé", Kind: "restaurant", Lat: fp(41.3790), Lng: fp(2.1884),
+		Address: "Can Solé, Carrer de Sant Carles, la Barceloneta, Barcelona, Spain", City: "Barcelona", OSMID: "node/2"}
+
+	geo := &fakeGeo{cands: []Candidate{manor, resto}}
+	r := mustAdd(t, db, geo, map[string]any{"name": "Can Solé", "city": "Barcelona", "kind": "restaurant"})
+	if r.Place.OSMID != "node/2" {
+		t.Fatalf("expected the restaurant, got %+v", r.Place)
+	}
+
+	// A typed place beats "other" even when the kind differs (bar vs restaurant).
+	bar := resto
+	bar.Kind, bar.OSMID = "bar", "node/3"
+	got := preferKind([]Candidate{manor, bar}, "restaurant")
+	if got[0].OSMID != "node/3" {
+		t.Fatalf("typed place should rank above other, got %+v", got)
+	}
+
+	// No kind given: order is kept.
+	if got := preferKind([]Candidate{manor, resto}, ""); got[0].OSMID != "way/1" {
+		t.Fatalf("order should be kept without a kind")
+	}
+}

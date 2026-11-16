@@ -16,7 +16,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: places
 display_name: Places
-version: 0.1.0
+version: 0.1.1
 description: Personal map of restaurants, bars, hotels and spots to try or loved.
 author: Apteva
 scopes: [project, global]
@@ -334,6 +334,7 @@ func (a *App) toolLookup(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	cands = rankInCity(cands, strings.TrimSpace(stringArg(args, "city")))
 	type withSaved struct {
 		Candidate
 		SavedPlaceID int64 `json:"saved_place_id,omitempty"`
