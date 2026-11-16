@@ -507,7 +507,7 @@ function PerformanceView(props: HomeWidgetProps) {
                             return (
                               <td
                                 key={key}
-                                className="px-2 py-1.5 tabular-nums"
+                                className="px-2 py-1.5 tabular-nums whitespace-nowrap"
                                 title={
                                   metric?.value == null
                                     ? "Unavailable"
