@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.12.0
+version: 0.12.1
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -75,6 +75,12 @@ description: |
   (user, agent/thread or app). tenant_reveal_api_key is off unless
   allow_api_key_reveal is set, and the never-working tenant_support_login is
   removed.
+
+  v0.12.1 keeps key rotation working on tenant servers that only grant the
+  security.containment scope to a key already holding it or to a recently
+  reauthenticated session: rotation falls back to an unscoped key and
+  tenant_contain reports partial with how to attach a scoped key. New tenants
+  get a scoped key during auto-setup.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -244,7 +250,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.12.0
+    ref: fleet/v0.12.1
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

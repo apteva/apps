@@ -33,7 +33,10 @@ type fakeSecurityTenant struct {
 	// containMode: "scope" accepts containment only from a key carrying
 	// security.containment (new servers), "403" always refuses an API key,
 	// "404" has no security API (old servers).
-	containMode     string
+	containMode string
+	// gateScopes mimics servers that only let a key already carrying the
+	// containment scope (or a reauthenticated session) grant it.
+	gateScopes      bool
 	keys            []*fakeKey
 	nextID          int64
 	minted          int
@@ -83,6 +86,17 @@ func newFakeSecurityTenant(t *testing.T, mode string) (*fakeSecurityTenant, stri
 				Scopes []string `json:"scopes"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if f.gateScopes && len(body.Scopes) > 0 {
+				callerScoped := false
+				for _, s := range k.scopes {
+					callerScoped = callerScoped || s == controlKeyScope
+				}
+				if !callerScoped {
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": "interactive_session_required", "required_scope": controlKeyScope})
+					return
+				}
+			}
 			nk := f.addKey(k.userID, body.Scopes)
 			f.mu.Lock()
 			f.minted++
@@ -472,5 +486,66 @@ func TestIncidentReport_ListsSensitiveActionsWithCallers(t *testing.T) {
 	notes := strings.Join(m["notes"].([]string), " ")
 	if !strings.Contains(notes, "legacy actor") {
 		t.Fatalf("legacy actor note missing: %s", notes)
+	}
+}
+
+func (f *fakeSecurityTenant) scopesOf(raw string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, k := range f.keys {
+		if k.raw == raw {
+			return k.scopes
+		}
+	}
+	return nil
+}
+
+// On a server that gates the scope, an unscoped control key still rotates
+// (unscoped) and containment explains how to get a scoped key.
+func TestRotateControlKey_GatedTenantFallsBackToUnscopedKey(t *testing.T) {
+	app, ctx := newTestApp(t)
+	f, oldKey := newFakeSecurityTenant(t, "scope")
+	f.gateScopes = true
+	id := seedRemoteTenant(t, app, "acme", f.srv.URL, oldKey)
+
+	out, err := app.toolRotateControlKey(ctx, map[string]any{"tenant_id": id})
+	if err != nil {
+		t.Fatalf("rotation must still work with an unscoped key: %v", err)
+	}
+	res := out.(*keyRotationResult)
+	if res.ContainScope == nil || *res.ContainScope || f.active(oldKey) {
+		t.Fatalf("result %+v", res)
+	}
+	if len(f.scopesOf(storedKey(t, app, id))) != 0 {
+		t.Fatal("fallback key should be unscoped")
+	}
+
+	c, err := app.toolTenantContain(ctx, map[string]any{"tenant_id": id, "reason": "incident"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := c.(*tenantContainResult)
+	if cr.Status != "partial" || len(cr.Targets) != 1 || !strings.Contains(cr.Targets[0].Detail, "tenant_attach_key") {
+		t.Fatalf("containment should be partial with the attach hint: %+v", cr)
+	}
+}
+
+// Once the tenant has a scoped key, rotation keeps the scope on a gated server.
+func TestRotateControlKey_GatedTenantKeepsScope(t *testing.T) {
+	app, ctx := newTestApp(t)
+	f, _ := newFakeSecurityTenant(t, "scope")
+	f.gateScopes = true
+	scoped := f.addKey(1, []string{controlKeyScope})
+	id := seedRemoteTenant(t, app, "acme", f.srv.URL, scoped.raw)
+
+	c, err := app.toolTenantContain(ctx, map[string]any{"tenant_id": id, "reason": "incident"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr := c.(*tenantContainResult); cr.Status != "confirmed" {
+		t.Fatalf("scoped tenant should confirm: %+v", cr)
+	}
+	if got := f.scopesOf(storedKey(t, app, id)); len(got) != 1 || got[0] != controlKeyScope {
+		t.Fatalf("successor scopes %v", got)
 	}
 }

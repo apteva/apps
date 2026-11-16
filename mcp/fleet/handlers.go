@@ -1034,7 +1034,10 @@ func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email
 	// Step 3: mint the api_key. The "fleet" name surfaces in the
 	// tenant's API Keys list so the operator can later identify
 	// which key is fleet-owned vs human-created.
-	keyBody, _ := json.Marshal(map[string]string{"name": "fleet"})
+	// The setup session has just logged in, so it counts as recently
+	// reauthenticated and may grant the containment scope (servers without
+	// scope gating store it and ignore it). Rotation keeps it from then on.
+	keyBody, _ := json.Marshal(map[string]any{"name": "fleet", "scopes": []string{controlKeyScope}})
 	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/keys", strings.NewReader(string(keyBody)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = authedClient.Do(req)

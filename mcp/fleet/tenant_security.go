@@ -316,7 +316,11 @@ func (a *App) containTenant(appCtx *sdk.AppCtx, tenantID string, opts containOpt
 			unsupported = true
 		case tenantHTTPStatus(err) == http.StatusForbidden:
 			tr.Status = "refused"
-			tr.Detail = "tenant refused containment from an API key; it needs a server that accepts the " + controlKeyScope + " key scope: " + err.Error()
+			if rot != nil && rot.ContainScope != nil && !*rot.ContainScope {
+				tr.Detail = "Fleet's control key does not carry the " + controlKeyScope + " scope, and the tenant only grants it to a recently reauthenticated session. Mint a key with that scope from the tenant dashboard and attach it with tenant_attach_key: " + err.Error()
+			} else {
+				tr.Detail = "tenant refused containment from an API key; it needs a server that accepts the " + controlKeyScope + " key scope: " + err.Error()
+			}
 		default:
 			tr.Status, tr.Detail = "failed", err.Error()
 		}

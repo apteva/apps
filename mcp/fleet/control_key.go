@@ -22,7 +22,10 @@ package main
 // tenant. The new key is minted with the "security.containment" scope so a
 // tenant whose server supports containment-scoped keys accepts it for
 // POST /api/security/containment/revoke (see tenant_contain); older servers
-// store the scope and ignore it.
+// store the scope and ignore it. Servers that gate privileged scopes refuse
+// to let an unscoped key grant it; rotation then mints an unscoped key, and
+// the tenant needs one scoped key from a reauthenticated session (Fleet's
+// auto-setup mints it that way) before tenant_contain can confirm.
 
 import (
 	"bytes"
@@ -178,7 +181,7 @@ type keyRotationResult struct {
 	OldKeyPrefix   string   `json:"old_key_prefix,omitempty"`
 	OldKeyRevoked  bool     `json:"old_key_revoked"`
 	OldKeyRejected *bool    `json:"old_key_rejected,omitempty"`
-	ContainScope   bool     `json:"containment_scope_requested"`
+	ContainScope   *bool    `json:"containment_scope_granted,omitempty"` // nil when resuming (unknown)
 	Steps          []string `json:"steps"`
 	Error          string   `json:"error,omitempty"`
 }
@@ -216,7 +219,7 @@ func (a *App) toolRotateControlKey(appCtx *sdk.AppCtx, args map[string]any) (any
 // tenant operation lock. The returned result is non-nil even on error so
 // callers can report how far it got.
 func (a *App) rotateControlKey(appCtx *sdk.AppCtx, tenantID, actor, reason string) (*keyRotationResult, error) {
-	res := &keyRotationResult{TenantID: tenantID, Status: "failed", ContainScope: true, Steps: []string{}}
+	res := &keyRotationResult{TenantID: tenantID, Status: "failed", Steps: []string{}}
 	fail := func(err error) (*keyRotationResult, error) {
 		res.Error = err.Error()
 		_ = a.store.recordEvent(tenantID, "control_key_rotation_failed", actor, map[string]any{"error": res.Error, "steps": res.Steps, "reason": reason})
@@ -318,8 +321,21 @@ func (a *App) rotateControlKey(appCtx *sdk.AppCtx, tenantID, actor, reason strin
 		"name":   controlKeyName + " " + time.Now().UTC().Format("2006-01-02T15:04Z"),
 		"scopes": []string{controlKeyScope},
 	}
+	granted := true
+	res.ContainScope = &granted
 	if err := tenantCall(ctx, baseURL, current, http.MethodPost, "/api/auth/keys", body, &minted); err != nil {
-		return fail(fmt.Errorf("mint new key: %w", err))
+		if tenantHTTPStatus(err) != http.StatusForbidden {
+			return fail(fmt.Errorf("mint new key: %w", err))
+		}
+		// Servers that gate privileged scopes only let a key that already
+		// carries the scope (or a reauthenticated session) grant it. An
+		// unscoped control key still rotates; it just cannot contain.
+		delete(body, "scopes")
+		granted = false
+		res.Steps = append(res.Steps, "tenant refused the "+controlKeyScope+" scope for this key; minting an unscoped key")
+		if err := tenantCall(ctx, baseURL, current, http.MethodPost, "/api/auth/keys", body, &minted); err != nil {
+			return fail(fmt.Errorf("mint new key: %w", err))
+		}
 	}
 	if !strings.HasPrefix(minted.Key, "sk-") || minted.ID == 0 {
 		return fail(errors.New("tenant did not return a private key with an id"))
@@ -369,6 +385,7 @@ func (a *App) rotateControlKey(appCtx *sdk.AppCtx, tenantID, actor, reason strin
 	_ = a.store.recordEvent(tenantID, "control_key_rotated", actor, map[string]any{
 		"new_key_id": res.NewKeyID, "new_key_prefix": res.NewKeyPrefix,
 		"old_key_prefix": res.OldKeyPrefix, "old_key_rejected": rejected, "reason": reason,
+		"containment_scope_granted": granted,
 	})
 	if !rejected {
 		return res, fmt.Errorf("old key %s still authenticates after revocation", res.OldKeyPrefix)
