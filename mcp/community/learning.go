@@ -23,6 +23,8 @@ func validateContentArgs(args map[string]any) error {
 		switch key {
 		case "body", "description", "instructions":
 			limit = 100_000
+		case "html":
+			limit = elementSourceLimit
 		case "bio", "summary":
 			limit = 4000
 		case "title", "name", "display_name", "instructor_name":

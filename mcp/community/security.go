@@ -38,6 +38,8 @@ var delegatedMemberTools = map[string]bool{
 	"course_access_explain":     true,
 	"storefront_checkout_start": true,
 	"storefront_checkout_claim": true,
+	"lesson_element_source":     true, "element_state_save": true,
+	"lesson_step_complete": true, "element_run": true,
 }
 
 var enrollmentRequiredTools = map[string]bool{
@@ -46,6 +48,7 @@ var enrollmentRequiredTools = map[string]bool{
 	"assignments_list": true, "lesson_comments_list": true,
 	"course_tracks_list": true, "course_track_select": true, "milestones_list": true, "milestone_submit": true, "lesson_comments_post": true,
 	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "lesson_file_url": true, "course_file_upload": true, "course_file_url": true,
+	"lesson_element_source": true, "element_state_save": true, "lesson_step_complete": true, "element_run": true,
 }
 
 func secureTools(tools []sdk.Tool) []sdk.Tool {
@@ -194,7 +197,8 @@ func lessonIDForTool(tool string, args map[string]any) string {
 	case "lessons_get", "lesson_bundle_get":
 		return strArg(args, "id", "")
 	case "lessons_mark_complete", "lesson_resources_list", "quizzes_list",
-		"assignments_list", "lesson_comments_list", "lesson_comments_post", "quiz_submit", "assignment_submit", "learning_status", "lesson_file_url":
+		"assignments_list", "lesson_comments_list", "lesson_comments_post", "quiz_submit", "assignment_submit", "learning_status", "lesson_file_url",
+		"lesson_element_source", "element_state_save", "lesson_step_complete", "element_run":
 		return strArg(args, "lesson_id", "")
 	default:
 		return ""
@@ -219,7 +223,8 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
 		"course_purchase_start", "course_purchase_status", "course_purchase_cancel",
 		"membership_checkout_start", "membership_status", "membership_cancel",
-		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim", "quiz_submit", "assignment_submit", "learning_status", "issued_certificate_get", "course_track_select", "milestone_submit", "course_file_upload":
+		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim", "quiz_submit", "assignment_submit", "learning_status", "issued_certificate_get", "course_track_select", "milestone_submit", "course_file_upload",
+		"element_state_save", "lesson_step_complete", "element_run":
 		args["member_id"] = memberID
 	case "course_tracks_list", "milestones_list":
 		args["member_id"] = memberID
@@ -450,7 +455,7 @@ func resolveCommunityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) 
 		return mustStr(args, "community_id")
 	case "lessons_get", "lesson_bundle_get":
 		return communityByLesson(db, strArg(args, "id", ""))
-	case "lessons_mark_complete":
+	case "lessons_mark_complete", "lesson_element_source", "element_state_save", "lesson_step_complete", "element_run":
 		return communityByLesson(db, strArg(args, "lesson_id", ""))
 	case "milestone_submit":
 		if spaceID := strArg(args, "space_id", ""); spaceID != "" {

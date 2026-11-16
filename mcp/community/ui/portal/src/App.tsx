@@ -1528,7 +1528,7 @@ export default function App() {
                   <article className="lesson-reader">
                     {bundle ? <>
                       <div className="lesson-title"><div><p className="eyebrow">Lesson</p><h2>{bundle.lesson.title}</h2></div><button className="secondary" onClick={completeLesson} disabled={bundle.lesson.progress?.status === "complete"}><CheckCircle2 size={16} />{bundle.lesson.progress?.status === "complete" ? "Completed" : "Mark complete"}</button></div>
-                      <LearningContent key={bundle.lesson.id} bundle={bundle} />
+                      <LearningContent key={bundle.lesson.id} bundle={bundle} onProgress={() => { const id = bundle.lesson.id; void Promise.all([loadCourse(), latest("lesson", () => api.courses.bundle(id), setBundle)]).catch(() => undefined); }} />
                       <section><h3>Discussion</h3><div className="comment-list">{bundle.comments.map((item) => <article key={item.id}><strong>{displayName(memberMap.get(item.member_id))}</strong><p>{item.body}</p></article>)}</div><form className="reply" onSubmit={postComment}><Field label="Add a comment" id="lesson-comment"><textarea id="lesson-comment" value={comment} onChange={(event) => setComment(event.target.value)} required /></Field><button className="primary" disabled={busy}>Comment</button></form></section>
                     </> : <Empty>{lessonLoadError ? <>{lessonLoadError} <button className="secondary" onClick={() => void run(loadBundle)}>Retry lesson</button></> : lessonId ? "Loading lesson…" : "Choose a lesson."}</Empty>}
                   </article>

@@ -27,6 +27,26 @@ for accounting review instead of guessing which course to revoke.
 
 Community provides a branded member portal, discussions, direct messages, courses, a public storefront, and one-time or recurring course access. The native dashboard panel manages communities, members, content, offers, instructors, and branding.
 
+## Interactive lessons (0.17.0)
+
+A lesson can be built from ordered **blocks**: `markdown`, `lesson_body`, `video`, `resources`, `quizzes`, `assignments`, and `element`. Lessons with no blocks render the classic way, so existing courses are unchanged. `lesson_blocks_set` replaces a lesson's blocks and picks a layout: `article` (one column, in order) or `stage` (a large stage, a side panel where Markdown blocks become tabs, and blocks below). Keep a block's `id` when re-saving to preserve members' saved state.
+
+An **element** is a full HTML/JS document from the community's element library. The portal mounts it in an iframe with `sandbox="allow-scripts"` (opaque origin: no cookies, storage, or access to the portal), inserts a strict CSP (`connect-src 'none'`; scripts only inline, blob, or from jsDelivr, unpkg, and cdnjs) and the element SDK, and talks to it over a private `MessagePort`. Elements get `window.lesson`:
+
+| Call | Effect |
+|---|---|
+| `await lesson.ready()` | `{settings, state, steps, lesson, block}`: the block's settings and the member's saved state |
+| `lesson.save(state)` | Saves up to 64 KB of member state for the block (debounced) |
+| `lesson.emit(name, payload)` / `lesson.on(name, fn)` | Events between the elements of one lesson |
+| `lesson.complete(step)` | Records a step; when every `required_steps` entry of the lesson's element blocks is recorded, the lesson completes |
+| `await lesson.run(runner, input)` | Calls a runner the element version declares and the community bound |
+
+Only operators can save or publish elements (`course_elements_save`, `course_elements_publish`). Published versions are immutable and blocks pin a version; `course_elements_publish {upgrade_blocks: true}` moves blocks forward. `course_elements_install_starters` installs `code-playground`, `finance-lab`, and `board-scene` (Arduino sketches are translated in the browser; set `settings.runner` to use a bound runner instead).
+
+`element_runners_set` binds runner names to app tools, which receive `{runner, input, element, version}` with no member identity. Members are limited to 20 runner calls per minute. `course_export` produces a JSON package with sections, lessons, blocks, quizzes, assignments, and the element versions used; `course_import` creates a new course from it, reusing element versions with the same checksum. Videos and resource files are Storage files and are not included.
+
+The dashboard panel adds **Interactive elements** (library, sandboxed preview, runners), **Blocks** on a lesson, and course **Export** / **Import**.
+
 ## Version 0.13.0
 
 This release fixes resource-based delegated authorization, global-install HTTP project scoping, default member listing, same-second DM unread counts, lesson-bundle progress identity, empty conversations, and thread activity after post removal. It preserves the storefront, payments, memberships, instructor profiles, previews, and custom domains from 0.12.3.
