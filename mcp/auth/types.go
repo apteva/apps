@@ -23,11 +23,16 @@ type Organization struct {
 }
 
 type User struct {
-	ID                   int64           `json:"id"`
-	ProjectID            string          `json:"project_id,omitempty"`
-	OrganizationID       int64           `json:"organization_id"`
-	Email                string          `json:"email"`
-	EmailVerifiedAt      string          `json:"email_verified_at,omitempty"`
+	ID              int64  `json:"id"`
+	ProjectID       string `json:"project_id,omitempty"`
+	OrganizationID  int64  `json:"organization_id"`
+	Email           string `json:"email"`
+	EmailVerifiedAt string `json:"email_verified_at,omitempty"`
+	// EmailVerification says how the address was established: verified
+	// (mailbox proven by a token), admin_asserted, not_required (signup while
+	// verification was off; mailbox never proven), pending, or legacy_assumed
+	// (pre-0.14 row whose origin could not be determined).
+	EmailVerification    string          `json:"email_verification,omitempty"`
 	DisplayName          string          `json:"display_name,omitempty"`
 	AvatarURL            string          `json:"avatar_url,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
@@ -111,15 +116,22 @@ type Session struct {
 }
 
 type AuditEvent struct {
-	ID             int64  `json:"id"`
-	OrganizationID *int64 `json:"organization_id,omitempty"` // nullable: project-wide events
-	UserID         *int64 `json:"user_id,omitempty"`
-	ClientID       string `json:"client_id,omitempty"`
-	Event          string `json:"event"`
-	IP             string `json:"ip,omitempty"`
-	UserAgent      string `json:"user_agent,omitempty"`
-	Metadata       string `json:"metadata,omitempty"` // raw JSON, returned as-is to the dashboard
-	OccurredAt     string `json:"occurred_at"`
+	ID              int64  `json:"id"`
+	OrganizationID  *int64 `json:"organization_id,omitempty"` // nullable: project-wide events
+	UserID          *int64 `json:"user_id,omitempty"`
+	ClientID        string `json:"client_id,omitempty"`
+	Event           string `json:"event"`
+	IP              string `json:"ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
+	Metadata        string `json:"metadata,omitempty"` // raw JSON, returned as-is to the dashboard
+	ActorType       string `json:"actor_type,omitempty"`
+	ActorID         string `json:"actor_id,omitempty"`
+	SourceApp       string `json:"source_app,omitempty"`
+	SourceInstallID int64  `json:"source_install_id,omitempty"`
+	CredentialID    string `json:"credential_id,omitempty"`
+	Result          string `json:"result,omitempty"`
+	CorrelationID   string `json:"correlation_id,omitempty"`
+	OccurredAt      string `json:"occurred_at"`
 }
 
 // MFAFactor — public shape (secret never leaves the DB).

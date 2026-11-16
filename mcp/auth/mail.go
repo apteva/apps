@@ -97,7 +97,7 @@ func issueRecoveryToken(ctx *sdk.AppCtx, pid string, org *Organization, uid int6
 		status = "failed"
 		_, _ = ctx.AppDB().Exec(`DELETE FROM verification_tokens WHERE project_id=? AND token_hash=?`, pid, hashToken(raw))
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, opts.ClientID, kind+"_delivery", "", "", map[string]any{"status": status})
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, opts.ClientID, kind+"_delivery", auditSource{ActorType: "system"}, map[string]any{"status": status})
 	return err
 }
 

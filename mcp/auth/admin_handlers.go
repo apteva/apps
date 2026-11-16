@@ -128,7 +128,7 @@ func (a *App) handleAdminOrgsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	org, _ := dbGetOrgByID(ctx.AppDB(), pid, id)
-	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_created", r.RemoteAddr, r.UserAgent(),
+	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_created", auditFromRequest(r),
 		map[string]any{"slug": body.Slug, "name": body.Name})
 	httpStatus(w, http.StatusCreated, map[string]any{"organization": org})
 }
@@ -158,11 +158,18 @@ func (a *App) handleAdminOrgsPatch(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
+	before, _ := dbGetOrgByID(ctx.AppDB(), pid, id)
 	if err := validatePolicyJSON(body.PolicyOverrides); err != nil {
+		if before != nil {
+			dbAudit(ctx.AppDB(), pid, id, nil, "", "org_update_failed", auditFromRequest(r), map[string]any{"error": err.Error()})
+		}
 		httpErr(w, 400, err.Error())
 		return
 	}
 	if err := dbUpdateOrg(ctx.AppDB(), pid, id, body.Name, body.Color, body.PolicyOverrides); err != nil {
+		if before != nil {
+			dbAudit(ctx.AppDB(), pid, id, nil, "", "org_update_failed", auditFromRequest(r), map[string]any{"error": "update_failed"})
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -171,7 +178,7 @@ func (a *App) handleAdminOrgsPatch(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "org not found")
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_updated", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_updated", auditFromRequest(r), orgChangeMeta(ctx, before, org))
 	httpJSON(w, map[string]any{"organization": org})
 }
 
@@ -200,7 +207,7 @@ func (a *App) handleAdminOrgsArchive(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_archived", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_archived", auditFromRequest(r), nil)
 	httpJSON(w, map[string]any{"ok": true})
 }
 
@@ -298,7 +305,7 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		emailVerified:     verified,
 		sendPasswordReset: body.SendPasswordReset,
 		metadataJSON:      metadataJSON,
-	}, r.RemoteAddr, r.UserAgent(), "admin_panel")
+	}, auditFromRequest(r), "admin_panel")
 	if err != nil {
 		httpErr(w, code, err.Error())
 		return
@@ -337,7 +344,7 @@ type createUserInput struct {
 // invites later in a controlled batch (or not at all, e.g. magic-link
 // installs). Returns (user, resetSent, httpStatusOnError, err); code is
 // 0 on success.
-func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in createUserInput, ip, ua, via string) (*User, bool, int, error) {
+func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in createUserInput, src auditSource, via string) (*User, bool, int, error) {
 	email := strings.ToLower(strings.TrimSpace(in.email))
 	if err := validateEmail(email); err != nil {
 		return nil, false, 400, err
@@ -363,7 +370,7 @@ func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in crea
 	if metadataJSON == "" {
 		metadataJSON = "{}"
 	}
-	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, email, pwHash, in.displayName, in.emailVerified, metadataJSON)
+	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, email, pwHash, in.displayName, adminVerificationState(in.emailVerified), metadataJSON)
 	if err != nil {
 		return nil, false, http.StatusInternalServerError, err
 	}
@@ -371,7 +378,7 @@ func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in crea
 	if err != nil {
 		return nil, false, http.StatusInternalServerError, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_created_admin", ip, ua,
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_created_admin", src,
 		map[string]any{"email": email, "via": via})
 
 	resetSent := false
@@ -437,7 +444,7 @@ func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
 	if metadataPtr != nil {
 		changes["metadata"] = json.RawMessage(*metadataPtr)
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", r.RemoteAddr, r.UserAgent(), changes)
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", auditFromRequest(r), changes)
 	httpJSON(w, map[string]any{"user": user})
 }
 
@@ -498,7 +505,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	if body.RevokeSessions != nil {
 		revokeSessions = *body.RevokeSessions
 	}
-	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, "password_set_admin", "", r.RemoteAddr, r.UserAgent(), r.Context())
+	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, "password_set_admin", "", auditFromRequest(r), r.Context())
 	if err != nil {
 		httpErr(w, code, err.Error())
 		return
@@ -506,7 +513,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
 }
 
-func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, password string, revokeSessions bool, event, cid, ip, ua string, contexts ...context.Context) (int64, int, error) {
+func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, password string, revokeSessions bool, event, cid string, src auditSource, contexts ...context.Context) (int64, int, error) {
 	org, err := dbGetOrgByID(ctx.AppDB(), pid, oid)
 	if err != nil {
 		return 0, 404, errors.New("organization not found")
@@ -534,7 +541,7 @@ func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, passw
 	if err != nil {
 		return 0, 500, err
 	}
-	dbAudit(tx, pid, oid, &uid, cid, event, ip, ua, map[string]any{"revoked_sessions": n})
+	dbAudit(tx, pid, oid, &uid, cid, event, src, map[string]any{"revoked_sessions": n})
 	if err = tx.Commit(); err != nil {
 		return 0, 500, err
 	}
@@ -596,11 +603,17 @@ func (a *App) handleAdminUsersDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decodeRequest(w, r, &body)
 	if err := dbSetUserStatus(ctx.AppDB(), pid, org.ID, uid, "disabled"); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disable_failed", auditFromRequest(r), map[string]any{"reason": body.Reason, "step": "set_status"})
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	revoked, _ := dbRevokeAllUserSessions(ctx.AppDB(), pid, org.ID, uid)
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disabled", r.RemoteAddr, r.UserAgent(),
+	revoked, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, org.ID, uid)
+	if err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disable_failed", auditFromRequest(r), map[string]any{"reason": body.Reason, "step": "revoke_sessions"})
+		httpErr(w, http.StatusInternalServerError, "session revocation failed")
+		return
+	}
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disabled", auditFromRequest(r),
 		map[string]any{"reason": body.Reason, "revoked_sessions": revoked})
 	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
 }
@@ -617,10 +630,11 @@ func (a *App) handleAdminUsersEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := dbSetUserStatus(ctx.AppDB(), pid, org.ID, uid, "active"); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enable_failed", auditFromRequest(r), nil)
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enabled", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enabled", auditFromRequest(r), nil)
 	httpJSON(w, map[string]any{"ok": true})
 }
 
@@ -637,10 +651,11 @@ func (a *App) handleAdminUsersRevokeSessions(w http.ResponseWriter, r *http.Requ
 	}
 	n, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, org.ID, uid)
 	if err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoke_failed", auditFromRequest(r), nil)
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoked", r.RemoteAddr, r.UserAgent(),
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoked", auditFromRequest(r),
 		map[string]any{"reason": "admin_revoke_all", "count": n})
 	httpJSON(w, map[string]any{"revoked_count": n})
 }
@@ -737,7 +752,7 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 	if org == nil {
 		auditMeta["scope"] = "multi_organization"
 	}
-	dbAudit(ctx.AppDB(), pid, orgID(org), nil, c.ClientID, "client_created", r.RemoteAddr, r.UserAgent(), auditMeta)
+	dbAudit(ctx.AppDB(), pid, orgID(org), nil, c.ClientID, "client_created", auditFromRequest(r), auditMeta)
 	out := map[string]any{"client": c, "client_id": c.ClientID, "multi_organization": org == nil}
 	if secret != "" {
 		out["client_secret"] = secret
@@ -774,7 +789,7 @@ func (a *App) handleAdminClientsRotate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_secret_rotated", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_secret_rotated", auditFromRequest(r), nil)
 	httpJSON(w, map[string]any{
 		"client_id":     clientID,
 		"client_secret": secret,
@@ -805,7 +820,7 @@ func (a *App) handleAdminClientsDisable(w http.ResponseWriter, r *http.Request) 
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", auditFromRequest(r), nil)
 	out := map[string]any{"ok": true}
 	attempted, syncErr := deleteClientBrowserOrigins(ctx, clientID)
 	recordBrowserOriginSync(out, attempted, syncErr)

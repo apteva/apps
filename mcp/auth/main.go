@@ -146,6 +146,10 @@ provides:
       description: Re-enable a disabled user (requires org).
     - name: auth_users_revoke_sessions
       description: Force-logout one user (requires org).
+    - name: auth_users_contain
+      description: Incident containment for one user — list and revoke all sessions, recovery links and queued mail, optionally disable, with an audited reason (requires org).
+    - name: auth_verification_report
+      description: Effective email-verification policy per organization, account counts by verification state, and attributed changes to the setting.
     - name: auth_users_set_password
       description: Set a new password for one user (requires org).
     - name: auth_roles_list
@@ -225,7 +229,7 @@ config_schema:
     type: text
     default: "900"
     label: Access token TTL (seconds)
-    description: Default 15 minutes. Per-client overrides supported.
+    description: Default 15 minutes. Per-client overrides supported. Issued tokens never live longer than 1 hour (3600); larger values are capped so a revoked user's token expires within the hour even in apps that only check the signature.
   - name: jwt_refresh_ttl_days
     type: text
     default: "30"
@@ -271,6 +275,26 @@ config_schema:
     default: "600"
     label: Identity signups per client per hour
     description: Maximum new guest or external-identity users one OAuth client may create per hour through auth_public_login_identity. Returning logins are not counted. 0 disables the limit.
+  - name: signups_per_ip_per_hour
+    type: text
+    default: "20"
+    label: Signups per client IP per hour
+    description: Maximum password signups from one client IP per hour. Applies only when the platform supplies a signed client IP. 0 disables the limit.
+  - name: signups_per_email_per_hour
+    type: text
+    default: "5"
+    label: Signup attempts per email per hour
+    description: Maximum signup attempts for one email address in one organization per hour. 0 disables the limit.
+  - name: signups_per_org_per_hour
+    type: text
+    default: "1000"
+    label: Signups per organization per hour
+    description: Maximum password signups into one organization per hour, across all clients. 0 disables the limit.
+  - name: blocked_email_domains
+    type: text
+    default: ""
+    label: Blocked signup email domains
+    description: Comma-separated domains refused at signup, including their subdomains (for example disposable-mail providers). Empty allows all domains.
 upgrade_policy: auto-patch
 `
 
@@ -291,6 +315,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("auth requires a db block")
 	}
 	globalCtx = ctx
+	if strings.TrimSpace(os.Getenv("AUTH_SIGNING_KEK")) == "" && strings.TrimSpace(ctx.DataDir()) == "" {
+		ctx.Logger().Warn("auth: no data directory or AUTH_SIGNING_KEK; signing keys stay unencrypted")
+	} else {
+		kek, err := loadSigningKEK(ctx)
+		if err != nil {
+			return fmt.Errorf("signing-key encryption: %w", err)
+		}
+		setSigningKEK(kek)
+	}
 	pid := envProject()
 	// Migrations have already run by the time OnMount fires (see
 	// app-sdk run.go). Backfill in 002_organizations.sql guarantees
@@ -323,6 +356,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			// retried on the next mount. A CORS control-plane outage must not make
 			// the identity service unavailable.
 			ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
+		}
+	}
+	if currentSigningKEK() != nil {
+		if err := sealStoredSigningKeys(ctx); err != nil {
+			return fmt.Errorf("encrypt signing keys: %w", err)
 		}
 	}
 	ctx.Logger().Info("auth mounted",
@@ -385,6 +423,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "POST", Pattern: "/admin/users/{id}/disable", Handler: a.handleAdminUsersDisable},
 		{Method: "POST", Pattern: "/admin/users/{id}/enable", Handler: a.handleAdminUsersEnable},
 		{Method: "POST", Pattern: "/admin/users/{id}/revoke_sessions", Handler: a.handleAdminUsersRevokeSessions},
+		{Method: "POST", Pattern: "/admin/users/{id}/contain", Handler: a.handleAdminUsersContain},
+		{Method: "GET", Pattern: "/admin/verification-report", Handler: a.handleAdminVerificationReport},
 		{Method: "POST", Pattern: "/admin/users/{id}/send_password_reset", Handler: a.handleAdminUsersSendPasswordReset},
 		{Method: "POST", Pattern: "/admin/users/{id}/set_password", Handler: a.handleAdminUsersSetPassword},
 		{Method: "PUT", Pattern: "/admin/users/{id}/roles", Handler: a.handleAdminUserRolesSet},
@@ -560,6 +600,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"user_id": map[string]any{"type": "integer"},
 			}), []string{"user_id"}),
 			Handler: a.toolUsersRevokeSessions,
+		},
+		{
+			Name:        "auth_users_contain",
+			Description: "Incident containment for one user. Requires organization_id/slug, user_id and reason. In one transaction: optionally disables the user (disable, default true), revokes every session family and refresh session, burns recovery and verification links, drops queued recovery mail and bumps authorization_version. Returns what was live, what was revoked, and credentials Auth cannot revoke with how long they can remain usable. Audited with actor and reason.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"user_id": map[string]any{"type": "integer"},
+				"reason":  map[string]any{"type": "string", "minLength": 1, "maxLength": 500},
+				"disable": map[string]any{"type": "boolean"},
+			}), []string{"user_id", "reason"}),
+			Handler: a.toolUsersContain,
+		},
+		{
+			Name:        "auth_verification_report",
+			Description: "Report email verification across the project: each organization's effective email_verification_required and where it comes from, account counts by email_verification (verified, admin_asserted, not_required, pending, legacy_assumed), organizations with verification off, and attributed changes to the setting.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolVerificationReport,
 		},
 		{
 			Name:        "auth_users_set_password",
@@ -754,7 +810,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	tools = append(tools, a.identityTools()...)
-	return tools
+	return withCallerArgs(tools)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -863,9 +919,13 @@ func ensureSigningKey(db DBTX, projectID string, orgID int64) error {
 	if err != nil {
 		return err
 	}
+	stored, err := sealSigningKey(projectID, orgID, kid, string(privPEM))
+	if err != nil {
+		return err
+	}
 	_, err = db.Exec(
 		`INSERT INTO signing_keys(project_id, organization_id, kid, alg, private_pem, public_pem) VALUES(?,?,?,?,?,?)`,
-		projectID, orgID, kid, "EdDSA", string(privPEM), string(pubPEM),
+		projectID, orgID, kid, "EdDSA", stored, string(pubPEM),
 	)
 	return err
 }

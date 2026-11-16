@@ -195,7 +195,7 @@ func TestCredentialEpochPreventsOldPasswordCheckMint(t *testing.T) {
 	org, _ := dbGetOrgByID(ctx.AppDB(), "test-proj", 1)
 	user, _ := dbGetUserByID(ctx.AppDB(), "test-proj", 1, uid)
 	client, _ := dbGetClientByClientID(ctx.AppDB(), "test-proj", cid)
-	if _, _, err := a.setUserPassword(ctx, "test-proj", 1, uid, "NewPassword123", true, "password_change", "", "", ""); err != nil {
+	if _, _, err := a.setUserPassword(ctx, "test-proj", 1, uid, "NewPassword123", true, "password_change", "", auditSource{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mintSession(ctx, "test-proj", org, user, client, httptest.NewRequest("POST", "/login", nil)); err == nil {
@@ -262,7 +262,7 @@ func TestDuplicateIdentityConcurrentAndQuotaRollback(t *testing.T) {
 func TestSearchPaginationAndQueryCount(t *testing.T) {
 	ctx, _ := newAuthCtx(t)
 	for i := 0; i < 7; i++ {
-		if _, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, fmt.Sprintf("page%d@example.com", i), "", "", true, "{}"); err != nil {
+		if _, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, fmt.Sprintf("page%d@example.com", i), "", "", emailAdminAsserted, "{}"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -310,7 +310,7 @@ func TestSigningKeyRotationAndEmergencyRevocation(t *testing.T) {
 	out := decode(t, callJSON(a.handleSignup, "POST", "/signup", map[string]any{"client_id": cid, "email": "keys@example.com", "password": "GoodPassword123"}))
 	token := out["access_token"].(string)
 	old, _ := dbAllSigningKeys(ctx.AppDB(), "test-proj", 1)
-	if err := rotateSigningKey(ctx.AppDB(), "test-proj", 1, false); err != nil {
+	if err := rotateSigningKey(ctx.AppDB(), "test-proj", 1, false, auditSource{ActorType: "system"}); err != nil {
 		t.Fatal(err)
 	}
 	keys, _ := dbAllSigningKeys(ctx.AppDB(), "test-proj", 1)
@@ -320,7 +320,7 @@ func TestSigningKeyRotationAndEmergencyRevocation(t *testing.T) {
 	if r := call(a.handleMe, "GET", "/me", nil, "Authorization", "Bearer "+token); r.Code != 200 {
 		t.Fatal("graceful rotation invalidated current token")
 	}
-	if err := rotateSigningKey(ctx.AppDB(), "test-proj", 1, true); err != nil {
+	if err := rotateSigningKey(ctx.AppDB(), "test-proj", 1, true, auditSource{ActorType: "system"}); err != nil {
 		t.Fatal(err)
 	}
 	keys, _ = dbAllSigningKeys(ctx.AppDB(), "test-proj", 1)
@@ -409,23 +409,28 @@ func TestMigrationInvalidatesExposedCredentialsAndPreservesUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid, err := dbCreateUser(db, "old", oid, "old@example.com", "", "", true, "{}")
+	res, err := db.Exec(`INSERT INTO users(project_id, organization_id, email, email_verified_at, metadata_json, status, created_at, updated_at) VALUES('old', ?, 'old@example.com', '2026-01-01T00:00:00Z', '{}', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, oid)
 	if err != nil {
 		t.Fatal(err)
 	}
+	uid, _ := res.LastInsertId()
 	if _, err = dbCreateSession(db, "old", oid, uid, "client", "refresh-hash", "", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err = dbInsertVerificationToken(db, "old", oid, uid, "reset_password", "reset-hash", "{}", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	dbAudit(db, "old", oid, &uid, "client", "password_reset_sent", "", "", map[string]any{"link": "https://example.com/#reset=exposed", "email": "old@example.com"})
-	raw, err := os.ReadFile("migrations/006_security.sql")
-	if err != nil {
+	if _, err = db.Exec(`INSERT INTO audit_log(project_id, organization_id, user_id, client_id, event, metadata) VALUES('old', ?, ?, 'client', 'password_reset_sent', '{"link":"https://example.com/#reset=exposed","email":"old@example.com"}')`, oid, uid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(string(raw)); err != nil {
-		t.Fatal(err)
+	for _, file := range []string{"006_security.sql", "007_hardening.sql"} {
+		raw, err := os.ReadFile(filepath.Join("migrations", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(raw)); err != nil {
+			t.Fatal(file, err)
+		}
 	}
 	var n int
 	for _, q := range []string{`SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL`, `SELECT COUNT(*) FROM verification_tokens WHERE used_at IS NULL`, `SELECT COUNT(*) FROM audit_log WHERE metadata LIKE '%exposed%'`} {
@@ -450,7 +455,7 @@ func TestDeliveryContainsTokenOnlyInEmail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", oid, "mail@example.com", "", "", false, "{}")
+	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", oid, "mail@example.com", "", "", emailPending, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +520,7 @@ func TestPolicyAppliesToAdminResetUpgradeAndTokenTTL(t *testing.T) {
 	if _, err := a.toolUsersCreate(ctx, map[string]any{"organization_slug": "default", "email": "admin-policy@example.com", "password": "GoodPassword123"}); err == nil {
 		t.Fatal("admin ignored org password policy")
 	}
-	if _, _, err := a.setUserPassword(ctx, "test-proj", 1, uid, "GoodPassword123", true, "test", "", "", ""); err == nil {
+	if _, _, err := a.setUserPassword(ctx, "test-proj", 1, uid, "GoodPassword123", true, "test", "", auditSource{}); err == nil {
 		t.Fatal("setter ignored org policy")
 	}
 	if _, err := a.toolGuestUpgrade(ctx, map[string]any{"organization_slug": "default", "user_id": guest.ID, "email": "upgrade@example.com", "password": "GoodPassword123"}); err == nil {
@@ -548,7 +553,7 @@ func TestRecoveryQueueDefersDeliveryAndDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	cid := out.(map[string]any)["client_id"].(string)
-	_, err = dbCreateUser(ctx.AppDB(), "test-proj", oid, "queue@example.com", "", "", false, "{}")
+	_, err = dbCreateUser(ctx.AppDB(), "test-proj", oid, "queue@example.com", "", "", emailPending, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +617,7 @@ func TestConcurrentRefreshAcrossDatabasePools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid, err := dbCreateUser(db, "wal", oid, "wal@example.com", "", "", true, "{}")
+	uid, err := dbCreateUser(db, "wal", oid, "wal@example.com", "", "", emailAdminAsserted, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +695,7 @@ func BenchmarkSearch100Of10000Users(b *testing.B) {
 		b.Fatal(err)
 	}
 	for i := 0; i < 10000; i++ {
-		if _, err := dbCreateUser(tx, "bench", oid, fmt.Sprintf("bench%05d@example.com", i), "", "", true, "{}"); err != nil {
+		if _, err := dbCreateUser(tx, "bench", oid, fmt.Sprintf("bench%05d@example.com", i), "", "", emailAdminAsserted, "{}"); err != nil {
 			b.Fatal(err)
 		}
 	}

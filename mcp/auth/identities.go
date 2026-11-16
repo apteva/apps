@@ -183,8 +183,8 @@ func dbCreateGuestUser(db DBTX, projectID string, orgID int64, email, displayNam
 		metadataJSON = "{}"
 	}
 	res, err := db.Exec(`
-		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, metadata_json, status, kind, created_at, updated_at)
-		VALUES(?, ?, ?, NULL, ?, NULL, ?, 'active', 'guest', ?, ?)`,
+		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, email_verification, metadata_json, status, kind, created_at, updated_at)
+		VALUES(?, ?, ?, NULL, ?, NULL, 'pending', ?, 'active', 'guest', ?, ?)`,
 		projectID, orgID, strings.ToLower(strings.TrimSpace(email)), displayName, metadataJSON, now, now)
 	if err != nil {
 		return 0, err
@@ -205,17 +205,18 @@ func dbCountClientEvents(db DBTX, projectID, clientID, event string, since time.
 // dbUpgradeGuest turns a guest row into an account row in one statement.
 // The WHERE kind = 'guest' guard makes a double upgrade a no-op error
 // instead of a silent overwrite of a real account's credentials.
-func dbUpgradeGuest(db DBTX, projectID string, orgID, userID int64, email, passwordHash string, emailVerified bool) error {
+func dbUpgradeGuest(db DBTX, projectID string, orgID, userID int64, email, passwordHash, verification string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	verifiedAt := sql.NullString{}
-	if emailVerified {
-		verifiedAt = sql.NullString{Valid: true, String: now}
+	if verification != emailNotRequired && verification != emailPending {
+		return errors.New("invalid email verification state")
 	}
+	// A guest upgrade never proves the mailbox, so email_verified_at stays
+	// empty whether or not the policy requires verification.
 	res, err := db.Exec(`
 		UPDATE users
-		   SET email = ?, password_hash = ?, kind = 'account', email_verified_at = ?, updated_at = ?
+		   SET email = ?, password_hash = ?, kind = 'account', email_verified_at = NULL, email_verification = ?, updated_at = ?
 		 WHERE project_id = ? AND organization_id = ? AND id = ? AND kind = 'guest'`,
-		strings.ToLower(strings.TrimSpace(email)), passwordHash, verifiedAt, now, projectID, orgID, userID)
+		strings.ToLower(strings.TrimSpace(email)), passwordHash, verification, now, projectID, orgID, userID)
 	if err != nil {
 		return err
 	}
@@ -332,6 +333,10 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	ip := stringArg(args, "ip", "")
 	ua := stringArg(args, "user_agent", "mcp:auth_public_login_identity")
+	// ip/user_agent are relayed by the calling app for the end user; they are
+	// recorded but never trusted for rate limiting.
+	src := auditFromArgs(args)
+	src.IP, src.UserAgent = ip, ua
 	db, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
 	if err != nil {
 		return nil, err
@@ -352,7 +357,7 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 		_ = dbTouchIdentity(db, ident.ID)
 	} else {
 		if !boolArg(args, "create_if_missing", true) {
-			dbAudit(db, pid, org.ID, nil, client.ClientID, "login_failed", ip, ua,
+			dbAudit(db, pid, org.ID, nil, client.ClientID, "login_failed", src,
 				map[string]any{"reason": "identity_unknown", "provider": provider})
 			return nil, errors.New("identity_not_found")
 		}
@@ -379,17 +384,17 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 			return nil, err
 		}
 		created = true
-		dbAudit(db, pid, org.ID, &uid, client.ClientID, identityCreatedEvent, ip, ua,
+		dbAudit(db, pid, org.ID, &uid, client.ClientID, identityCreatedEvent, src,
 			map[string]any{"provider": provider})
 	}
 
 	if user.Status != "active" {
-		dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "login_failed", ip, ua,
+		dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "login_failed", src,
 			map[string]any{"reason": "status:" + user.Status, "provider": provider})
 		return nil, errors.New("user_inactive")
 	}
 	if userLocked(user) {
-		dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "login_locked", ip, ua, nil)
+		dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "login_locked", src, nil)
 		return nil, errors.New("account_locked")
 	}
 	if err := dbMarkLoginSuccess(db, pid, org.ID, user.ID); err != nil {
@@ -405,7 +410,7 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "identity_login", ip, ua, map[string]any{"provider": provider, "created": created})
+	dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "identity_login", src, map[string]any{"provider": provider, "created": created})
 	if err = db.Commit(); err != nil {
 		return nil, err
 	}
@@ -473,7 +478,7 @@ func (a *App) toolIdentitiesLink(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(db, pid, org.ID, &uid, "", "identity_linked", "", "agent",
+	dbAudit(db, pid, org.ID, &uid, "", "identity_linked", auditFromArgs(args),
 		map[string]any{"provider": provider})
 	ident, err := dbFindIdentity(db, pid, org.ID, provider, subject)
 	if err != nil || ident == nil {
@@ -525,7 +530,7 @@ func (a *App) toolIdentitiesUnlink(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(db, pid, org.ID, &uid, "", "identity_unlinked", "", "agent",
+	dbAudit(db, pid, org.ID, &uid, "", "identity_unlinked", auditFromArgs(args),
 		map[string]any{"provider": provider, "count": n})
 	return map[string]any{"removed": n}, nil
 }
@@ -611,7 +616,7 @@ func (a *App) toolGuestUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	verificationRequired := policy.Verify
-	if err := dbUpgradeGuest(db, pid, org.ID, uid, email, pwHash, !verificationRequired); err != nil {
+	if err := dbUpgradeGuest(db, pid, org.ID, uid, email, pwHash, verificationStateFor(verificationRequired)); err != nil {
 		return nil, err
 	}
 	if v, ok := args["display_name"].(string); ok && strings.TrimSpace(v) != "" {
@@ -624,7 +629,7 @@ func (a *App) toolGuestUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if _, err = db.Exec(`DELETE FROM oauth_identities WHERE project_id=? AND organization_id=? AND user_id=?`, pid, org.ID, uid); err != nil {
 		return nil, err
 	}
-	dbAudit(db, pid, org.ID, &uid, "", "guest_upgraded", "", "agent",
+	dbAudit(db, pid, org.ID, &uid, "", "guest_upgraded", auditFromArgs(args),
 		map[string]any{"email": email, "verification_required": verificationRequired})
 	updated, err := dbGetUserByID(db, pid, org.ID, uid)
 	if err != nil {

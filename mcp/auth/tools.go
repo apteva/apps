@@ -59,7 +59,7 @@ func (a *App) toolOrgsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, fmt.Errorf("seed signing key: %w", err)
 	}
 	org, _ := dbGetOrgByID(ctx.AppDB(), pid, id)
-	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_created", "", "agent",
+	dbAudit(ctx.AppDB(), pid, id, nil, "", "org_created", auditFromArgs(args),
 		map[string]any{"slug": slug, "name": name})
 	return map[string]any{"organization": org}, nil
 }
@@ -84,13 +84,15 @@ func (a *App) toolOrgsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		policy = &v
 	}
 	if err := validatePolicyJSON(policy); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_update_failed", auditFromArgs(args), map[string]any{"error": err.Error()})
 		return nil, err
 	}
 	if err := dbUpdateOrg(ctx.AppDB(), pid, org.ID, name, color, policy); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_update_failed", auditFromArgs(args), map[string]any{"error": "update_failed"})
 		return nil, err
 	}
 	updated, _ := dbGetOrgByID(ctx.AppDB(), pid, org.ID)
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_updated", "", "agent", nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_updated", auditFromArgs(args), orgChangeMeta(ctx, org, updated))
 	return map[string]any{"organization": updated}, nil
 }
 
@@ -109,7 +111,7 @@ func (a *App) toolOrgsArchive(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := dbArchiveOrg(ctx.AppDB(), pid, org.ID); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_archived", "", "agent", nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "org_archived", auditFromArgs(args), nil)
 	return map[string]any{"ok": true}, nil
 }
 
@@ -189,7 +191,7 @@ func (a *App) toolUsersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		emailVerified:     emailVerified,
 		sendPasswordReset: boolArg(args, "send_password_reset", false),
 		metadataJSON:      metadataJSON,
-	}, "", "agent", "mcp")
+	}, auditFromArgs(args), "mcp")
 	if cErr != nil {
 		return nil, cErr
 	}
@@ -274,7 +276,7 @@ func (a *App) toolUsersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if metadataPtr != nil {
 		changes["metadata"] = json.RawMessage(*metadataPtr)
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", "", "agent", changes)
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", auditFromArgs(args), changes)
 	return map[string]any{"user": updated}, nil
 }
 
@@ -328,9 +330,10 @@ func (a *App) toolUsersRevokeSessions(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	n, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, org.ID, uid)
 	if err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoke_failed", auditFromArgs(args), nil)
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoked", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "session_revoked", auditFromArgs(args),
 		map[string]any{"reason": "admin_revoke_all", "count": n})
 	return map[string]any{"revoked_count": n}, nil
 }
@@ -350,7 +353,7 @@ func (a *App) toolUsersSetPassword(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	password := stringArg(args, "password", "")
 	revokeSessions := boolArg(args, "revoke_sessions", true)
-	revoked, _, err := a.setUserPassword(ctx, pid, org.ID, uid, password, revokeSessions, "password_set_admin", "", "", "agent")
+	revoked, _, err := a.setUserPassword(ctx, pid, org.ID, uid, password, revokeSessions, "password_set_admin", "", auditFromArgs(args))
 	if err != nil {
 		return nil, err
 	}
@@ -370,14 +373,16 @@ func (a *App) toolUsersDisable(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if !ok {
 		return nil, errors.New("user_id required")
 	}
+	reason, _ := args["reason"].(string)
 	if err := dbSetUserStatus(ctx.AppDB(), pid, org.ID, uid, "disabled"); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disable_failed", auditFromArgs(args), map[string]any{"reason": reason, "step": "set_status"})
 		return nil, err
 	}
 	if _, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, org.ID, uid); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disable_failed", auditFromArgs(args), map[string]any{"reason": reason, "step": "revoke_sessions"})
 		return nil, err
 	}
-	reason, _ := args["reason"].(string)
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disabled", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_disabled", auditFromArgs(args),
 		map[string]any{"reason": reason})
 	return map[string]any{"ok": true}, nil
 }
@@ -396,9 +401,10 @@ func (a *App) toolUsersEnable(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errors.New("user_id required")
 	}
 	if err := dbSetUserStatus(ctx.AppDB(), pid, org.ID, uid, "active"); err != nil {
+		dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enable_failed", auditFromArgs(args), nil)
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enabled", "", "agent", nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_enabled", auditFromArgs(args), nil)
 	return map[string]any{"ok": true}, nil
 }
 
@@ -529,7 +535,7 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if org == nil {
 		auditMeta["scope"] = "multi_organization"
 	}
-	dbAudit(ctx.AppDB(), pid, oid, nil, c.ClientID, "client_created", "", "agent", auditMeta)
+	dbAudit(ctx.AppDB(), pid, oid, nil, c.ClientID, "client_created", auditFromArgs(args), auditMeta)
 	out := map[string]any{
 		"client":             c,
 		"client_id":          c.ClientID,
@@ -606,7 +612,7 @@ func (a *App) toolClientsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, updated.OrganizationID, nil, clientID, "client_updated", "", "agent", map[string]any{
+	dbAudit(ctx.AppDB(), pid, updated.OrganizationID, nil, clientID, "client_updated", auditFromArgs(args), map[string]any{
 		"allowed_origins": origins,
 	})
 	out := map[string]any{"client": updated}
@@ -662,7 +668,7 @@ func (a *App) toolClientsRotateSecret(ctx *sdk.AppCtx, args map[string]any) (any
 	if err := dbUpdateClientSecret(ctx.AppDB(), pid, clientID, hashToken(secret)); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_secret_rotated", "", "agent", nil)
+	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_secret_rotated", auditFromArgs(args), nil)
 	return map[string]any{
 		"client_id":     clientID,
 		"client_secret": secret,
@@ -688,7 +694,7 @@ func (a *App) toolClientsDisable(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := dbDisableClient(ctx.AppDB(), pid, clientID); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", "", "agent", nil)
+	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", auditFromArgs(args), nil)
 	out := map[string]any{"ok": true}
 	attempted, syncErr := deleteClientBrowserOrigins(ctx, clientID)
 	recordBrowserOriginSync(out, attempted, syncErr)
@@ -720,7 +726,9 @@ func (a *App) toolPublicSignup(ctx *sdk.AppCtx, args map[string]any) (any, error
 		OrganizationSlug: stringArg(args, "organization_slug", ""),
 		IP:               stringArg(args, "ip", ""),
 		UserAgent:        stringArg(args, "user_agent", "mcp:auth_public_signup"),
+		Source:           auditFromArgs(args),
 	}
+	req.Source.IP, req.Source.UserAgent = req.IP, req.UserAgent
 	// Synthetic request so the session minter has UA/RemoteAddr to
 	// stamp on the sessions row (orgBaseURL falls back to PlatformInfo
 	// before consulting the request, so the missing Host is harmless).

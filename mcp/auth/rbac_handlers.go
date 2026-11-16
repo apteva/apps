@@ -43,7 +43,7 @@ func (a *App) handleAdminRolesCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, rbacCreateStatus(err), err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_created", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_created", auditFromRequest(r),
 		map[string]any{"role_id": role.ID, "key": role.Key})
 	httpStatus(w, http.StatusCreated, map[string]any{"role": role})
 }
@@ -75,7 +75,7 @@ func (a *App) handleAdminRolesUpdate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_updated", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_updated", auditFromRequest(r),
 		map[string]any{"role_id": id, "key": role.Key})
 	httpJSON(w, map[string]any{"role": role})
 }
@@ -94,7 +94,7 @@ func (a *App) handleAdminRolesDelete(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_deleted", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_deleted", auditFromRequest(r),
 		map[string]any{"role_id": id})
 	httpJSON(w, map[string]any{"ok": true})
 }
@@ -125,7 +125,7 @@ func (a *App) handleAdminRolePermissionsSet(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_permissions_set", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "role_permissions_set", auditFromRequest(r),
 		map[string]any{"role_id": id, "permissions": role.Permissions})
 	httpJSON(w, map[string]any{"role": role})
 }
@@ -162,7 +162,7 @@ func (a *App) handleAdminPermissionsCreate(w http.ResponseWriter, r *http.Reques
 		httpErr(w, rbacCreateStatus(err), err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_created", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_created", auditFromRequest(r),
 		map[string]any{"permission_id": permission.ID, "key": permission.Key})
 	httpStatus(w, http.StatusCreated, map[string]any{"permission": permission})
 }
@@ -194,7 +194,7 @@ func (a *App) handleAdminPermissionsUpdate(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_updated", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_updated", auditFromRequest(r),
 		map[string]any{"permission_id": id, "key": permission.Key})
 	httpJSON(w, map[string]any{"permission": permission})
 }
@@ -213,7 +213,7 @@ func (a *App) handleAdminPermissionsDelete(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_deleted", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, nil, "", "permission_deleted", auditFromRequest(r),
 		map[string]any{"permission_id": id})
 	httpJSON(w, map[string]any{"ok": true})
 }
@@ -244,7 +244,7 @@ func (a *App) handleAdminUserRolesSet(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, &userID, "", "user_roles_set", r.RemoteAddr, r.UserAgent(),
+	dbAudit(getAppCtx(r).AppDB(), pid, org.ID, &userID, "", "user_roles_set", auditFromRequest(r),
 		map[string]any{
 			"roles":                 authorization.Roles,
 			"authorization_version": authorization.AuthorizationVersion,
@@ -291,7 +291,7 @@ func (a *App) toolRolesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_created", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_created", auditFromArgs(args),
 		map[string]any{"role_id": role.ID, "key": role.Key})
 	return map[string]any{"role": role}, nil
 }
@@ -315,7 +315,7 @@ func (a *App) toolRolesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_updated", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_updated", auditFromArgs(args),
 		map[string]any{"role_id": id, "key": role.Key})
 	return map[string]any{"role": role}, nil
 }
@@ -328,7 +328,7 @@ func (a *App) toolRolesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := dbDeleteRole(ctx.AppDB(), pid, org.ID, id); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_deleted", "", "agent", map[string]any{"role_id": id})
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_deleted", auditFromArgs(args), map[string]any{"role_id": id})
 	return map[string]any{"ok": true}, nil
 }
 
@@ -362,7 +362,7 @@ func (a *App) toolPermissionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_created", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_created", auditFromArgs(args),
 		map[string]any{"permission_id": permission.ID, "key": permission.Key})
 	return map[string]any{"permission": permission}, nil
 }
@@ -386,7 +386,7 @@ func (a *App) toolPermissionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_updated", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_updated", auditFromArgs(args),
 		map[string]any{"permission_id": id, "key": permission.Key})
 	return map[string]any{"permission": permission}, nil
 }
@@ -399,7 +399,7 @@ func (a *App) toolPermissionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := dbDeletePermission(ctx.AppDB(), pid, org.ID, id); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_deleted", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "permission_deleted", auditFromArgs(args),
 		map[string]any{"permission_id": id})
 	return map[string]any{"ok": true}, nil
 }
@@ -419,7 +419,7 @@ func (a *App) toolRolePermissionsSet(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_permissions_set", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, nil, "", "role_permissions_set", auditFromArgs(args),
 		map[string]any{"role_id": roleID, "permissions": role.Permissions})
 	return map[string]any{"role": role}, nil
 }
@@ -439,7 +439,7 @@ func (a *App) toolUserRolesSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &userID, "", "user_roles_set", "", "agent",
+	dbAudit(ctx.AppDB(), pid, org.ID, &userID, "", "user_roles_set", auditFromArgs(args),
 		map[string]any{
 			"roles":                 authorization.Roles,
 			"authorization_version": authorization.AuthorizationVersion,

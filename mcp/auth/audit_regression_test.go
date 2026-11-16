@@ -130,7 +130,7 @@ func TestRegressionResetBurnsTokenBeforePasswordValidation(t *testing.T) {
 func TestRegressionOldResetTokenSurvivesPasswordChange(t *testing.T) {
 	a, cid, org, _, uid := seedRecoveryUser(t, "old-reset@example.com", "GoodPassword123")
 	insertRecoveryToken(t, org.ID, uid, "reset_password", "older-reset", cid)
-	if _, _, err := a.setUserPassword(globalCtx, "test-proj", org.ID, uid, "OwnerNewPassword123", true, "audit", "", "", ""); err != nil {
+	if _, _, err := a.setUserPassword(globalCtx, "test-proj", org.ID, uid, "OwnerNewPassword123", true, "audit", "", auditSource{}); err != nil {
 		t.Fatal(err)
 	}
 	rec := callJSON(a.handlePasswordResetConfirm, "POST", "/password/reset/confirm", map[string]any{"client_id": cid, "token": "older-reset", "password": "OlderTokenWins123"})
@@ -264,7 +264,7 @@ func TestRegressionMFASearchFiltersAfterLimit(t *testing.T) {
 	ctx, _ := newAuthCtx(t)
 	a := &App{}
 	for i := 0; i < 2; i++ {
-		uid, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, fmt.Sprintf("search%d@example.com", i), "", "", true, "{}")
+		uid, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, fmt.Sprintf("search%d@example.com", i), "", "", emailAdminAsserted, "{}")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +334,7 @@ func TestRegressionIdentityQuotaConcurrentOvershoot(t *testing.T) {
 func TestRegressionMalformedRoleIDsClearAssignments(t *testing.T) {
 	ctx, _ := newAuthCtx(t)
 	a := &App{}
-	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, "roles@example.com", "", "", true, "{}")
+	uid, err := dbCreateUser(ctx.AppDB(), "test-proj", 1, "roles@example.com", "", "", emailAdminAsserted, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestRegressionMalformedRoleIDsClearAssignments(t *testing.T) {
 func TestRegressionPasswordWhitespaceChanged(t *testing.T) {
 	a, cid, org, _, uid := seedRecoveryUser(t, "spaces@example.com", "GoodPassword123")
 	password := "  SpacedPassword123  "
-	if _, _, err := a.setUserPassword(globalCtx, "test-proj", org.ID, uid, password, true, "audit", "", "", ""); err != nil {
+	if _, _, err := a.setUserPassword(globalCtx, "test-proj", org.ID, uid, password, true, "audit", "", auditSource{}); err != nil {
 		t.Fatal(err)
 	}
 	rec := callJSON(a.handleLogin, "POST", "/login", map[string]any{"client_id": cid, "email": "spaces@example.com", "password": password})
