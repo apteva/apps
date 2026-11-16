@@ -104,10 +104,23 @@ func loadSchedState(db *sql.DB, pid string, from, to time.Time, excludeSlot int6
 		st.dayLoad[fmt.Sprintf("%d|%s", id, s.Format("2006-01-02"))]++
 	}
 	rows.Close()
-	sites, err := listSites(db, pid, "", "")
+	// Every own site (their opening hours bound premises resources).
+	// Customer sites are fetched one at a time where needed; listSites
+	// caps its result and would drop own sites behind many customers.
+	rows, err = db.Query(`SELECT `+siteCols+` FROM sites WHERE project_id=? AND kind='own'`, pid)
 	if err != nil {
 		return nil, err
 	}
+	sites := []*Site{}
+	for rows.Next() {
+		s, err := scanSite(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sites = append(sites, s)
+	}
+	rows.Close()
 	for _, s := range sites {
 		st.sites[s.ID] = s
 	}
@@ -169,7 +182,7 @@ func (st *schedState) free(r *Resource, iv interval, bufferMin int) bool {
 }
 
 func matchesRequirement(r *Resource, req Requirement, w *Work) bool {
-	if r.Kind != req.Kind {
+	if r.Kind != req.Kind || !r.worksFor(w.BrandID) {
 		return false
 	}
 	for _, q := range req.Quals {
@@ -312,7 +325,9 @@ func suggestSlots(db *sql.DB, pid string, w *Work, wt *WorkType, p suggestParams
 	}
 	var site *Site
 	if w.SiteID != nil {
-		site = st.sites[*w.SiteID]
+		if site = st.sites[*w.SiteID]; site == nil {
+			site, _ = getSite(db, pid, *w.SiteID) // a customer site, for travel
+		}
 	}
 	siteBound := w.Mode != "at_customer" && site != nil && site.Kind == "own"
 	options := []SlotOption{}
@@ -429,6 +444,10 @@ func listSlots(db *sql.DB, pid string, workID int64, args map[string]any) ([]*Sl
 		if v := int64Arg(args, "resource_id"); v > 0 {
 			q += " AND EXISTS (SELECT 1 FROM slot_resources sr WHERE sr.slot_id=s.id AND sr.resource_id=?)"
 			params = append(params, v)
+		}
+		if v := stringArg(args, "brand"); v != "" {
+			q += " AND w.brand_id=(SELECT id FROM brands WHERE project_id=s.project_id AND key=?)"
+			params = append(params, strings.ToLower(v))
 		}
 		if v := int64Arg(args, "site_id"); v > 0 {
 			q += " AND w.site_id=?"

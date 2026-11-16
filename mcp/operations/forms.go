@@ -105,13 +105,40 @@ type FormResponse struct {
 }
 
 func submitForm(db *sql.DB, pid string, args map[string]any) (*FormResponse, error) {
-	f, err := getForm(db, pid, stringArg(args, "form_key"))
-	if err != nil {
-		return nil, notFound(err, "form")
-	}
 	data := objectArg(args, "data")
 	if data == nil {
 		return nil, errors.New("data required")
+	}
+	workID, slotID, siteID, objectID := int64Arg(args, "work_id"), int64Arg(args, "slot_id"), int64Arg(args, "site_id"), int64Arg(args, "object_id")
+	if slotID > 0 && workID == 0 {
+		_ = db.QueryRow(`SELECT work_id FROM slots WHERE project_id=? AND id=?`, pid, slotID).Scan(&workID)
+	}
+	// The form is the one of the work's brand (or the site's brand for a
+	// site log), falling back to the shared form.
+	var brandID int64
+	if workID > 0 {
+		w, err := getWork(db, pid, workID)
+		if err != nil {
+			return nil, notFound(err, "work")
+		}
+		brandID = w.BrandID
+		if siteID == 0 && w.SiteID != nil {
+			siteID = *w.SiteID
+		}
+	}
+	if workID == 0 && siteID == 0 {
+		return nil, errors.New("work_id, slot_id or site_id required (site_id for site logs such as temperature checks)")
+	}
+	if workID == 0 {
+		s, err := getSite(db, pid, siteID)
+		if err != nil {
+			return nil, notFound(err, "site")
+		}
+		brandID = s.BrandID
+	}
+	f, err := getForm(db, pid, stringArg(args, "form_key"), brandID)
+	if err != nil {
+		return nil, notFound(err, "form")
 	}
 	missing, invalid := checkFormData(f, data, true)
 	if len(missing) > 0 {
@@ -119,22 +146,6 @@ func submitForm(db *sql.DB, pid string, args map[string]any) (*FormResponse, err
 	}
 	if len(invalid) > 0 {
 		return nil, fmt.Errorf("form %s rejected: %s", f.Key, strings.Join(invalid, "; "))
-	}
-	workID, slotID, siteID, objectID := int64Arg(args, "work_id"), int64Arg(args, "slot_id"), int64Arg(args, "site_id"), int64Arg(args, "object_id")
-	if slotID > 0 && workID == 0 {
-		_ = db.QueryRow(`SELECT work_id FROM slots WHERE project_id=? AND id=?`, pid, slotID).Scan(&workID)
-	}
-	if workID > 0 {
-		w, err := getWork(db, pid, workID)
-		if err != nil {
-			return nil, notFound(err, "work")
-		}
-		if siteID == 0 && w.SiteID != nil {
-			siteID = *w.SiteID
-		}
-	}
-	if workID == 0 && siteID == 0 {
-		return nil, errors.New("work_id, slot_id or site_id required (site_id for site logs such as temperature checks)")
 	}
 	now := nowUTC()
 	r, err := db.Exec(`INSERT INTO form_responses(project_id,form_key,form_version,work_id,slot_id,site_id,object_id,responder,data_json,submitted_at)

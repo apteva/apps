@@ -25,6 +25,7 @@ type ItemRequest struct {
 }
 
 type PriceContext struct {
+	BrandID     int64 // prices, modifiers and policies of this brand (0 = shared only)
 	WorkTypeKey string
 	Priority    string
 	PartySize   int
@@ -68,7 +69,7 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 	reqs := append([]Requirement{}, pc.TypeReqs...)
 	duration := 0
 	for _, it := range items {
-		ri, err := getRateItem(db, pid, 0, it.Code)
+		ri, err := getRateItem(db, pid, 0, it.Code, pc.BrandID)
 		if err != nil {
 			return nil, notFound(err, "rate item "+it.Code)
 		}
@@ -101,7 +102,7 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 	res.DurationMin = duration
 	res.Requirements = reqs
 
-	mods, err := listModifiers(db, pid)
+	mods, err := effectiveModifiers(db, pid, pc.BrandID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 		res.Lines = append(res.Lines, PricedLine{Code: "discount", Kind: "modifier",
 			Description: fmt.Sprintf("Discount %.4g%%", pc.DiscountPct), Qty: 1, UnitPriceCents: amt, TotalCents: amt})
 		total += amt
-		if maxPct := policyInt(db, pid, "max_discount_pct", 0); float64(maxPct) < pc.DiscountPct {
+		if maxPct := policyInt(db, pid, pc.BrandID, "max_discount_pct", 0); float64(maxPct) < pc.DiscountPct {
 			res.Flags = append(res.Flags, fmt.Sprintf("discount_above_max:%d", maxPct))
 		}
 	}
@@ -137,13 +138,13 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 	if total > 0 {
 		m := round2(float64(total-res.CostCents) / float64(total) * 100)
 		res.MarginPct = &m
-		if minMargin := policyInt(db, pid, "min_margin_pct", -1); minMargin >= 0 && m < float64(minMargin) {
+		if minMargin := policyInt(db, pid, pc.BrandID, "min_margin_pct", -1); minMargin >= 0 && m < float64(minMargin) {
 			res.Flags = append(res.Flags, fmt.Sprintf("below_min_margin:%d", minMargin))
 		}
 	}
 	autoMax := pc.AutoMax
 	if autoMax == 0 {
-		autoMax = policyInt(db, pid, "auto_quote_max_cents", 0)
+		autoMax = policyInt(db, pid, pc.BrandID, "auto_quote_max_cents", 0)
 	}
 	if autoMax > 0 && total > autoMax {
 		res.Flags = append(res.Flags, fmt.Sprintf("above_auto_approve:%d", autoMax))

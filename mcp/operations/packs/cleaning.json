@@ -1,0 +1,123 @@
+{
+  "key": "cleaning",
+  "name": "Cleaning",
+  "version": "0.1.0",
+  "description": "Home and office cleaning at the customer's address: regular cleans billed by the hour, deep and end-of-tenancy cleans priced from the number of rooms and done by a pair, recurring office contracts, and extras (oven, fridge, windows, carpets). A checklist with after photos is required before billing.",
+  "setup": "Add cleaners as person resources with quals [cleaner], their shifts and home location; carpet machines as equipment with quals [carpet_machine]. Regular and office cleans usually run on agreements (weekly, fortnightly): create one per customer with agreements_create.",
+  "forms": [
+    {
+      "key": "cleaning_intake",
+      "name": "Cleaning request",
+      "purpose": "intake",
+      "schema": {"fields": [
+        {"key": "property_type", "label": "Property", "type": "choice", "required": true, "options": ["flat", "house", "office", "other"]},
+        {"key": "bedrooms", "label": "Bedrooms", "type": "number", "min": 0, "max": 20},
+        {"key": "bathrooms", "label": "Bathrooms", "type": "number", "min": 0, "max": 20},
+        {"key": "hours", "label": "Hours wanted (regular and office cleans)", "type": "number", "min": 1, "max": 12},
+        {"key": "pets", "label": "Pets in the home", "type": "bool"},
+        {"key": "supplies_on_site", "label": "Cleaning products and vacuum on site", "type": "bool"},
+        {"key": "access_notes", "label": "Access (keys, codes, parking)", "type": "text"}
+      ]}
+    },
+    {
+      "key": "clean_checklist",
+      "name": "Cleaning checklist",
+      "purpose": "checklist",
+      "schema": {"fields": [
+        {"key": "kitchen", "label": "Kitchen surfaces and sink", "type": "bool", "required": true},
+        {"key": "bathrooms", "label": "Bathrooms and toilets", "type": "bool", "required": true},
+        {"key": "floors", "label": "Floors vacuumed and mopped", "type": "bool", "required": true},
+        {"key": "bins", "label": "Bins emptied", "type": "bool", "required": true},
+        {"key": "issues", "label": "Anything not done or found broken", "type": "text"},
+        {"key": "after_photos", "label": "After photos", "type": "photo"}
+      ]}
+    },
+    {
+      "key": "incident_report",
+      "name": "Incident report",
+      "purpose": "compliance",
+      "schema": {"fields": [
+        {"key": "what_happened", "label": "What happened", "type": "text", "required": true},
+        {"key": "damage", "label": "Something was damaged", "type": "bool", "required": true},
+        {"key": "photos", "label": "Photos", "type": "photo"},
+        {"key": "customer_told", "label": "Customer told", "type": "bool", "required": true}
+      ]}
+    }
+  ],
+  "work_types": [
+    {
+      "key": "regular_clean",
+      "name": "Regular clean",
+      "mode": "at_customer",
+      "phases": ["intake", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "cleaning_intake",
+      "default_duration_min": 120,
+      "buffer_min": 20,
+      "requirements": [{"kind": "person", "quals": ["cleaner"], "role": "cleaner"}],
+      "priority_rules": [{"keywords": ["today", "urgent", "asap", "this afternoon"], "priority": "p1"}],
+      "sla": {"p1": 480},
+      "required_forms": {"bill": ["clean_checklist"]},
+      "playbook": "Ask for the address, property type and how many hours (2 for a flat, 3 for a house is typical), pets and access. Price REGULAR_CLEAN (qty = hours) plus any extras, offer the first slots, and suggest a weekly or fortnightly agreement with the same cleaner."
+    },
+    {
+      "key": "deep_clean",
+      "name": "Deep clean",
+      "mode": "at_customer",
+      "phases": ["intake", "quote", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "cleaning_intake",
+      "default_duration_min": 300,
+      "buffer_min": 20,
+      "requirements": [{"kind": "person", "quals": ["cleaner"], "count": 2, "role": "cleaner"}],
+      "quote_policy": {"auto_approve_max_cents": 40000},
+      "required_forms": {"bill": ["clean_checklist"]},
+      "playbook": "Needs bedrooms and bathrooms to price DEEP_CLEAN. Add oven, fridge, windows or carpets if asked. Send the quote and book once accepted; two cleaners go together."
+    },
+    {
+      "key": "end_of_tenancy",
+      "name": "End-of-tenancy clean",
+      "mode": "at_customer",
+      "phases": ["intake", "quote", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "cleaning_intake",
+      "default_duration_min": 360,
+      "buffer_min": 20,
+      "requirements": [{"kind": "person", "quals": ["cleaner"], "count": 2, "role": "cleaner"}],
+      "quote_policy": {"auto_approve_max_cents": 40000},
+      "required_forms": {"bill": ["clean_checklist"]},
+      "playbook": "The property is empty and the deposit depends on it: always include OVEN_CLEAN and FRIDGE_CLEAN, offer carpets. Confirm key pickup and return in access notes. After photos are required."
+    },
+    {
+      "key": "office_clean",
+      "name": "Office clean",
+      "mode": "at_customer",
+      "phases": ["schedule", "execute", "bill", "closed"],
+      "default_duration_min": 120,
+      "buffer_min": 20,
+      "requirements": [{"kind": "person", "quals": ["cleaner"], "role": "cleaner"}],
+      "required_forms": {"bill": ["clean_checklist"]},
+      "playbook": "Generated by a contract agreement (often early morning or evening, several days a week). Keep the same cleaner on the contract when possible."
+    }
+  ],
+  "rate_items": [
+    {"code": "REGULAR_CLEAN", "name": "Regular clean (per hour)", "pricing": {"mode": "hourly", "unit": "hour", "unit_cents": 2800, "qty_from": "hours", "min_charge_cents": 5600},
+     "cost_cents": 1600, "duration": {"per_unit_min": 60}},
+    {"code": "DEEP_CLEAN", "name": "Deep clean", "pricing": {"mode": "formula", "formula": "max(bedrooms * 3500 + bathrooms * 3000 + 6000, 14000)"},
+     "cost_cents": 8000, "duration": {"fixed_min": 300}},
+    {"code": "END_OF_TENANCY", "name": "End-of-tenancy clean", "pricing": {"mode": "formula", "formula": "max(bedrooms * 4500 + bathrooms * 3500 + 9000, 19000)"},
+     "cost_cents": 11000, "duration": {"fixed_min": 360}},
+    {"code": "OFFICE_CLEAN", "name": "Office clean (per hour)", "pricing": {"mode": "hourly", "unit": "hour", "unit_cents": 3200, "qty_from": "hours"},
+     "cost_cents": 1700, "duration": {"per_unit_min": 60}},
+    {"code": "OVEN_CLEAN", "name": "Inside oven", "pricing": {"mode": "flat", "unit_cents": 6500}, "cost_cents": 1500, "duration": {"fixed_min": 60},
+     "materials": [{"sku": "OVEN-CLEANER", "qty_per_unit": 1}]},
+    {"code": "FRIDGE_CLEAN", "name": "Inside fridge", "pricing": {"mode": "flat", "unit_cents": 2500}, "cost_cents": 700, "duration": {"fixed_min": 30}},
+    {"code": "WINDOWS_INTERIOR", "name": "Interior windows", "pricing": {"mode": "per_unit", "unit": "window", "unit_cents": 400}, "cost_cents": 150, "duration": {"per_unit_min": 5}},
+    {"code": "CARPET_ROOM", "name": "Carpet shampoo (per room)", "pricing": {"mode": "per_unit", "unit": "room", "unit_cents": 3500}, "cost_cents": 900, "duration": {"per_unit_min": 30},
+     "requirements": [{"kind": "equipment", "quals": ["carpet_machine"]}]}
+  ],
+  "modifiers": [
+    {"key": "weekend", "name": "Weekend surcharge", "kind": "surcharge", "when": {"weekdays": [6, 7]}, "amount": {"pct": 20}},
+    {"key": "same_day", "name": "Same-day surcharge", "kind": "surcharge", "when": {"priorities": ["p1"]}, "amount": {"pct": 30}},
+    {"key": "pets", "name": "Pet hair", "kind": "fee", "when": {"flags": ["pets"]}, "amount": {"cents": 1000}},
+    {"key": "bring_supplies", "name": "Products and equipment brought", "kind": "fee", "when": {"flags": ["bring_supplies"]}, "amount": {"cents": 800}}
+  ],
+  "policies": {"currency": "EUR", "auto_quote_max_cents": 40000, "max_discount_pct": 15, "min_margin_pct": 35}
+}

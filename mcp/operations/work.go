@@ -18,6 +18,8 @@ type appCaller func(app, tool string, input map[string]any, out any) error
 type Work struct {
 	ID              int64           `json:"id"`
 	Number          string          `json:"number"`
+	BrandID         int64           `json:"brand_id"`        // 0 = no brand
+	Brand           string          `json:"brand,omitempty"` // brand key
 	WorkTypeID      int64           `json:"work_type_id"`
 	WorkType        string          `json:"work_type"`
 	Mode            string          `json:"mode"`
@@ -55,9 +57,9 @@ type Work struct {
 const workCols = `w.id,w.number,w.work_type_id,t.key,w.mode,w.phase,w.status,w.hold_from_status,w.priority,w.source,w.crm_contact_id,
 	w.customer_name,w.customer_email,w.customer_phone,w.site_id,w.object_ids_json,w.party_size,w.summary,w.intake_json,w.custom_json,
 	w.agreement_id,w.parent_id,w.duration_min,w.currency,w.estimate_cents,w.quote_status,w.quote_accepted_at,w.invoice_ref,
-	w.invoiced_cents,w.paid_at,w.sla_due_at,w.created_at,w.updated_at,w.closed_at`
+	w.invoiced_cents,w.paid_at,w.sla_due_at,w.created_at,w.updated_at,w.closed_at,w.brand_id,COALESCE(b.key,'')`
 
-const workFrom = ` FROM work w JOIN work_types t ON t.id=w.work_type_id`
+const workFrom = ` FROM work w JOIN work_types t ON t.id=w.work_type_id LEFT JOIN brands b ON b.id=w.brand_id`
 
 func scanWork(s scanner) (*Work, error) {
 	var w Work
@@ -67,7 +69,7 @@ func scanWork(s scanner) (*Work, error) {
 	if err := s.Scan(&w.ID, &w.Number, &w.WorkTypeID, &w.WorkType, &w.Mode, &w.Phase, &w.Status, &w.HoldFromStatus, &w.Priority, &w.Source,
 		&crm, &w.CustomerName, &w.CustomerEmail, &w.CustomerPhone, &site, &objs, &w.PartySize, &w.Summary, &intake, &custom,
 		&agr, &parent, &w.DurationMin, &w.Currency, &w.EstimateCents, &w.QuoteStatus, &qa, &w.InvoiceRef,
-		&w.InvoicedCents, &paid, &sla, &w.CreatedAt, &w.UpdatedAt, &closed); err != nil {
+		&w.InvoicedCents, &paid, &sla, &w.CreatedAt, &w.UpdatedAt, &closed, &w.BrandID, &w.Brand); err != nil {
 		return nil, err
 	}
 	if crm.Valid {
@@ -118,9 +120,9 @@ type IntakeResult struct {
 }
 
 func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*IntakeResult, error) {
-	wt, err := getWorkType(db, pid, 0, stringArg(args, "work_type"))
+	brandID, wt, err := resolveWorkBrand(db, pid, args, stringArg(args, "work_type"), int64Arg(args, "site_id"))
 	if err != nil {
-		return nil, notFound(err, "work type "+stringArg(args, "work_type"))
+		return nil, err
 	}
 	if !wt.Active {
 		return nil, fmt.Errorf("work type %s is inactive", wt.Key)
@@ -131,7 +133,7 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 	}
 	res := &IntakeResult{Playbook: wt.Playbook}
 	if wt.IntakeFormKey != "" {
-		f, err := getForm(db, pid, wt.IntakeFormKey)
+		f, err := getForm(db, pid, wt.IntakeFormKey, brandID)
 		if err != nil {
 			return nil, notFound(err, "intake form")
 		}
@@ -175,10 +177,12 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 		siteID = s.ID
 	}
 	if siteID == 0 && wt.Mode != "at_customer" {
-		// Premises work defaults to the business's only own site.
+		// Premises work defaults to the only own site the brand can use
+		// (its own sites and the shared ones).
 		var only int64
 		var n int
-		_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(id),0) FROM sites WHERE project_id=? AND kind='own'`, pid).Scan(&n, &only)
+		_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(id),0) FROM sites WHERE project_id=? AND kind='own' AND brand_id IN (?,0)`,
+			pid, brandID).Scan(&n, &only)
 		if n == 1 {
 			siteID = only
 		}
@@ -200,7 +204,7 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 	if partySize == 0 {
 		partySize = intArg(answers, "party_size", 0)
 	}
-	currency := strings.ToUpper(firstNonEmpty(stringArg(args, "currency"), policyString(db, pid, "currency", "EUR")))
+	currency := strings.ToUpper(firstNonEmpty(stringArg(args, "currency"), policyString(db, pid, brandID, "currency", "EUR")))
 	now := clock()
 	var sla any
 	if mins, ok := wt.SLA[priority]; ok && mins > 0 {
@@ -208,16 +212,24 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 	}
 	phase := wt.Phases[0]
 	status := firstStatus(wt, phase)
-	number, err := nextNumber(db, pid)
+	prefix := defaultNumberPrefix
+	if brandID > 0 {
+		b, err := getBrand(db, pid, brandID)
+		if err != nil {
+			return nil, err
+		}
+		prefix = b.NumberPrefix
+	}
+	number, err := nextNumber(db, pid, prefix)
 	if err != nil {
 		return nil, err
 	}
 	objIDs := int64sArg(args, "object_ids")
 	ts := fmtTime(now)
-	r, err := db.Exec(`INSERT INTO work(project_id,number,work_type_id,mode,phase,status,priority,source,crm_contact_id,customer_name,customer_email,
+	r, err := db.Exec(`INSERT INTO work(project_id,number,brand_id,work_type_id,mode,phase,status,priority,source,crm_contact_id,customer_name,customer_email,
 		customer_phone,site_id,object_ids_json,party_size,summary,intake_json,custom_json,agreement_id,parent_id,duration_min,currency,sla_due_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		pid, number, wt.ID, wt.Mode, phase, status, priority, firstNonEmpty(stringArg(args, "source"), "agent"), nilIfZero(crmID), name, email, phone,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		pid, number, brandID, wt.ID, wt.Mode, phase, status, priority, firstNonEmpty(stringArg(args, "source"), "agent"), nilIfZero(crmID), name, email, phone,
 		nilIfZero(siteID), jsonOr(objIDs, "[]"), partySize, summary, mustJSON(answers), jsonOr(objectArg(args, "custom"), "{}"),
 		nilIfZero(int64Arg(args, "agreement_id")), nilIfZero(int64Arg(args, "parent_id")), wt.DefaultDurationMin, currency, sla, ts, ts)
 	if err != nil {
@@ -225,7 +237,7 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 	}
 	id, _ := r.LastInsertId()
 	if wt.IntakeFormKey != "" && len(answers) > 0 {
-		f, _ := getForm(db, pid, wt.IntakeFormKey)
+		f, _ := getForm(db, pid, wt.IntakeFormKey, brandID)
 		if f != nil {
 			_, _ = db.Exec(`INSERT INTO form_responses(project_id,form_key,form_version,work_id,site_id,responder,data_json,submitted_at) VALUES(?,?,?,?,?,?,?,?)`,
 				pid, f.Key, f.Version, id, nilIfZero(siteID), "intake", mustJSON(answers), ts)
@@ -260,14 +272,16 @@ func derivePriority(wt *WorkType, summary string, answers map[string]any) string
 	return "p3"
 }
 
-func nextNumber(db *sql.DB, pid string) (string, error) {
+// nextNumber returns the next job number in a prefix's series:
+// W-00001 for work without a brand, FF-00001 for brand FlowFix.
+func nextNumber(db *sql.DB, pid, prefix string) (string, error) {
 	var n int64
-	if err := db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=?`, pid).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND number LIKE ?`, pid, prefix+"-%").Scan(&n); err != nil {
 		return "", err
 	}
 	for {
 		n++
-		num := fmt.Sprintf("W-%05d", n)
+		num := fmt.Sprintf("%s-%05d", prefix, n)
 		var exists int
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND number=?`, pid, num).Scan(&exists)
 		if exists == 0 {
@@ -314,9 +328,9 @@ func nilIfZero(v int64) any {
 	return v
 }
 
-func policyString(db *sql.DB, pid, key, def string) string {
-	var raw string
-	if err := db.QueryRow(`SELECT value_json FROM policies WHERE project_id=? AND key=?`, pid, key).Scan(&raw); err != nil {
+func policyString(db *sql.DB, pid string, brandID int64, key, def string) string {
+	raw, ok := policyRaw(db, pid, brandID, key)
+	if !ok {
 		return def
 	}
 	var s string
@@ -329,7 +343,7 @@ func policyString(db *sql.DB, pid, key, def string) string {
 // ─── pricing on a work item ─────────────────────────────────────────
 
 func priceContextFor(db *sql.DB, pid string, w *Work, wt *WorkType, args map[string]any) PriceContext {
-	pc := PriceContext{WorkTypeKey: wt.Key, Priority: w.Priority, PartySize: w.PartySize, Answers: w.Intake,
+	pc := PriceContext{BrandID: w.BrandID, WorkTypeKey: wt.Key, Priority: w.Priority, PartySize: w.PartySize, Answers: w.Intake,
 		DefaultDur: wt.DefaultDurationMin, TypeReqs: append([]Requirement{}, wt.Requirements...), AutoMax: wt.QuotePolicy.AutoApproveMaxCents}
 	if extra := objectArg(args, "answers"); extra != nil {
 		merged := map[string]any{}
@@ -365,7 +379,7 @@ func priceContextFor(db *sql.DB, pid string, w *Work, wt *WorkType, args map[str
 		}
 	}
 	if pc.Location == nil {
-		pc.Location = loadLocation(policyString(db, pid, "timezone", "UTC"))
+		pc.Location = loadLocation(policyString(db, pid, w.BrandID, "timezone", "UTC"))
 	}
 	return pc
 }
@@ -450,7 +464,7 @@ func workRequirements(db *sql.DB, pid string, w *Work, wt *WorkType) []Requireme
 		if l.Kind != "item" {
 			continue
 		}
-		if ri, err := getRateItem(db, pid, 0, l.Code); err == nil {
+		if ri, err := getRateItem(db, pid, 0, l.Code, w.BrandID); err == nil {
 			reqs = mergeRequirements(reqs, ri.Requirements)
 		}
 	}
@@ -672,10 +686,18 @@ func invoiceWork(db *sql.DB, pid string, call appCaller, w *Work, args map[strin
 				Number string `json:"number"`
 			} `json:"invoice"`
 		}
+		meta := map[string]any{"source": "operations", "work_id": w.ID, "work_number": w.Number}
+		notes := firstNonEmpty(stringArg(args, "notes"), w.Number+" "+w.Summary)
+		if w.BrandID > 0 {
+			if b, err := getBrand(db, pid, w.BrandID); err == nil {
+				meta["brand"] = map[string]any{"key": b.Key, "name": b.Name, "legal_name": b.LegalName, "email": b.Email,
+					"phone": b.Phone, "website": b.Website}
+				notes = firstNonEmpty(b.LegalName, b.Name) + " · " + notes
+			}
+		}
 		if err := call("billing", "invoices_create_from_prepared_lines", map[string]any{
 			"customer_id": cust.Customer.ID, "currency": w.Currency, "line_items": items,
-			"notes": firstNonEmpty(stringArg(args, "notes"), w.Number+" "+w.Summary), "finalize": boolArg(args, "finalize", true),
-			"metadata": map[string]any{"source": "operations", "work_id": w.ID, "work_number": w.Number},
+			"notes": notes, "finalize": boolArg(args, "finalize", true), "metadata": meta,
 		}, &inv); err != nil {
 			return nil, nil, fmt.Errorf("billing invoice: %w", err)
 		}
@@ -712,6 +734,9 @@ func searchWork(db *sql.DB, pid string, args map[string]any) ([]*Work, error) {
 	}
 	if v := stringArg(args, "status"); v != "" {
 		add("w.status=?", v)
+	}
+	if v := stringArg(args, "brand"); v != "" {
+		add("b.key=?", strings.ToLower(v))
 	}
 	if v := stringArg(args, "work_type"); v != "" {
 		add("t.key=?", v)
@@ -758,11 +783,20 @@ func searchWork(db *sql.DB, pid string, args map[string]any) ([]*Work, error) {
 	return out, rows.Err()
 }
 
-func metrics(db *sql.DB, pid string, from, to time.Time) (map[string]any, error) {
+// metrics reports on the project, or on one brand when brandID > 0.
+// Utilisation stays per resource across brands, since resources are
+// shared. With brands, by_brand puts each brand's figures side by side.
+func metrics(db *sql.DB, pid string, from, to time.Time, brandID int64) (map[string]any, error) {
 	f, t := fmtTime(from), fmtTime(to)
 	out := map[string]any{"from": f, "to": t}
+	// bw narrows a query on work w to the brand.
+	bw := ""
+	if brandID > 0 {
+		bw = fmt.Sprintf(" AND w.brand_id=%d", brandID)
+		out["brand"] = brandKey(db, pid, brandID)
+	}
 	byPhase := map[string]int{}
-	rows, err := db.Query(`SELECT phase, COUNT(*) FROM work WHERE project_id=? GROUP BY phase`, pid)
+	rows, err := db.Query(`SELECT phase, COUNT(*) FROM work w WHERE project_id=?`+bw+` GROUP BY phase`, pid)
 	if err != nil {
 		return nil, err
 	}
@@ -776,23 +810,23 @@ func metrics(db *sql.DB, pid string, from, to time.Time) (map[string]any, error)
 	out["open_by_phase"] = byPhase
 
 	var created, closed, cancelled, needsOwner int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND created_at>=? AND created_at<?`, pid, f, t).Scan(&created)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND phase='closed' AND closed_at>=? AND closed_at<?`, pid, f, t).Scan(&closed)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND phase='cancelled' AND closed_at>=? AND closed_at<?`, pid, f, t).Scan(&cancelled)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND status='needs_owner'`, pid).Scan(&needsOwner)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND created_at>=? AND created_at<?`+bw, pid, f, t).Scan(&created)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND phase='closed' AND closed_at>=? AND closed_at<?`+bw, pid, f, t).Scan(&closed)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND phase='cancelled' AND closed_at>=? AND closed_at<?`+bw, pid, f, t).Scan(&cancelled)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND status='needs_owner'`+bw, pid).Scan(&needsOwner)
 	out["created"], out["closed"], out["cancelled"], out["waiting_on_owner"] = created, closed, cancelled, needsOwner
 
 	var sent, accepted int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND quote_status IN ('sent','accepted','declined') AND created_at>=? AND created_at<?`, pid, f, t).Scan(&sent)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND quote_status='accepted' AND created_at>=? AND created_at<?`, pid, f, t).Scan(&accepted)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND quote_status IN ('sent','accepted','declined') AND created_at>=? AND created_at<?`+bw, pid, f, t).Scan(&sent)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work w WHERE project_id=? AND quote_status='accepted' AND created_at>=? AND created_at<?`+bw, pid, f, t).Scan(&accepted)
 	if sent > 0 {
 		out["quote_acceptance_pct"] = round2(float64(accepted) / float64(sent) * 100)
 	}
 
 	var invoiced, cost int64
-	_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work WHERE project_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`, pid, f, t).Scan(&invoiced)
+	_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work w WHERE project_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`+bw, pid, f, t).Scan(&invoiced)
 	_ = db.QueryRow(`SELECT COALESCE(SUM(l.cost_cents),0) FROM work_lines l JOIN work w ON w.id=l.work_id
-		WHERE w.project_id=? AND l.source='actual' AND w.invoice_ref<>'' AND w.updated_at>=? AND w.updated_at<?`, pid, f, t).Scan(&cost)
+		WHERE w.project_id=? AND l.source='actual' AND w.invoice_ref<>'' AND w.updated_at>=? AND w.updated_at<?`+bw, pid, f, t).Scan(&cost)
 	out["invoiced_cents"] = invoiced
 	if invoiced > 0 {
 		out["margin_pct"] = round2(float64(invoiced-cost) / float64(invoiced) * 100)
@@ -801,7 +835,7 @@ func metrics(db *sql.DB, pid string, from, to time.Time) (map[string]any, error)
 	// Minutes from intake to first slot start, median.
 	lead := []float64{}
 	rows, err = db.Query(`SELECT w.created_at, MIN(s.starts_at) FROM work w JOIN slots s ON s.work_id=w.id
-		WHERE w.project_id=? AND w.created_at>=? AND w.created_at<? AND s.status<>'cancelled' GROUP BY w.id`, pid, f, t)
+		WHERE w.project_id=? AND w.created_at>=? AND w.created_at<? AND s.status<>'cancelled'`+bw+` GROUP BY w.id`, pid, f, t)
 	if err == nil {
 		for rows.Next() {
 			var c, s string
@@ -835,7 +869,41 @@ func metrics(db *sql.DB, pid string, from, to time.Time) (map[string]any, error)
 		}
 	}
 	out["utilisation"] = util
+
+	if brandID == 0 {
+		if byBrand := brandBreakdown(db, pid, f, t); len(byBrand) > 0 {
+			out["by_brand"] = byBrand
+		}
+	}
 	return out, nil
+}
+
+// brandBreakdown gives each brand's created, closed, open and invoiced
+// figures for the period. Empty when the project has no brands.
+func brandBreakdown(db *sql.DB, pid, f, t string) []map[string]any {
+	brands, err := listBrands(db, pid, "")
+	if err != nil || len(brands) == 0 {
+		return nil
+	}
+	out := []map[string]any{}
+	row := func(id int64, key, name string) {
+		var created, closed, open int
+		var invoiced int64
+		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND created_at>=? AND created_at<?`, pid, id, f, t).Scan(&created)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND phase='closed' AND closed_at>=? AND closed_at<?`, pid, id, f, t).Scan(&closed)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND phase NOT IN ('closed','cancelled')`, pid, id).Scan(&open)
+		_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work WHERE project_id=? AND brand_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`,
+			pid, id, f, t).Scan(&invoiced)
+		if id == 0 && created+closed+open == 0 && invoiced == 0 {
+			return // no unbranded work: leave the row out
+		}
+		out = append(out, map[string]any{"brand": key, "name": name, "created": created, "closed": closed, "open": open, "invoiced_cents": invoiced})
+	}
+	for _, b := range brands {
+		row(b.ID, b.Key, b.Name)
+	}
+	row(0, "", "No brand")
+	return out
 }
 
 func overlapMinutes(db *sql.DB, q string, id int64, from, to time.Time) float64 {

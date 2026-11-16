@@ -24,6 +24,8 @@ type Recurrence struct {
 type Agreement struct {
 	ID                   int64          `json:"id"`
 	Name                 string         `json:"name"`
+	BrandID              int64          `json:"brand_id"`
+	Brand                string         `json:"brand,omitempty"`
 	WorkTypeID           int64          `json:"work_type_id"`
 	WorkType             string         `json:"work_type"`
 	CRMContactID         *int64         `json:"crm_contact_id,omitempty"`
@@ -43,7 +45,8 @@ type Agreement struct {
 }
 
 const agreementCols = `a.id,a.name,a.work_type_id,t.key,a.crm_contact_id,a.customer_name,a.customer_email,a.customer_phone,a.site_id,
-	a.recurrence_json,a.items_json,a.answers_json,a.preferred_resource_ids_json,a.auto_book,a.starts_on,a.ends_on,a.next_on,a.status`
+	a.recurrence_json,a.items_json,a.answers_json,a.preferred_resource_ids_json,a.auto_book,a.starts_on,a.ends_on,a.next_on,a.status,
+	a.brand_id,COALESCE((SELECT key FROM brands b WHERE b.id=a.brand_id),'')`
 
 func scanAgreement(s scanner) (*Agreement, error) {
 	var a Agreement
@@ -51,7 +54,7 @@ func scanAgreement(s scanner) (*Agreement, error) {
 	var rec, items, answers, pref string
 	var auto int
 	if err := s.Scan(&a.ID, &a.Name, &a.WorkTypeID, &a.WorkType, &crm, &a.CustomerName, &a.CustomerEmail, &a.CustomerPhone, &site,
-		&rec, &items, &answers, &pref, &auto, &a.StartsOn, &a.EndsOn, &a.NextOn, &a.Status); err != nil {
+		&rec, &items, &answers, &pref, &auto, &a.StartsOn, &a.EndsOn, &a.NextOn, &a.Status, &a.BrandID, &a.Brand); err != nil {
 		return nil, err
 	}
 	if crm.Valid {
@@ -118,9 +121,9 @@ func validateRecurrence(r *Recurrence) error {
 }
 
 func createAgreement(db *sql.DB, pid string, args map[string]any) (*Agreement, error) {
-	wt, err := getWorkType(db, pid, 0, stringArg(args, "work_type"))
+	brandID, wt, err := resolveWorkBrand(db, pid, args, stringArg(args, "work_type"), int64Arg(args, "site_id"))
 	if err != nil {
-		return nil, notFound(err, "work type")
+		return nil, err
 	}
 	var rec Recurrence
 	if err := remarshal(objectArg(args, "recurrence"), &rec); err != nil {
@@ -147,7 +150,7 @@ func createAgreement(db *sql.DB, pid string, args map[string]any) (*Agreement, e
 	}
 	items := parseItems(args["items"])
 	for _, it := range items {
-		if _, err := getRateItem(db, pid, 0, it.Code); err != nil {
+		if _, err := getRateItem(db, pid, 0, it.Code, brandID); err != nil {
 			return nil, notFound(err, "rate item "+it.Code)
 		}
 	}
@@ -157,10 +160,10 @@ func createAgreement(db *sql.DB, pid string, args map[string]any) (*Agreement, e
 		customer = map[string]any{}
 	}
 	now := nowUTC()
-	r, err := db.Exec(`INSERT INTO agreements(project_id,name,work_type_id,crm_contact_id,customer_name,customer_email,customer_phone,site_id,
+	r, err := db.Exec(`INSERT INTO agreements(project_id,brand_id,name,work_type_id,crm_contact_id,customer_name,customer_email,customer_phone,site_id,
 		recurrence_json,items_json,answers_json,preferred_resource_ids_json,auto_book,starts_on,ends_on,next_on,status,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)`,
-		pid, firstNonEmpty(stringArg(args, "name"), wt.Name), wt.ID, nilIfZero(int64Arg(customer, "crm_contact_id")), stringArg(customer, "name"),
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)`,
+		pid, brandID, firstNonEmpty(stringArg(args, "name"), wt.Name), wt.ID, nilIfZero(int64Arg(customer, "crm_contact_id")), stringArg(customer, "name"),
 		stringArg(customer, "email"), stringArg(customer, "phone"), nilIfZero(siteID), mustJSON(rec), jsonOr(items, "[]"),
 		jsonOr(objectArg(args, "answers"), "{}"), jsonOr(int64sArg(args, "preferred_resource_ids"), "[]"), boolInt(boolArg(args, "auto_book", true)),
 		starts, stringArg(args, "ends_on"), first, now, now)
@@ -243,10 +246,19 @@ func generateAgreements(db *sql.DB, pid string, until string, onlyID int64) ([]G
 	if err != nil {
 		return nil, err
 	}
+	archived := map[int64]bool{}
+	if bs, err := listBrands(db, pid, "archived"); err == nil {
+		for _, b := range bs {
+			archived[b.ID] = true
+		}
+	}
 	out := []GeneratedOccurrence{}
 	for _, a := range list {
 		if onlyID > 0 && a.ID != onlyID {
 			continue
+		}
+		if archived[a.BrandID] {
+			continue // an archived brand takes no new work
 		}
 		guard := 0
 		for a.NextOn <= until && guard < 400 {
@@ -283,7 +295,7 @@ func generateOne(db *sql.DB, pid string, a *Agreement) (GeneratedOccurrence, err
 		}
 		items = append(items, m)
 	}
-	args := map[string]any{"work_type": wt.Key, "source": "agreement", "agreement_id": float64(a.ID), "answers": a.Answers,
+	args := map[string]any{"work_type": wt.Key, "brand_id": float64(a.BrandID), "source": "agreement", "agreement_id": float64(a.ID), "answers": a.Answers,
 		"summary": a.Name + " " + a.NextOn, "items": items, "actor": "agreement",
 		"customer": map[string]any{"name": a.CustomerName, "email": a.CustomerEmail, "phone": a.CustomerPhone}}
 	if a.CRMContactID != nil {

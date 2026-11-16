@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,14 +24,68 @@ func testDB(t *testing.T) *sql.DB {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	schema, err := os.ReadFile("migrations/001_init.sql")
+	migrate(t, db, "")
+	return db
+}
+
+// migrate applies the migrations in order, up to and including `upto`
+// ("" = all), the way the SDK runner does: foreign keys off during the
+// run, then checked.
+func migrate(t *testing.T, db *sql.DB, upto string) {
+	t.Helper()
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
+	sort.Strings(files)
+	applied := map[string]bool{}
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name='_test_migrations'`)
+	if err == nil {
+		has := rows.Next()
+		rows.Close()
+		if has {
+			r2, _ := db.Query(`SELECT filename FROM _test_migrations`)
+			for r2.Next() {
+				var f string
+				_ = r2.Scan(&f)
+				applied[f] = true
+			}
+			r2.Close()
+		}
+	}
+	mustExec := func(q string) {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustExec(`CREATE TABLE IF NOT EXISTS _test_migrations(filename TEXT PRIMARY KEY)`)
+	mustExec(`PRAGMA foreign_keys=OFF`)
+	for _, f := range files {
+		name := filepath.Base(f)
+		if applied[name] {
+			continue
+		}
+		body, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		mustExec(`INSERT INTO _test_migrations VALUES('` + name + `')`)
+		if name == upto {
+			break
+		}
+	}
+	mustExec(`PRAGMA foreign_keys=ON`)
+	check, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return db
+	defer check.Close()
+	if check.Next() {
+		t.Fatal("migrations left foreign key violations")
+	}
 }
 
 // Monday 16 Nov 2026, 08:00 UTC.
@@ -47,7 +103,7 @@ func install(t *testing.T, db *sql.DB, key string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := installPack(db, pid, packs[key]); err != nil {
+	if _, err := installPack(db, pid, packs[key], 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -76,21 +132,21 @@ func shift(t *testing.T, db *sql.DB, resID int64, start, end string) {
 func TestBuiltinPacksValidate(t *testing.T) {
 	db := testDB(t)
 	packs := must(builtinPacks())
-	for _, k := range []string{"plumber", "salon", "restaurant"} {
+	for _, k := range []string{"plumber", "salon", "restaurant", "cleaning"} {
 		p, ok := packs[k]
 		if !ok {
 			t.Fatalf("pack %s missing", k)
 		}
-		if errs := validatePack(db, pid, &p); len(errs) > 0 {
+		if errs := validatePack(db, pid, &p, 0); len(errs) > 0 {
 			t.Fatalf("pack %s invalid: %v", k, errs)
 		}
 	}
 	// All three install side by side in one project: nothing is trade-specific.
-	for _, k := range []string{"plumber", "salon", "restaurant"} {
+	for _, k := range []string{"plumber", "salon", "restaurant", "cleaning"} {
 		install(t, db, k)
 	}
-	wts := must(listWorkTypes(db, pid))
-	if len(wts) < 10 {
+	wts := must(listWorkTypes(db, pid, 0))
+	if len(wts) < 14 {
 		t.Fatalf("expected the three packs' work types, got %d", len(wts))
 	}
 }
@@ -493,10 +549,210 @@ func TestLifecycleGuards(t *testing.T) {
 	if _, err := transition(db, pid, tr.Work, "resume", "agent", "", nil); err == nil {
 		t.Fatal("cancelled work cannot move")
 	}
-	m := must(metrics(db, pid, testNow.AddDate(0, 0, -1), testNow.AddDate(0, 0, 1)))
+	m := must(metrics(db, pid, testNow.AddDate(0, 0, -1), testNow.AddDate(0, 0, 1), 0))
 	if m["cancelled"].(int) != 1 {
 		t.Fatalf("metrics = %+v", m)
 	}
 }
 
 func ptr(f float64) *float64 { return &f }
+
+func TestBrandsShareResources(t *testing.T) {
+	db := testDB(t)
+	fixClock(t, testNow)
+	ff := must(upsertBrand(db, pid, map[string]any{"key": "flowfix", "name": "FlowFix", "number_prefix": "FF"}))
+	bc := must(upsertBrand(db, pid, map[string]any{"key": "brightclean", "name": "BrightClean"}))
+	if bc.NumberPrefix != "BC" && bc.NumberPrefix != "BRI" {
+		t.Fatalf("derived prefix = %s", bc.NumberPrefix)
+	}
+	if _, err := upsertBrand(db, pid, map[string]any{"key": "other", "name": "Other", "number_prefix": "FF"}); err == nil {
+		t.Fatal("duplicate prefix must be refused")
+	}
+	packs := must(builtinPacks())
+	must(installPack(db, pid, packs["plumber"], ff.ID))
+	must(installPack(db, pid, packs["cleaning"], bc.ID))
+	// Sam does both trades for both brands; Max is limited to FlowFix.
+	sam := must(upsertResource(db, pid, map[string]any{"kind": "person", "name": "Sam", "quals": []any{"plumber", "cleaner"}}))
+	max := must(upsertResource(db, pid, map[string]any{"kind": "person", "name": "Max", "quals": []any{"plumber", "cleaner"}, "brands": []any{"flowfix"}}))
+	shift(t, db, sam.ID, "2026-11-16T08:00:00Z", "2026-11-16T18:00:00Z")
+	shift(t, db, max.ID, "2026-11-16T08:00:00Z", "2026-11-16T18:00:00Z")
+
+	// The work type settles the brand when only one brand has it.
+	clean := must(intakeWork(db, pid, nil, map[string]any{"work_type": "regular_clean", "address": "1 rue A",
+		"answers": map[string]any{"property_type": "flat", "hours": 2}})).Work
+	if clean.Brand != "brightclean" || !strings.HasPrefix(clean.Number, bc.NumberPrefix+"-") {
+		t.Fatalf("clean brand %q number %s", clean.Brand, clean.Number)
+	}
+	leak := must(intakeWork(db, pid, nil, map[string]any{"work_type": "emergency", "address": "2 rue B",
+		"answers": map[string]any{"issue": "leak", "description": "drip"}})).Work
+	if leak.Number != "FF-00001" {
+		t.Fatalf("leak number %s", leak.Number)
+	}
+	// Sam takes the FlowFix job at 09:00 ...
+	must(bookSlot(db, pid, leak, map[string]any{"starts_at": "2026-11-16T09:00:00Z", "resource_ids": ids(sam.ID)}))
+	// ... so the BrightClean job at 09:00 has nobody: Max is FlowFix only.
+	if _, err := bookSlot(db, pid, clean, map[string]any{"starts_at": "2026-11-16T09:00:00Z"}); err == nil {
+		t.Fatal("Max must not be booked for BrightClean, and Sam is busy")
+	}
+	// A brand passed explicitly that does not have the work type is refused.
+	if _, err := intakeWork(db, pid, nil, map[string]any{"work_type": "regular_clean", "brand": "flowfix", "address": "x"}); err == nil {
+		t.Fatal("flowfix has no regular_clean")
+	}
+	m := must(metrics(db, pid, testNow.AddDate(0, 0, -1), testNow.AddDate(0, 0, 1), 0))
+	if bb, ok := m["by_brand"].([]map[string]any); !ok || len(bb) != 2 {
+		t.Fatalf("by_brand = %v", m["by_brand"])
+	}
+}
+
+func TestUpgradeFromV01KeepsData(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:upgrade?mode=memory&cache=shared&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	fixClock(t, testNow)
+	migrate(t, db, "001_init.sql")
+	// A 0.1 project: pack, policy, a job and an agreement, written with
+	// the 0.1 schema.
+	now := nowUTC()
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustExec(`INSERT INTO work_types(project_id,key,name,mode,phases_json,updated_at) VALUES(?,?,?,?,?,?)`,
+		pid, "visit", "Visit", "at_site", `["intake","schedule","execute","closed"]`, now)
+	mustExec(`INSERT INTO rate_items(project_id,code,name,pricing_json,updated_at) VALUES(?,?,?,?,?)`,
+		pid, "BASIC", "Basic", `{"mode":"flat","unit_cents":5000}`, now)
+	mustExec(`INSERT INTO policies(project_id,key,value_json,updated_at) VALUES(?,?,?,?)`, pid, "max_discount_pct", "10", now)
+	mustExec(`INSERT INTO work(project_id,number,work_type_id,mode,phase,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		pid, "W-00001", 1, "at_site", "intake", "new", now, now)
+	mustExec(`INSERT INTO agreements(project_id,name,work_type_id,recurrence_json,starts_on,next_on,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, pid, "Weekly", 1, `{"every":1,"unit":"week","time":"09:00"}`, "2026-11-16", "2026-11-16", now, now)
+
+	migrate(t, db, "")
+
+	w := must(getWork(db, pid, 1))
+	if w.WorkType != "visit" || w.BrandID != 0 || w.Brand != "" {
+		t.Fatalf("work after upgrade: %+v", w)
+	}
+	ag := must(getAgreement(db, pid, 1))
+	if ag.WorkType != "visit" {
+		t.Fatalf("agreement after upgrade: %+v", ag)
+	}
+	if v := policyInt(db, pid, 0, "max_discount_pct", 0); v != 10 {
+		t.Fatalf("policy = %d", v)
+	}
+	if ri := must(getRateItem(db, pid, 0, "BASIC", 0)); ri.Pricing.UnitCents != 5000 {
+		t.Fatal("rate item lost")
+	}
+	// No brands: new work still numbers in the W series.
+	nw := must(intakeWork(db, pid, nil, map[string]any{"work_type": "visit"})).Work
+	if nw.Number != "W-00002" {
+		t.Fatalf("number = %s", nw.Number)
+	}
+}
+
+func TestBrandOverridesPoliciesAndAmbiguity(t *testing.T) {
+	db := testDB(t)
+	fixClock(t, testNow)
+	install(t, db, "plumber") // shared by both brands
+	a := must(upsertBrand(db, pid, map[string]any{"key": "alpha", "name": "Alpha Plumbing", "number_prefix": "AP"}))
+	b := must(upsertBrand(db, pid, map[string]any{"key": "beta", "name": "Beta Pipes", "number_prefix": "BP"}))
+
+	// Several brands, shared work type, no brand given: ask.
+	_, err := intakeWork(db, pid, nil, map[string]any{"work_type": "repair", "address": "x", "answers": map[string]any{"issue": "tap", "description": "drip"}})
+	var be *BrandError
+	if !errors.As(err, &be) || len(be.Options) != 2 {
+		t.Fatalf("want brand question with 2 options, got %v", err)
+	}
+
+	// Beta charges more for the call-out and allows less discount.
+	ri := must(getRateItem(db, pid, 0, "CALLOUT", 0))
+	ri.BrandID, ri.Pricing.UnitCents = b.ID, 9900
+	if err := upsertRateItem(db, pid, *ri); err != nil {
+		t.Fatal(err)
+	}
+	if err := setPolicy(db, pid, b.ID, "max_discount_pct", 5); err != nil {
+		t.Fatal(err)
+	}
+	price := func(brand int64) *PriceResult {
+		return must(priceItems(db, pid, []ItemRequest{{Code: "CALLOUT"}}, PriceContext{BrandID: brand, DiscountPct: 8, DefaultDur: 60}))
+	}
+	pa, pb := price(a.ID), price(b.ID)
+	if pa.SubtotalCents != 8900 || pb.SubtotalCents != 9900 {
+		t.Fatalf("subtotals alpha %d beta %d", pa.SubtotalCents, pb.SubtotalCents)
+	}
+	if pa.NeedsOwner || !pb.NeedsOwner {
+		t.Fatalf("8%% discount: alpha flags %v, beta flags %v", pa.Flags, pb.Flags)
+	}
+	// Removing the override falls back to the project value.
+	if err := setPolicy(db, pid, b.ID, "max_discount_pct", nil); err != nil {
+		t.Fatal(err)
+	}
+	if price(b.ID).NeedsOwner {
+		t.Fatal("override removed: 8% is within the project's 10%")
+	}
+
+	// Each brand installs its own copy of a pack: same keys, no clash.
+	packs := must(builtinPacks())
+	must(installPack(db, pid, packs["cleaning"], a.ID))
+	must(installPack(db, pid, packs["cleaning"], b.ID))
+	if _, err := findWorkType(db, pid, "deep_clean", 0); !errors.As(err, &be) {
+		t.Fatalf("deep_clean exists for two brands: want brand question, got %v", err)
+	}
+	if wt := must(findWorkType(db, pid, "deep_clean", b.ID)); wt.BrandID != b.ID {
+		t.Fatal("brand lookup must return the brand's own type")
+	}
+
+	// A brand's own site settles the brand; a mismatch is refused.
+	shop := must(upsertSite(db, pid, map[string]any{"kind": "customer", "name": "Beta client", "address": "y", "brand": "beta"}))
+	w := must(intakeWork(db, pid, nil, map[string]any{"work_type": "repair", "site_id": float64(shop.ID),
+		"answers": map[string]any{"issue": "tap", "description": "drip"}})).Work
+	if w.Brand != "beta" || w.Number != "BP-00001" {
+		t.Fatalf("site brand: %s %s", w.Brand, w.Number)
+	}
+	if _, err := intakeWork(db, pid, nil, map[string]any{"work_type": "repair", "brand": "alpha", "site_id": float64(shop.ID)}); !errors.As(err, &be) {
+		t.Fatalf("alpha work at beta's site must be refused, got %v", err)
+	}
+
+	// Prefix rules.
+	if _, err := upsertBrand(db, pid, map[string]any{"key": "gamma", "name": "Gamma", "number_prefix": "W"}); err == nil {
+		t.Fatal("prefix W is reserved")
+	}
+	if _, err := upsertBrand(db, pid, map[string]any{"key": "beta", "number_prefix": "BX"}); err == nil {
+		t.Fatal("beta has work: prefix cannot change")
+	}
+
+	// Archived brands take no new work.
+	must(upsertBrand(db, pid, map[string]any{"key": "alpha", "status": "archived"}))
+	if _, err := intakeWork(db, pid, nil, map[string]any{"work_type": "repair", "brand": "alpha", "address": "z"}); err == nil {
+		t.Fatal("archived brand must refuse work")
+	}
+}
+
+func TestCleaningPrices(t *testing.T) {
+	db := testDB(t)
+	fixClock(t, testNow) // Monday
+	install(t, db, "cleaning")
+	res := must(intakeWork(db, pid, nil, map[string]any{"work_type": "deep_clean", "address": "3 rue C",
+		"answers": map[string]any{"property_type": "flat", "bedrooms": 2, "bathrooms": 1}, "items": []any{"DEEP_CLEAN", "OVEN_CLEAN"}}))
+	if res.Quote.SubtotalCents != 16000+6500 || res.Quote.DurationMin != 360 {
+		t.Fatalf("deep clean %d, %d min", res.Quote.SubtotalCents, res.Quote.DurationMin)
+	}
+	if res.Quote.Requirements[0].Count != 2 {
+		t.Fatalf("deep clean needs two cleaners, got %+v", res.Quote.Requirements)
+	}
+	reg := must(intakeWork(db, pid, nil, map[string]any{"work_type": "regular_clean", "address": "4 rue D",
+		"answers": map[string]any{"property_type": "flat", "hours": 3}, "items": []any{"REGULAR_CLEAN"}}))
+	if reg.Quote.TotalCents != 8400 || reg.Quote.DurationMin != 180 {
+		t.Fatalf("regular clean %d, %d min", reg.Quote.TotalCents, reg.Quote.DurationMin)
+	}
+	sameDay := must(intakeWork(db, pid, nil, map[string]any{"work_type": "regular_clean", "address": "5 rue E", "summary": "need it today please",
+		"answers": map[string]any{"property_type": "flat", "hours": 2}, "items": []any{"REGULAR_CLEAN"}}))
+	if sameDay.Work.Priority != "p1" || sameDay.Quote.TotalCents != 5600+1680 {
+		t.Fatalf("same day: %s %d", sameDay.Work.Priority, sameDay.Quote.TotalCents)
+	}
+}

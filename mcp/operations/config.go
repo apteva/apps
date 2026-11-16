@@ -49,6 +49,7 @@ type QuotePolicy struct {
 
 type WorkType struct {
 	ID                 int64               `json:"id,omitempty"`
+	BrandID            int64               `json:"brand_id"` // 0 = shared by all brands
 	PackKey            string              `json:"pack_key,omitempty"`
 	Key                string              `json:"key"`
 	Name               string              `json:"name"`
@@ -86,6 +87,7 @@ type FormSchema struct {
 
 type Form struct {
 	ID        int64      `json:"id,omitempty"`
+	BrandID   int64      `json:"brand_id"`
 	PackKey   string     `json:"pack_key,omitempty"`
 	Key       string     `json:"key"`
 	Version   int        `json:"version"`
@@ -124,6 +126,7 @@ type Material struct {
 
 type RateItem struct {
 	ID             int64         `json:"id,omitempty"`
+	BrandID        int64         `json:"brand_id"`
 	PackKey        string        `json:"pack_key,omitempty"`
 	Code           string        `json:"code"`
 	Name           string        `json:"name"`
@@ -154,6 +157,7 @@ type Amount struct {
 
 type Modifier struct {
 	ID        int64        `json:"id,omitempty"`
+	BrandID   int64        `json:"brand_id"`
 	PackKey   string       `json:"pack_key,omitempty"`
 	Key       string       `json:"key"`
 	Name      string       `json:"name"`
@@ -327,8 +331,9 @@ func validateModifier(m *Modifier) error {
 }
 
 // validatePack checks a pack on its own and that every form it
-// references is either in the pack or already installed.
-func validatePack(db *sql.DB, pid string, p *Pack) []string {
+// references is either in the pack or already installed for the brand
+// (or shared).
+func validatePack(db *sql.DB, pid string, p *Pack, brandID int64) []string {
 	var errs []string
 	if p.Key == "" || p.Name == "" {
 		errs = append(errs, "pack needs key and name")
@@ -347,7 +352,7 @@ func validatePack(db *sql.DB, pid string, p *Pack) []string {
 		if db == nil {
 			return false
 		}
-		_, err := getForm(db, pid, k)
+		_, err := getForm(db, pid, k, brandID)
 		return err == nil
 	}
 	for i := range p.WorkTypes {
@@ -385,8 +390,10 @@ func validatePack(db *sql.DB, pid string, p *Pack) []string {
 
 // ─── store ──────────────────────────────────────────────────────────
 
-func installPack(db *sql.DB, pid string, p Pack) (map[string]int, error) {
-	if errs := validatePack(db, pid, &p); len(errs) > 0 {
+// installPack writes a pack's records under brandID (0 = shared).
+// Installing the same pack for two brands gives each its own copy.
+func installPack(db *sql.DB, pid string, p Pack, brandID int64) (map[string]int, error) {
+	if errs := validatePack(db, pid, &p, brandID); len(errs) > 0 {
 		return nil, fmt.Errorf("pack %s is invalid: %s", p.Key, strings.Join(errs, "; "))
 	}
 	tx, err := db.Begin()
@@ -396,25 +403,25 @@ func installPack(db *sql.DB, pid string, p Pack) (map[string]int, error) {
 	defer tx.Rollback()
 	now := nowUTC()
 	for _, f := range p.Forms {
-		f.PackKey = p.Key
+		f.PackKey, f.BrandID = p.Key, brandID
 		if err := upsertForm(tx, pid, f); err != nil {
 			return nil, err
 		}
 	}
 	for _, wt := range p.WorkTypes {
-		wt.PackKey = p.Key
+		wt.PackKey, wt.BrandID = p.Key, brandID
 		if err := upsertWorkType(tx, pid, wt); err != nil {
 			return nil, err
 		}
 	}
 	for _, ri := range p.RateItems {
-		ri.PackKey = p.Key
+		ri.PackKey, ri.BrandID = p.Key, brandID
 		if err := upsertRateItem(tx, pid, ri); err != nil {
 			return nil, err
 		}
 	}
 	for _, m := range p.Modifiers {
-		m.PackKey = p.Key
+		m.PackKey, m.BrandID = p.Key, brandID
 		if err := upsertModifier(tx, pid, m); err != nil {
 			return nil, err
 		}
@@ -426,15 +433,15 @@ func installPack(db *sql.DB, pid string, p Pack) (map[string]int, error) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		// Pack policies are defaults: never overwrite an owner's choice.
-		if _, err := tx.Exec(`INSERT INTO policies(project_id,key,value_json,updated_at) VALUES(?,?,?,?)
-			ON CONFLICT(project_id,key) DO NOTHING`, pid, k, mustJSON(p.Policies[k]), now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO policies(project_id,brand_id,key,value_json,updated_at) VALUES(?,?,?,?,?)
+			ON CONFLICT(project_id,brand_id,key) DO NOTHING`, pid, brandID, k, mustJSON(p.Policies[k]), now); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO packs(project_id,key,name,version,manifest_json,installed_at) VALUES(?,?,?,?,?,?)
-		ON CONFLICT(project_id,key) DO UPDATE SET name=excluded.name, version=excluded.version,
+	if _, err := tx.Exec(`INSERT INTO packs(project_id,brand_id,key,name,version,manifest_json,installed_at) VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,key) DO UPDATE SET name=excluded.name, version=excluded.version,
 		manifest_json=excluded.manifest_json, installed_at=excluded.installed_at`,
-		pid, p.Key, p.Name, p.Version, mustJSON(p), now); err != nil {
+		pid, brandID, p.Key, p.Name, p.Version, mustJSON(p), now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -449,26 +456,26 @@ type execer interface {
 }
 
 func upsertWorkType(db execer, pid string, wt WorkType) error {
-	_, err := db.Exec(`INSERT INTO work_types(project_id,pack_key,key,name,mode,phases_json,statuses_json,required_forms_json,
+	_, err := db.Exec(`INSERT INTO work_types(project_id,brand_id,pack_key,key,name,mode,phases_json,statuses_json,required_forms_json,
 		intake_form_key,default_duration_min,buffer_min,requirements_json,priority_rules_json,sla_json,quote_policy_json,playbook,active,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,key) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,mode=excluded.mode,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,key) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,mode=excluded.mode,
 		phases_json=excluded.phases_json,statuses_json=excluded.statuses_json,required_forms_json=excluded.required_forms_json,
 		intake_form_key=excluded.intake_form_key,default_duration_min=excluded.default_duration_min,buffer_min=excluded.buffer_min,
 		requirements_json=excluded.requirements_json,priority_rules_json=excluded.priority_rules_json,sla_json=excluded.sla_json,
 		quote_policy_json=excluded.quote_policy_json,playbook=excluded.playbook,active=excluded.active,updated_at=excluded.updated_at`,
-		pid, wt.PackKey, wt.Key, wt.Name, wt.Mode, mustJSON(wt.Phases), jsonOr(wt.Statuses, "[]"), jsonOr(wt.RequiredForms, "{}"),
+		pid, wt.BrandID, wt.PackKey, wt.Key, wt.Name, wt.Mode, mustJSON(wt.Phases), jsonOr(wt.Statuses, "[]"), jsonOr(wt.RequiredForms, "{}"),
 		wt.IntakeFormKey, wt.DefaultDurationMin, wt.BufferMin, jsonOr(wt.Requirements, "[]"), jsonOr(wt.PriorityRules, "[]"),
 		jsonOr(wt.SLA, "{}"), mustJSON(wt.QuotePolicy), wt.Playbook, boolInt(wt.Active), nowUTC())
 	return err
 }
 
 func upsertForm(db execer, pid string, f Form) error {
-	_, err := db.Exec(`INSERT INTO forms(project_id,pack_key,key,version,name,purpose,schema_json,updated_at) VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,key) DO UPDATE SET pack_key=excluded.pack_key,
+	_, err := db.Exec(`INSERT INTO forms(project_id,brand_id,pack_key,key,version,name,purpose,schema_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,key) DO UPDATE SET pack_key=excluded.pack_key,
 		version=CASE WHEN forms.schema_json<>excluded.schema_json THEN MAX(forms.version+1, excluded.version) ELSE forms.version END,
 		name=excluded.name,purpose=excluded.purpose,schema_json=excluded.schema_json,updated_at=excluded.updated_at`,
-		pid, f.PackKey, f.Key, f.Version, f.Name, f.Purpose, mustJSON(f.Schema), nowUTC())
+		pid, f.BrandID, f.PackKey, f.Key, f.Version, f.Name, f.Purpose, mustJSON(f.Schema), nowUTC())
 	return err
 }
 
@@ -477,21 +484,21 @@ func upsertRateItem(db execer, pid string, ri RateItem) error {
 	if ri.CatalogPriceID != nil {
 		catalog = *ri.CatalogPriceID
 	}
-	_, err := db.Exec(`INSERT INTO rate_items(project_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,
-		requirements_json,materials_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,code) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,catalog_price_id=excluded.catalog_price_id,
+	_, err := db.Exec(`INSERT INTO rate_items(project_id,brand_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,
+		requirements_json,materials_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,code) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,catalog_price_id=excluded.catalog_price_id,
 		pricing_json=excluded.pricing_json,cost_cents=excluded.cost_cents,duration_json=excluded.duration_json,
 		requirements_json=excluded.requirements_json,materials_json=excluded.materials_json,active=excluded.active,updated_at=excluded.updated_at`,
-		pid, ri.PackKey, ri.Code, ri.Name, catalog, mustJSON(ri.Pricing), ri.CostCents, mustJSON(ri.Duration),
+		pid, ri.BrandID, ri.PackKey, ri.Code, ri.Name, catalog, mustJSON(ri.Pricing), ri.CostCents, mustJSON(ri.Duration),
 		jsonOr(ri.Requirements, "[]"), jsonOr(ri.Materials, "[]"), boolInt(ri.Active), nowUTC())
 	return err
 }
 
 func upsertModifier(db execer, pid string, m Modifier) error {
-	_, err := db.Exec(`INSERT INTO modifiers(project_id,pack_key,key,name,kind,when_json,amount_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,key) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,kind=excluded.kind,
+	_, err := db.Exec(`INSERT INTO modifiers(project_id,brand_id,pack_key,key,name,kind,when_json,amount_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,key) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,kind=excluded.kind,
 		when_json=excluded.when_json,amount_json=excluded.amount_json,active=excluded.active,updated_at=excluded.updated_at`,
-		pid, m.PackKey, m.Key, m.Name, m.Kind, mustJSON(m.When), mustJSON(m.Amount), boolInt(m.Active), nowUTC())
+		pid, m.BrandID, m.PackKey, m.Key, m.Name, m.Kind, mustJSON(m.When), mustJSON(m.Amount), boolInt(m.Active), nowUTC())
 	return err
 }
 
@@ -502,7 +509,7 @@ func boolInt(b bool) int {
 	return 0
 }
 
-const workTypeCols = `id,pack_key,key,name,mode,phases_json,statuses_json,required_forms_json,intake_form_key,default_duration_min,
+const workTypeCols = `id,brand_id,pack_key,key,name,mode,phases_json,statuses_json,required_forms_json,intake_form_key,default_duration_min,
 	buffer_min,requirements_json,priority_rules_json,sla_json,quote_policy_json,playbook,active,updated_at`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -511,7 +518,7 @@ func scanWorkType(s scanner) (*WorkType, error) {
 	var wt WorkType
 	var phases, statuses, forms, reqs, rules, sla, qp string
 	var active int
-	if err := s.Scan(&wt.ID, &wt.PackKey, &wt.Key, &wt.Name, &wt.Mode, &phases, &statuses, &forms, &wt.IntakeFormKey,
+	if err := s.Scan(&wt.ID, &wt.BrandID, &wt.PackKey, &wt.Key, &wt.Name, &wt.Mode, &phases, &statuses, &forms, &wt.IntakeFormKey,
 		&wt.DefaultDurationMin, &wt.BufferMin, &reqs, &rules, &sla, &qp, &wt.Playbook, &active, &wt.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -526,15 +533,62 @@ func scanWorkType(s scanner) (*WorkType, error) {
 	return &wt, nil
 }
 
+// getWorkType reads a work type by id, or by key without a brand
+// context (see findWorkType).
 func getWorkType(db *sql.DB, pid string, id int64, key string) (*WorkType, error) {
 	if id > 0 {
 		return scanWorkType(db.QueryRow(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=? AND id=?`, pid, id))
 	}
-	return scanWorkType(db.QueryRow(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=? AND key=?`, pid, key))
+	return findWorkType(db, pid, key, 0)
 }
 
-func listWorkTypes(db *sql.DB, pid string) ([]*WorkType, error) {
-	rows, err := db.Query(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=? ORDER BY pack_key, key`, pid)
+// findWorkType looks a work type up by key. With a brand it prefers
+// the brand's own type, then the shared one. Without a brand the key
+// must be unambiguous: the shared type, or the only brand's type.
+func findWorkType(db *sql.DB, pid, key string, brandID int64) (*WorkType, error) {
+	if brandID > 0 {
+		wt, err := scanWorkType(db.QueryRow(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=? AND key=? AND brand_id IN (?,0)
+			ORDER BY brand_id DESC LIMIT 1`, pid, key, brandID))
+		return wt, notFound(err, "work type "+key)
+	}
+	rows, err := db.Query(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=? AND key=? ORDER BY brand_id`, pid, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []*WorkType
+	for rows.Next() {
+		wt, err := scanWorkType(rows)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, wt)
+	}
+	switch {
+	case len(found) == 0:
+		return nil, notFound(sql.ErrNoRows, "work type "+key)
+	case found[0].BrandID == 0 || len(found) == 1:
+		return found[0], nil
+	}
+	opts := []string{}
+	for _, wt := range found {
+		opts = append(opts, brandKey(db, pid, wt.BrandID))
+	}
+	return nil, &BrandError{Reason: "work type " + key + " exists for several brands; pass brand", Options: opts}
+}
+
+// brandScope narrows a config query to one brand plus the shared rows.
+// brandID 0 means every row.
+func brandScope(q string, args []any, brandID int64) (string, []any) {
+	if brandID > 0 {
+		return q + ` AND brand_id IN (?,0)`, append(args, brandID)
+	}
+	return q, args
+}
+
+func listWorkTypes(db *sql.DB, pid string, brandID int64) ([]*WorkType, error) {
+	q, args := brandScope(`SELECT `+workTypeCols+` FROM work_types WHERE project_id=?`, []any{pid}, brandID)
+	rows, err := db.Query(q+` ORDER BY brand_id, pack_key, key`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -553,19 +607,25 @@ func listWorkTypes(db *sql.DB, pid string) ([]*WorkType, error) {
 func scanForm(s scanner) (*Form, error) {
 	var f Form
 	var schema string
-	if err := s.Scan(&f.ID, &f.PackKey, &f.Key, &f.Version, &f.Name, &f.Purpose, &schema, &f.UpdatedAt); err != nil {
+	if err := s.Scan(&f.ID, &f.BrandID, &f.PackKey, &f.Key, &f.Version, &f.Name, &f.Purpose, &schema, &f.UpdatedAt); err != nil {
 		return nil, err
 	}
 	decodeInto(schema, &f.Schema)
 	return &f, nil
 }
 
-func getForm(db *sql.DB, pid, key string) (*Form, error) {
-	return scanForm(db.QueryRow(`SELECT id,pack_key,key,version,name,purpose,schema_json,updated_at FROM forms WHERE project_id=? AND key=?`, pid, key))
+const formCols = `id,brand_id,pack_key,key,version,name,purpose,schema_json,updated_at`
+
+// getForm reads a form by key, preferring the brand's own form over
+// the shared one.
+func getForm(db *sql.DB, pid, key string, brandID int64) (*Form, error) {
+	return scanForm(db.QueryRow(`SELECT `+formCols+` FROM forms WHERE project_id=? AND key=? AND brand_id IN (?,0)
+		ORDER BY brand_id DESC LIMIT 1`, pid, key, brandID))
 }
 
-func listForms(db *sql.DB, pid string) ([]*Form, error) {
-	rows, err := db.Query(`SELECT id,pack_key,key,version,name,purpose,schema_json,updated_at FROM forms WHERE project_id=? ORDER BY pack_key,key`, pid)
+func listForms(db *sql.DB, pid string, brandID int64) ([]*Form, error) {
+	q, args := brandScope(`SELECT `+formCols+` FROM forms WHERE project_id=?`, []any{pid}, brandID)
+	rows, err := db.Query(q+` ORDER BY brand_id, pack_key, key`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -581,14 +641,14 @@ func listForms(db *sql.DB, pid string) ([]*Form, error) {
 	return out, rows.Err()
 }
 
-const rateItemCols = `id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,requirements_json,materials_json,active,updated_at`
+const rateItemCols = `id,brand_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,requirements_json,materials_json,active,updated_at`
 
 func scanRateItem(s scanner) (*RateItem, error) {
 	var ri RateItem
 	var catalog sql.NullInt64
 	var pricing, dur, reqs, mats string
 	var active int
-	if err := s.Scan(&ri.ID, &ri.PackKey, &ri.Code, &ri.Name, &catalog, &pricing, &ri.CostCents, &dur, &reqs, &mats, &active, &ri.UpdatedAt); err != nil {
+	if err := s.Scan(&ri.ID, &ri.BrandID, &ri.PackKey, &ri.Code, &ri.Name, &catalog, &pricing, &ri.CostCents, &dur, &reqs, &mats, &active, &ri.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if catalog.Valid {
@@ -602,16 +662,18 @@ func scanRateItem(s scanner) (*RateItem, error) {
 	return &ri, nil
 }
 
-func getRateItem(db *sql.DB, pid string, id int64, code string) (*RateItem, error) {
+// getRateItem reads a rate item by id, or by code preferring the
+// brand's own price over the shared one.
+func getRateItem(db *sql.DB, pid string, id int64, code string, brandID int64) (*RateItem, error) {
 	if id > 0 {
 		return scanRateItem(db.QueryRow(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND id=?`, pid, id))
 	}
-	return scanRateItem(db.QueryRow(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND code=?`, pid, code))
+	return scanRateItem(db.QueryRow(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND code=? AND brand_id IN (?,0)
+		ORDER BY brand_id DESC LIMIT 1`, pid, code, brandID))
 }
 
-func listRateItems(db *sql.DB, pid, q, pack string) ([]*RateItem, error) {
-	query := `SELECT ` + rateItemCols + ` FROM rate_items WHERE project_id=? AND active=1`
-	args := []any{pid}
+func listRateItems(db *sql.DB, pid, q, pack string, brandID int64) ([]*RateItem, error) {
+	query, args := brandScope(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND active=1`, []any{pid}, brandID)
 	if q != "" {
 		query += ` AND (lower(name) LIKE ? OR lower(code) LIKE ?)`
 		like := "%" + strings.ToLower(q) + "%"
@@ -621,7 +683,7 @@ func listRateItems(db *sql.DB, pid, q, pack string) ([]*RateItem, error) {
 		query += ` AND pack_key=?`
 		args = append(args, pack)
 	}
-	rows, err := db.Query(query+` ORDER BY pack_key, code`, args...)
+	rows, err := db.Query(query+` ORDER BY brand_id, pack_key, code`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -637,8 +699,9 @@ func listRateItems(db *sql.DB, pid, q, pack string) ([]*RateItem, error) {
 	return out, rows.Err()
 }
 
-func listModifiers(db *sql.DB, pid string) ([]*Modifier, error) {
-	rows, err := db.Query(`SELECT id,pack_key,key,name,kind,when_json,amount_json,active,updated_at FROM modifiers WHERE project_id=? ORDER BY key`, pid)
+func listModifiers(db *sql.DB, pid string, brandID int64) ([]*Modifier, error) {
+	q, args := brandScope(`SELECT id,brand_id,pack_key,key,name,kind,when_json,amount_json,active,updated_at FROM modifiers WHERE project_id=?`, []any{pid}, brandID)
+	rows, err := db.Query(q+` ORDER BY key, brand_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +711,7 @@ func listModifiers(db *sql.DB, pid string) ([]*Modifier, error) {
 		var m Modifier
 		var when, amount string
 		var active int
-		if err := rows.Scan(&m.ID, &m.PackKey, &m.Key, &m.Name, &m.Kind, &when, &amount, &active, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.BrandID, &m.PackKey, &m.Key, &m.Name, &m.Kind, &when, &amount, &active, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		decodeInto(when, &m.When)
@@ -659,8 +722,42 @@ func listModifiers(db *sql.DB, pid string) ([]*Modifier, error) {
 	return out, rows.Err()
 }
 
-func listPolicies(db *sql.DB, pid string) (map[string]any, error) {
-	rows, err := db.Query(`SELECT key,value_json FROM policies WHERE project_id=?`, pid)
+// effectiveModifiers returns the modifiers that apply to a brand's
+// work: the shared ones plus the brand's own, where a brand modifier
+// replaces a shared one with the same key.
+func effectiveModifiers(db *sql.DB, pid string, brandID int64) ([]*Modifier, error) {
+	if brandID == 0 {
+		all, err := listModifiers(db, pid, 0)
+		if err != nil {
+			return nil, err
+		}
+		out := []*Modifier{}
+		for _, m := range all {
+			if m.BrandID == 0 {
+				out = append(out, m)
+			}
+		}
+		return out, nil
+	}
+	all, err := listModifiers(db, pid, brandID) // ordered by key, brand_id: shared first
+	if err != nil {
+		return nil, err
+	}
+	out := []*Modifier{}
+	for _, m := range all {
+		if n := len(out); n > 0 && out[n-1].Key == m.Key {
+			out[n-1] = m // the brand's row comes after the shared one
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// listPolicies returns the policies that apply to a brand: the
+// project's, overridden by the brand's own. brandID 0 = project only.
+func listPolicies(db *sql.DB, pid string, brandID int64) (map[string]any, error) {
+	rows, err := db.Query(`SELECT key,value_json FROM policies WHERE project_id=? AND brand_id IN (?,0) ORDER BY brand_id`, pid, brandID)
 	if err != nil {
 		return nil, err
 	}
@@ -678,9 +775,18 @@ func listPolicies(db *sql.DB, pid string) (map[string]any, error) {
 	return out, rows.Err()
 }
 
-func policyInt(db *sql.DB, pid, key string, def int64) int64 {
+func policyRaw(db *sql.DB, pid string, brandID int64, key string) (string, bool) {
 	var raw string
-	if err := db.QueryRow(`SELECT value_json FROM policies WHERE project_id=? AND key=?`, pid, key).Scan(&raw); err != nil {
+	if err := db.QueryRow(`SELECT value_json FROM policies WHERE project_id=? AND key=? AND brand_id IN (?,0)
+		ORDER BY brand_id DESC LIMIT 1`, pid, key, brandID).Scan(&raw); err != nil {
+		return "", false
+	}
+	return raw, true
+}
+
+func policyInt(db *sql.DB, pid string, brandID int64, key string, def int64) int64 {
+	raw, ok := policyRaw(db, pid, brandID, key)
+	if !ok {
 		return def
 	}
 	var f float64
@@ -690,26 +796,37 @@ func policyInt(db *sql.DB, pid, key string, def int64) int64 {
 	return int64(f)
 }
 
-func setPolicy(db *sql.DB, pid, key string, value any) error {
-	_, err := db.Exec(`INSERT INTO policies(project_id,key,value_json,updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(project_id,key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`,
-		pid, key, mustJSON(value), nowUTC())
+// setPolicy sets a project policy (brandID 0) or a brand's override.
+// A nil value removes a brand's override.
+func setPolicy(db *sql.DB, pid string, brandID int64, key string, value any) error {
+	if value == nil && brandID > 0 {
+		_, err := db.Exec(`DELETE FROM policies WHERE project_id=? AND brand_id=? AND key=?`, pid, brandID, key)
+		return err
+	}
+	_, err := db.Exec(`INSERT INTO policies(project_id,brand_id,key,value_json,updated_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`,
+		pid, brandID, key, mustJSON(value), nowUTC())
 	return err
 }
 
 func listInstalledPacks(db *sql.DB, pid string) ([]map[string]any, error) {
-	rows, err := db.Query(`SELECT key,name,version,installed_at FROM packs WHERE project_id=? ORDER BY key`, pid)
+	rows, err := db.Query(`SELECT p.key,p.name,p.version,p.installed_at,COALESCE(b.key,'') FROM packs p
+		LEFT JOIN brands b ON b.id=p.brand_id WHERE p.project_id=? ORDER BY p.key, p.brand_id`, pid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var k, n, v, at string
-		if err := rows.Scan(&k, &n, &v, &at); err != nil {
+		var k, n, v, at, brand string
+		if err := rows.Scan(&k, &n, &v, &at, &brand); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"key": k, "name": n, "version": v, "installed_at": at})
+		row := map[string]any{"key": k, "name": n, "version": v, "installed_at": at}
+		if brand != "" {
+			row["brand"] = brand
+		}
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }

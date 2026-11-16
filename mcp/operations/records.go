@@ -13,6 +13,7 @@ import (
 
 type Site struct {
 	ID           int64                 `json:"id"`
+	BrandID      int64                 `json:"brand_id"` // 0 = shared
 	Kind         string                `json:"kind"`
 	Name         string                `json:"name"`
 	CRMContactID *int64                `json:"crm_contact_id,omitempty"`
@@ -27,14 +28,14 @@ type Site struct {
 	UpdatedAt    string                `json:"updated_at"`
 }
 
-const siteCols = `id,kind,name,crm_contact_id,address,lat,lng,timezone,hours_json,access_json,custom_json,created_at,updated_at`
+const siteCols = `id,brand_id,kind,name,crm_contact_id,address,lat,lng,timezone,hours_json,access_json,custom_json,created_at,updated_at`
 
 func scanSite(s scanner) (*Site, error) {
 	var x Site
 	var crm sql.NullInt64
 	var lat, lng sql.NullFloat64
 	var hours, access, custom string
-	if err := s.Scan(&x.ID, &x.Kind, &x.Name, &crm, &x.Address, &lat, &lng, &x.Timezone, &hours, &access, &custom, &x.CreatedAt, &x.UpdatedAt); err != nil {
+	if err := s.Scan(&x.ID, &x.BrandID, &x.Kind, &x.Name, &crm, &x.Address, &lat, &lng, &x.Timezone, &hours, &access, &custom, &x.CreatedAt, &x.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if crm.Valid {
@@ -93,6 +94,13 @@ func upsertSite(db *sql.DB, pid string, args map[string]any) (*Site, error) {
 	} else {
 		cur = &Site{Kind: "own", Timezone: "UTC", Hours: map[string][][]string{}, Access: json.RawMessage("{}"), Custom: json.RawMessage("{}")}
 	}
+	if hasArg(args, "brand") || hasArg(args, "brand_id") {
+		b, err := brandRef(db, pid, args, true)
+		if err != nil {
+			return nil, err
+		}
+		cur.BrandID = b
+	}
 	if v := stringArg(args, "kind"); v != "" {
 		if v != "own" && v != "customer" {
 			return nil, errors.New("kind must be own or customer")
@@ -146,16 +154,16 @@ func upsertSite(db *sql.DB, pid string, args map[string]any) (*Site, error) {
 		crm = *cur.CRMContactID
 	}
 	if id > 0 {
-		_, err := db.Exec(`UPDATE sites SET kind=?,name=?,crm_contact_id=?,address=?,lat=?,lng=?,timezone=?,hours_json=?,access_json=?,custom_json=?,updated_at=?
-			WHERE project_id=? AND id=?`, cur.Kind, cur.Name, crm, cur.Address, nullFloat(cur.Lat), nullFloat(cur.Lng), cur.Timezone,
+		_, err := db.Exec(`UPDATE sites SET brand_id=?,kind=?,name=?,crm_contact_id=?,address=?,lat=?,lng=?,timezone=?,hours_json=?,access_json=?,custom_json=?,updated_at=?
+			WHERE project_id=? AND id=?`, cur.BrandID, cur.Kind, cur.Name, crm, cur.Address, nullFloat(cur.Lat), nullFloat(cur.Lng), cur.Timezone,
 			jsonOr(cur.Hours, "{}"), string(cur.Access), string(cur.Custom), now, pid, id)
 		if err != nil {
 			return nil, err
 		}
 		return getSite(db, pid, id)
 	}
-	r, err := db.Exec(`INSERT INTO sites(project_id,kind,name,crm_contact_id,address,lat,lng,timezone,hours_json,access_json,custom_json,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, pid, cur.Kind, cur.Name, crm, cur.Address, nullFloat(cur.Lat), nullFloat(cur.Lng),
+	r, err := db.Exec(`INSERT INTO sites(project_id,brand_id,kind,name,crm_contact_id,address,lat,lng,timezone,hours_json,access_json,custom_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, pid, cur.BrandID, cur.Kind, cur.Name, crm, cur.Address, nullFloat(cur.Lat), nullFloat(cur.Lng),
 		cur.Timezone, jsonOr(cur.Hours, "{}"), string(cur.Access), string(cur.Custom), now, now)
 	if err != nil {
 		return nil, err
@@ -164,9 +172,10 @@ func upsertSite(db *sql.DB, pid string, args map[string]any) (*Site, error) {
 	return getSite(db, pid, nid)
 }
 
-func listSites(db *sql.DB, pid, kind, q string) ([]*Site, error) {
-	query := `SELECT ` + siteCols + ` FROM sites WHERE project_id=?`
-	args := []any{pid}
+// listSites lists sites; brandID > 0 keeps that brand's sites and the
+// shared ones.
+func listSites(db *sql.DB, pid, kind, q string, brandID int64) ([]*Site, error) {
+	query, args := brandScope(`SELECT `+siteCols+` FROM sites WHERE project_id=?`, []any{pid}, brandID)
 	if kind != "" {
 		query += ` AND kind=?`
 		args = append(args, kind)
@@ -207,6 +216,7 @@ type Resource struct {
 	HomeLat       *float64        `json:"home_lat"`
 	HomeLng       *float64        `json:"home_lng"`
 	CostRateCents int64           `json:"cost_rate_cents"`
+	BrandIDs      []int64         `json:"brand_ids"` // empty = works for every brand
 	NeedsShift    bool            `json:"needs_shift"`
 	Active        bool            `json:"active"`
 	Custom        json.RawMessage `json:"custom"`
@@ -214,16 +224,16 @@ type Resource struct {
 	UpdatedAt     string          `json:"updated_at"`
 }
 
-const resourceCols = `id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,created_at,updated_at`
+const resourceCols = `id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,created_at,updated_at,brand_ids_json`
 
 func scanResource(s scanner) (*Resource, error) {
 	var r Resource
 	var site, crm, gigs sql.NullInt64
 	var hlat, hlng sql.NullFloat64
-	var quals, custom string
+	var quals, custom, brands string
 	var shift, active int
 	if err := s.Scan(&r.ID, &r.Kind, &r.Name, &site, &r.Zone, &r.Capacity, &quals, &crm, &gigs, &hlat, &hlng,
-		&r.CostRateCents, &shift, &active, &custom, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.CostRateCents, &shift, &active, &custom, &r.CreatedAt, &r.UpdatedAt, &brands); err != nil {
 		return nil, err
 	}
 	if site.Valid {
@@ -240,6 +250,8 @@ func scanResource(s scanner) (*Resource, error) {
 	}
 	r.Quals = []string{}
 	decodeInto(quals, &r.Quals)
+	r.BrandIDs = []int64{}
+	decodeInto(brands, &r.BrandIDs)
 	r.NeedsShift, r.Active = shift == 1, active == 1
 	r.Custom = json.RawMessage(custom)
 	return &r, nil
@@ -259,7 +271,7 @@ func upsertResource(db *sql.DB, pid string, args map[string]any) (*Resource, err
 		}
 		r = c
 	} else {
-		r = &Resource{Capacity: 1, Quals: []string{}, Active: true, Custom: json.RawMessage("{}")}
+		r = &Resource{Capacity: 1, Quals: []string{}, BrandIDs: []int64{}, Active: true, Custom: json.RawMessage("{}")}
 		// People only work inside their shifts by default.
 		r.NeedsShift = stringArg(args, "kind") == "person" || stringArg(args, "kind") == "crew"
 	}
@@ -306,6 +318,11 @@ func upsertResource(db *sql.DB, pid string, args map[string]any) (*Resource, err
 			}
 		}
 	}
+	if ids, ok, err := brandIDsArg(db, pid, args); err != nil {
+		return nil, err
+	} else if ok {
+		r.BrandIDs = ids
+	}
 	if hasArg(args, "crm_contact_id") {
 		v := int64Arg(args, "crm_contact_id")
 		r.CRMContactID = &v
@@ -338,18 +355,18 @@ func upsertResource(db *sql.DB, pid string, args map[string]any) (*Resource, err
 	now := nowUTC()
 	if id > 0 {
 		_, err := db.Exec(`UPDATE resources SET kind=?,name=?,site_id=?,zone=?,capacity=?,quals_json=?,crm_contact_id=?,gigs_worker_id=?,
-			home_lat=?,home_lng=?,cost_rate_cents=?,needs_shift=?,active=?,custom_json=?,updated_at=? WHERE project_id=? AND id=?`,
+			home_lat=?,home_lng=?,cost_rate_cents=?,needs_shift=?,active=?,custom_json=?,brand_ids_json=?,updated_at=? WHERE project_id=? AND id=?`,
 			r.Kind, r.Name, ptr(r.SiteID), r.Zone, r.Capacity, mustJSON(r.Quals), ptr(r.CRMContactID), ptr(r.GigsWorkerID),
-			nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), now, pid, id)
+			nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs), now, pid, id)
 		if err != nil {
 			return nil, err
 		}
 		return getResource(db, pid, id)
 	}
 	res, err := db.Exec(`INSERT INTO resources(project_id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,
-		home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,brand_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		pid, r.Kind, r.Name, ptr(r.SiteID), r.Zone, r.Capacity, mustJSON(r.Quals), ptr(r.CRMContactID), ptr(r.GigsWorkerID),
-		nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), now, now)
+		nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs), now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -385,6 +402,13 @@ func listResources(db *sql.DB, pid, kind string, siteID int64, activeOnly bool) 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// worksFor says whether a resource can take a brand's work. Resources
+// with no brands listed work for every brand; work without a brand can
+// use any resource.
+func (r *Resource) worksFor(brandID int64) bool {
+	return brandID == 0 || len(r.BrandIDs) == 0 || containsID(r.BrandIDs, brandID)
 }
 
 // ─── resource blocks (shifts, time off, blocked) ────────────────────

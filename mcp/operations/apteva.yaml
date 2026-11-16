@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: operations
 display_name: Operations
-version: 0.1.0
-description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work.
+version: 0.2.0
+description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work, several brands on shared resources.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/operations
 icon: /ui/icon.svg
@@ -26,6 +26,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: brands_upsert,       description: "Create or update a brand (name, contacts, job-number prefix, voice)." }
+    - { name: brands_list,         description: "List brands." }
     - { name: packs_list,          description: "List built-in and installed business packs." }
     - { name: packs_install,       description: "Install a built-in or custom business pack." }
     - { name: packs_validate,      description: "Validate a custom pack without installing it." }
