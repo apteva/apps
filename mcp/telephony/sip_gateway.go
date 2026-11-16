@@ -69,6 +69,7 @@ type sipSession struct {
 	answerMu       sync.Mutex
 	peerEnded      atomic.Bool // Set only after a validated in-dialog carrier BYE.
 	ended          atomic.Bool
+	ending         sipSessionEnd
 	finalSent      atomic.Bool // a non-2xx final INVITE response was sent
 	mediaOnce      sync.Once
 	bridgeStarted  atomic.Bool
@@ -373,7 +374,10 @@ func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
 		}
 		providerCallID := sipCallID(request)
 		if outbound := g.outboundSessionByProviderCall(providerCallID); outbound != nil {
+			// Before ReadBye: ending the dialog can finish the session at once.
+			reason := outbound.ending.record(terminationByCarrier, sipByeTermination(request))
 			if err := g.outboundDialogs.ReadBye(request, transaction); err != nil {
+				outbound.ending.forget(reason)
 				_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 				return
 			}
@@ -387,7 +391,9 @@ func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, 481, "Call Does Not Exist", nil))
 			return
 		}
+		reason := session.ending.record(terminationByCarrier, sipByeTermination(request))
 		if err := g.dialogs.ReadBye(request, transaction); err != nil {
+			session.ending.forget(reason)
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 			return
 		}
@@ -827,12 +833,23 @@ func (s *sipSession) startMedia() error {
 	return launchErr
 }
 
-func (s *sipSession) hangup() error { return s.finishWithSignaling("local_error", nil) }
+// hangup ends the dialog, or waits for the path that already ended it, so the
+// call's stored termination is final when it returns.
+func (s *sipSession) hangup() error {
+	err := s.finishWithSignaling("local_error", nil)
+	s.ending.wait(sipByeRetryBudget + time.Second)
+	return err
+}
 
 func (s *sipSession) finish(leg string, cause error) { _ = s.finishWithSignaling(leg, cause) }
 func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if !s.ended.CompareAndSwap(false, true) {
 		return nil
+	}
+	defer s.ending.finished()
+	facts := s.ending.facts(s.gateway.app, s.call.ID, leg)
+	if sipSessionEndHook != nil {
+		sipSessionEndHook(leg)
 	}
 	s.diagnostics.end(leg, cause)
 	var signalingErr error
@@ -903,7 +920,7 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 				}
 				message = cause.Error()
 			}
-			_ = s.gateway.app.db().updateStatus(row.ID, status, message)
+			_, _ = s.gateway.app.db().updateStatusWithFacts(row.ID, status, message, facts)
 		}
 		if err := s.gateway.app.killCallThread(projectCtx, row); err != nil {
 			projectCtx.Logger().Warn("kill direct SIP call thread", "call", row.ID, "leg", leg, "err", err)

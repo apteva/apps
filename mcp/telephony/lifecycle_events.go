@@ -163,7 +163,9 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	terminationCause := current.TerminationCause
 	terminationCode := current.TerminationCode
 	terminationInitiator := current.TerminationInitiator
-	if !isTerminalStatus(current.Status) || current.Status == status {
+	// A repeated end may fill in what the first did not know, but never
+	// replaces a recorded source: a hang-up after the carrier's BYE changes nothing.
+	if !isTerminalStatus(current.Status) || (current.Status == status && current.TerminationInitiator == "") {
 		terminationCause = firstNonEmpty(facts.TerminationCause, terminationCause)
 		terminationCode = firstNonEmpty(facts.TerminationCode, terminationCode)
 		terminationInitiator = firstNonEmpty(facts.TerminationInitiator, terminationInitiator)
@@ -373,12 +375,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 		media["close_code"] = call.MediaCloseCode
 	}
 	payload["media"] = media
-	termination := map[string]any{}
-	addOptionalString(termination, "reason", call.TerminationReason)
-	addOptionalString(termination, "cause", call.TerminationCause)
-	addOptionalString(termination, "code", call.TerminationCode)
-	addOptionalString(termination, "initiator", call.TerminationInitiator)
-	if len(termination) > 0 {
+	if termination := terminationPublic(call); len(termination) > 0 {
 		payload["termination"] = termination
 	}
 	return payload

@@ -277,7 +277,7 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 	if _, mutated := platform.credentials.Fields["connection_id"]; mutated {
 		t.Fatal("number-specific connection_id was written into shared credentials")
 	}
-	if msg := app.hangupCall(ctx, session.CallID, 0, "project-a"); msg != "" {
+	if _, msg := app.hangupCall(ctx, session.CallID, 0, "project-a", hangupActor{Initiator: terminationByOperator, Action: "hangup_requested"}); msg != "" {
 		t.Fatalf("hang up Telnyx browser call: %s", msg)
 	}
 	last := platform.integrationCalls[len(platform.integrationCalls)-1]

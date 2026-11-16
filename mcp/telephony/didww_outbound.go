@@ -126,6 +126,7 @@ type outboundSIPSession struct {
 	maxDuration    time.Duration
 	peerEnded      atomic.Bool
 	ended          atomic.Bool
+	ending         sipSessionEnd
 	mediaReady     atomic.Bool
 	signalMu       sync.Mutex
 	timerMu        sync.Mutex
@@ -395,6 +396,11 @@ func (s *outboundSIPSession) waitAnswer() {
 		if response := s.dialog.InviteResponse; response != nil && !response.IsSuccess() {
 			s.gateway.app.db().observeAccountSIP(s.callID, response.StatusCode, response.Reason)
 		}
+		if errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+			s.ending.record(terminationByTelephony, lifecycleFacts{})
+		} else if response := s.dialog.InviteResponse; response != nil && response.StatusCode >= 300 {
+			s.ending.record(terminationByCarrier, lifecycleFacts{TerminationCode: strconv.Itoa(int(response.StatusCode))})
+		}
 		s.finishWithStatus("carrier", status, err)
 		return
 	}
@@ -473,6 +479,7 @@ func (s *outboundSIPSession) hangup() error {
 	defer timer.Stop()
 	select {
 	case <-s.inviteDone:
+		s.ending.wait(time.Second)
 		return s.terminationErr
 	case <-timer.C:
 		return errors.New("outbound SIP termination not confirmed within deadline")
@@ -487,6 +494,8 @@ func (s *outboundSIPSession) finishWithStatus(leg, status string, cause error) {
 	if !s.ended.CompareAndSwap(false, true) {
 		return
 	}
+	defer s.ending.finished()
+	facts := s.ending.facts(s.gateway.app, s.callID, leg)
 	s.diagnostics.end(leg, cause)
 	s.cancel()
 	go func() {
@@ -511,7 +520,7 @@ func (s *outboundSIPSession) finishWithStatus(leg, status string, cause error) {
 		if cause != nil {
 			message = cause.Error()
 		}
-		_ = s.gateway.app.db().updateStatus(s.callID, status, message)
+		_, _ = s.gateway.app.db().updateStatusWithFacts(s.callID, status, message, facts)
 	}
 	_ = s.gateway.app.killCallThread(s.gateway.appCtx.WithProject(row.ProjectID), row)
 }

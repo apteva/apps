@@ -41,7 +41,9 @@ func callClassification(call callRow) string {
 	if !isTerminalStatus(call.Status) {
 		return "routing"
 	}
-	if call.TerminationInitiator == "caller" {
+	// A direct SIP carrier's BYE on an inbound call is the caller's side
+	// hanging up, as carriers report "caller".
+	if call.TerminationInitiator == "caller" || (call.TerminationInitiator == terminationByCarrier && call.Direction == "inbound") {
 		return "caller_abandoned"
 	}
 	if call.RoutingResolution != "" {

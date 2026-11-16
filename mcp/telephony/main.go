@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.19.1
+version: 0.20.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -422,7 +422,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.19.1
+    ref: telephony/v0.20.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -500,39 +500,41 @@ type App struct {
 	mediaDiagnostics   mediaDiagnosticRegistry
 	aiPolicies         aiPolicyRegistry
 	agentAudioSessions sync.Map
-	mediaBridges       carrierBridgeRegistry
-	callReads          callReadCache
-	idleWorkers        idleWorkerGate
-	dashboardExtras    dashboardExtrasCache
-	inventoryReads     inventoryReadCache
-	policyReads        phonePolicyCache
-	outboundHints      outboundInventoryHints
-	admissionMu        sync.RWMutex
-	carrierMediaDrains sync.Map
-	audioPeerHasher    audioPeerHasher
-	audioNetworks      audioNetworkCollector
-	audioProbes        audioProbeMonitor
-	notifications      callNotificationQueue
-	audioTransports    audioTransportCollector
-	carrierTelemetry   carrierTelemetryCollector
-	audioAlerts        audioAlertCorrelator
-	decisionWG         sync.WaitGroup
-	decisionStopping   bool
-	aiRecovering       map[string]bool
-	dispatchMu         sync.Mutex
-	dispatchCancel     context.CancelFunc
-	burstMu            sync.Mutex
-	dispatcher         *routingDispatcher
-	deliveryDispatcher *routingDispatcher
-	callChanges        callChangeHub
-	installID          int64
-	sip                sipRuntimeHolder
-	autoAnswerMu       sync.Mutex
-	softphones         softphoneRegistry
-	phoneAttachments   phoneAttachmentCache
-	listeners          callListenerRegistry
-	preparations       realtimePreparations
-	eventDispatcher    *routingDispatcher
+	// Call id → lifecycleFacts of a hang-up or reject in flight.
+	terminationRequests sync.Map
+	mediaBridges        carrierBridgeRegistry
+	callReads           callReadCache
+	idleWorkers         idleWorkerGate
+	dashboardExtras     dashboardExtrasCache
+	inventoryReads      inventoryReadCache
+	policyReads         phonePolicyCache
+	outboundHints       outboundInventoryHints
+	admissionMu         sync.RWMutex
+	carrierMediaDrains  sync.Map
+	audioPeerHasher     audioPeerHasher
+	audioNetworks       audioNetworkCollector
+	audioProbes         audioProbeMonitor
+	notifications       callNotificationQueue
+	audioTransports     audioTransportCollector
+	carrierTelemetry    carrierTelemetryCollector
+	audioAlerts         audioAlertCorrelator
+	decisionWG          sync.WaitGroup
+	decisionStopping    bool
+	aiRecovering        map[string]bool
+	dispatchMu          sync.Mutex
+	dispatchCancel      context.CancelFunc
+	burstMu             sync.Mutex
+	dispatcher          *routingDispatcher
+	deliveryDispatcher  *routingDispatcher
+	callChanges         callChangeHub
+	installID           int64
+	sip                 sipRuntimeHolder
+	autoAnswerMu        sync.Mutex
+	softphones          softphoneRegistry
+	phoneAttachments    phoneAttachmentCache
+	listeners           callListenerRegistry
+	preparations        realtimePreparations
+	eventDispatcher     *routingDispatcher
 }
 
 const (
@@ -983,7 +985,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_hangup",
-			Description: "End an active call. Args: call_id (required). Hangs up the carrier call and kills the underlying realtime thread.",
+			Description: "End an active call. Args: call_id (required). Hangs up the carrier call and kills the underlying realtime thread. Returns the call's status and termination; already_ended is true when the call had already ended.",
 			InputSchema: schemaObject(map[string]any{
 				"call_id": map[string]any{"type": "string", "description": "Call id returned by telephony_place_call."},
 			}, []string{"call_id"}),
@@ -1857,31 +1859,60 @@ func (a *App) toolHangup(callerCtx context.Context, ctx *sdk.AppCtx, args map[st
 	if callID == "" {
 		return mcpError("call_id required"), nil
 	}
-	if msg := a.hangupCall(ctx, callID, agentID, currentProject(ctx)); msg != "" {
+	result, msg := a.hangupCall(ctx, callID, agentID, currentProject(ctx), hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "hangup_requested"})
+	if msg != "" {
 		return mcpError(msg), nil
 	}
-
-	return "ok", nil
+	return result.response(), nil
 }
 
-func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectID string) string {
+// hangupCall ends a call on behalf of actor. When the call had already ended,
+// or the other side ends it while the request is in flight, it returns the
+// existing termination unchanged.
+func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectID string, actor hangupActor) (hangupResult, string) {
+	requestedAt := time.Now()
 	row, err := a.db().findCall(callID)
 	if err != nil || row == nil {
-		return "unknown call_id"
+		return hangupResult{}, "unknown call_id"
 	}
 
 	if projectID == "" || row.ProjectID != projectID {
-		return "call does not belong to this project"
+		return hangupResult{}, "call does not belong to this project"
 	}
 	if agentID != 0 && row.AgentID != agentID {
-		return "call belongs to another agent"
+		return hangupResult{}, "call belongs to another agent"
 	}
+	previous := row.Status
 	if isTerminalStatus(row.Status) {
 		if err := a.killCallThread(ctx, row); err != nil {
-			return "kill completed call thread: " + err.Error()
+			return hangupResult{}, "kill completed call thread: " + err.Error()
 		}
-		return ""
+		return a.finishHangup(row, actor, previous, requestedAt), ""
 	}
+	facts := actor.facts()
+	defer a.requestTermination(callID, facts)()
+	if msg := a.endCallAtCarrier(ctx, row); msg != "" {
+		if current, _ := a.db().findCall(callID); current != nil && isTerminalStatus(current.Status) {
+			return a.finishHangup(current, actor, previous, requestedAt), ""
+		}
+		a.auditHangup(row, actor, previous, "failed", msg, requestedAt)
+		return hangupResult{}, msg
+	}
+	if err := a.killCallThread(ctx, row); err != nil {
+		ctx.Logger().Warn("kill thread failed", "err", err)
+	}
+	if _, err := a.db().updateStatusWithFacts(callID, "completed", "", facts); err != nil {
+		return hangupResult{}, "persist completed status: " + err.Error()
+	}
+	final, err := a.db().findCall(callID)
+	if err != nil || final == nil {
+		return hangupResult{}, "load ended call: " + fmt.Sprint(err)
+	}
+	return a.finishHangup(final, actor, previous, requestedAt), ""
+}
+
+// endCallAtCarrier asks the carrier or SIP dialog to end an active call.
+func (a *App) endCallAtCarrier(ctx *sdk.AppCtx, row *callRow) string {
 	if row.CarrierSID == "" && !a.callUsesDirectSIP(row) {
 		// Plivo can be cancelled by request UUID before its call UUID arrives.
 		if err := a.terminateUnidentifiedCarrierCall(ctx, row); err != nil {
@@ -1909,13 +1940,6 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectI
 			return "carrier hangup failed: " + err.Error()
 		}
 	}
-	if err := a.killCallThread(ctx, row); err != nil {
-		ctx.Logger().Warn("kill thread failed", "err", err)
-	}
-	if err := a.db().updateStatus(callID, "completed", ""); err != nil {
-		return "persist completed status: " + err.Error()
-	}
-
 	return ""
 }
 
@@ -2422,31 +2446,44 @@ func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 		return map[string]any{"ok": true, "call_id": callID, "offer_declined": true}, nil
 	}
 	reason := strArg(args, "reason", "rejected by agent")
-	if err := a.rejectPendingInboundCall(ctx, row, reason); err != nil {
+	result, err := a.rejectPendingInboundCall(ctx, row, reason, hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "rejected"})
+	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	return map[string]any{"ok": true, "call_id": callID}, nil
+	return result.response(), nil
 }
 
 // rejectPendingInboundCall is shared by the agent tool and the browser panel.
 // Ringing calls need the provider's reject operation, which is distinct from
 // hanging up an already-active call for carriers such as Telnyx.
-func (a *App) rejectPendingInboundCall(ctx *sdk.AppCtx, row *callRow, reason string) error {
+func (a *App) rejectPendingInboundCall(ctx *sdk.AppCtx, row *callRow, reason string, actor hangupActor) (hangupResult, error) {
+	requestedAt := time.Now()
 	if row == nil || row.Direction != "inbound" || (row.Status != "pending" && row.Status != "answering") {
-		return errors.New("call is not a rejectable pending inbound call")
+		return hangupResult{}, errors.New("call is not a rejectable pending inbound call")
 	}
+	previous := row.Status
+	facts := actor.facts()
+	defer a.requestTermination(row.ID, facts)()
 	if row.CarrierSID != "" {
 		if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
-			return fmt.Errorf("carrier reject failed: %w", err)
+			if current, _ := a.db().findCall(row.ID); current != nil && isTerminalStatus(current.Status) {
+				return a.finishHangup(current, actor, previous, requestedAt), nil
+			}
+			a.auditHangup(row, actor, previous, "failed", err.Error(), requestedAt)
+			return hangupResult{}, fmt.Errorf("carrier reject failed: %w", err)
 		}
 	}
 	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill rejected call thread", "call", row.ID, "err", err)
 	}
-	if err := a.db().updateStatus(row.ID, "canceled", reason); err != nil {
-		return fmt.Errorf("persist rejection: %w", err)
+	if _, err := a.db().updateStatusWithFacts(row.ID, "canceled", reason, facts); err != nil {
+		return hangupResult{}, fmt.Errorf("persist rejection: %w", err)
 	}
-	return nil
+	final, err := a.db().findCall(row.ID)
+	if err != nil || final == nil {
+		return hangupResult{}, fmt.Errorf("load rejected call: %v", err)
+	}
+	return a.finishHangup(final, actor, previous, requestedAt), nil
 }
 
 func (a *App) findTwilioPhoneNumber(ctx *sdk.AppCtx, route *routeRow) (string, string, string, error) {
@@ -3867,24 +3904,31 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load call: "+loadErr.Error(), http.StatusInternalServerError)
 		return
 	}
-	if p := phoneUserFrom(r); p != nil && (row == nil || !a.phoneCallAllowed(p, row, true)) {
-		http.Error(w, "call not found", 404)
-		return
+	actor := hangupActor{Initiator: terminationByOperator, Action: "hangup_requested", RequestID: r.Header.Get("X-Request-ID")}
+	if p := phoneUserFrom(r); p != nil {
+		if row == nil || !a.phoneCallAllowed(p, row, true) {
+			http.Error(w, "call not found", 404)
+			return
+		}
+		actor.Initiator, actor.Principal = terminationByUser, p.Identity.key()
 	}
 	if row != nil && row.ProjectID == project && row.PeerKind == peerKindHuman &&
 		row.Direction == "inbound" && (row.Status == "pending" || row.Status == "answering") {
-		if err := a.rejectPendingInboundCall(ctx, row, ""); err != nil {
+		actor.Action = "rejected"
+		result, err := a.rejectPendingInboundCall(ctx, row, "", actor)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, result.response())
 		return
 	}
-	if msg := a.hangupCall(ctx, parts[1], 0, project); msg != "" {
+	result, msg := a.hangupCall(ctx, parts[1], 0, project, actor)
+	if msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, result.response())
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
