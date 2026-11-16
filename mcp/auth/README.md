@@ -1,9 +1,11 @@
-# Auth v0.13.0
+# Auth v0.14.0
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.13.0 adds private bearer-session verification for bound apps.
-This release preserves existing sessions and requires no database migration.
+permissions. v0.14.0 hardens client IP handling, audit attribution, email
+verification provenance, access-token lifetime and signing-key storage, and adds
+user containment; see below. Existing sessions stay valid. v0.13.0 added private
+bearer-session verification for bound apps.
 v0.12.1 distinguishes retryable refresh failures from uncertain
 rotation outcomes for persistent SDK sessions. v0.12.0 added opt-in role-bound
 platform credentials and a renewal
@@ -11,7 +13,7 @@ endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
 migration and preserves existing Auth sessions. Configure explicit role bindings
 and platform policies before enabling delegated access.
 
-## Unreleased security hardening
+## v0.14.0 security hardening
 
 Migration `007_hardening.sql` keeps existing sessions. Behaviour changes:
 
@@ -226,7 +228,7 @@ The `/me` endpoint continues to return `user`, `org`, and `authorization`.
 
 ## Development and tests
 
-Use the pinned Go 1.26.10+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
+Use the pinned Go 1.26.11+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
 workspace overlay from replacing the release SDK dependency.
 
 ```sh
