@@ -36,6 +36,9 @@ name: community
 display_name: Community
 version: 0.17.0
 description: |
+  Interactive lessons mix text, video and quizzes with sandboxed HTML/JS
+  elements from a versioned library (simulations, code playgrounds, board
+  scenes) that save learner state and complete lessons when goals are met.
   Optional order bumps use Checkout rules and item receipts, with one payment,
   independent course delivery/refunds, and selections editable until Pay.
   Circle/Skool-shaped community platform. Multiple communities per install,
