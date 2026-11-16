@@ -63,7 +63,15 @@ export const apteva = new AptevaClient({
   fetch: portalFetch,
 });
 const community = apteva.app(COMMUNITY_APP);
-const auth = apteva.app(AUTH_APP);
+// Auth calls authenticate with credentials or the refresh token in the body.
+// They use their own client so the delegated member key, which is scoped to
+// the community app only, is never attached: the platform rejects a delegated
+// key on any other app, which made every refresh fail with 403.
+const auth = new AptevaClient({
+  baseURL: pickBaseURL(__API_BASE__),
+  projectId: currentProjectId(),
+  fetch: portalFetch,
+}).app(AUTH_APP);
 
 export interface AuthResponse {
   user: { id: number; email: string; display_name?: string };

@@ -7,18 +7,19 @@ const lesson = { id: "lesson", community_id: community.id, section_id: "section"
 const quiz = { id: "quiz", lesson_id: lesson.id, title: "Knowledge check", passing_score: 70, questions: [{ prompt: "Two plus two?", options: ["4", "5"] }] };
 const assignment = { id: "assignment", title: "Introduce yourself", instructions: "Write **a short introduction**." };
 
-async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: boolean; members?: number } = {}) {
+async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: boolean; members?: number; session?: Record<string, unknown> } = {}) {
   const calls: Array<{ name: string; arguments: Record<string, any> }> = [];
   let profile = { ...member };
   let submissions: any[] = [], attempts: any[] = [];
-  await page.addInitScript(() => {
-    sessionStorage.setItem("apteva-community-auth:main", JSON.stringify({ user: { id: 1, email: "alice@example.test" }, apteva_access_token: "test-member-token", stored_at: Date.now(), apteva_expires_in: 3600 }));
-  });
+  await page.addInitScript((session) => {
+    sessionStorage.setItem("apteva-community-auth:main", JSON.stringify({ user: { id: 1, email: "alice@example.test" }, apteva_access_token: "test-member-token", stored_at: Date.now(), apteva_expires_in: 3600, ...session }));
+  }, options.session || {});
   await page.route("**/api/**", async (route) => {
     const request = route.request(), url = new URL(request.url());
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
     if (url.pathname.endsWith("/portal/bootstrap")) return json({ community, brand: { name: community.name, primary_color: "#059669", accent_color: "#059669" }, auth: { client_id: "client" }, signup: { enabled: true } });
     if (url.pathname.endsWith("/portal/products")) return json({ products: [], count: 0 });
+    if (url.pathname.endsWith("/auth/refresh")) return route.fallback();
     if (!url.pathname.endsWith("/mcp")) return json({});
     const { name, arguments: args = {} } = request.postDataJSON().params;
     calls.push({ name, arguments: args });
@@ -131,4 +132,31 @@ test("expired delegated sessions return to sign-in with an actionable message", 
   await expect(page.getByRole("alert")).toContainText("Your session expired. Please sign in again.");
   await expect(page.getByRole("navigation")).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem("apteva-community-auth:main"))).toBeNull();
+});
+
+test("session refresh never sends the community-scoped member key to Auth", async ({ page }) => {
+  const refreshes: Array<{ authorization: string | null; body: Record<string, unknown> }> = [];
+  const memberKeys: string[] = [];
+  page.on("request", (request) => {
+    if (/\/api\/apps\/community\/mcp/.test(request.url())) memberKeys.push(request.headers().authorization || "");
+  });
+  await page.route(/\/api\/apps\/auth\/refresh(?:\?|$)/, async (route) => {
+    const request = route.request();
+    const authorization = (await request.allHeaders()).authorization || null;
+    refreshes.push({ authorization, body: request.postDataJSON() });
+    // The platform only accepts a delegated key on the apps its policy names.
+    if (authorization) return route.fulfill({ status: 403, body: "delegated user key is not allowed to call this app" });
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: { id: 1, email: "alice@example.test" }, refresh_token: "rotated-refresh", apteva_access_token: "refreshed-member-token", apteva_expires_in: 60 }) });
+  });
+  // A 60-second delegated token stored 47 seconds ago is due for refresh at once.
+  await fixture(page, { session: { refresh_token: "first-refresh", apteva_expires_in: 60, stored_at: Date.now() - 47_000 } });
+  await expect.poll(() => refreshes.length, { timeout: 10_000 }).toBeGreaterThan(0);
+  expect(refreshes[0].authorization).toBeNull();
+  expect(refreshes[0].body).toMatchObject({ client_id: "client", refresh_token: "first-refresh" });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => memberKeys.at(-1)).toBe("Bearer refreshed-member-token");
+  await expect(page.locator('nav[aria-label="Community navigation"]')).toBeAttached();
+  await expect(page.getByText("Your session expired")).toHaveCount(0);
+  const stored = await page.evaluate(() => JSON.parse(sessionStorage.getItem("apteva-community-auth:main") || "{}"));
+  expect(stored).toMatchObject({ refresh_token: "rotated-refresh", apteva_access_token: "refreshed-member-token" });
 });
