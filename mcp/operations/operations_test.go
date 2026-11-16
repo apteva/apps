@@ -756,3 +756,21 @@ func TestCleaningPrices(t *testing.T) {
 		t.Fatalf("same day: %s %d", sameDay.Work.Priority, sameDay.Quote.TotalCents)
 	}
 }
+
+func TestOnlyOwnSiteSettlesBrand(t *testing.T) {
+	db := testDB(t)
+	fixClock(t, testNow)
+	install(t, db, "restaurant") // shared
+	must(upsertBrand(db, pid, map[string]any{"key": "trattoria", "name": "Trattoria", "number_prefix": "TR"}))
+	must(upsertBrand(db, pid, map[string]any{"key": "brightclean", "name": "BrightClean", "number_prefix": "BC"}))
+	r := must(upsertSite(db, pid, map[string]any{"kind": "own", "name": "Trattoria", "timezone": "UTC"}))
+	// The only own site is shared: the brand is still a question.
+	if _, err := intakeWork(db, pid, nil, map[string]any{"work_type": "reservation", "answers": map[string]any{"party_size": 2}}); err == nil {
+		t.Fatal("shared site, two brands: brand needed")
+	}
+	must(upsertSite(db, pid, map[string]any{"id": float64(r.ID), "brand": "trattoria"}))
+	w := must(intakeWork(db, pid, nil, map[string]any{"work_type": "reservation", "answers": map[string]any{"party_size": 2}})).Work
+	if w.Brand != "trattoria" || w.Number != "TR-00001" || w.SiteID == nil || *w.SiteID != r.ID {
+		t.Fatalf("work %s %s site %v", w.Brand, w.Number, w.SiteID)
+	}
+}

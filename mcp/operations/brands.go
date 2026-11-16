@@ -346,6 +346,16 @@ func resolveWorkBrand(db *sql.DB, pid string, args map[string]any, typeKey strin
 	if b == 0 {
 		b = wt.BrandID
 	}
+	if b == 0 && siteID == 0 && wt.Mode != "at_customer" {
+		// Premises work without a site goes to the business's only own
+		// site (see intakeWork); that site's brand settles the work's.
+		var n int
+		var only int64
+		_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(brand_id),0) FROM sites WHERE project_id=? AND kind='own'`, pid).Scan(&n, &only)
+		if n == 1 {
+			b = only
+		}
+	}
 	if b == 0 {
 		active := activeBrandIDs(db, pid)
 		switch len(active) {
