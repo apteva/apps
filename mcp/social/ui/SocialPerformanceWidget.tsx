@@ -38,7 +38,7 @@ const labels: Record<string, string> = {
   interactions: "Interactions",
 };
 const control =
-  "min-h-8 max-w-full rounded border border-border bg-bg-input px-2 py-1 text-xs text-text";
+  "min-h-7 max-w-full rounded border border-border bg-bg-input px-2 py-1 text-xs text-text";
 const emptyOptions: PerformanceOptions = {
   profiles: [],
   accounts: [],
@@ -123,6 +123,26 @@ function PerformanceView(props: HomeWidgetProps) {
       : filters.period === "custom"
         ? `${filters.startDate} – ${filters.endDate}`
         : `Last ${days} complete days`;
+  const accountSummary =
+    rows.length < sortedRows.length
+      ? `${sort.descending && sortedMetric ? "Top" : "Showing"} ${rows.length} of ${sortedRows.length} accounts`
+      : `${rows.length} ${rows.length === 1 ? "account" : "accounts"}`;
+  const sortLabel =
+    labels[sort.key] ||
+    (
+      {
+        name: "Account",
+        profile_name: "Profile",
+        platform: "Platform",
+      } as Record<string, string>
+    )[sort.key];
+  const comparisonContext =
+    sortedMetric === "followers"
+      ? `Growth during ${range} (UTC). Follower counts are the latest cached observations.`
+      : sortedMetric
+        ? `Percentages compare with the previous ${days} days, using complete data.`
+        : "";
+  const cacheContext = `${data?.updated_at ? `Oldest available refresh: ${new Date(data.updated_at).toLocaleString()}. ` : ""}Followers are current; other metrics use selected dates. * Partial data: hover a marker for coverage. — Unavailable. † Excluded from totals: hover for the reason.`;
   const full = props.widgetSize === "full";
   const changeFilter = (patch: Partial<PerformanceFilters>) =>
     setFilters((previous) => ({ ...previous, ...patch }));
@@ -136,7 +156,7 @@ function PerformanceView(props: HomeWidgetProps) {
   const heading = (key: PerformanceSort, label: string) => (
     <th
       key={key}
-      className="px-2 py-2 text-left font-medium whitespace-nowrap"
+      className="px-2 py-1.5 text-left font-medium whitespace-nowrap"
       aria-sort={
         sort.key === key
           ? sort.descending
@@ -164,33 +184,53 @@ function PerformanceView(props: HomeWidgetProps) {
   );
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
-      <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-bold text-text">
-            <BarChart3 size={16} aria-hidden />
-            Social · Performance
-          </h2>
-          <p className="mt-1 text-[11px] text-text-dim">{range} · UTC</p>
+      <header className="flex shrink-0 items-start justify-between gap-2 border-b border-border px-3 py-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <h2 className="flex items-center gap-1.5 text-sm font-bold text-text">
+              <BarChart3 size={14} aria-hidden />
+              Social · Performance
+            </h2>
+            {data && display.showAccounts && (
+              <p
+                aria-label="Account ranking"
+                aria-live="polite"
+                className="text-[10px] text-text-muted"
+                title={comparisonContext}
+              >
+                {accountSummary} · {sortLabel} {sort.descending ? "↓" : "↑"}
+              </p>
+            )}
+          </div>
+          <p
+            aria-label="Performance date range"
+            className="mt-0.5 text-[10px] text-text-dim"
+            title={comparisonContext}
+          >
+            {range} · UTC
+          </p>
         </div>
         <a
           href={socialPageLink(navigation, {
             tab: "metrics",
             ...(filters.period !== "custom" ? { range: `${days}d` } : {}),
           })}
-          className="shrink-0 text-[11px] text-text-muted hover:text-accent"
+          className="shrink-0 text-[10px] text-text-muted hover:text-accent"
+          aria-label="Open Social analytics"
         >
-          Open analytics →
+          Analytics ↗
         </a>
       </header>
       {display.showFilters && (
         <div
-          className="flex shrink-0 flex-nowrap items-end gap-2 overflow-x-auto border-b border-border px-4 py-2"
+          className="flex shrink-0 flex-nowrap items-end gap-1.5 overflow-x-auto border-b border-border px-3 py-1.5"
           aria-label="Performance filters"
         >
           <label className="shrink-0 text-[11px] text-text-dim">
-            Profile
+            <span className="sr-only">Profile</span>
             <select
               aria-label="Profile"
+              title="Profile"
               className={`block ${control}`}
               value={filters.profileID}
               onChange={(event) =>
@@ -209,9 +249,10 @@ function PerformanceView(props: HomeWidgetProps) {
             </select>
           </label>
           <label className="shrink-0 text-[11px] text-text-dim">
-            Platform
+            <span className="sr-only">Platform</span>
             <select
               aria-label="Platform"
+              title="Platform"
               className={`block ${control}`}
               value={filters.platform}
               onChange={(event) =>
@@ -227,9 +268,10 @@ function PerformanceView(props: HomeWidgetProps) {
             </select>
           </label>
           <label className="shrink-0 text-[11px] text-text-dim">
-            Date range
+            <span className="sr-only">Date range</span>
             <select
               aria-label="Date range"
+              title="Date range"
               className={`block ${control}`}
               value={filters.period}
               onChange={(event) => changeFilter({ period: event.target.value })}
@@ -243,9 +285,10 @@ function PerformanceView(props: HomeWidgetProps) {
           {filters.period === "custom" && (
             <>
               <label className="shrink-0 text-[11px] text-text-dim">
-                From
+                <span className="sr-only">From</span>
                 <input
                   aria-label="Start date"
+                  title="Start date"
                   type="date"
                   max={completePerformanceDates().endDate}
                   className={`block ${control}`}
@@ -256,9 +299,10 @@ function PerformanceView(props: HomeWidgetProps) {
                 />
               </label>
               <label className="shrink-0 text-[11px] text-text-dim">
-                To
+                <span className="sr-only">To</span>
                 <input
                   aria-label="End date"
+                  title="End date"
                   type="date"
                   max={completePerformanceDates().endDate}
                   className={`block ${control}`}
@@ -271,7 +315,6 @@ function PerformanceView(props: HomeWidgetProps) {
             </>
           )}
           <div className="shrink-0 text-[11px] text-text-dim">
-            <p>Accounts</p>
             <button
               type="button"
               className={control}
@@ -280,8 +323,8 @@ function PerformanceView(props: HomeWidgetProps) {
               onClick={() => setAccountsOpen((open) => !open)}
             >
               {selectedIDs.length
-                ? `${selectedIDs.length} selected`
-                : "All matching accounts"}{" "}
+                ? `${selectedIDs.length} accounts`
+                : "All accounts"}{" "}
               ▾
             </button>
           </div>
@@ -340,7 +383,7 @@ function PerformanceView(props: HomeWidgetProps) {
           {invalid || result.error ? "" : "Loading performance…"}
         </p>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-1.5">
           {display.showSummary && display.columns.length > 0 && (
             <div
               aria-label="Performance totals"
@@ -377,19 +420,14 @@ function PerformanceView(props: HomeWidgetProps) {
           )}
           {display.showAccounts && (
             <>
-              <p className="mt-3 text-[11px] text-text-muted">
-                {rows.length < sortedRows.length
-                  ? `${sort.descending && sortedMetric ? "Top" : "Showing"} ${rows.length} of ${sortedRows.length} accounts`
-                  : `${rows.length} ${rows.length === 1 ? "account" : "accounts"}`}
-                {sortedMetric &&
-                  ` · ${labels[sortedMetric]} ${sort.descending ? "↓" : "↑"}${sortedMetric === "followers" ? ` · Growth during ${data.start_date} – ${data.end_date}` : ` · % vs previous ${data.days} days`}`}
-              </p>
               {rows.length === 0 ? (
                 <p className="py-4 text-xs text-text-dim">
                   No connected accounts match these filters.
                 </p>
               ) : (
-                <div className="mt-2 overflow-x-auto">
+                <div
+                  className={`${display.showSummary || prefs.showTrends ? "mt-2 " : ""}overflow-x-auto`}
+                >
                   <table className="w-full text-left text-[11px]">
                     <caption className="sr-only">
                       Social performance by account
@@ -414,38 +452,53 @@ function PerformanceView(props: HomeWidgetProps) {
                     <tbody>
                       {rows.map((account) => (
                         <tr key={account.id} className="border-t border-border">
-                          <td className="px-2 py-2 text-text whitespace-nowrap">
-                            <a
-                              className="hover:text-accent"
-                              href={socialPageLink(navigation, {
-                                tab: "metrics",
-                                account_ids: account.id,
-                                ...(filters.period !== "custom"
-                                  ? { range: `${days}d` }
-                                  : {}),
-                              })}
-                            >
-                              {account.name}
-                            </a>
-                            {account.status && account.status !== "active" && (
-                              <span className="block text-[10px] text-text-dim">
-                                {account.status.replace(/_/g, " ")} · cached
-                                metrics
-                              </span>
-                            )}
-                            {account.aggregate_exclusion_reason && (
-                              <span className="block max-w-56 whitespace-normal text-text-dim">
-                                {account.aggregate_exclusion_reason}
-                              </span>
-                            )}
+                          <td className="px-2 py-1.5 text-text whitespace-nowrap">
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              {account.status &&
+                                account.status !== "active" && (
+                                  <span
+                                    role="img"
+                                    aria-label={`${account.status.replace(/_/g, " ")} · cached metrics`}
+                                    title={`${account.status.replace(/_/g, " ")} · cached metrics`}
+                                    className={`shrink-0 text-[10px] ${account.status === "needs_reauth" ? "text-warn" : "text-text-dim"}`}
+                                  >
+                                    ○
+                                  </span>
+                                )}
+                              <a
+                                className="block max-w-48 truncate hover:text-accent"
+                                title={account.name}
+                                href={socialPageLink(navigation, {
+                                  tab: "metrics",
+                                  account_ids: account.id,
+                                  ...(filters.period !== "custom"
+                                    ? { range: `${days}d` }
+                                    : {}),
+                                })}
+                              >
+                                {account.name}
+                              </a>
+                              {account.aggregate_exclusion_reason && (
+                                <span
+                                  role="img"
+                                  className="text-warn"
+                                  aria-label={
+                                    account.aggregate_exclusion_reason
+                                  }
+                                  title={account.aggregate_exclusion_reason}
+                                >
+                                  †
+                                </span>
+                              )}
+                            </div>
                           </td>
                           {display.showProfile && (
-                            <td className="px-2 py-2 whitespace-nowrap">
+                            <td className="px-2 py-1.5 whitespace-nowrap">
                               {account.profile_name || "Unassigned"}
                             </td>
                           )}
                           {display.showPlatform && (
-                            <td className="px-2 py-2 whitespace-nowrap">
+                            <td className="px-2 py-1.5 whitespace-nowrap">
                               {platformPresentation(account.platform).label}
                             </td>
                           )}
@@ -454,7 +507,7 @@ function PerformanceView(props: HomeWidgetProps) {
                             return (
                               <td
                                 key={key}
-                                className="px-2 py-2 tabular-nums"
+                                className="px-2 py-1.5 tabular-nums"
                                 title={
                                   metric?.value == null
                                     ? "Unavailable"
@@ -492,9 +545,13 @@ function PerformanceView(props: HomeWidgetProps) {
                                 {key !== "followers" &&
                                   metric?.value != null &&
                                   (metric.days || 0) < data.days && (
-                                    <span className="block text-[10px] text-text-dim">
-                                      Partial · {metric.days || 0}/{data.days}{" "}
-                                      days
+                                    <span
+                                      role="img"
+                                      className="ml-1 text-[10px] text-warn"
+                                      aria-label={`${labels[key]} partial coverage: ${metric.days || 0} of ${data.days} days`}
+                                      title={`Partial ${labels[key].toLowerCase()}: ${metric.days || 0}/${data.days} days of data`}
+                                    >
+                                      *
                                     </span>
                                   )}
                               </td>
@@ -510,12 +567,16 @@ function PerformanceView(props: HomeWidgetProps) {
           )}
         </div>
       )}
-      <footer className="shrink-0 border-t border-border px-4 py-2 text-[10px] text-text-dim">
+      <footer
+        className="shrink-0 truncate border-t border-border px-3 py-1 text-[10px] text-text-dim"
+        title={cacheContext}
+      >
         {data?.updated_at
-          ? `Oldest available refresh: ${new Date(data.updated_at).toLocaleString()}`
+          ? `Cached ${new Date(data.updated_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}`
           : "No cached analytics yet"}{" "}
-        · Followers are current; other metrics use selected dates · Missing
-        metrics —
+        · * Partial · — Unavailable
+        {data?.accounts.some((account) => account.aggregate_exclusion_reason) &&
+          " · † Excluded from totals"}
       </footer>
     </section>
   );

@@ -4,6 +4,11 @@ The existing Performance widget ranks matching accounts at both half and full
 width. Its Profile, Platform, Date range and Accounts controls share one row
 (scrolling horizontally on narrow widgets); Accounts opens a separate selection
 panel. Column headings change the sort for the mounted widget.
+The displayed account count and current sort stay in the compact header next
+to the title, above the filters. The selected dates appear once. Table rows use
+inline status and coverage markers; hover for account status, exact partial-day
+coverage (`*`) or an aggregate-exclusion explanation (`†`). A compact footer
+provides the cache timestamp and marker legend.
 
 Use the widget's **Configure** action for persisted SDK settings. Display lets
 you choose the ranking metric, account limit (10 by default, configurable from

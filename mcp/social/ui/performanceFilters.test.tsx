@@ -131,7 +131,12 @@ test("performance ranks the top ten persisted accounts and filters by named prof
   expect(browser.document.querySelector("tbody tr a")?.textContent).toBe(
     "Brand 4 youtube",
   );
-  expect(browser.document.body.textContent).toContain("Top 10 of 16 accounts");
+  expect(browser.document.querySelector("header")?.textContent).toContain(
+    "Top 10 of 16 accounts",
+  );
+  expect(
+    browser.document.querySelectorAll('[aria-label="Account ranking"]'),
+  ).toHaveLength(1);
   expect(
     browser.document.querySelector('button[aria-label="Select accounts"]'),
   ).toBeTruthy();
@@ -514,7 +519,63 @@ test("follower ranking shows selected-period growth and explains missing history
   expect(
     missing.some((e) => e.getAttribute("title")?.includes("at the start")),
   ).toBe(true);
-  expect(browser.document.body.textContent).toContain(
-    "Growth during 2026-10-17 – 2026-11-13",
+  expect(
+    browser.document
+      .querySelector('header [aria-label="Account ranking"]')
+      ?.getAttribute("title"),
+  ).toContain("Growth during 2026-10-17 – 2026-11-13");
+});
+
+test("compact rows preserve status, coverage and aggregate-exclusion explanations", async () => {
+  const data = summary(options.accounts.slice(0, 1));
+  data.accounts[0].status = "disconnected";
+  data.accounts[0].aggregate_exclusion_reason =
+    "Board excluded because its parent account is selected.";
+  data.accounts[0].metrics.views.days = 26;
+  globalThis.fetch = (async (input) =>
+    Response.json(
+      String(input).includes("/options?") ? options : data,
+    )) as typeof fetch;
+  await render({
+    projectId: "brand",
+    widgetSettings: { show_summary: false, show_trends: false },
+  });
+  const row = browser.document.querySelector("tbody tr")!;
+  expect(
+    row
+      .querySelector('[aria-label="disconnected · cached metrics"]')
+      ?.getAttribute("title"),
+  ).toBe("disconnected · cached metrics");
+  expect(row.textContent).not.toContain("cached metrics");
+  const coverage = row.querySelector(
+    '[aria-label="Views partial coverage: 26 of 28 days"]',
   );
+  expect(coverage?.textContent).toBe("*");
+  expect(coverage?.getAttribute("title")).toContain("26/28 days");
+  expect(
+    row.querySelector(
+      '[title="Board excluded because its parent account is selected."]',
+    )?.textContent,
+  ).toBe("†");
+  expect(row.querySelector("a")?.getAttribute("title")).toBe(
+    "Brand 1 facebook",
+  );
+  expect(browser.document.querySelector("footer")?.textContent).toContain(
+    "* Partial",
+  );
+  expect(browser.document.querySelector("footer")?.textContent).toContain(
+    "† Excluded from totals",
+  );
+  const heading = [...browser.document.querySelectorAll("th button")].find(
+    (e) => e.textContent?.startsWith("Followers"),
+  ) as HTMLButtonElement;
+  await act(async () => heading.click());
+  expect(
+    browser.document.querySelector('header [aria-label="Account ranking"]')
+      ?.textContent,
+  ).toContain("Followers ↓");
+  expect(
+    browser.document.querySelector('[aria-label="Performance date range"]')
+      ?.textContent,
+  ).toBe("2026-10-17 – 2026-11-13 · UTC");
 });
