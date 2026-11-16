@@ -173,6 +173,10 @@ func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
+	return stampCallerActors(a.mcpTools())
+}
+
+func (a *App) mcpTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tenant_create",
@@ -315,19 +319,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id"},
 			},
 			Handler: a.toolDelete,
-		},
-		{
-			Name:        "tenant_support_login",
-			Description: "Mint a short-lived super-admin URL on the tenant via its POST /api/admin/support_session. Args: tenant_id, reason.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"tenant_id": map[string]any{"type": "string"},
-					"reason":    map[string]any{"type": "string"},
-				},
-				"required": []string{"tenant_id", "reason"},
-			},
-			Handler: a.toolSupportLogin,
 		},
 		{
 			Name:        "tenant_run_remote",
@@ -695,7 +686,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_reveal_api_key",
-			Description: "Return the tenant's api_key. Fleet keeps the key sealed with its own keyring (AES-GCM); this tool unseals + returns. Sensitive — records an api_key_revealed event on the tenant. Args: tenant_id.",
+			Description: "Return the tenant's control api_key. Disabled unless Fleet config allow_api_key_reveal=true; prefer tenant_rotate_control_key. Sensitive — records an api_key_revealed event with the caller. Args: tenant_id.",
 			InputSchema: idOnlySchema(),
 			Handler:     a.toolRevealAPIKey,
 		},
@@ -704,6 +695,78 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Rotate the tenant admin user's password to a fresh random value via PATCH /api/users/<id>/password on the tenant (auth'd with the stored api_key). Revokes every existing session for that user. Returns admin_email + admin_password. Use this when the operator needs admin credentials again — fleet does not persist the original password. Args: tenant_id.",
 			InputSchema: idOnlySchema(),
 			Handler:     a.toolResetAdminPassword,
+		},
+		{
+			Name:        "tenant_rotate_control_key",
+			Description: "Replace Fleet's admin api_key on a tenant: mint a new key, verify it, store it with its key ID, then revoke the old key by prefix. Voids any previously revealed key. Safe to re-run after an interruption: it resumes instead of minting again. Args: tenant_id, reason?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"reason":    map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolRotateControlKey,
+		},
+		{
+			Name:        "tenant_security_overview",
+			Description: "Read-only: the tenant's security overview (GET /api/security/overview). Returns status=unsupported with the tenant version when its server has no security API. Args: tenant_id.",
+			InputSchema: idOnlySchema(),
+			Annotations: map[string]any{"readOnlyHint": true},
+			Handler:     a.toolTenantSecurityOverview,
+		},
+		{
+			Name:        "tenant_security_events",
+			Description: "Read-only: the tenant's security event timeline (GET /api/security/events). Returns status=unsupported with the tenant version on older servers. Args: tenant_id, category?, action?, principal_type?, principal_id?, source_ip?, result?, since?, before_seq?, limit?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":      map[string]any{"type": "string"},
+					"category":       map[string]any{"type": "string"},
+					"action":         map[string]any{"type": "string"},
+					"principal_type": map[string]any{"type": "string"},
+					"principal_id":   map[string]any{"type": "string"},
+					"source_ip":      map[string]any{"type": "string"},
+					"result":         map[string]any{"type": "string"},
+					"since":          map[string]any{"type": "string"},
+					"before_seq":     map[string]any{"type": "integer"},
+					"limit":          map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Annotations: map[string]any{"readOnlyHint": true},
+			Handler:     a.toolTenantSecurityEvents,
+		},
+		{
+			Name:        "tenant_contain",
+			Description: "Incident containment on one tenant: rotate Fleet's control key, then revoke sessions and API keys on the tenant (POST /api/security/containment/revoke), keeping only the new control key. Targets the tenant admin by default, or user_ids, or all_users. Reports confirmed, partial (key rotated, tenant containment incomplete or refused), unsupported (key rotated; tenant server too old) or failed. Args: tenant_id, reason, user_ids?, all_users?, sessions? (default true), api_keys? (default true), disable_users?.",
+			InputSchema: containSchema(true),
+			Annotations: map[string]any{"destructiveHint": true},
+			Handler:     a.toolTenantContain,
+		},
+		{
+			Name:        "tenant_contain_all",
+			Description: "Run tenant_contain on every Fleet tenant (4 at a time). complete=true only when every tenant is confirmed; re-run to retry the rest. Args: reason, all_users?, sessions? (default true), api_keys? (default true).",
+			InputSchema: containSchema(false),
+			Annotations: map[string]any{"destructiveHint": true},
+			Handler:     a.toolTenantContainAll,
+		},
+		{
+			Name:        "fleet_incident_report",
+			Description: "Read-only: Fleet's record of sensitive actions per tenant in a time window — key reveals, admin password resets, remote runs, user/key/connection changes through tenant_platform_call, key attaches, rotations and containment — with the caller (user, agent/thread or app) on each. Args: since? (RFC3339, YYYY-MM-DD, or 24h/7d; default 7d), until?, tenant_id?, actor? (substring), include_reads?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"since":         map[string]any{"type": "string"},
+					"until":         map[string]any{"type": "string"},
+					"tenant_id":     map[string]any{"type": "string"},
+					"actor":         map[string]any{"type": "string"},
+					"include_reads": map[string]any{"type": "boolean"},
+				},
+			},
+			Annotations: map[string]any{"readOnlyHint": true},
+			Handler:     a.toolIncidentReport,
 		},
 		{
 			Name:        "fleet_tenant_backup_plan",
@@ -755,6 +818,23 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "a2a_reconcile_on_mount", Run: a.runA2AReconciler},
 		{Name: "a2a_reconcile", Schedule: a2aReconcileEvery, Run: a.runA2AReconciler},
 	}
+}
+
+func containSchema(perTenant bool) map[string]any {
+	props := map[string]any{
+		"reason":    map[string]any{"type": "string"},
+		"all_users": map[string]any{"type": "boolean"},
+		"sessions":  map[string]any{"type": "boolean"},
+		"api_keys":  map[string]any{"type": "boolean"},
+	}
+	required := []string{"reason"}
+	if perTenant {
+		props["tenant_id"] = map[string]any{"type": "string"}
+		props["user_ids"] = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}
+		props["disable_users"] = map[string]any{"type": "boolean"}
+		required = []string{"tenant_id", "reason"}
+	}
+	return map[string]any{"type": "object", "properties": props, "required": required}
 }
 
 func idOnlySchema() map[string]any {

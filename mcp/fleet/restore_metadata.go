@@ -23,7 +23,10 @@ func (s *store) restoreMetadata(id string, m restoreMetadata) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`UPDATE fleet_tenants SET api_key_enc=?,setup_token_enc=?,current_version=?,target_version=? WHERE id=?`, m.APIKey, m.SetupToken, m.CurrentVersion, m.TargetVersion, id); err != nil {
+	// The restored database carries its own api_keys table, so any recorded
+	// control-key ID or in-flight rotation no longer describes it.
+	if _, err = tx.Exec(`UPDATE fleet_tenants SET api_key_enc=?,setup_token_enc=?,current_version=?,target_version=?,
+		api_key_id=0,api_key_prefix='',pending_key_enc=NULL,pending_key_id=0,pending_key_prefix='',revoke_key_prefix='' WHERE id=?`, m.APIKey, m.SetupToken, m.CurrentVersion, m.TargetVersion, id); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`UPDATE fleet_tenant_state SET setup_complete=?,setup_password_enc=?,setup_phase=? WHERE tenant_id=?`, m.SetupComplete, m.SetupPassword, m.SetupPhase, id); err != nil {

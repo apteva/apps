@@ -6,6 +6,43 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 **Fleet v0.10.12** supports the stable host lifecycle and pins **app-sdk v0.107.0**, verified as a descendant of the previous SDK release. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the earlier changes, validation and rollout requirements.
 
+### Tenant incident containment (v0.12.0)
+
+Fleet reaches every tenant with one admin `sk-` key (the control key), sealed
+in its keyring. If an operator account on the main server is compromised, that
+key and everything done through it outlive containment on the main server.
+v0.12.0 closes that gap:
+
+- **`tenant_rotate_control_key`** mints a new key on the tenant, verifies it,
+  stores it with its tenant-side key ID, and only then revokes the old key by
+  its prefix. Each step is persisted (`pending_key_*`, `revoke_key_prefix`), so
+  re-running after a crash resumes the rotation instead of minting another key.
+  It works on every tenant version and voids any key revealed earlier.
+- **`tenant_contain`** rotates the control key, then calls the tenant's
+  `POST /api/security/containment/revoke` to revoke sessions and API keys of
+  the tenant admin (default), `user_ids`, or `all_users`, keeping only the new
+  control key. Outcomes: `confirmed`, `partial` (key rotated; the tenant
+  refused or did not finish containment), `unsupported` (key rotated; the
+  tenant server has no security API) or `failed` (rotation failed).
+  The new key carries the `security.containment` scope; tenant servers that
+  accept that scope let Fleet's key call containment and nothing else
+  privileged. Until a tenant runs such a server, containment there reports
+  `partial`.
+- **`tenant_contain_all`** runs `tenant_contain` on every tenant and reports
+  `complete` only when every tenant is `confirmed`.
+- **`tenant_security_overview` / `tenant_security_events`** are read-only
+  proxies to the tenant's `/api/security/*`; older tenants return
+  `status=unsupported` with their version.
+- **`fleet_incident_report`** lists sensitive actions per tenant in a window
+  (key reveals, admin password resets, remote runs, user/key/connection
+  changes through `tenant_platform_call`, key attaches, rotations, containment).
+- Every audit event now records the real caller: `agent:<id>/thread:<id>`,
+  `app:<name>#<install>`, `subject:<type>:<id>`, or `user:<id> <email>` for
+  panel actions. Events recorded before 0.12.0 carry the legacy `user`.
+- `tenant_reveal_api_key` is disabled unless the Fleet config
+  `allow_api_key_reveal` is true. `tenant_support_login` was removed: the
+  endpoint it called (`POST /api/admin/support_session`) never existed.
+
 ### Updating a connected client installation (v0.11.0)
 
 Use **Connect remote** with the tenant's reachable HTTPS URL, Apteva admin API
@@ -93,7 +130,7 @@ to prevent this drift. No runtime behavior changes from the 0.10.9 source code.
 - Health polling uses eight workers. Startup reconciliation runs after mounting so an unavailable VPS cannot hide the control plane.
 - Snapshots stream by default. Local snapshot staging uses filesystem cloning where available and consistent SQLite copies; compression happens after the tenant restarts. Restores retain the prior directory and restore matching credentials/runtime metadata.
 - The panel provides paginated search, operation recovery, template project selection and local storage cleanup. Child logs rotate on the one-minute maintenance cadence, retaining five 10 MiB tails. Copy/truncate preserves descriptors held by children that outlive Fleet; a small concurrent-write window and temporary growth between ticks remain possible.
-- `tenant_connect`, tenant control, support login, DNS/ingress, templates and optional A2A remain available. Remote monitoring can be suspended and resumed separately from managed process lifecycle.
+- `tenant_connect`, tenant control, DNS/ingress, templates and optional A2A remain available. Remote monitoring can be suspended and resumed separately from managed process lifecycle.
 
 ## Functions deployments in 0.10.9
 
@@ -208,12 +245,14 @@ In the **Fleet** project page panel, all of the above is one screen — the crea
 | `FLEET_DATA_ROOT` | `~/.apteva-fleet` | Root directory under which each tenant's data dir lives. |
 | `FLEET_MASTER_KEY` | auto-generated `<DataDir>/master.key` | base64-encoded 32-byte key for encrypting tenant api_keys at rest. |
 
+App config: `allow_api_key_reveal` (bool, default false) enables `tenant_reveal_api_key`.
+
 ## Schema
 
 Two tables (both prefixed `fleet_`):
 
 - **`fleet_tenants`** — id, slug, kind (`local`/`remote`), base_url, config_dir (local only), encrypted api_key, encrypted setup_token (cleared once attached), owner, current/target version, status, last_seen, last_health.
-- **`fleet_events`** — append-only audit timeline (spawn_start, spawned, spawn_failed, started, stopped, status_changed, key_attached, support_login, health_failed, remote_call). FK-cascaded on tenant delete.
+- **`fleet_events`** — append-only audit timeline (spawn_start, spawned, spawn_failed, started, stopped, status_changed, key_attached, health_failed, remote_call, platform_call, api_key_revealed, admin_password_reset, control_key_rotated, tenant_contained, …) with the caller in `actor`. Retains the newest 1000 events per tenant. FK-cascaded on tenant delete.
 
 Statuses: `starting | setup_pending | active | suspended | stopped | disconnected | failed | deleted`.
 
