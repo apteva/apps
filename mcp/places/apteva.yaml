@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: places
 display_name: Places
-version: 0.1.0
+version: 0.1.1
 description: |
   Personal map of places to try and places you loved: restaurants,
   cafés, bars, hotels, museums, beaches, viewpoints, shops. Save a place
