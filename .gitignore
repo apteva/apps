@@ -38,6 +38,7 @@ mcp/market-intel/market-intel
 mcp/media/media
 mcp/messaging/messaging
 mcp/mqtt/mqtt
+mcp/places/places
 mcp/podcast/podcast
 mcp/redirects/redirects
 mcp/robot/robot

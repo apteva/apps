@@ -1,0 +1,89 @@
+schema: apteva-app/v1
+
+name: places
+display_name: Places
+version: 0.1.0
+description: |
+  Personal map of places to try and places you loved: restaurants,
+  cafés, bars, hotels, museums, beaches, viewpoints, shops. Save a place
+  from a name, a Google Maps link or coordinates and the app fills in
+  address, location, price and Google id (Google Places when a
+  connection is bound, OpenStreetMap otherwise). Tag places, group them
+  into lists, log visits with who you went with, what you ordered or
+  which room you had, and rate them. Agents can answer "somewhere for
+  dinner near here we haven't tried" from your own list. Imports Google
+  Takeout saved places, exports GeoJSON and CSV.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/places
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [places, maps, restaurants, travel, personal]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.connections.execute     # Google Places lookups
+    - platform.connections.manage      # list connections in the settings dialog
+  integrations:
+    - role: google-places
+      kind: integration
+      required: false
+      compatible_slugs: [google-places]
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: places_add,          description: "Save a place from a name (+ city), a Google Maps link, or lat/lng. Looks up details and detects duplicates. Args: name?, url?, city?, lat?, lng?, kind?, status?, tags?, notes?, source_url?, my_rating?, list?, lookup?, allow_duplicate?." }
+    - { name: places_lookup,       description: "Look up candidate places without saving. Args: query, city?, kind?, near_lat?, near_lng?, limit?." }
+    - { name: places_search,       description: "Search saved places by text, kind, status, tag, city, list, distance, price, rating or 'not visited in N days'." }
+    - { name: places_get,          description: "Read one place with its visits and lists. Args: id." }
+    - { name: places_update,       description: "Patch a place, including add_tags / remove_tags. Args: id, ...fields." }
+    - { name: places_delete,       description: "Delete a place and its visits. Args: id." }
+    - { name: places_log_visit,    description: "Log a visit (date, with whom, dishes, spend, rating, details). A to_try place becomes visited. Args: place_id, ...." }
+    - { name: places_delete_visit, description: "Delete one logged visit. Args: visit_id." }
+    - { name: lists_list,          description: "List place lists with counts." }
+    - { name: lists_create,        description: "Create a list. Args: name, description?, color?." }
+    - { name: lists_update,        description: "Rename or describe a list. Args: id, name?, description?, color?." }
+    - { name: lists_delete,        description: "Delete a list; places are kept. Args: id." }
+    - { name: lists_add,           description: "Add places to a list. Args: list_id or list_name, place_ids." }
+    - { name: lists_remove,        description: "Remove places from a list. Args: list_id, place_ids." }
+    - { name: places_import,       description: "Import Google Takeout saved places (JSON or list CSV), GeoJSON or CSV. Args: content, format?, list_name?, status?, lookup?." }
+    - { name: places_export,       description: "Export places as GeoJSON or CSV. Args: format?, status?, list_id?, kind?." }
+    - { name: settings_get,        description: "Read settings: lookup connection and home location." }
+    - { name: settings_set,        description: "Update settings. Args: places_connection_id?, home_lat?, home_lng?, home_label?." }
+    - { name: connections_list,    description: "List Google Places connections available to this project." }
+  ui_panels:
+    - slot: project.page
+      label: Places
+      icon: map-pin
+      entry: /ui/PlacesPanel.mjs
+  publishes:
+    - name: place.added
+      description: A place was saved.
+    - name: place.updated
+      description: A place was updated.
+    - name: place.visited
+      description: A visit was logged.
+    - name: place.deleted
+      description: A place was deleted.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/places
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/places.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
