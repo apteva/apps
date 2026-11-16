@@ -401,6 +401,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				l.stale[d].Add(1)
 				continue
 			}
+			atomicMax(&l.maxAdapterMS, int64(age))
 			// Source timing survives the adapter so partial-frame expiration uses the
 			// samples actually retained by the shared RTP framer.
 			pcm := make([]byte, 64+len(data)-24)

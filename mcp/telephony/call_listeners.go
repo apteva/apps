@@ -21,6 +21,14 @@ const listenerMaxAge = 200 * time.Millisecond
 const listenerMaxFrameBytes = 960 // 20 ms
 const listenerQueueFrames = 12    // combined directions; at most 240 ms aggregate, further bounded by age
 
+// Access checks run beside the audio loop. Audio pauses only when no check has
+// started for this long, so a stuck database read cannot keep a revoked
+// listener hearing the call.
+const listenerUncheckedLimit = 5 * time.Second
+const listenerSlowCheck = 100 * time.Millisecond
+
+var listenerCheckHook func() // tests only: runs at the start of each periodic access check
+
 type listenerAudioFrame struct {
 	data []byte
 	at   time.Time
@@ -38,7 +46,13 @@ type callListener struct {
 	sent               [2]atomic.Int64
 	stale              [2]atomic.Int64
 	trimmed            [2]atomic.Int64
+	unchecked          [2]atomic.Int64
 	maxWriteMS         atomic.Int64
+	maxQueueMS         atomic.Int64 // oldest frame taken from l.audio
+	maxAdapterMS       atomic.Int64 // oldest frame reaching the WebRTC track queue
+	maxCheckMS         atomic.Int64
+	slowChecks         atomic.Int64
+	checkStartedAt     atomic.Int64 // unix ms; start of the last access check that completed
 	mu                 sync.Mutex
 	reason             string
 }
@@ -48,9 +62,10 @@ func (l *callListener) close(reason string) {
 }
 func (l *callListener) closeReason() string { l.mu.Lock(); defer l.mu.Unlock(); return l.reason }
 func (l *callListener) diagnostics() map[string]any {
-	result := map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load(), "coaching": l.coaching.grant.Enabled, "coach_starts": l.coaching.starts.Load(), "coach_received_frames": l.coaching.received.Load(), "coach_dropped_frames": l.coaching.dropped.Load()}
+	result := map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "unchecked_frames": []int64{l.unchecked[0].Load(), l.unchecked[1].Load()}, "max_write_ms": l.maxWriteMS.Load(), "max_queue_ms": l.maxQueueMS.Load(), "max_check_ms": l.maxCheckMS.Load(), "slow_checks": l.slowChecks.Load(), "coaching": l.coaching.grant.Enabled, "coach_starts": l.coaching.starts.Load(), "coach_received_frames": l.coaching.received.Load(), "coach_dropped_frames": l.coaching.dropped.Load()}
 	if l.rtc != nil {
 		result["media_transport"] = "webrtc"
+		result["max_adapter_ms"] = l.maxAdapterMS.Load()
 		result["rtp"] = map[string]rtcMediaSnapshot{"caller": l.rtc.stats[0].snapshot(), "adviser": l.rtc.stats[1].snapshot()}
 		result["coach_rtp"] = l.rtc.coachStats.snapshot()
 		if l.rtc.ice != nil {
@@ -244,6 +259,21 @@ func (a *App) listenerSessionValid(row *callRow, token string) bool {
 	reason, _ := a.listenerSessionCheck(row, token)
 	return reason == ""
 }
+
+// listenerPrincipal rebuilds the principal the way the listen or coach request
+// did: the cached policy, resource grants included, narrowed to that action.
+// The periodic check runs every second per listener, so it must not re-read
+// and re-parse the whole policy when its revision has not changed.
+func listenerPrincipal(project string, identity phoneIdentity, policy *phonePolicy, coaching bool) (*phonePrincipal, error) {
+	p, err := phonePrincipalFromPolicy(project, identity, *policy)
+	if err != nil {
+		return nil, err
+	}
+	if coaching {
+		return p.forAction("call.coach"), nil
+	}
+	return p.forAction("call.listen"), nil
+}
 func (a *App) listenerSessionCheck(row *callRow, token string) (string, int64) {
 	if isTerminalStatus(row.Status) {
 		return "call_ended", 0
@@ -280,17 +310,17 @@ func (a *App) listenerSessionCheck(row *callRow, token string) (string, int64) {
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
 		return "access_revoked", expires
 	}
-	policy, err := a.phonePolicy(row.ProjectID)
+	policy, err := a.cachedPhonePolicy(row.ProjectID)
 	if err != nil {
 		return "policy_lookup_failed", expires
 	}
-	p, err := phonePrincipalFromPolicy(row.ProjectID, identity, policy)
+	p, err := listenerPrincipal(row.ProjectID, identity, policy, coaching)
 	if err != nil || !a.phoneCanListen(p, row) || (coaching && !p.Coach) {
 		return "access_revoked", expires
 	}
 	if providerJSON != "" {
 		var provider phoneAuthProvider
-		if json.Unmarshal([]byte(providerJSON), &provider) != nil || (!phoneProviderStillAllows(policy, provider, "call.listen") || (coaching && !phoneProviderStillAllows(policy, provider, "call.coach"))) {
+		if json.Unmarshal([]byte(providerJSON), &provider) != nil || (!phoneProviderStillAllows(*policy, provider, "call.listen") || (coaching && !phoneProviderStillAllows(*policy, provider, "call.coach"))) {
 			return "access_revoked", expires
 		}
 	}
@@ -499,6 +529,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "listener access denied", 403)
 		return
 	}
+	checked := time.Now()
 	reason, verifiedExpiry := a.listenerSessionCheck(row, token)
 	if reason != "" {
 		status := http.StatusForbidden
@@ -607,6 +638,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		conn = rtc
 		readConn = rtc
 		// Setup can overlap expiry/revocation. Verify again before admitting media.
+		checked = time.Now()
 		current, e := a.db().findCall(id)
 		if e != nil || current == nil {
 			return
@@ -616,6 +648,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	l.checkStartedAt.Store(checked.UnixMilli())
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	auditID := newSecret()
@@ -669,7 +702,10 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
-	defer func() { close(done); <-watcherDone }()
+	audioDone := make(chan struct{})
+	defer func() { close(done); <-watcherDone; <-audioDone }()
+	// Control: periodic access checks, coaching stops and close. Database reads
+	// and the coaching claim lock wait here, never in the audio loop below.
 	go func() {
 		defer close(watcherDone)
 		ticker := time.NewTicker(time.Second)
@@ -697,7 +733,17 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				event, _ := json.Marshal(map[string]any{"type": "coach.stopped", "generation": stopped.generation, "reason": stopped.reason})
 				writer.queueControl(event)
 			case <-ticker.C:
+				started := time.Now()
+				if listenerCheckHook != nil {
+					listenerCheckHook()
+				}
 				current, reason, expiry, e := targetCheck()
+				l.checkStartedAt.Store(started.UnixMilli())
+				took := time.Since(started)
+				atomicMax(&l.maxCheckMS, took.Milliseconds())
+				if took > listenerSlowCheck {
+					l.slowChecks.Add(1)
+				}
 				if e != nil && verifiedExpiry > time.Now().Unix() {
 					if h := a.softphones.lookup(id); h != nil {
 						h.stopCoach(l, "policy_unavailable")
@@ -738,27 +784,43 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 					l.close("access_revoked")
 				}
 				continue
+			}
+		}
+	}()
+	// Audio: only queue reads and socket writes. A slow access check no longer
+	// overflows l.audio; the control goroutine closes l.done to stop it.
+	go func() {
+		defer close(audioDone)
+		for {
+			select {
+			case <-done:
+				return
+			case <-l.done:
+				return
 			case frame := <-l.audio:
 				select {
 				case <-l.done:
-					continue
+					return
 				default:
 				}
 				direction := binary.LittleEndian.Uint32(frame.data[4:])
-				if time.Since(frame.at) > listenerMaxAge {
+				waited := time.Since(frame.at)
+				if waited > listenerMaxAge {
 					l.stale[direction].Add(1)
 					continue
 				}
-				// Recheck termination/revocation on the periodic path, never on the primary media path.
+				atomicMax(&l.maxQueueMS, waited.Milliseconds())
+				if frame.at.UnixMilli()-l.checkStartedAt.Load() > listenerUncheckedLimit.Milliseconds() {
+					l.unchecked[direction].Add(1)
+					continue
+				}
 				started := time.Now()
 				if err := writer.write(ws.OpBinary, frame.data, listenerMaxAge); err != nil {
 					l.close("listener_network_error")
 					closer.Close(ws.StatusGoingAway, l.closeReason())
 					return
 				}
-				elapsed := time.Since(started).Milliseconds()
-				for previous := l.maxWriteMS.Load(); elapsed > previous && !l.maxWriteMS.CompareAndSwap(previous, elapsed); previous = l.maxWriteMS.Load() {
-				}
+				atomicMax(&l.maxWriteMS, time.Since(started).Milliseconds())
 				l.sent[direction].Add(1)
 			}
 		}
@@ -944,7 +1006,7 @@ func (a *App) revokeCallListeners(project string) {
 		}
 	}
 	_ = rows.Close()
-	policy, err := a.phonePolicy(project)
+	policy, err := a.cachedPhonePolicy(project)
 	if err != nil {
 		return
 	}
@@ -958,11 +1020,11 @@ func (a *App) revokeCallListeners(project string) {
 		}
 		var identity phoneIdentity
 		_ = json.Unmarshal([]byte(g.principal), &identity)
-		p, e := phonePrincipalFromPolicy(project, identity, policy)
+		p, e := listenerPrincipal(project, identity, policy, g.coaching)
 		allowed := e == nil && a.phoneCanListen(p, row) && (!g.coaching || p.Coach)
 		if allowed && g.provider != "" {
 			var provider phoneAuthProvider
-			allowed = json.Unmarshal([]byte(g.provider), &provider) == nil && phoneProviderStillAllows(policy, provider, "call.listen") && (!g.coaching || phoneProviderStillAllows(policy, provider, "call.coach"))
+			allowed = json.Unmarshal([]byte(g.provider), &provider) == nil && phoneProviderStillAllows(*policy, provider, "call.listen") && (!g.coaching || phoneProviderStillAllows(*policy, provider, "call.coach"))
 		}
 		if !allowed {
 			_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, g.hash)
