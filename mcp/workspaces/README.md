@@ -1,5 +1,32 @@
 # Workspaces
 
+## v0.7.0
+
+Agents can use a workspace as their computer without shell workarounds:
+
+- `workspace_file_read`, `workspace_file_write`, `workspace_apply_edits` and
+  `workspace_file_list` move exact text through Containers' volume archive
+  transfer (2 MB text files) and support SHA-256 preconditions. Listing runs a
+  short helper outside the agent's PTY session and prunes `.git`,
+  `node_modules` and `.home` by default.
+- `workspace_source_import` lets agents unpack a tar.gz into the workspace.
+- `workspace_command_wait` blocks up to 20 s and returns output since an opaque
+  cursor; `workspace_command_output` reads the same window without waiting.
+  With Containers 0.5.2, command output is published when the command
+  finishes, so while it runs these return status with empty output.
+- Preview tools are no longer app-only, and `workspaces_create` accepts
+  `preview_port`. `workspace_preview_stop` gains `keep_workspace_running`,
+  defaulting to true for agents (preview process only) and false for app
+  callers, so Code keeps its v0.6 behaviour.
+
+New files are written as 0644 and existing files keep their mode and owner.
+Missing parent directories are created with the workspace's umask (0077, so
+0700), matching what `mkdir -p` in the workspace shell produces.
+
+File transfers pause the container for the duration of the copy, as every
+Containers volume archive operation does.
+
+
 ## v0.6.2
 
 Preview Stop succeeds when the workspace was already destroyed, allowing Code
@@ -81,6 +108,10 @@ The product boundary is deliberate:
   runtime health, durable volumes, storage usage, and activity.
 - Stateful PTY-backed asynchronous command history with bounded logs, exit
   status, duration, actor attribution, and cancellation.
+- Agent file tools: line-window reads, whole-file writes, exact-string edits
+  with SHA-256 preconditions, directory listing, and archive import.
+- Blocking command wait and cursor-based incremental output.
+- HTTP previews on a published loopback port, for agents and app callers.
 - Stop/resume, TTL extension, and confirmed permanent destruction.
 - Automatic expiration: stop at `expires_at`, preserve the container and volumes for the
   configured recovery window, then delete them at `delete_at`.
@@ -163,8 +194,9 @@ latest SDK tag so source installation outside the monorepo resolves correctly.
 - Remote execution and archive transfer (Containers currently supports these
   two operations only for local workloads).
 - Interactive PTY sessions.
-- Background preview services and public preview routing.
+- Public preview routing (previews are loopback-only on the Apteva host).
 - Live CPU/RAM telemetry (the backend currently returns limits and volume
   storage usage).
 - Secret injection and selectable network policy.
-- Snapshot/restore, full file browsing, checks, and Git operations.
+- Snapshot/restore, a file browser in the panel, binary file transfer through
+  the agent tools, checks, and Git operations.

@@ -47,10 +47,10 @@ func savePreview(db *sql.DB, p *Preview) error {
 func (a *App) previewTools() []sdk.Tool {
 	id := map[string]any{"workspace_id": strSchema()}
 	return []sdk.Tool{
-		{Name: "workspace_preview_start", Description: "Start a persistent HTTP preview on a workspace provisioned with preview_port. Runs until stopped or workspace TTL expires; argv must bind 0.0.0.0. Returns before readiness.", Exposure: sdk.ToolExposureAppOnly, InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema()}, "env": map[string]any{"type": "object", "additionalProperties": strSchema()}}, []string{"workspace_id", "argv"}), HandlerCtx: a.toolPreviewStart},
-		{Name: "workspace_preview_get", Description: "Fetch preview readiness, mapped URL and execution status.", Exposure: sdk.ToolExposureAppOnly, InputSchema: schemaObject(id, []string{"workspace_id"}), HandlerCtx: a.toolPreviewGet},
-		{Name: "workspace_preview_logs", Description: "Tail bounded container preview logs.", Exposure: sdk.ToolExposureAppOnly, InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "tail": intSchema()}, []string{"workspace_id"}), HandlerCtx: a.toolPreviewLogs},
-		{Name: "workspace_preview_stop", Description: "Stop the preview and its workspace container, retaining its volumes until workspace expiry.", Exposure: sdk.ToolExposureAppOnly, InputSchema: schemaObject(id, []string{"workspace_id"}), HandlerCtx: a.toolPreviewStop},
+		{Name: "workspace_preview_start", Description: "Start a persistent HTTP preview on a workspace provisioned with preview_port. Runs until stopped or workspace TTL expires; argv must bind 0.0.0.0. Returns before readiness.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema()}, "env": map[string]any{"type": "object", "additionalProperties": strSchema()}}, []string{"workspace_id", "argv"}), HandlerCtx: a.toolPreviewStart},
+		{Name: "workspace_preview_get", Description: "Fetch preview readiness, mapped URL and execution status.", InputSchema: schemaObject(id, []string{"workspace_id"}), HandlerCtx: a.toolPreviewGet},
+		{Name: "workspace_preview_logs", Description: "Tail bounded container preview logs.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "tail": intSchema()}, []string{"workspace_id"}), HandlerCtx: a.toolPreviewLogs},
+		{Name: "workspace_preview_stop", Description: "Stop the preview. keep_workspace_running (default true for agents, false for app callers) keeps the workspace container up; otherwise the container stops with its volumes retained.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "keep_workspace_running": boolSchema()}, []string{"workspace_id"}), HandlerCtx: a.toolPreviewStop},
 	}
 }
 func previewContext(c context.Context, app *sdk.AppCtx, args map[string]any) (Actor, *Workspace, error) {
@@ -224,6 +224,24 @@ func (a *App) toolPreviewStop(c context.Context, app *sdk.AppCtx, args map[strin
 	// Preserve idempotent Stop so Code can restart or delete its repository.
 	if w.LifecycleStatus == statusDestroyed {
 		return map[string]any{"workspace": w}, nil
+	}
+	// App callers (Code) own the whole preview workspace and expect Stop to
+	// stop its container. Agents usually keep working in the same workspace,
+	// so for them Stop only ends the preview process unless told otherwise.
+	keep := actor.InstallID <= 0
+	if _, ok := args["keep_workspace_running"]; ok {
+		keep = boolArg(args, "keep_workspace_running")
+	}
+	if keep {
+		unlock := a.lockWorkspace(w.ID)
+		err = a.cancelPreview(app, w)
+		unlock()
+		if err != nil {
+			return nil, err
+		}
+		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.stopped", actor, "Preview stopped; workspace still running", nil)
+		p, _ := getPreview(app.AppDB(), w.ID)
+		return map[string]any{"workspace": w, "preview": p}, nil
 	}
 	w, err = a.stopWorkspace(app, actor, w, "workspace.stopped")
 	return map[string]any{"workspace": w}, err

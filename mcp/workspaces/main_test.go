@@ -32,6 +32,8 @@ type platformStub struct {
 	executionStatus string
 	exitCode        *int
 	volumeArchive   string
+	executionLogs   string
+	exportErr       error
 }
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
@@ -84,7 +86,11 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			"id": "exe_test", "status": "cancelled", "finished_at": nowUTC(),
 		}}
 	case "containers_exec_logs":
-		response = map[string]any{"execution_id": "exe_test", "status": p.executionStatus, "logs": "hello\nworld", "output_bytes": 11}
+		logs := p.executionLogs
+		if logs == "" {
+			logs = "hello\nworld"
+		}
+		response = map[string]any{"execution_id": "exe_test", "status": p.executionStatus, "logs": logs, "output_bytes": len(logs)}
 	case "containers_usage_get":
 		response = map[string]any{"metrics": []map[string]any{{
 			"feature_key": "containers.storage.bytes", "quantity": 2048,
@@ -93,6 +99,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "containers_volume_import":
 		response = map[string]any{"workload_id": "wrk_test", "volume": "workspace", "compressed_bytes": 10}
 	case "containers_volume_export":
+		if p.exportErr != nil {
+			return p.exportErr
+		}
 		archive := p.volumeArchive
 		if archive == "" {
 			archive = "H4sI"
@@ -157,7 +166,7 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.6.2" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.7.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.6.2
+version: 0.7.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -12,6 +12,10 @@ description: |
   export a filtered source snapshot, and acknowledge an applied revision.
   v0.6.2 lets operators and originating apps select an allowlisted custom
   container image per workspace while retaining approved runtime profiles.
+  v0.7.0 makes the workspace usable as an agent computer: text file read,
+  write, list and exact-string edits with SHA-256 preconditions, archive
+  import, a blocking command wait with cursor-based output, and HTTP
+  previews that agents can start and stop themselves.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -46,19 +50,19 @@ provides:
     - prefix: /
   mcp_tools:
     - name: workspace_preview_start
-      description: "Start a persistent container preview on a workspace created with preview_port. App-only. Args: workspace_id, argv, env?."
+      description: "Start a persistent HTTP preview on a workspace created with preview_port; argv must bind 0.0.0.0. Args: workspace_id, argv, env?."
       requires: workspaces.write
     - name: workspace_preview_get
-      description: "Fetch container preview readiness and its published loopback URL. App-only. Args: workspace_id."
+      description: "Fetch preview readiness and its published loopback URL. Args: workspace_id."
       requires: workspaces.read
     - name: workspace_preview_logs
-      description: "Tail bounded container preview logs. App-only. Args: workspace_id, tail?."
+      description: "Tail bounded preview logs. Args: workspace_id, tail?."
       requires: workspaces.read
     - name: workspace_preview_stop
-      description: "Stop a preview and its container, retaining volumes until workspace expiry. App-only. Args: workspace_id."
+      description: "Stop a preview. keep_workspace_running defaults to true for agents (preview process only) and false for app callers (container stops, volumes retained). Args: workspace_id, keep_workspace_running?."
       requires: workspaces.write
     - name: workspaces_create
-      description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
+      description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, preview_port?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
       requires: workspaces.write
     - name: workspaces_list
       description: "List current-project workspaces. Args: status?, include_destroyed?, limit?."
@@ -77,6 +81,27 @@ provides:
       requires: workspaces.read
     - name: workspace_command_cancel
       description: "Cancel one queued or running command. Args: workspace_id, command_id."
+      requires: workspaces.write
+    - name: workspace_command_wait
+      description: "Wait up to wait_ms (default 15000, max 20000) for a command to finish; returns status, output since cursor (published when the command finishes), and the next cursor. Args: workspace_id, command_id, cursor?, wait_ms?."
+      requires: workspaces.read
+    - name: workspace_command_output
+      description: "Read output produced since cursor from a 64 KB window; gap=true means older output was missed. Args: workspace_id, command_id, cursor?."
+      requires: workspaces.read
+    - name: workspace_file_read
+      description: "Read a text file of at most 2 MB under /workspace by 1-based line range; returns content, start/end/total lines and sha256. Args: workspace_id, path, offset?, limit?."
+      requires: workspaces.read
+    - name: workspace_file_write
+      description: "Create or replace a text file of at most 2 MB under /workspace, creating parent directories. Refuses to replace binary, oversized or directory paths. Args: workspace_id, path, content, expected_sha256?, create_only?."
+      requires: workspaces.write
+    - name: workspace_apply_edits
+      description: "Apply ordered exact-string replacements to one text file under /workspace; each old_string must match once unless replace_all. Args: workspace_id, path, edits[{old_string,new_string,replace_all?}], expected_sha256?."
+      requires: workspaces.write
+    - name: workspace_file_list
+      description: "List files and directories under a /workspace path (running workspace). Prunes .git, node_modules and .home by default. Args: workspace_id, path?, max_depth?, name_pattern?, exclude?, limit?."
+      requires: workspaces.read
+    - name: workspace_source_import
+      description: "Extract a tar.gz archive of at most 8 MB into a /workspace path. Requires no active command. Args: workspace_id, archive_base64, path?."
       requires: workspaces.write
     - name: workspace_stop
       description: "Cancel any active command and stop the persistent workspace container while preserving its writable layer and volumes. Args: workspace_id."
@@ -145,7 +170,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.6.2
+    ref: workspaces/v0.7.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health

@@ -32,8 +32,8 @@ Prefer an `argv` array:
 {"workspace_id":"wsp_…","argv":["go","test","./..."]}
 ```
 
-Use `shell_command` only when shell syntax such as pipes or redirection is
-actually required. Never place secrets in commands. Workspaces intentionally
+Use `shell_command` only when shell syntax such as pipes, `cd`, or `export`
+is actually required. Never place secrets in commands. Workspaces intentionally
 does not accept arbitrary environment values.
 
 Commands run through one persistent PTY shell inside the workspace container.
@@ -44,10 +44,56 @@ directory; when supplied, it must remain under `/workspace`. Background services
 also persist while the container runs. Stopping the workspace terminates its
 processes and shell; resume starts a fresh shell in the preserved filesystem.
 
-Use `workspace_command_get` for status and `workspace_command_logs` for bounded
-output. Do not poll in a tight loop. Terminal states are `succeeded`, `failed`,
-`cancelled`, and `timed_out`. If a running command is no longer useful, cancel
-it before starting another.
+After `workspace_command_start`, call `workspace_command_wait` instead of
+polling. It blocks up to `wait_ms` (default 15 s, max 20 s) and returns the
+command status, the output produced since your `cursor`, and the next `cursor`.
+Call it again with that cursor until the status is terminal: `succeeded`,
+`failed`, `cancelled`, or `timed_out`. Output currently becomes available when
+a command finishes, so an empty `output` while it is `running` is normal; keep
+waiting rather than restarting the command. For long-running servers use a
+preview, whose logs are readable while it runs. `workspace_command_output` returns new
+output without waiting; `gap=true` means older output scrolled out of the
+64 KB window. If a running command is no longer useful, cancel it before
+starting another.
+
+## Work with files
+
+Use the file tools for files and keep the shell for running programs. Do not
+write files with heredocs, `echo >`, or `sed -i`.
+
+- `workspace_file_list` shows a directory tree (`path`, `max_depth`,
+  `name_pattern` such as `*.go`). It prunes `.git`, `node_modules` and `.home`
+  unless you pass `exclude`.
+- `workspace_file_read` returns a line window (`offset`, `limit`, 1-based) plus
+  `total_lines` and the whole file's `sha256`. Text files up to 2 MB only; use
+  `head`, `tail` or `grep` through a command for logs and larger files.
+- `workspace_apply_edits` replaces exact strings. Copy `old_string` from what
+  you read, including indentation, with enough context to match once (or set
+  `replace_all`). Pass the `sha256` from your read as `expected_sha256` so the
+  edit fails instead of clobbering a file that changed since.
+- `workspace_file_write` creates or replaces a whole file and creates parent
+  directories. Use `create_only=true` for new files, and `expected_sha256` when
+  replacing one you read.
+- `workspace_source_import` unpacks a tar.gz (max 8 MB) into a directory when
+  no command is running.
+
+Paths are relative to `/workspace`; `/workspace/...` is also accepted. Files
+outside `/workspace` (system files, `/cache`) are reachable only through
+commands. Reads and writes briefly pause the container while the volume is
+transferred.
+
+Use `grep -rn` or `rg` through a command to search file contents.
+
+## Preview a web app
+
+Create the workspace with `preview_port` (the port your server will listen on)
+to publish it on the host. Start the server with `workspace_preview_start`
+(`argv` such as `["bun","run","dev","--host","0.0.0.0"]`); it must bind
+`0.0.0.0`. Poll `workspace_preview_get` until `status` is `live`, then use its
+`url` (a loopback address on the Apteva host). `workspace_preview_logs` shows
+server output. `workspace_preview_stop` ends the server and keeps the workspace
+running; pass `keep_workspace_running=false` to stop the container too. A
+preview runs outside your shell session, so it does not block commands.
 
 ## Lifecycle
 

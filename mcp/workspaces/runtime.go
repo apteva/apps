@@ -31,8 +31,8 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		return nil, errors.New("authenticated app caller required")
 	}
 	previewPort := intArg(args, "preview_port", 0)
-	if previewPort < 0 || previewPort > 65535 || (previewPort > 0 && !allowArchive) {
-		return nil, errors.New("preview_port must be 1-65535 and requires an authenticated app caller")
+	if previewPort < 0 || previewPort > 65535 {
+		return nil, errors.New("preview_port must be 1-65535")
 	}
 	name, err := normalizeWorkspaceName(strArg(args, "name"))
 	if err != nil {

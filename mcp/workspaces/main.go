@@ -40,7 +40,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.6.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.7.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -72,12 +72,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		"image":       strSchema(),
 		"ttl_minutes": intSchema(), "owner_label": strSchema(), "repo_label": strSchema(),
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
+		"preview_port": intSchema(),
 	}
 	appCreateProps := make(map[string]any, len(createProps)+8)
 	for key, value := range createProps {
 		appCreateProps[key] = value
 	}
-	appCreateProps["preview_port"] = intSchema()
 	appCreateProps["owner_agent_id"] = intSchema()
 	appCreateProps["owner_thread_id"] = strSchema()
 	appCreateProps["resource_kind"] = strSchema()
@@ -86,7 +86,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
 	return append(a.previewTools(), []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile with an optional allowlisted, digest-pinned image override.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile with an optional allowlisted, digest-pinned image override. Set preview_port to publish one container port for workspace_preview_start.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
 		{Name: "workspace_command_start", Description: "Run one asynchronous command through the workspace's persistent PTY shell session.", InputSchema: schemaObject(map[string]any{
@@ -96,6 +96,32 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "workspace_command_get", Description: "Refresh and fetch one workspace command.", InputSchema: schemaObject(commandID, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandGet},
 		{Name: "workspace_command_logs", Description: "Tail bounded logs for one workspace command.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "command_id": strSchema(), "tail": intSchema()}, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandLogs},
 		{Name: "workspace_command_cancel", Description: "Cancel one queued or running workspace command.", InputSchema: schemaObject(commandID, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandCancel},
+		{Name: "workspace_command_wait", Description: "Wait up to wait_ms (default 15000, max 20000) for a command to finish, then return its status and output since cursor.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "command_id": strSchema(), "cursor": strSchema(), "wait_ms": intSchema(),
+		}, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandWait},
+		{Name: "workspace_command_output", Description: "Return command output produced since cursor (64 KB window); gap=true means older output was missed.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "command_id": strSchema(), "cursor": strSchema(),
+		}, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandOutput},
+		{Name: "workspace_file_read", Description: "Read a text file (max 2 MB) from /workspace by line range. Returns content, line numbers and sha256.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "path": strSchema(), "offset": intSchema(), "limit": intSchema(),
+		}, []string{"workspace_id", "path"}), HandlerCtx: a.toolFileRead},
+		{Name: "workspace_file_write", Description: "Create or replace a text file (max 2 MB) under /workspace; parent directories are created.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "path": strSchema(), "content": strSchema(),
+			"expected_sha256": strSchema(), "create_only": boolSchema(),
+		}, []string{"workspace_id", "path", "content"}), HandlerCtx: a.toolFileWrite},
+		{Name: "workspace_apply_edits", Description: "Apply ordered exact-string replacements to one text file under /workspace.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "path": strSchema(), "expected_sha256": strSchema(),
+			"edits": map[string]any{"type": "array", "minItems": 1, "maxItems": 100, "items": schemaObject(map[string]any{
+				"old_string": strSchema(), "new_string": strSchema(), "replace_all": boolSchema(),
+			}, []string{"old_string", "new_string"})},
+		}, []string{"workspace_id", "path", "edits"}), HandlerCtx: a.toolApplyEdits},
+		{Name: "workspace_file_list", Description: "List files and directories under a /workspace path.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "path": strSchema(), "max_depth": intSchema(), "name_pattern": strSchema(),
+			"exclude": map[string]any{"type": "array", "items": strSchema(), "maxItems": 64}, "limit": intSchema(),
+		}, []string{"workspace_id"}), HandlerCtx: a.toolFileList},
+		{Name: "workspace_source_import", Description: "Extract a tar.gz archive (max 8 MB) into a /workspace path. Requires no active command.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "archive_base64": strSchema(), "path": strSchema(),
+		}, []string{"workspace_id", "archive_base64"}), HandlerCtx: a.toolSourceImport},
 		{Name: "workspace_stop", Description: "Cancel active work and stop a workspace while preserving volumes.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolStop},
 		{Name: "workspace_resume", Description: "Resume a stopped workspace whose TTL is active.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolResume},
 		{Name: "workspace_extend", Description: "Set a new workspace TTL relative to now.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "ttl_minutes": intSchema()}, []string{"workspace_id", "ttl_minutes"}), HandlerCtx: a.toolExtend},
@@ -220,6 +246,25 @@ func (a *App) toolCommandCancel(callCtx context.Context, app *sdk.AppCtx, args m
 		return nil, err
 	}
 	return map[string]any{"command": c}, nil
+}
+
+func (a *App) toolCommandWait(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	_, _, c, err := commandContext(callCtx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	return a.waitCommand(callCtx, app, c, strArg(args, "cursor"), intArg(args, "wait_ms", 15000))
+}
+
+func (a *App) toolCommandOutput(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	_, _, c, err := commandContext(callCtx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	if refreshed, err := a.refreshCommand(app, c); err == nil {
+		c = refreshed
+	}
+	return a.commandOutput(app, c, strArg(args, "cursor"))
 }
 
 func commandContext(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (Actor, *Workspace, *Command, error) {
