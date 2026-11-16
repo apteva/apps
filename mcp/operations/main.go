@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: operations
 display_name: Operations
-version: 0.2.1
+version: 0.3.0
 description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work, several brands on shared resources.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/operations
@@ -41,6 +41,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  ui_panels:
+    - slot: project.page
+      label: Operations
+      icon: clipboard-check
+      entry: /ui/OperationsPanel.mjs
   mcp_tools:
     - { name: brands_upsert,       description: "Create or update a brand (name, contacts, job-number prefix, voice)." }
     - { name: brands_list,         description: "List brands." }
