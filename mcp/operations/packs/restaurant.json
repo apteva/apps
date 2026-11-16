@@ -1,0 +1,117 @@
+{
+  "key": "restaurant",
+  "name": "Restaurant",
+  "version": "0.1.0",
+  "description": "Everything around the service: table reservations matched to seats, takeaway orders with a realistic ready time, daily prep runs, opening and closing checklists and food-safety temperature logs. Live service and payments stay in the POS.",
+  "setup": "Create the restaurant as an own site with opening hours and timezone. Add tables as space resources with quals [table], zone (dining, terrace) and capacity = seats; ovens as equipment with quals [oven]; staff as persons with quals (cook, server, manager) and shifts.",
+  "forms": [
+    {
+      "key": "reservation_intake",
+      "name": "Reservation details",
+      "purpose": "intake",
+      "schema": {"fields": [
+        {"key": "party_size", "label": "Guests", "type": "number", "required": true, "min": 1, "max": 40},
+        {"key": "occasion", "label": "Occasion", "type": "choice", "options": ["none", "birthday", "anniversary", "business", "other"]},
+        {"key": "allergies", "label": "Allergies or dietary needs", "type": "text"},
+        {"key": "high_chair", "label": "High chair needed", "type": "bool"}
+      ]}
+    },
+    {
+      "key": "temperature_log",
+      "name": "Temperature log",
+      "purpose": "compliance",
+      "schema": {"fields": [
+        {"key": "unit", "label": "Fridge / freezer", "type": "text", "required": true},
+        {"key": "temp_c", "label": "Temperature (°C)", "type": "number", "required": true, "min": -40, "max": 20},
+        {"key": "within_limits", "label": "Within limits", "type": "bool", "required": true},
+        {"key": "action_taken", "label": "Action taken if not", "type": "text"}
+      ]}
+    },
+    {
+      "key": "opening_checklist",
+      "name": "Opening checklist",
+      "purpose": "checklist",
+      "schema": {"fields": [
+        {"key": "fridges_checked", "label": "Fridge temperatures logged", "type": "bool", "required": true},
+        {"key": "surfaces_sanitised", "label": "Prep surfaces sanitised", "type": "bool", "required": true},
+        {"key": "allergen_board", "label": "Allergen board up to date", "type": "bool", "required": true},
+        {"key": "deliveries_checked", "label": "Deliveries checked in", "type": "bool"}
+      ]}
+    },
+    {
+      "key": "closing_checklist",
+      "name": "Closing checklist",
+      "purpose": "checklist",
+      "schema": {"fields": [
+        {"key": "food_labelled", "label": "Food covered, labelled and dated", "type": "bool", "required": true},
+        {"key": "equipment_off", "label": "Ovens and grills off", "type": "bool", "required": true},
+        {"key": "floors_cleaned", "label": "Floors cleaned", "type": "bool", "required": true},
+        {"key": "waste_out", "label": "Waste out", "type": "bool", "required": true}
+      ]}
+    }
+  ],
+  "work_types": [
+    {
+      "key": "reservation",
+      "name": "Table reservation",
+      "mode": "at_site",
+      "phases": ["intake", "schedule", "execute", "closed"],
+      "intake_form_key": "reservation_intake",
+      "default_duration_min": 105,
+      "buffer_min": 15,
+      "requirements": [{"kind": "space", "quals": ["table"], "capacity_from": "party_size", "role": "table"}],
+      "statuses": [{"key": "seated", "label": "Seated", "phase": "execute"}],
+      "playbook": "Ask the number of guests, date and time, name and phone, and allergies. Offer the nearest times schedule_suggest returns (it picks the smallest table that fits). Parties of 8+ are passed to the manager with needs_owner. Mark no-shows with slots_update missed."
+    },
+    {
+      "key": "takeaway_order",
+      "name": "Takeaway order",
+      "mode": "fulfilment",
+      "phases": ["intake", "schedule", "execute", "closed"],
+      "default_duration_min": 15,
+      "requirements": [{"kind": "person", "quals": ["cook"], "role": "cook"}, {"kind": "equipment", "quals": ["oven"]}],
+      "playbook": "Price the order from the menu items with quote_build, read back the total, then book the first slot: its end time is the pickup time to give the customer."
+    },
+    {
+      "key": "prep_run",
+      "name": "Prep run",
+      "mode": "production",
+      "phases": ["schedule", "execute", "closed"],
+      "default_duration_min": 60,
+      "requirements": [{"kind": "person", "quals": ["cook"], "role": "cook"}],
+      "playbook": "Generated each morning from an agreement. Adjust quantities to tonight's reservations before the run starts."
+    },
+    {
+      "key": "opening",
+      "name": "Opening routine",
+      "mode": "internal",
+      "phases": ["schedule", "execute", "closed"],
+      "default_duration_min": 30,
+      "requirements": [{"kind": "person", "role": "opener"}],
+      "required_forms": {"closed": ["opening_checklist"]}
+    },
+    {
+      "key": "closing",
+      "name": "Closing routine",
+      "mode": "internal",
+      "phases": ["schedule", "execute", "closed"],
+      "default_duration_min": 30,
+      "requirements": [{"kind": "person", "role": "closer"}],
+      "required_forms": {"closed": ["closing_checklist"]}
+    }
+  ],
+  "rate_items": [
+    {"code": "PIZZA_MARGHERITA", "name": "Pizza Margherita", "pricing": {"mode": "per_unit", "unit": "pizza", "unit_cents": 1100}, "cost_cents": 280, "duration": {"per_unit_min": 4},
+     "materials": [{"sku": "DOUGH-BALL", "qty_per_unit": 1}, {"sku": "MOZZARELLA-G", "qty_per_unit": 120}]},
+    {"code": "PIZZA_DIAVOLA", "name": "Pizza Diavola", "pricing": {"mode": "per_unit", "unit": "pizza", "unit_cents": 1300}, "cost_cents": 340, "duration": {"per_unit_min": 4},
+     "materials": [{"sku": "DOUGH-BALL", "qty_per_unit": 1}, {"sku": "MOZZARELLA-G", "qty_per_unit": 120}, {"sku": "SALAMI-G", "qty_per_unit": 50}]},
+    {"code": "TIRAMISU", "name": "Tiramisu", "pricing": {"mode": "per_unit", "unit": "portion", "unit_cents": 650}, "cost_cents": 150},
+    {"code": "PREP_DOUGH", "name": "Dough batch (40 balls)", "pricing": {"mode": "per_unit", "unit": "batch", "unit_cents": 0}, "cost_cents": 900, "duration": {"per_unit_min": 25},
+     "materials": [{"sku": "FLOUR-KG", "qty_per_unit": 10}]},
+    {"code": "PREP_SAUCE", "name": "Tomato sauce batch", "pricing": {"mode": "per_unit", "unit": "batch", "unit_cents": 0}, "cost_cents": 600, "duration": {"per_unit_min": 20}}
+  ],
+  "modifiers": [
+    {"key": "delivery_fee", "name": "Delivery fee", "kind": "fee", "when": {"flags": ["delivery"], "work_types": ["takeaway_order"]}, "amount": {"cents": 300}}
+  ],
+  "policies": {"currency": "EUR", "max_discount_pct": 10}
+}

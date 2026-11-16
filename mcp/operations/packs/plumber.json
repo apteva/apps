@@ -1,0 +1,123 @@
+{
+  "key": "plumber",
+  "name": "Plumbing & heating",
+  "version": "0.1.0",
+  "description": "Field service: emergencies, quoted repairs and installs at the customer's address, boiler servicing on agreements. Flat-rate price book with after-hours and weekend surcharges.",
+  "setup": "Add your plumbers as person resources with quals [plumber] (and gas_safe for boiler work), set their shifts and home location, adjust prices with config_upsert.",
+  "forms": [
+    {
+      "key": "plumbing_intake",
+      "name": "Plumbing request",
+      "purpose": "intake",
+      "schema": {"fields": [
+        {"key": "issue", "label": "What's the problem?", "type": "choice", "required": true,
+         "options": ["leak", "burst_pipe", "blocked_drain", "no_hot_water", "toilet", "tap", "install", "boiler", "other"]},
+        {"key": "description", "label": "Describe it", "type": "text", "required": true},
+        {"key": "water_shut_off", "label": "Is the water shut off?", "type": "bool"},
+        {"key": "property_type", "label": "Property", "type": "choice", "options": ["house", "flat", "commercial"]},
+        {"key": "photos", "label": "Photos", "type": "photo"}
+      ]}
+    },
+    {
+      "key": "job_report",
+      "name": "Job report",
+      "purpose": "signoff",
+      "schema": {"fields": [
+        {"key": "diagnosis", "label": "Diagnosis", "type": "text", "required": true},
+        {"key": "work_done", "label": "Work done", "type": "text", "required": true},
+        {"key": "after_photos", "label": "After photos", "type": "photo", "required": true},
+        {"key": "customer_signature", "label": "Customer signature", "type": "signature"},
+        {"key": "follow_up_needed", "label": "Follow-up needed", "type": "bool"}
+      ]}
+    },
+    {
+      "key": "boiler_service_record",
+      "name": "Boiler service record",
+      "purpose": "inspection",
+      "schema": {"fields": [
+        {"key": "flue_check", "label": "Flue check passed", "type": "bool", "required": true},
+        {"key": "co_ppm", "label": "CO reading (ppm)", "type": "number", "required": true, "min": 0, "max": 1000},
+        {"key": "pressure_bar", "label": "System pressure (bar)", "type": "number", "required": true, "min": 0, "max": 4},
+        {"key": "notes", "label": "Notes", "type": "text"}
+      ]}
+    }
+  ],
+  "work_types": [
+    {
+      "key": "emergency",
+      "name": "Emergency call-out",
+      "mode": "at_customer",
+      "phases": ["intake", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "plumbing_intake",
+      "default_duration_min": 90,
+      "buffer_min": 30,
+      "requirements": [{"kind": "person", "quals": ["plumber"], "count": 1, "role": "plumber"}],
+      "priority_rules": [
+        {"keywords": ["burst", "flood", "gushing", "sewage", "ceiling", "no water"], "priority": "p1"},
+        {"keywords": ["leak", "no_hot_water", "no hot water"], "priority": "p2"}
+      ],
+      "sla": {"p1": 240, "p2": 1440},
+      "required_forms": {"bill": ["job_report"]},
+      "playbook": "Safety first: if water is pouring, tell the caller where to shut the stopcock and to switch off electrics near water. Gas smell is not plumbing: tell them to leave and call the gas emergency line. Price with CALLOUT_EMERGENCY plus the likely repair item; emergencies are booked without a quote, so tell the caller the call-out price before booking. Book the earliest slot inside the SLA."
+    },
+    {
+      "key": "repair",
+      "name": "Repair (quoted)",
+      "mode": "at_customer",
+      "phases": ["intake", "quote", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "plumbing_intake",
+      "default_duration_min": 90,
+      "buffer_min": 30,
+      "requirements": [{"kind": "person", "quals": ["plumber"], "count": 1, "role": "plumber"}],
+      "priority_rules": [{"keywords": ["leak"], "priority": "p2"}],
+      "sla": {"p2": 2880, "p3": 7200},
+      "quote_policy": {"auto_approve_max_cents": 60000},
+      "required_forms": {"bill": ["job_report"]},
+      "playbook": "Ask for photos, pick the matching flat-rate items with quote_build, send the quote, and book once the customer accepts. If unsure what's wrong, quote DIAGNOSTIC_VISIT only."
+    },
+    {
+      "key": "install",
+      "name": "Installation",
+      "mode": "at_customer",
+      "phases": ["intake", "quote", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "plumbing_intake",
+      "default_duration_min": 240,
+      "buffer_min": 30,
+      "requirements": [{"kind": "person", "quals": ["plumber"], "count": 1, "role": "plumber"}],
+      "quote_policy": {"auto_approve_max_cents": 150000},
+      "required_forms": {"bill": ["job_report"]},
+      "playbook": "Installs always need a quote. Confirm access, existing fittings and photos before quoting."
+    },
+    {
+      "key": "boiler_service",
+      "name": "Annual boiler service",
+      "mode": "at_customer",
+      "phases": ["schedule", "execute", "bill", "closed"],
+      "default_duration_min": 60,
+      "buffer_min": 30,
+      "requirements": [{"kind": "person", "quals": ["plumber", "gas_safe"], "count": 1, "role": "engineer"}],
+      "required_forms": {"bill": ["boiler_service_record"]},
+      "playbook": "Usually generated by an agreement. Remind the customer the day before; the service record is mandatory."
+    }
+  ],
+  "rate_items": [
+    {"code": "CALLOUT", "name": "Call-out (first 30 min)", "pricing": {"mode": "flat", "unit_cents": 8900}, "cost_cents": 2500, "duration": {"fixed_min": 30}},
+    {"code": "CALLOUT_EMERGENCY", "name": "Emergency call-out (first 30 min)", "pricing": {"mode": "flat", "unit_cents": 14900}, "cost_cents": 3500, "duration": {"fixed_min": 30}},
+    {"code": "DIAGNOSTIC_VISIT", "name": "Diagnostic visit", "pricing": {"mode": "flat", "unit_cents": 7900}, "cost_cents": 2500, "duration": {"fixed_min": 45}},
+    {"code": "LABOUR_HOUR", "name": "Additional labour", "pricing": {"mode": "hourly", "unit": "hour", "unit_cents": 6500}, "cost_cents": 3000, "duration": {"per_unit_min": 60}},
+    {"code": "LEAK_REPAIR", "name": "Leak repair (accessible pipe)", "pricing": {"mode": "flat", "unit_cents": 15000}, "cost_cents": 4500, "duration": {"fixed_min": 60},
+     "materials": [{"sku": "PIPE-FITTING-15MM", "qty_per_unit": 2}]},
+    {"code": "DRAIN_UNBLOCK", "name": "Drain unblocking", "pricing": {"mode": "flat", "unit_cents": 12000}, "cost_cents": 3000, "duration": {"fixed_min": 60}},
+    {"code": "TAP_REPLACE", "name": "Replace a tap", "pricing": {"mode": "per_unit", "unit": "tap", "unit_cents": 11000}, "cost_cents": 4000, "duration": {"per_unit_min": 45}},
+    {"code": "WATER_HEATER_INSTALL", "name": "Water heater installation", "pricing": {"mode": "flat", "unit_cents": 120000}, "cost_cents": 70000,
+     "duration": {"fixed_min": 300}, "requirements": [{"kind": "person", "quals": ["plumber"], "count": 2}]},
+    {"code": "BATHROOM_REFIT", "name": "Bathroom refit", "pricing": {"mode": "quote_only"}, "duration": {"fixed_min": 480}},
+    {"code": "BOILER_SERVICE", "name": "Boiler service", "pricing": {"mode": "flat", "unit_cents": 9900}, "cost_cents": 3000, "duration": {"fixed_min": 60},
+     "requirements": [{"kind": "person", "quals": ["gas_safe"]}]}
+  ],
+  "modifiers": [
+    {"key": "after_hours", "name": "After-hours surcharge (19:00–07:00)", "kind": "surcharge", "when": {"hour_from": 19, "hour_to": 7}, "amount": {"pct": 50}},
+    {"key": "weekend", "name": "Weekend surcharge", "kind": "surcharge", "when": {"weekdays": [6, 7]}, "amount": {"pct": 25}}
+  ],
+  "policies": {"currency": "EUR", "auto_quote_max_cents": 80000, "max_discount_pct": 10, "min_margin_pct": 30}
+}

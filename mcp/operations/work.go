@@ -1,0 +1,867 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"time"
+)
+
+// appCaller calls a sibling app's tool (crm, billing). nil in tests or
+// when the platform is unavailable; bridges then degrade gracefully.
+type appCaller func(app, tool string, input map[string]any, out any) error
+
+type Work struct {
+	ID              int64           `json:"id"`
+	Number          string          `json:"number"`
+	WorkTypeID      int64           `json:"work_type_id"`
+	WorkType        string          `json:"work_type"`
+	Mode            string          `json:"mode"`
+	Phase           string          `json:"phase"`
+	Status          string          `json:"status"`
+	HoldFromStatus  string          `json:"hold_from_status,omitempty"`
+	Priority        string          `json:"priority"`
+	Source          string          `json:"source"`
+	CRMContactID    *int64          `json:"crm_contact_id,omitempty"`
+	CustomerName    string          `json:"customer_name"`
+	CustomerEmail   string          `json:"customer_email"`
+	CustomerPhone   string          `json:"customer_phone"`
+	SiteID          *int64          `json:"site_id"`
+	ObjectIDs       []int64         `json:"object_ids"`
+	PartySize       int             `json:"party_size"`
+	Summary         string          `json:"summary"`
+	Intake          map[string]any  `json:"intake"`
+	Custom          json.RawMessage `json:"custom"`
+	AgreementID     *int64          `json:"agreement_id,omitempty"`
+	ParentID        *int64          `json:"parent_id,omitempty"`
+	DurationMin     int             `json:"duration_min"`
+	Currency        string          `json:"currency"`
+	EstimateCents   int64           `json:"estimate_cents"`
+	QuoteStatus     string          `json:"quote_status"`
+	QuoteAcceptedAt string          `json:"quote_accepted_at,omitempty"`
+	InvoiceRef      string          `json:"invoice_ref,omitempty"`
+	InvoicedCents   int64           `json:"invoiced_cents"`
+	PaidAt          string          `json:"paid_at,omitempty"`
+	SLADueAt        string          `json:"sla_due_at,omitempty"`
+	CreatedAt       string          `json:"created_at"`
+	UpdatedAt       string          `json:"updated_at"`
+	ClosedAt        string          `json:"closed_at,omitempty"`
+}
+
+const workCols = `w.id,w.number,w.work_type_id,t.key,w.mode,w.phase,w.status,w.hold_from_status,w.priority,w.source,w.crm_contact_id,
+	w.customer_name,w.customer_email,w.customer_phone,w.site_id,w.object_ids_json,w.party_size,w.summary,w.intake_json,w.custom_json,
+	w.agreement_id,w.parent_id,w.duration_min,w.currency,w.estimate_cents,w.quote_status,w.quote_accepted_at,w.invoice_ref,
+	w.invoiced_cents,w.paid_at,w.sla_due_at,w.created_at,w.updated_at,w.closed_at`
+
+const workFrom = ` FROM work w JOIN work_types t ON t.id=w.work_type_id`
+
+func scanWork(s scanner) (*Work, error) {
+	var w Work
+	var crm, site, agr, parent sql.NullInt64
+	var objs, intake, custom string
+	var qa, paid, sla, closed sql.NullString
+	if err := s.Scan(&w.ID, &w.Number, &w.WorkTypeID, &w.WorkType, &w.Mode, &w.Phase, &w.Status, &w.HoldFromStatus, &w.Priority, &w.Source,
+		&crm, &w.CustomerName, &w.CustomerEmail, &w.CustomerPhone, &site, &objs, &w.PartySize, &w.Summary, &intake, &custom,
+		&agr, &parent, &w.DurationMin, &w.Currency, &w.EstimateCents, &w.QuoteStatus, &qa, &w.InvoiceRef,
+		&w.InvoicedCents, &paid, &sla, &w.CreatedAt, &w.UpdatedAt, &closed); err != nil {
+		return nil, err
+	}
+	if crm.Valid {
+		w.CRMContactID = &crm.Int64
+	}
+	if site.Valid {
+		w.SiteID = &site.Int64
+	}
+	if agr.Valid {
+		w.AgreementID = &agr.Int64
+	}
+	if parent.Valid {
+		w.ParentID = &parent.Int64
+	}
+	w.ObjectIDs = []int64{}
+	decodeInto(objs, &w.ObjectIDs)
+	w.Intake = map[string]any{}
+	decodeInto(intake, &w.Intake)
+	w.Custom = json.RawMessage(custom)
+	w.QuoteAcceptedAt, w.PaidAt, w.SLADueAt, w.ClosedAt = qa.String, paid.String, sla.String, closed.String
+	return &w, nil
+}
+
+func getWork(db *sql.DB, pid string, id int64) (*Work, error) {
+	return scanWork(db.QueryRow(`SELECT `+workCols+workFrom+` WHERE w.project_id=? AND w.id=?`, pid, id))
+}
+
+func getWorkByRef(db *sql.DB, pid string, args map[string]any) (*Work, error) {
+	if id := int64Arg(args, "work_id"); id > 0 {
+		w, err := getWork(db, pid, id)
+		return w, notFound(err, "work")
+	}
+	if n := stringArg(args, "number"); n != "" {
+		w, err := scanWork(db.QueryRow(`SELECT `+workCols+workFrom+` WHERE w.project_id=? AND w.number=?`, pid, n))
+		return w, notFound(err, "work")
+	}
+	return nil, errors.New("work_id or number required")
+}
+
+// ─── intake ─────────────────────────────────────────────────────────
+
+type IntakeResult struct {
+	Work     *Work        `json:"work"`
+	Quote    *PriceResult `json:"price,omitempty"`
+	Missing  []string     `json:"missing_answers,omitempty"`
+	Playbook string       `json:"playbook,omitempty"`
+	CRMError string       `json:"crm_error,omitempty"`
+}
+
+func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*IntakeResult, error) {
+	wt, err := getWorkType(db, pid, 0, stringArg(args, "work_type"))
+	if err != nil {
+		return nil, notFound(err, "work type "+stringArg(args, "work_type"))
+	}
+	if !wt.Active {
+		return nil, fmt.Errorf("work type %s is inactive", wt.Key)
+	}
+	answers := objectArg(args, "answers")
+	if answers == nil {
+		answers = map[string]any{}
+	}
+	res := &IntakeResult{Playbook: wt.Playbook}
+	if wt.IntakeFormKey != "" {
+		f, err := getForm(db, pid, wt.IntakeFormKey)
+		if err != nil {
+			return nil, notFound(err, "intake form")
+		}
+		missing, invalid := checkFormData(f, answers, false)
+		if len(invalid) > 0 {
+			return nil, fmt.Errorf("invalid answers: %s", strings.Join(invalid, "; "))
+		}
+		res.Missing = missing
+	}
+	customer := objectArg(args, "customer")
+	if customer == nil {
+		customer = map[string]any{}
+	}
+	name, email, phone := stringArg(customer, "name"), strings.ToLower(stringArg(customer, "email")), stringArg(customer, "phone")
+	crmID := int64Arg(customer, "crm_contact_id")
+	if crmID == 0 && call != nil && (email != "" || phone != "") {
+		kind, value := "email", email
+		if email == "" {
+			kind, value = "phone", phone
+		}
+		var got struct {
+			Contact struct {
+				ID int64 `json:"id"`
+			} `json:"contact"`
+		}
+		if err := call("crm", "contacts_upsert_by_channel", map[string]any{"kind": kind, "value": value,
+			"defaults": map[string]any{"display_name": name}, "source": "operations"}, &got); err != nil {
+			res.CRMError = err.Error()
+		} else {
+			crmID = got.Contact.ID
+		}
+	}
+
+	siteID := int64Arg(args, "site_id")
+	if siteID == 0 && stringArg(args, "address") != "" {
+		s, err := upsertSite(db, pid, map[string]any{"kind": "customer", "name": firstNonEmpty(name, stringArg(args, "address")),
+			"address": stringArg(args, "address"), "lat": args["lat"], "lng": args["lng"], "crm_contact_id": nilIfZero(crmID)})
+		if err != nil {
+			return nil, err
+		}
+		siteID = s.ID
+	}
+	if siteID == 0 && wt.Mode != "at_customer" {
+		// Premises work defaults to the business's only own site.
+		var only int64
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(id),0) FROM sites WHERE project_id=? AND kind='own'`, pid).Scan(&n, &only)
+		if n == 1 {
+			siteID = only
+		}
+	}
+	if siteID > 0 {
+		if _, err := getSite(db, pid, siteID); err != nil {
+			return nil, notFound(err, "site")
+		}
+	}
+	if wt.Mode == "at_customer" && siteID == 0 {
+		return nil, errors.New("at_customer work needs site_id or address")
+	}
+	summary := stringArg(args, "summary")
+	priority := stringArg(args, "priority")
+	if priority == "" {
+		priority = derivePriority(wt, summary, answers)
+	}
+	partySize := intArg(args, "party_size", 0)
+	if partySize == 0 {
+		partySize = intArg(answers, "party_size", 0)
+	}
+	currency := strings.ToUpper(firstNonEmpty(stringArg(args, "currency"), policyString(db, pid, "currency", "EUR")))
+	now := clock()
+	var sla any
+	if mins, ok := wt.SLA[priority]; ok && mins > 0 {
+		sla = fmtTime(now.Add(time.Duration(mins) * time.Minute))
+	}
+	phase := wt.Phases[0]
+	status := firstStatus(wt, phase)
+	number, err := nextNumber(db, pid)
+	if err != nil {
+		return nil, err
+	}
+	objIDs := int64sArg(args, "object_ids")
+	ts := fmtTime(now)
+	r, err := db.Exec(`INSERT INTO work(project_id,number,work_type_id,mode,phase,status,priority,source,crm_contact_id,customer_name,customer_email,
+		customer_phone,site_id,object_ids_json,party_size,summary,intake_json,custom_json,agreement_id,parent_id,duration_min,currency,sla_due_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		pid, number, wt.ID, wt.Mode, phase, status, priority, firstNonEmpty(stringArg(args, "source"), "agent"), nilIfZero(crmID), name, email, phone,
+		nilIfZero(siteID), jsonOr(objIDs, "[]"), partySize, summary, mustJSON(answers), jsonOr(objectArg(args, "custom"), "{}"),
+		nilIfZero(int64Arg(args, "agreement_id")), nilIfZero(int64Arg(args, "parent_id")), wt.DefaultDurationMin, currency, sla, ts, ts)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := r.LastInsertId()
+	if wt.IntakeFormKey != "" && len(answers) > 0 {
+		f, _ := getForm(db, pid, wt.IntakeFormKey)
+		if f != nil {
+			_, _ = db.Exec(`INSERT INTO form_responses(project_id,form_key,form_version,work_id,site_id,responder,data_json,submitted_at) VALUES(?,?,?,?,?,?,?,?)`,
+				pid, f.Key, f.Version, id, nilIfZero(siteID), "intake", mustJSON(answers), ts)
+		}
+	}
+	_ = logEvent(db, pid, id, stringArg(args, "actor"), "created", "", status, map[string]any{"priority": priority, "source": stringArg(args, "source")})
+	w, err := getWork(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if items := parseItems(args["items"]); len(items) > 0 {
+		pr, err := buildEstimate(db, pid, w, wt, items, args)
+		if err != nil {
+			return nil, err
+		}
+		res.Quote = pr
+		w, _ = getWork(db, pid, id)
+	}
+	res.Work = w
+	return res, nil
+}
+
+func derivePriority(wt *WorkType, summary string, answers map[string]any) string {
+	text := strings.ToLower(summary + " " + mustJSON(answers))
+	for _, r := range wt.PriorityRules {
+		for _, k := range r.Keywords {
+			if k != "" && strings.Contains(text, strings.ToLower(k)) {
+				return r.Priority
+			}
+		}
+	}
+	return "p3"
+}
+
+func nextNumber(db *sql.DB, pid string) (string, error) {
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=?`, pid).Scan(&n); err != nil {
+		return "", err
+	}
+	for {
+		n++
+		num := fmt.Sprintf("W-%05d", n)
+		var exists int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND number=?`, pid, num).Scan(&exists)
+		if exists == 0 {
+			return num, nil
+		}
+	}
+}
+
+func parseItems(raw any) []ItemRequest {
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := []ItemRequest{}
+	for _, x := range arr {
+		switch v := x.(type) {
+		case string:
+			out = append(out, ItemRequest{Code: v})
+		case map[string]any:
+			it := ItemRequest{Code: stringArg(v, "code")}
+			if hasArg(v, "qty") {
+				q := floatArg(v, "qty", 1)
+				it.Qty = &q
+			}
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func nilIfZero(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+func policyString(db *sql.DB, pid, key, def string) string {
+	var raw string
+	if err := db.QueryRow(`SELECT value_json FROM policies WHERE project_id=? AND key=?`, pid, key).Scan(&raw); err != nil {
+		return def
+	}
+	var s string
+	if json.Unmarshal([]byte(raw), &s) != nil || s == "" {
+		return def
+	}
+	return s
+}
+
+// ─── pricing on a work item ─────────────────────────────────────────
+
+func priceContextFor(db *sql.DB, pid string, w *Work, wt *WorkType, args map[string]any) PriceContext {
+	pc := PriceContext{WorkTypeKey: wt.Key, Priority: w.Priority, PartySize: w.PartySize, Answers: w.Intake,
+		DefaultDur: wt.DefaultDurationMin, TypeReqs: append([]Requirement{}, wt.Requirements...), AutoMax: wt.QuotePolicy.AutoApproveMaxCents}
+	if extra := objectArg(args, "answers"); extra != nil {
+		merged := map[string]any{}
+		for k, v := range w.Intake {
+			merged[k] = v
+		}
+		for k, v := range extra {
+			merged[k] = v
+		}
+		pc.Answers = merged
+	}
+	pc.DiscountPct = floatArg(args, "discount_pct", 0)
+	if fl := arrayArg(args, "flags"); fl != nil {
+		for _, f := range fl {
+			if s, ok := f.(string); ok {
+				pc.Flags = append(pc.Flags, s)
+			}
+		}
+	}
+	start := stringArg(args, "starts_at")
+	if start == "" {
+		var s string
+		if db.QueryRow(`SELECT starts_at FROM slots WHERE work_id=? AND status<>'cancelled' ORDER BY starts_at LIMIT 1`, w.ID).Scan(&s) == nil {
+			start = s
+		}
+	}
+	if t, err := parseTime(start); err == nil {
+		pc.StartsAt = &t
+	}
+	if w.SiteID != nil {
+		if s, err := getSite(db, pid, *w.SiteID); err == nil {
+			pc.Location = loadLocation(s.Timezone)
+		}
+	}
+	if pc.Location == nil {
+		pc.Location = loadLocation(policyString(db, pid, "timezone", "UTC"))
+	}
+	return pc
+}
+
+// buildEstimate prices items and stores them as the estimate lines.
+func buildEstimate(db *sql.DB, pid string, w *Work, wt *WorkType, items []ItemRequest, args map[string]any) (*PriceResult, error) {
+	pr, err := priceItems(db, pid, items, priceContextFor(db, pid, w, wt, args))
+	if err != nil {
+		return nil, err
+	}
+	if err := replaceLines(db, pid, w.ID, "estimate", pr.Lines); err != nil {
+		return nil, err
+	}
+	qs := "draft"
+	if pr.NeedsOwner {
+		qs = "needs_owner"
+	}
+	if _, err := db.Exec(`UPDATE work SET estimate_cents=?, duration_min=?, quote_status=?, updated_at=? WHERE id=?`,
+		pr.TotalCents, pr.DurationMin, qs, nowUTC(), w.ID); err != nil {
+		return nil, err
+	}
+	_ = logEvent(db, pid, w.ID, stringArg(args, "actor"), "estimate", "", "", map[string]any{"total_cents": pr.TotalCents, "flags": pr.Flags})
+	return pr, nil
+}
+
+func replaceLines(db *sql.DB, pid string, workID int64, source string, lines []PricedLine) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM work_lines WHERE work_id=? AND source=?`, workID, source); err != nil {
+		return err
+	}
+	now := nowUTC()
+	for _, l := range lines {
+		if _, err := tx.Exec(`INSERT INTO work_lines(project_id,work_id,source,rate_item_id,code,kind,description,qty,unit,unit_price_cents,total_cents,cost_cents,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, pid, workID, source, nilIfZero(l.RateItemID), l.Code, l.Kind, l.Description, l.Qty, l.Unit,
+			l.UnitPriceCents, l.TotalCents, l.CostCents, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func listLines(db *sql.DB, workID int64, source string) ([]PricedLine, error) {
+	rows, err := db.Query(`SELECT COALESCE(rate_item_id,0),code,kind,description,qty,unit,unit_price_cents,total_cents,cost_cents
+		FROM work_lines WHERE work_id=? AND source=? ORDER BY id`, workID, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PricedLine{}
+	for rows.Next() {
+		var l PricedLine
+		if err := rows.Scan(&l.RateItemID, &l.Code, &l.Kind, &l.Description, &l.Qty, &l.Unit, &l.UnitPriceCents, &l.TotalCents, &l.CostCents); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func itemsFromLines(lines []PricedLine) []ItemRequest {
+	out := []ItemRequest{}
+	for _, l := range lines {
+		if l.Kind != "item" {
+			continue
+		}
+		q := l.Qty
+		out = append(out, ItemRequest{Code: l.Code, Qty: &q})
+	}
+	return out
+}
+
+// workRequirements recomputes the resources a work item needs: the
+// type's requirements plus those of its estimate items.
+func workRequirements(db *sql.DB, pid string, w *Work, wt *WorkType) []Requirement {
+	reqs := mergeRequirements(append([]Requirement{}, wt.Requirements...), nil)
+	lines, _ := listLines(db, w.ID, "estimate")
+	for _, l := range lines {
+		if l.Kind != "item" {
+			continue
+		}
+		if ri, err := getRateItem(db, pid, 0, l.Code); err == nil {
+			reqs = mergeRequirements(reqs, ri.Requirements)
+		}
+	}
+	return reqs
+}
+
+// ─── quotes ─────────────────────────────────────────────────────────
+
+func quoteDecision(db *sql.DB, pid string, w *Work, decision, actor, reason string) (*Work, string, error) {
+	if w.EstimateCents == 0 && countLines(db, w.ID, "estimate") == 0 {
+		return nil, "", errors.New("build an estimate first (quote_build)")
+	}
+	wt, err := getWorkType(db, pid, w.WorkTypeID, "")
+	if err != nil {
+		return nil, "", err
+	}
+	event := ""
+	switch decision {
+	case "approve": // owner clears a policy flag
+		if w.QuoteStatus != "needs_owner" {
+			return nil, "", errors.New("quote does not need owner approval")
+		}
+		if err := setQuoteStatus(db, w.ID, "approved"); err != nil {
+			return nil, "", err
+		}
+		if w.Status == statusNeedsOwner {
+			if _, err := transition(db, pid, w, "resume", actor, "quote approved", nil); err != nil {
+				return nil, "", err
+			}
+		}
+		event = "quote.approved"
+	case "send":
+		if w.QuoteStatus == "needs_owner" {
+			return nil, "", errors.New("quote needs owner approval before it is sent")
+		}
+		if err := setQuoteStatus(db, w.ID, "sent"); err != nil {
+			return nil, "", err
+		}
+		if wt.usesPhase("quote") && (w.Phase == "quote" || w.Phase == "intake") {
+			if w.Phase == "intake" {
+				if _, err := transition(db, pid, w, "quote", actor, "", nil); err != nil {
+					return nil, "", err
+				}
+			}
+			if _, err := transition(db, pid, w, "quote_sent", actor, "", nil); err != nil {
+				return nil, "", err
+			}
+		}
+		event = "quote.sent"
+	case "accept":
+		if w.QuoteStatus == "needs_owner" {
+			return nil, "", errors.New("quote needs owner approval before it can be accepted")
+		}
+		if _, err := db.Exec(`UPDATE work SET quote_status='accepted', quote_accepted_at=?, updated_at=? WHERE id=?`, nowUTC(), nowUTC(), w.ID); err != nil {
+			return nil, "", err
+		}
+		w.QuoteStatus = "accepted"
+		if wt.usesPhase("quote") && (w.Phase == "intake" || w.Phase == "quote") {
+			if w.Phase == "intake" {
+				if _, err := transition(db, pid, w, "quote", actor, "", nil); err != nil {
+					return nil, "", err
+				}
+			}
+			if next := nextPhase(wt, "quote"); next != "" {
+				if _, err := transition(db, pid, w, next, actor, "quote accepted", nil); err != nil {
+					return nil, "", err
+				}
+			}
+		}
+		event = "quote.accepted"
+	case "decline":
+		if err := setQuoteStatus(db, w.ID, "declined"); err != nil {
+			return nil, "", err
+		}
+		event = "quote.declined"
+	default:
+		return nil, "", errors.New("decision must be approve, send, accept or decline")
+	}
+	_ = logEvent(db, pid, w.ID, actor, "quote", "", decision, map[string]any{"reason": reason})
+	nw, err := getWork(db, pid, w.ID)
+	return nw, event, err
+}
+
+func setQuoteStatus(db *sql.DB, id int64, s string) error {
+	_, err := db.Exec(`UPDATE work SET quote_status=?, updated_at=? WHERE id=?`, s, nowUTC(), id)
+	return err
+}
+
+func countLines(db *sql.DB, workID int64, source string) int {
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_lines WHERE work_id=? AND source=?`, workID, source).Scan(&n)
+	return n
+}
+
+// ─── completion ─────────────────────────────────────────────────────
+
+type CompleteResult struct {
+	Work      *Work        `json:"work"`
+	Actual    *PriceResult `json:"actual,omitempty"`
+	Materials []Material   `json:"materials_used,omitempty"`
+	Next      string       `json:"next"`
+}
+
+// completeWork closes the open slots, records the actual lines (the
+// estimate unless items are given), stamps serviced objects, and moves
+// the work to its next phase (bill or closed).
+func completeWork(db *sql.DB, pid string, w *Work, args map[string]any) (*CompleteResult, error) {
+	wt, err := getWorkType(db, pid, w.WorkTypeID, "")
+	if err != nil {
+		return nil, err
+	}
+	if w.Phase != "execute" {
+		return nil, fmt.Errorf("work is in phase %s; only execute work can be completed", w.Phase)
+	}
+	// Check required forms before touching anything, so a refused
+	// completion leaves the slots as they were.
+	var missing []string
+	for _, key := range wt.RequiredForms[nextPhase(wt, "execute")] {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM form_responses WHERE work_id=? AND form_key=?`, w.ID, key).Scan(&n)
+		if n == 0 {
+			missing = append(missing, "form "+key+" must be submitted")
+		}
+	}
+	if len(missing) > 0 {
+		return nil, &GuardError{To: nextPhase(wt, "execute"), Reasons: missing}
+	}
+	now := nowUTC()
+	if _, err := db.Exec(`UPDATE slots SET status='done', completed_at=?, started_at=COALESCE(started_at, starts_at), updated_at=?
+		WHERE work_id=? AND status IN ('booked','in_progress')`, now, now, w.ID); err != nil {
+		return nil, err
+	}
+	res := &CompleteResult{}
+	items := parseItems(args["items"])
+	if len(items) == 0 {
+		lines, _ := listLines(db, w.ID, "estimate")
+		items = itemsFromLines(lines)
+	}
+	if len(items) > 0 {
+		pr, err := priceItems(db, pid, items, priceContextFor(db, pid, w, wt, args))
+		if err != nil {
+			return nil, err
+		}
+		if err := replaceLines(db, pid, w.ID, "actual", pr.Lines); err != nil {
+			return nil, err
+		}
+		res.Actual, res.Materials = pr, pr.Materials
+	}
+	for _, oid := range w.ObjectIDs {
+		_, _ = db.Exec(`UPDATE objects SET last_serviced_at=?, updated_at=? WHERE project_id=? AND id=?`, now, now, pid, oid)
+	}
+	payload := map[string]any{"notes": stringArg(args, "notes")}
+	if res.Actual != nil {
+		payload["actual_cents"] = res.Actual.TotalCents
+	}
+	_ = logEvent(db, pid, w.ID, stringArg(args, "actor"), "completed", "", "", payload)
+	next := nextPhase(wt, "execute")
+	tr, err := transition(db, pid, w, next, stringArg(args, "actor"), "work completed", nil)
+	if err != nil {
+		return nil, err
+	}
+	res.Work, res.Next = tr.Work, next
+	return res, nil
+}
+
+// ─── billing bridge ─────────────────────────────────────────────────
+
+func invoiceWork(db *sql.DB, pid string, call appCaller, w *Work, args map[string]any) (*Work, map[string]any, error) {
+	if w.Phase != "bill" {
+		return nil, nil, errNotBillable
+	}
+	if w.InvoiceRef != "" {
+		return w, map[string]any{"already_invoiced": true}, nil // idempotent
+	}
+	lines, err := listLines(db, w.ID, "actual")
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(lines) == 0 {
+		lines, _ = listLines(db, w.ID, "estimate")
+	}
+	if len(lines) == 0 {
+		return nil, nil, errors.New("no lines to invoice")
+	}
+	var total int64
+	items := []any{}
+	for _, l := range lines {
+		total += l.TotalCents
+		qty, unit := l.Qty, l.UnitPriceCents
+		if qty <= 0 || float64(unit)*qty != float64(l.TotalCents) {
+			qty, unit = 1, l.TotalCents
+		}
+		items = append(items, map[string]any{"description": l.Description, "quantity": qty, "unit_price_cents": unit,
+			"metadata": map[string]any{"code": l.Code, "kind": l.Kind}})
+	}
+	ref := stringArg(args, "external_ref")
+	info := map[string]any{"total_cents": total}
+	switch {
+	case ref != "":
+		info["mode"] = "external"
+	case call == nil:
+		return nil, nil, errors.New("billing app not reachable; pass external_ref to record an invoice made elsewhere")
+	default:
+		if w.CustomerEmail == "" {
+			return nil, nil, errors.New("customer email required to invoice through billing (or pass external_ref)")
+		}
+		var cust struct {
+			Customer struct {
+				ID int64 `json:"id"`
+			} `json:"customer"`
+		}
+		if err := call("billing", "customers_upsert_by_email", map[string]any{"email": w.CustomerEmail,
+			"defaults": map[string]any{"name": firstNonEmpty(w.CustomerName, w.CustomerEmail)}}, &cust); err != nil {
+			return nil, nil, fmt.Errorf("billing customer: %w", err)
+		}
+		var inv struct {
+			Invoice struct {
+				ID     int64  `json:"id"`
+				Number string `json:"number"`
+			} `json:"invoice"`
+		}
+		if err := call("billing", "invoices_create_from_prepared_lines", map[string]any{
+			"customer_id": cust.Customer.ID, "currency": w.Currency, "line_items": items,
+			"notes": firstNonEmpty(stringArg(args, "notes"), w.Number+" "+w.Summary), "finalize": boolArg(args, "finalize", true),
+			"metadata": map[string]any{"source": "operations", "work_id": w.ID, "work_number": w.Number},
+		}, &inv); err != nil {
+			return nil, nil, fmt.Errorf("billing invoice: %w", err)
+		}
+		ref = fmt.Sprintf("billing:%d", inv.Invoice.ID)
+		info["mode"], info["invoice_id"], info["invoice_number"] = "billing", inv.Invoice.ID, inv.Invoice.Number
+	}
+	if _, err := db.Exec(`UPDATE work SET invoice_ref=?, invoiced_cents=?, updated_at=? WHERE id=?`, ref, total, nowUTC(), w.ID); err != nil {
+		return nil, nil, err
+	}
+	w.InvoiceRef = ref
+	if _, err := transition(db, pid, w, "invoiced", stringArg(args, "actor"), "", map[string]any{"invoice_ref": ref}); err != nil {
+		return nil, nil, err
+	}
+	info["invoice_ref"] = ref
+	nw, err := getWork(db, pid, w.ID)
+	return nw, info, err
+}
+
+// ─── search & metrics ───────────────────────────────────────────────
+
+func searchWork(db *sql.DB, pid string, args map[string]any) ([]*Work, error) {
+	q := `SELECT ` + workCols + workFrom + ` WHERE w.project_id=?`
+	params := []any{pid}
+	add := func(cond string, v any) {
+		q += " AND " + cond
+		params = append(params, v)
+	}
+	if v := stringArg(args, "phase"); v != "" {
+		if v == "open" {
+			q += " AND w.phase NOT IN ('closed','cancelled')"
+		} else {
+			add("w.phase=?", v)
+		}
+	}
+	if v := stringArg(args, "status"); v != "" {
+		add("w.status=?", v)
+	}
+	if v := stringArg(args, "work_type"); v != "" {
+		add("t.key=?", v)
+	}
+	if v := stringArg(args, "mode"); v != "" {
+		add("w.mode=?", v)
+	}
+	if v := stringArg(args, "priority"); v != "" {
+		add("w.priority=?", v)
+	}
+	if v := int64Arg(args, "site_id"); v > 0 {
+		add("w.site_id=?", v)
+	}
+	if v := int64Arg(args, "crm_contact_id"); v > 0 {
+		add("w.crm_contact_id=?", v)
+	}
+	if v := stringArg(args, "q"); v != "" {
+		like := "%" + strings.ToLower(v) + "%"
+		q += " AND (lower(w.summary) LIKE ? OR lower(w.customer_name) LIKE ? OR lower(w.customer_email) LIKE ? OR w.customer_phone LIKE ? OR w.number LIKE ?)"
+		params = append(params, like, like, like, like, like)
+	}
+	if boolArg(args, "sla_breached", false) {
+		add("w.sla_due_at IS NOT NULL AND w.sla_due_at<?", nowUTC())
+		q += " AND NOT EXISTS (SELECT 1 FROM slots s WHERE s.work_id=w.id AND s.status<>'cancelled')"
+	}
+	limit := intArg(args, "limit", 50)
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	q += fmt.Sprintf(" ORDER BY CASE w.priority WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 WHEN 'p3' THEN 3 ELSE 4 END, w.updated_at DESC LIMIT %d", limit)
+	rows, err := db.Query(q, params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Work{}
+	for rows.Next() {
+		w, err := scanWork(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+func metrics(db *sql.DB, pid string, from, to time.Time) (map[string]any, error) {
+	f, t := fmtTime(from), fmtTime(to)
+	out := map[string]any{"from": f, "to": t}
+	byPhase := map[string]int{}
+	rows, err := db.Query(`SELECT phase, COUNT(*) FROM work WHERE project_id=? GROUP BY phase`, pid)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		var n int
+		_ = rows.Scan(&p, &n)
+		byPhase[p] = n
+	}
+	rows.Close()
+	out["open_by_phase"] = byPhase
+
+	var created, closed, cancelled, needsOwner int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND created_at>=? AND created_at<?`, pid, f, t).Scan(&created)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND phase='closed' AND closed_at>=? AND closed_at<?`, pid, f, t).Scan(&closed)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND phase='cancelled' AND closed_at>=? AND closed_at<?`, pid, f, t).Scan(&cancelled)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND status='needs_owner'`, pid).Scan(&needsOwner)
+	out["created"], out["closed"], out["cancelled"], out["waiting_on_owner"] = created, closed, cancelled, needsOwner
+
+	var sent, accepted int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND quote_status IN ('sent','accepted','declined') AND created_at>=? AND created_at<?`, pid, f, t).Scan(&sent)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND quote_status='accepted' AND created_at>=? AND created_at<?`, pid, f, t).Scan(&accepted)
+	if sent > 0 {
+		out["quote_acceptance_pct"] = round2(float64(accepted) / float64(sent) * 100)
+	}
+
+	var invoiced, cost int64
+	_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work WHERE project_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`, pid, f, t).Scan(&invoiced)
+	_ = db.QueryRow(`SELECT COALESCE(SUM(l.cost_cents),0) FROM work_lines l JOIN work w ON w.id=l.work_id
+		WHERE w.project_id=? AND l.source='actual' AND w.invoice_ref<>'' AND w.updated_at>=? AND w.updated_at<?`, pid, f, t).Scan(&cost)
+	out["invoiced_cents"] = invoiced
+	if invoiced > 0 {
+		out["margin_pct"] = round2(float64(invoiced-cost) / float64(invoiced) * 100)
+	}
+
+	// Minutes from intake to first slot start, median.
+	lead := []float64{}
+	rows, err = db.Query(`SELECT w.created_at, MIN(s.starts_at) FROM work w JOIN slots s ON s.work_id=w.id
+		WHERE w.project_id=? AND w.created_at>=? AND w.created_at<? AND s.status<>'cancelled' GROUP BY w.id`, pid, f, t)
+	if err == nil {
+		for rows.Next() {
+			var c, s string
+			_ = rows.Scan(&c, &s)
+			ct, e1 := parseTime(c)
+			st, e2 := parseTime(s)
+			if e1 == nil && e2 == nil {
+				lead = append(lead, st.Sub(ct).Minutes())
+			}
+		}
+		rows.Close()
+	}
+	if len(lead) > 0 {
+		sort.Float64s(lead)
+		out["median_minutes_to_first_slot"] = math.Round(lead[len(lead)/2])
+	}
+
+	// Utilisation: booked minutes / shift minutes per shift-bound resource.
+	util := []map[string]any{}
+	res, _ := listResources(db, pid, "", 0, true)
+	for _, r := range res {
+		if !r.NeedsShift {
+			continue
+		}
+		shift := overlapMinutes(db, `SELECT starts_at, ends_at FROM resource_blocks WHERE resource_id=? AND kind='shift' AND ends_at>? AND starts_at<?`, r.ID, from, to)
+		booked := overlapMinutes(db, `SELECT s.starts_at, s.ends_at FROM slots s JOIN slot_resources sr ON sr.slot_id=s.id
+			WHERE sr.resource_id=? AND s.status IN ('booked','in_progress','done') AND s.ends_at>? AND s.starts_at<?`, r.ID, from, to)
+		if shift > 0 {
+			util = append(util, map[string]any{"resource_id": r.ID, "name": r.Name, "shift_minutes": shift, "booked_minutes": booked,
+				"utilisation_pct": round2(booked / shift * 100)})
+		}
+	}
+	out["utilisation"] = util
+	return out, nil
+}
+
+func overlapMinutes(db *sql.DB, q string, id int64, from, to time.Time) float64 {
+	rows, err := db.Query(q, id, fmtTime(from), fmtTime(to))
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	total := 0.0
+	for rows.Next() {
+		var a, b string
+		_ = rows.Scan(&a, &b)
+		s, e1 := parseTime(a)
+		e, e2 := parseTime(b)
+		if e1 != nil || e2 != nil {
+			continue
+		}
+		if s.Before(from) {
+			s = from
+		}
+		if e.After(to) {
+			e = to
+		}
+		if e.After(s) {
+			total += e.Sub(s).Minutes()
+		}
+	}
+	return total
+}

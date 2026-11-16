@@ -1,0 +1,85 @@
+{
+  "key": "salon",
+  "name": "Hair & beauty salon",
+  "version": "0.1.0",
+  "description": "Premises appointments: each service needs a qualified stylist and a chair or station at the same time. Paid at the desk; colour clients need a consultation and a recorded formula.",
+  "setup": "Create your salon as an own site with opening hours, add chairs and nail stations as space resources (zone chairs / nails), add stylists as person resources with quals (cut, colour, nails) and their shifts.",
+  "forms": [
+    {
+      "key": "client_consultation",
+      "name": "Client consultation",
+      "purpose": "intake",
+      "schema": {"fields": [
+        {"key": "hair_length", "label": "Hair length", "type": "choice", "options": ["short", "medium", "long"]},
+        {"key": "allergies", "label": "Allergies or sensitivities", "type": "text"},
+        {"key": "patch_test_done", "label": "Patch test done in the last 6 months", "type": "bool"},
+        {"key": "preferred_stylist", "label": "Preferred stylist", "type": "text"}
+      ]}
+    },
+    {
+      "key": "colour_record",
+      "name": "Colour record",
+      "purpose": "compliance",
+      "schema": {"fields": [
+        {"key": "formula", "label": "Formula", "type": "text", "required": true},
+        {"key": "developer_vol", "label": "Developer (vol)", "type": "choice", "required": true, "options": ["10", "20", "30", "40"]},
+        {"key": "processing_min", "label": "Processing time (min)", "type": "number", "required": true, "min": 0, "max": 120},
+        {"key": "result_photo", "label": "Result photo", "type": "photo"}
+      ]}
+    },
+    {
+      "key": "salon_opening",
+      "name": "Opening checklist",
+      "purpose": "checklist",
+      "schema": {"fields": [
+        {"key": "stations_clean", "label": "Stations cleaned and sanitised", "type": "bool", "required": true},
+        {"key": "tools_sterilised", "label": "Tools sterilised", "type": "bool", "required": true},
+        {"key": "towels_stocked", "label": "Towels stocked", "type": "bool", "required": true}
+      ]}
+    }
+  ],
+  "work_types": [
+    {
+      "key": "appointment",
+      "name": "Appointment",
+      "mode": "at_site",
+      "phases": ["intake", "schedule", "execute", "bill", "closed"],
+      "intake_form_key": "client_consultation",
+      "default_duration_min": 45,
+      "buffer_min": 10,
+      "requirements": [{"kind": "person", "role": "stylist"}],
+      "statuses": [{"key": "checked_in", "label": "Checked in", "phase": "execute"}],
+      "playbook": "Ask which services, pick the rate items (they set duration and who can do them), and offer the first free times with schedule_suggest; if the client asks for a stylist, book with resource_ids. Colour on a new client needs a patch test 48 h before. Payment is taken at the desk: work_mark_paid closes the visit."
+    },
+    {
+      "key": "opening",
+      "name": "Opening routine",
+      "mode": "internal",
+      "phases": ["schedule", "execute", "closed"],
+      "default_duration_min": 20,
+      "requirements": [{"kind": "person", "role": "opener"}],
+      "required_forms": {"closed": ["salon_opening"]},
+      "playbook": "Generated daily by an agreement. Nudge the opener if the checklist is not in 15 minutes after opening."
+    }
+  ],
+  "rate_items": [
+    {"code": "CUT_LONG", "name": "Cut & finish (long hair)", "pricing": {"mode": "flat", "unit_cents": 5500}, "cost_cents": 1200, "duration": {"fixed_min": 60},
+     "requirements": [{"kind": "person", "quals": ["cut"]}, {"kind": "space", "zone": "chairs"}]},
+    {"code": "CUT_SHORT", "name": "Cut & finish (short hair)", "pricing": {"mode": "flat", "unit_cents": 3500}, "cost_cents": 800, "duration": {"fixed_min": 30},
+     "requirements": [{"kind": "person", "quals": ["cut"]}, {"kind": "space", "zone": "chairs"}]},
+    {"code": "COLOUR_ROOTS", "name": "Root colour", "pricing": {"mode": "flat", "unit_cents": 6500}, "cost_cents": 1800, "duration": {"fixed_min": 75},
+     "materials": [{"sku": "COLOUR-TUBE", "qty_per_unit": 1}, {"sku": "DEVELOPER-60ML", "qty_per_unit": 1}],
+     "requirements": [{"kind": "person", "quals": ["colour"]}, {"kind": "space", "zone": "chairs"}]},
+    {"code": "BALAYAGE", "name": "Balayage", "pricing": {"mode": "tiered", "tiers": [{"up_to": 1, "unit_cents": 12000}, {"unit_cents": 15000}], "qty_from": "length_band"},
+     "cost_cents": 3000, "duration": {"fixed_min": 150},
+     "requirements": [{"kind": "person", "quals": ["colour"]}, {"kind": "space", "zone": "chairs"}]},
+    {"code": "BLOWDRY", "name": "Blow-dry", "pricing": {"mode": "flat", "unit_cents": 3000}, "cost_cents": 500, "duration": {"fixed_min": 30},
+     "requirements": [{"kind": "person", "quals": ["cut"]}, {"kind": "space", "zone": "chairs"}]},
+    {"code": "MANICURE", "name": "Manicure", "pricing": {"mode": "flat", "unit_cents": 3500}, "cost_cents": 700, "duration": {"fixed_min": 45},
+     "requirements": [{"kind": "person", "quals": ["nails"]}, {"kind": "space", "zone": "nails"}]}
+  ],
+  "modifiers": [
+    {"key": "student", "name": "Student discount", "kind": "discount", "when": {"flags": ["student"], "work_types": ["appointment"]}, "amount": {"pct": 10}}
+  ],
+  "policies": {"currency": "EUR", "max_discount_pct": 15, "min_margin_pct": 50}
+}

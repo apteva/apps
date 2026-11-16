@@ -1,0 +1,86 @@
+schema: apteva-app/v1
+name: operations
+display_name: Operations
+version: 0.1.0
+description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/operations
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [operations, scheduling, field-service, appointments, reservations, work-orders]
+scopes: [project]
+requires:
+  permissions: [db.write.app, platform.apps.call]
+  integrations:
+    - role: crm
+      kind: app
+      compatible_app_names: [crm]
+      required: false
+      label: "CRM"
+    - role: billing
+      kind: app
+      compatible_app_names: [billing]
+      required: false
+      label: "Billing"
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: packs_list,          description: "List built-in and installed business packs." }
+    - { name: packs_install,       description: "Install a built-in or custom business pack." }
+    - { name: packs_validate,      description: "Validate a custom pack without installing it." }
+    - { name: config_get,          description: "Read work types, forms, rate items, modifiers and policies." }
+    - { name: config_upsert,       description: "Create or update one work type, form, rate item or modifier." }
+    - { name: policies_set,        description: "Set an owner policy." }
+    - { name: sites_upsert,        description: "Create or update a site (own premises or customer location)." }
+    - { name: sites_list,          description: "List sites." }
+    - { name: resources_upsert,    description: "Create or update a resource (person, crew, space, equipment, vehicle)." }
+    - { name: resources_list,      description: "List resources." }
+    - { name: resources_set_blocks, description: "Add shifts, time off or blocked periods to a resource." }
+    - { name: resources_blocks,    description: "List a resource's shifts and blocks." }
+    - { name: objects_upsert,      description: "Create or update a service object at a site." }
+    - { name: objects_list,        description: "List service objects." }
+    - { name: work_intake,         description: "Create a work item from a request." }
+    - { name: work_get,            description: "Read a work item with lines, slots and forms." }
+    - { name: work_search,         description: "Search work items." }
+    - { name: work_transition,     description: "Change a work item's status through the lifecycle guards." }
+    - { name: work_timeline,       description: "Read a work item's event timeline." }
+    - { name: work_note,           description: "Add a note to a work item's timeline." }
+    - { name: price_preview,       description: "Price rate items without saving." }
+    - { name: quote_build,         description: "Price a work item and store its estimate." }
+    - { name: quote_decide,        description: "Approve, send, accept or decline a quote." }
+    - { name: schedule_suggest,    description: "Suggest slots with resources for a work item." }
+    - { name: schedule_book,       description: "Book a slot for a work item." }
+    - { name: slots_update,        description: "Reschedule, cancel, mark missed, start, set ETA or note a slot." }
+    - { name: slots_list,          description: "Agenda of slots by time, resource or site." }
+    - { name: work_complete,       description: "Complete a work item's visit and record actual lines." }
+    - { name: forms_submit,        description: "Submit a form (checklist, inspection, compliance log)." }
+    - { name: forms_responses,     description: "List form responses." }
+    - { name: work_invoice,        description: "Invoice a completed work item through Billing." }
+    - { name: work_mark_paid,      description: "Record payment and close a work item." }
+    - { name: agreements_create,   description: "Create recurring work." }
+    - { name: agreements_list,     description: "List recurring work agreements." }
+    - { name: agreements_update,   description: "Pause, resume or end an agreement." }
+    - { name: agreements_generate, description: "Generate (and book) recurring work due up to a date." }
+    - { name: metrics,             description: "Operations metrics for a period." }
+  publishes:
+    - { name: work.created,        description: "A work item was created." }
+    - { name: work.status_changed, description: "A work item changed status within its phase." }
+    - { name: work.phase_changed,  description: "A work item entered a new phase." }
+    - { name: work.needs_owner,    description: "A work item waits on an owner decision." }
+    - { name: work.closed,         description: "A work item was closed." }
+    - { name: quote.accepted,      description: "A quote was accepted." }
+    - { name: slot.booked,         description: "A slot was booked." }
+    - { name: slot.updated,        description: "A slot was rescheduled, cancelled, missed or started." }
+    - { name: form.submitted,      description: "A form was submitted." }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/operations }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/operations.db
+  migrations: migrations/
+upgrade_policy: auto-patch
+
