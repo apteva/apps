@@ -7,11 +7,22 @@ const lesson = { id: "lesson", community_id: community.id, section_id: "section"
 const quiz = { id: "quiz", lesson_id: lesson.id, title: "Knowledge check", passing_score: 70, questions: [{ prompt: "Two plus two?", options: ["4", "5"] }] };
 const assignment = { id: "assignment", title: "Introduce yourself", instructions: "Write **a short introduction**." };
 
-async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: boolean; members?: number } = {}) {
+// A tiny element: reads settings, saves state, reports a step, and relays an event.
+const elementHTML = `<!doctype html><html><head></head><body><p id="out">waiting</p><script type="module">
+const { settings, state } = await lesson.ready();
+document.getElementById("out").textContent = settings.label + (state ? " restored" : "");
+lesson.on("ping", (p) => { document.getElementById("out").textContent = "got " + p.n; lesson.save({ seen: p.n }); lesson.complete("pinged"); });
+try { localStorage.setItem("x", "1"); lesson.emit("storage", { ok: true }); } catch { lesson.emit("storage", { ok: false }); }
+if (settings.sender) setTimeout(() => lesson.emit("ping", { n: 7 }), 300);
+</script></body></html>`;
+
+async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: boolean; members?: number; interactive?: boolean } = {}) {
   const calls: Array<{ name: string; arguments: Record<string, any> }> = [];
   let profile = { ...member };
   let submissions: any[] = [], attempts: any[] = [];
+  const elementSteps: Record<string, string[]> = {};
   await page.addInitScript(() => {
+    if (window.top !== window) return; // also injected into sandboxed element frames
     sessionStorage.setItem("apteva-community-auth:main", JSON.stringify({ user: { id: 1, email: "alice@example.test" }, apteva_access_token: "test-member-token", stored_at: Date.now(), apteva_expires_in: 3600 }));
   });
   await page.route("**/api/**", async (route) => {
@@ -44,7 +55,22 @@ async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: b
       case "lessons_list":
         if (options.lessonFailure) return json({ jsonrpc: "2.0", error: { code: -32000, message: "Server temporarily unavailable" } });
         out = { lessons: [lesson] }; break;
-      case "lesson_bundle_get": out = { lesson, quizzes: [quiz], assignments: [assignment], resources: [{ id: "resource", name: "Notes", storage_file_id: "43" }], comments: [] }; break;
+      case "lesson_bundle_get":
+        out = { lesson, quizzes: [quiz], assignments: [assignment], resources: [{ id: "resource", name: "Notes", storage_file_id: "43" }], comments: [] };
+        if (options.interactive) Object.assign(out as object, {
+          layout: "stage",
+          blocks: [
+            { id: "b-text", lesson_id: lesson.id, position: 0, slot: "side", type: "markdown", title: "Overview", settings: { body: "Side **notes**" }, required_steps: [] },
+            { id: "b-recv", lesson_id: lesson.id, position: 1, slot: "stage", type: "element", title: "", element_id: "elm", element_version: 1, element_slug: "probe", runners: [], settings: { label: "receiver" }, required_steps: ["pinged"] },
+            { id: "b-send", lesson_id: lesson.id, position: 2, slot: "side", type: "element", title: "", element_id: "elm", element_version: 1, element_slug: "probe", runners: [], settings: { label: "sender", sender: true }, required_steps: [] },
+            { id: "b-quiz", lesson_id: lesson.id, position: 3, slot: "main", type: "quizzes", title: "", settings: {}, required_steps: [] },
+          ],
+          element_state: {}, steps: elementSteps,
+        });
+        break;
+      case "lesson_element_source": out = { source: elementHTML, checksum: "c", runners: [] }; break;
+      case "element_state_save": out = { ok: true }; break;
+      case "lesson_step_complete": elementSteps[args.block_id] = [args.step]; out = { steps: elementSteps, required: 1, done: 1, lesson_completed: true }; break;
       case "learning_status": out = { attempts, submissions }; break;
       case "lesson_file_url": out = { url: "https://files.example.test/video.mp4", expires_at: 4102444800 }; break;
       case "quiz_submit": attempts = [{ id: 1, quiz_id: "quiz", member_id: "alice", score: args.answers[0] === 0 ? 100 : 0, passed: args.answers[0] === 0 }]; out = attempts[0]; break;
@@ -131,4 +157,21 @@ test("expired delegated sessions return to sign-in with an actionable message", 
   await expect(page.getByRole("alert")).toContainText("Your session expired. Please sign in again.");
   await expect(page.getByRole("navigation")).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem("apteva-community-auth:main"))).toBeNull();
+});
+
+test("interactive lesson mounts sandboxed elements that relay events, save state and complete steps", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (e) => errors.push(e.message));
+  const calls = await fixture(page, { interactive: true }); await navigate(page, "Courses");
+  await expect(page.locator(".side-tab-body strong")).toHaveText("notes");
+  const frames = page.locator("iframe[sandbox]");
+  await expect(frames).toHaveCount(2);
+  for (const sandbox of await frames.evaluateAll((els) => els.map((el) => el.getAttribute("sandbox")))) expect(sandbox).toBe("allow-scripts");
+  await expect(page.frameLocator('iframe[sandbox]').first().locator("#out")).toHaveText("got 7");
+  await expect(page.getByText("1 of 1 goals")).toBeVisible();
+  await expect.poll(() => calls.find((c) => c.name === "element_state_save")?.arguments).toMatchObject({ block_id: "b-recv", state: { seen: 7 } });
+  expect(calls.find((c) => c.name === "lesson_step_complete")?.arguments).toMatchObject({ block_id: "b-recv", step: "pinged" });
+  // The opaque-origin sandbox has no storage and no access to the portal.
+  expect(await page.evaluate(() => (window as any).compromised)).toBeUndefined();
+  await expect(page.getByRole("button", { name: "Submit answers" })).toBeVisible();
+  expect(errors).toEqual([]);
 });

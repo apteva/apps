@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
+import { CourseImportDialog, ElementLibraryDialog, LessonBlocksDialog, exportCourse } from "./InteractiveAuthoring";
+
 const API = "/api/apps/community";
 
 interface AppEventEnvelope<T = unknown> {
@@ -430,6 +432,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   const [instructorId, setInstructorId] = useState<string | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceId] = useState<string | null>(null);
+  const [authoring, setAuthoring] = useState<null | "elements" | "blocks" | "import">(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
@@ -698,6 +701,11 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
     return m;
   }, [lessons]);
 
+  const authoringCall = useCallback(
+    <T,>(tool: string, args: Record<string, unknown>) => callTool<T>(tool, args, projectId),
+    [projectId],
+  );
+
   const runTool = useCallback(
     async <T,>(label: string, tool: string, args: Record<string, unknown>): Promise<T> => {
       setStatus(`${label}...`);
@@ -753,6 +761,9 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           <div className="grid grid-cols-2 gap-2">
             <button className={buttonClass()} disabled={!activeCommunity} onClick={() => setDialog("portal")}>
               Portal settings
+            </button>
+            <button className={buttonClass()} disabled={!activeCommunity} onClick={() => setAuthoring("elements")}>
+              Interactive elements
             </button>
             {activeCommunity ? (
               <a className={`${buttonClass()} text-center`} href={clientPortalURL(activeCommunity, projectId, installId)} target="_blank" rel="noreferrer">
@@ -883,6 +894,13 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
               >
                 + Course
               </button>
+              <button
+                className={buttonClass("ghost")}
+                disabled={!communityId}
+                onClick={() => setAuthoring("import")}
+              >
+                Import
+              </button>
             </div>
           </div>
           {spaces.length === 0 ? (
@@ -939,6 +957,17 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
               ) : null}
               <button className={buttonClass()} onClick={() => setDialog("offer")}>
                 {courseOffer?.active ? "Edit sale" : "Configure sale"}
+              </button>
+              <button
+                className={buttonClass()}
+                onClick={() => {
+                  if (!activeSpace) return;
+                  exportCourse(authoringCall, activeSpace.id, activeSpace.slug)
+                    .then(() => setStatus("Course exported"))
+                    .catch((e) => fail("Export course", e));
+                }}
+              >
+                Export
               </button>
               <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
                 + Section
@@ -1049,6 +1078,9 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           </div>
           {isCourseSpace && activeLesson ? (
             <div className="flex gap-2">
+              <button className={buttonClass()} onClick={() => setAuthoring("blocks")}>
+                Blocks
+              </button>
               <button className={buttonClass()} onClick={() => setDialog("video")}>
                 Attach video
               </button>
@@ -1254,6 +1286,28 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
             if (target.lessonId) setLessonId(target.lessonId);
           }}
           runTool={runTool}
+        />
+      ) : null}
+      {authoring === "elements" && communityId ? (
+        <ElementLibraryDialog communityId={communityId} call={authoringCall} onClose={() => setAuthoring(null)} />
+      ) : null}
+      {authoring === "blocks" && communityId && activeLesson ? (
+        <LessonBlocksDialog
+          communityId={communityId}
+          lessonId={activeLesson.id}
+          lessonTitle={activeLesson.title}
+          call={authoringCall}
+          onClose={() => setAuthoring(null)}
+        />
+      ) : null}
+      {authoring === "import" && communityId ? (
+        <CourseImportDialog
+          communityId={communityId}
+          call={authoringCall}
+          onClose={() => setAuthoring(null)}
+          onImported={(id) => {
+            void refreshSpaces(communityId).then(() => setSpaceId(id));
+          }}
         />
       ) : null}
     </div>

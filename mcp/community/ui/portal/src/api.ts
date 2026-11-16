@@ -118,12 +118,44 @@ export interface StorefrontCheckoutSession {
   subscription?: MemberSubscription;
 }
 
+export type LessonBlockType = "markdown" | "lesson_body" | "video" | "resources" | "quizzes" | "assignments" | "element";
+export type LessonBlockSlot = "main" | "stage" | "side";
+
+export interface LessonBlock {
+  id: string;
+  lesson_id: string;
+  position: number;
+  slot: LessonBlockSlot;
+  type: LessonBlockType;
+  title: string;
+  element_id?: string;
+  element_version?: number;
+  element_slug?: string;
+  element_name?: string;
+  checksum?: string;
+  runners?: string[];
+  settings: Record<string, unknown>;
+  required_steps: string[];
+  height?: number;
+}
+
 export interface LessonBundle {
   lesson: Lesson;
   resources: LessonResource[];
   quizzes: Quiz[];
   assignments: Assignment[];
   comments: LessonComment[];
+  layout?: "article" | "stage";
+  blocks?: LessonBlock[];
+  element_state?: Record<string, Record<string, unknown>>;
+  steps?: Record<string, string[]>;
+}
+
+export interface StepResult {
+  steps: Record<string, string[]>;
+  required: number;
+  done: number;
+  lesson_completed: boolean;
 }
 
 export function useDelegatedToken(token?: string): void {
@@ -293,6 +325,14 @@ export const api = {
       community.tool("lessons_mark_complete", { lesson_id, member_id: self, status, last_position_seconds }),
     comment: (lesson_id: string, body: string) =>
       community.tool<LessonComment>("lesson_comments_post", { lesson_id, member_id: self, body }),
+    elementSource: (lesson_id: string, element_id: string, version: number) =>
+      community.tool<{ source: string; checksum: string; runners: string[] }>("lesson_element_source", { lesson_id, element_id, version }),
+    saveElementState: (lesson_id: string, block_id: string, state: Record<string, unknown>) =>
+      community.tool("element_state_save", { lesson_id, block_id, member_id: self, state }),
+    completeStep: (lesson_id: string, block_id: string, step: string) =>
+      community.tool<StepResult>("lesson_step_complete", { lesson_id, block_id, member_id: self, step }),
+    runElement: (lesson_id: string, block_id: string, runner: string, input: Record<string, unknown>) =>
+      community.tool<{ runner: string; result: unknown }>("element_run", { lesson_id, block_id, member_id: self, runner, input }),
   },
   memberships: {
     plans: (community_id: string) =>

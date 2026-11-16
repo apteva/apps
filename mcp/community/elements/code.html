@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code playground element</title>
+<style>
+  :root { --ink: #17202b; --muted: #5b6776; --line: #d9dfe7; --accent: #0f8b8d; --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: #fff; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px 18px; }
+  h2 { font: 600 13px var(--mono); letter-spacing: .1em; text-transform: uppercase; margin: 0 auto 0 0; }
+  .btn { height: 32px; min-width: 32px; padding: 0 10px; border: 1px solid var(--line); background: #fff; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--mono); color: var(--ink); cursor: pointer; }
+  .btn:hover { border-color: #b8c2ce; }
+  .btn.primary { background: #17202b; color: #fff; border-color: #17202b; }
+  .btn.primary:hover { background: #2a3644; }
+  .btn svg { width: 14px; height: 14px; }
+  .editor { position: relative; flex: 1; min-height: 0; margin: 0 14px; border: 1px solid var(--line); border-radius: 10px; overflow: auto; background: #fbfcfd; }
+  .editor-inner { position: relative; display: grid; grid-template-columns: 40px 1fr; min-height: 100%; }
+  .gutter { padding: 10px 0; text-align: right; color: #9aa4b1; font: 13px/21px var(--mono); user-select: none; border-right: 1px solid var(--line); background: #f5f7f9; }
+  .gutter div { padding-right: 8px; }
+  .gutter .err { background: #fde2e1; color: #b42318; }
+  .gutter .warn { background: #fef3c7; color: #a16207; }
+  .code-area { position: relative; }
+  pre, textarea { margin: 0; padding: 10px 12px; font: 13px/21px var(--mono); white-space: pre; tab-size: 2; border: 0; min-width: 100%; }
+  pre { pointer-events: none; color: var(--ink); }
+  textarea { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; background: transparent; color: transparent; caret-color: var(--ink); outline: none; overflow: hidden; }
+  textarea::selection { background: rgba(15, 139, 141, .22); }
+  .k { color: #2550c8; } .c { color: #0f7f6f; } .f { color: #c2410c; } .n { color: #7c3aed; } .s { color: #a16207; } .cm { color: #8a96a3; font-style: italic; }
+  .console { height: 116px; margin: 10px 14px 14px; border-radius: 10px; background: #111821; color: #d6dee8; font: 12px/1.55 var(--mono); padding: 8px 12px; overflow: auto; }
+  .console .row.err { color: #ff8a80; } .console .row.warn { color: #fcd34d; } .console .row.ok { color: #6ee7b7; } .console .row.dim { color: #7d8996; }
+</style>
+</head>
+<body>
+  <header>
+    <h2>Try it yourself</h2>
+    <button class="btn" id="reset" title="Restore the starter code"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8a5 5 0 1 0 1.5-3.5M3 2.5v2.5h2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Reset</button>
+    <button class="btn" id="copy" title="Copy code"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 0 1 4 2.5h6.5"/></svg>Copy</button>
+    <button class="btn" id="stop" title="Stop the program"><svg viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor"/></svg></button>
+    <button class="btn primary" id="run" title="Run (Ctrl/Cmd + Enter)"><svg viewBox="0 0 16 16"><path d="M4.5 3v10l8-5z" fill="currentColor"/></svg>Run</button>
+  </header>
+  <div class="editor" id="editor">
+    <div class="editor-inner">
+      <div class="gutter" id="gutter"></div>
+      <div class="code-area">
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Sketch source code"></textarea>
+      </div>
+    </div>
+  </div>
+  <div class="console" id="console" aria-live="polite"></div>
+
+<script>
+(async () => {
+  const src = document.getElementById("src");
+  const hl = document.getElementById("hl");
+  const gutter = document.getElementById("gutter");
+  const out = document.getElementById("console");
+  let marks = {}; // line -> "err" | "warn"
+
+  const { settings, state } = await lesson.ready();
+  const starter = settings.starter || "";
+  src.value = state?.source ?? starter;
+
+  const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*")|\b(void|int|const|let|var|function|if|else|for|while|return|bool|boolean|long|unsigned|float|double|byte|char|#define)\b|\b(HIGH|LOW|INPUT_PULLUP|INPUT|OUTPUT|LED_BUILTIN|A[0-5]|true|false|Serial|Math|console|null|undefined)\b|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)(?=\s*\()/g;
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+  function render() {
+    const text = src.value;
+    let html = "", last = 0;
+    for (const m of text.matchAll(TOKEN)) {
+      html += esc(text.slice(last, m.index));
+      const cls = m[1] ? "cm" : m[2] ? "s" : m[3] ? "k" : m[4] ? "c" : m[5] ? "n" : "f";
+      html += `<span class="${cls}">${esc(m[0])}</span>`;
+      last = m.index + m[0].length;
+    }
+    hl.innerHTML = html + esc(text.slice(last)) + "\n";
+    const lines = text.split("\n").length;
+    gutter.innerHTML = Array.from({ length: lines }, (_, i) => `<div class="${marks[i + 1] || ""}">${i + 1}</div>`).join("");
+  }
+
+  function print(text, kind = "") {
+    const row = document.createElement("div");
+    row.className = "row " + kind;
+    row.textContent = text;
+    out.append(row);
+    while (out.children.length > 200) out.firstChild.remove();
+    out.scrollTop = out.scrollHeight;
+  }
+
+  function run() {
+    marks = {};
+    render();
+    out.innerHTML = "";
+    print("Compiling…", "dim");
+    lesson.emit("code.run", { language: settings.language || "text", source: src.value });
+  }
+
+  src.addEventListener("input", () => { marks = {}; render(); lesson.save({ source: src.value }); });
+  src.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const { selectionStart: a, selectionEnd: b } = src;
+      src.setRangeText("  ", a, b, "end");
+      src.dispatchEvent(new Event("input"));
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      run();
+    }
+  });
+  document.getElementById("run").onclick = run;
+  document.getElementById("stop").onclick = () => lesson.emit("code.stop", {});
+  document.getElementById("reset").onclick = () => {
+    src.value = starter;
+    marks = {};
+    render();
+    lesson.save({ source: src.value });
+    print("Starter code restored.", "dim");
+  };
+  document.getElementById("copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(src.value); }
+    catch { src.select(); document.execCommand("copy"); src.setSelectionRange(0, 0); }
+    print("Copied to clipboard.", "dim");
+  };
+
+  // Events from other elements in the lesson.
+  lesson.on("run.status", (p) => {
+    if (p.status === "compiled") {
+      out.innerHTML = "";
+      print(p.message || "Running.", "ok");
+    }
+    for (const w of p.warnings || []) { marks[w.line] = marks[w.line] || "warn"; print(`Line ${w.line}: ${w.message}`, "warn"); }
+    for (const e of p.errors || []) { marks[e.line] = "err"; print(`Line ${e.line}: ${e.message}`, "err"); }
+    if (p.status === "error" && p.message) print(p.message, "err");
+    if (p.status === "stopped") print("Stopped.", "dim");
+    render();
+  });
+  lesson.on("serial", (p) => { for (const line of p.lines || []) print(line); });
+  lesson.on("code.variant", (p) => {
+    const next = settings.variants?.[p.variant];
+    if (!next) return;
+    src.value = next;
+    render();
+    lesson.save({ source: src.value, variant: p.variant });
+    print(`Loaded the "${p.variant}" version of the sketch.`, "dim");
+    run();
+  });
+
+  render();
+  print(settings.hint || "Press Run.", "dim");
+})();
+</script>
+</body>
+</html>

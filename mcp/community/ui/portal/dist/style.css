@@ -562,3 +562,25 @@ legend { padding: 0 .3rem; font-weight: 600; }
 
 .offer-options.single .offer-option { grid-template-columns: minmax(0, 1fr) auto; }
 @media (max-width: 600px) { .order-bump { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; padding: 12px; } .order-bump img { display: none; } .order-bump b { font-size: 12px; } .offer-options.single .offer-price { grid-column: auto; text-align: right; } }
+
+/* ─── Interactive lessons ─────────────────────────────────────── */
+.lesson-blocks { position: relative; display: grid; gap: 18px; margin-top: 8px; }
+.lesson-block > h3:first-child { margin-top: 0; }
+.element-block iframe { display: block; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.element-error { border: 1px dashed var(--line); border-radius: 12px; padding: 16px; }
+.element-notice { margin: 6px 0 0; font-size: .8rem; }
+.stage-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+.stage-grid.no-side { grid-template-columns: minmax(0, 1fr); }
+.stage-main { display: grid; gap: 16px; min-width: 0; }
+.stage-side { display: grid; gap: 12px; min-width: 0; }
+.side-tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+.side-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 10px; color: var(--muted); background: none; font-weight: 700; white-space: nowrap; }
+.side-tabs button.selected { color: var(--ink); border-bottom-color: currentColor; }
+.side-tab-body { border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; background: var(--surface-soft); }
+.lesson-steps { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: .82rem; font-weight: 700; }
+.lesson-steps-bar { flex: 1; max-width: 260px; height: 6px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); }
+.lesson-steps-bar span { display: block; height: 100%; border-radius: inherit; background: currentColor; transition: width .3s; }
+.lesson-toast { position: fixed; right: 24px; bottom: 24px; z-index: 50; border-radius: 10px; padding: 10px 16px; color: #fff; background: #1f2d2a; box-shadow: 0 8px 24px rgba(0,0,0,.18); font-weight: 700; }
+@media (max-width: 960px) {
+  .stage-grid { grid-template-columns: minmax(0, 1fr); }
+}

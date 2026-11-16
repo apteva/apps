@@ -646,6 +646,13 @@ func toolLessonBundleGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if firstErr != nil {
 		return nil, firstErr
 	}
+	interactive, err := lessonInteractiveBundle(db, id, strArg(args, "member_id", ""))
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range interactive {
+		out[key] = value
+	}
 	return out, nil
 }
 

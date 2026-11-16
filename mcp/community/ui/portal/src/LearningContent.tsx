@@ -1,7 +1,8 @@
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, type LessonBundle } from "./api";
+import { api, type LessonBlock, type LessonBundle } from "./api";
+import { ElementBus, ElementFrame } from "./ElementHost";
 import type {
   Assignment,
   AssignmentReviewItem,
@@ -327,7 +328,7 @@ function AssignmentForm({
   );
 }
 
-export function LearningContent({ bundle }: { bundle: LessonBundle }) {
+export function LearningContent({ bundle, onProgress }: { bundle: LessonBundle; onProgress?: () => void }) {
   const [status, setStatus] = useState<LearningStatus>({
     attempts: [],
     submissions: [],
@@ -351,6 +352,21 @@ export function LearningContent({ bundle }: { bundle: LessonBundle }) {
       active = false;
     };
   }, [bundle.lesson.id, version]);
+  const refresh = () => setVersion((v) => v + 1);
+  const statusError = error && (
+    <p role="alert">
+      Learning results could not be loaded. {error}{" "}
+      <button onClick={refresh}>Retry</button>
+    </p>
+  );
+  if (bundle.blocks && bundle.blocks.length > 0) {
+    return (
+      <>
+        {statusError}
+        <LessonBlocks bundle={bundle} status={status} onSaved={refresh} onProgress={onProgress} />
+      </>
+    );
+  }
   return (
     <>
       {bundle.lesson.video_storage_key && (
@@ -360,58 +376,174 @@ export function LearningContent({ bundle }: { bundle: LessonBundle }) {
         />
       )}
       <Markdown body={bundle.lesson.body} />
-      {bundle.resources.length > 0 && (
-        <section>
-          <h3>Resources</h3>
-          <ul>
-            {bundle.resources.map((resource) => (
-              <li key={resource.id}>
-                <FileLink
-                  lessonId={bundle.lesson.id}
-                  fileId={resource.storage_file_id}
-                  label={resource.name || "resource"}
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      {error && (
-        <p role="alert">
-          Learning results could not be loaded. {error}{" "}
-          <button onClick={() => setVersion((v) => v + 1)}>Retry</button>
-        </p>
-      )}
-      {bundle.assignments.length > 0 && (
-        <section>
-          <h3>Assignments</h3>
-          {bundle.assignments.map((assignment) => (
-            <AssignmentForm
-              key={assignment.id}
-              lessonId={bundle.lesson.id}
-              assignment={assignment}
-              previous={status.submissions.find(
-                (s) => s.assignment_id === assignment.id,
-              )}
-              onSaved={() => setVersion((v) => v + 1)}
-            />
-          ))}
-        </section>
-      )}
-      {bundle.quizzes.length > 0 && (
-        <section>
-          <h3>Quizzes</h3>
-          {bundle.quizzes.map((quiz) => (
-            <QuizForm
-              key={quiz.id}
-              quiz={quiz}
-              previous={status.attempts.find((a) => a.quiz_id === quiz.id)}
-              onSaved={() => setVersion((v) => v + 1)}
-            />
-          ))}
-        </section>
-      )}
+      <ResourcesSection bundle={bundle} />
+      {statusError}
+      <AssignmentsSection bundle={bundle} status={status} onSaved={refresh} />
+      <QuizzesSection bundle={bundle} status={status} onSaved={refresh} />
     </>
+  );
+}
+
+type SectionProps = { bundle: LessonBundle; status: LearningStatus; onSaved: () => void };
+
+function ResourcesSection({ bundle, title = "Resources" }: { bundle: LessonBundle; title?: string }) {
+  if (bundle.resources.length === 0) return null;
+  return (
+    <section>
+      <h3>{title}</h3>
+      <ul>
+        {bundle.resources.map((resource) => (
+          <li key={resource.id}>
+            <FileLink
+              lessonId={bundle.lesson.id}
+              fileId={resource.storage_file_id}
+              label={resource.name || "resource"}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function AssignmentsSection({ bundle, status, onSaved, title = "Assignments" }: SectionProps & { title?: string }) {
+  if (bundle.assignments.length === 0) return null;
+  return (
+    <section>
+      <h3>{title}</h3>
+      {bundle.assignments.map((assignment) => (
+        <AssignmentForm
+          key={assignment.id}
+          lessonId={bundle.lesson.id}
+          assignment={assignment}
+          previous={status.submissions.find((s) => s.assignment_id === assignment.id)}
+          onSaved={onSaved}
+        />
+      ))}
+    </section>
+  );
+}
+
+function QuizzesSection({ bundle, status, onSaved, title = "Quizzes" }: SectionProps & { title?: string }) {
+  if (bundle.quizzes.length === 0) return null;
+  return (
+    <section>
+      <h3>{title}</h3>
+      {bundle.quizzes.map((quiz) => (
+        <QuizForm
+          key={quiz.id}
+          quiz={quiz}
+          previous={status.attempts.find((a) => a.quiz_id === quiz.id)}
+          onSaved={onSaved}
+        />
+      ))}
+    </section>
+  );
+}
+
+function LessonBlocks({ bundle, status, onSaved, onProgress }: SectionProps & { onProgress?: () => void }) {
+  const bus = useRef(new ElementBus()).current;
+  const [steps, setSteps] = useState(bundle.steps || {});
+  const [toast, setToast] = useState("");
+  const blocks = bundle.blocks || [];
+  const lessonId = bundle.lesson.id;
+  useEffect(() => setSteps(bundle.steps || {}), [bundle.steps]);
+  const requiredTotal = blocks.reduce((n, b) => n + b.required_steps.length, 0);
+  const requiredDone = blocks.reduce((n, b) => n + b.required_steps.filter((s) => (steps[b.id] || []).includes(s)).length, 0);
+
+  function renderBlock(block: LessonBlock) {
+    const heading = block.title && block.type !== "element" ? <h3>{block.title}</h3> : null;
+    switch (block.type) {
+      case "markdown":
+        return <section key={block.id} className="lesson-block">{heading}<Markdown body={String(block.settings?.body || "")} /></section>;
+      case "lesson_body":
+        return bundle.lesson.body ? <section key={block.id} className="lesson-block">{heading}<Markdown body={bundle.lesson.body} /></section> : null;
+      case "video":
+        return bundle.lesson.video_storage_key ? <LessonVideo key={block.id} lessonId={lessonId} fileId={bundle.lesson.video_storage_key} /> : null;
+      case "resources":
+        return <ResourcesSection key={block.id} bundle={bundle} title={block.title || undefined} />;
+      case "quizzes":
+        return <QuizzesSection key={block.id} bundle={bundle} status={status} onSaved={onSaved} title={block.title || undefined} />;
+      case "assignments":
+        return <AssignmentsSection key={block.id} bundle={bundle} status={status} onSaved={onSaved} title={block.title || undefined} />;
+      case "element":
+        return (
+          <ElementFrame
+            key={`${block.id}@${block.element_version}`}
+            lessonId={lessonId}
+            lessonTitle={bundle.lesson.title}
+            block={block}
+            state={bundle.element_state?.[block.id]}
+            steps={steps[block.id]}
+            bus={bus}
+            onStep={(result) => {
+              setSteps(result.steps || {});
+              if (result.lesson_completed && bundle.lesson.progress?.status !== "complete") {
+                setToast("Lesson complete");
+                window.setTimeout(() => setToast(""), 3500);
+                onProgress?.();
+              }
+            }}
+          />
+        );
+      default:
+        return null;
+    }
+  }
+
+  const progress = requiredTotal > 0 && (
+    <div className="lesson-steps" role="status" aria-label="Lesson goals">
+      <div className="lesson-steps-bar"><span style={{ width: `${Math.round((requiredDone / requiredTotal) * 100)}%` }} /></div>
+      <span>{requiredDone} of {requiredTotal} goals</span>
+    </div>
+  );
+  const toastNode = toast && <div className="lesson-toast" role="status">{toast}</div>;
+
+  if ((bundle.layout || "article") !== "stage") {
+    return <div className="lesson-blocks">{progress}{blocks.map(renderBlock)}{toastNode}</div>;
+  }
+  const stage = blocks.filter((b) => b.slot === "stage");
+  const side = blocks.filter((b) => b.slot === "side");
+  const main = blocks.filter((b) => b.slot === "main");
+  return (
+    <div className="lesson-blocks stage-layout">
+      {progress}
+      <div className={side.length ? "stage-grid" : "stage-grid no-side"}>
+        <div className="stage-main">{stage.map(renderBlock)}</div>
+        {side.length > 0 && <SidePanel blocks={side} render={renderBlock} />}
+      </div>
+      {main.map(renderBlock)}
+      {toastNode}
+    </div>
+  );
+}
+
+// Side column: Markdown blocks become tabs (titled by the block), other blocks
+// stack below them so interactive elements stay mounted.
+function SidePanel({ blocks, render }: { blocks: LessonBlock[]; render: (b: LessonBlock) => ReactNode }) {
+  const tabs = blocks.filter((b) => b.type === "markdown");
+  const rest = blocks.filter((b) => b.type !== "markdown");
+  const [active, setActive] = useState(tabs[0]?.id || "");
+  const current = tabs.find((t) => t.id === active) || tabs[0];
+  return (
+    <aside className="stage-side">
+      {tabs.length > 1 && (
+        <div className="side-tabs" role="tablist">
+          {tabs.map((t, i) => (
+            <button key={t.id} role="tab" aria-selected={t.id === current?.id} className={t.id === current?.id ? "selected" : ""} onClick={() => setActive(t.id)}>
+              {t.title || `Part ${i + 1}`}
+            </button>
+          ))}
+        </div>
+      )}
+      {current && (
+        <section className="lesson-block side-tab-body">
+          {tabs.length === 1 && current.title && <h3>{current.title}</h3>}
+          <Markdown body={String(current.settings?.body || "")} />
+        </section>
+      )}
+      {rest.map(render)}
+    </aside>
   );
 }
 

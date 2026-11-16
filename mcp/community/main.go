@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.16.0
+version: 0.17.0
 description: |
   Optional order bumps use Checkout rules and item receipts, with one payment,
   independent course delivery/refunds, and selections editable until Pay.
@@ -286,6 +286,22 @@ provides:
     - { name: community_domain_attach, description: "Attach one custom hostname using Domains DNS plus native ingress and TLS." }
     - { name: community_domain_status, description: "Return DNS, native ingress, and certificate status for a community hostname." }
     - { name: community_domain_detach, description: "Detach a hostname and remove only the exact DNS record Community created." }
+    - { name: course_elements_list, description: "List the community's interactive element library." }
+    - { name: course_elements_get, description: "Get an element draft and its published versions." }
+    - { name: course_elements_save, description: "Create or update a sandboxed HTML/JS element draft." }
+    - { name: course_elements_publish, description: "Publish an element draft as an immutable version." }
+    - { name: course_elements_archive, description: "Archive or restore an element." }
+    - { name: course_elements_install_starters, description: "Install the bundled starter elements." }
+    - { name: lesson_blocks_list, description: "List a lesson's layout and blocks." }
+    - { name: lesson_blocks_set, description: "Replace a lesson's ordered blocks and layout." }
+    - { name: element_runners_list, description: "List runner bindings for elements." }
+    - { name: element_runners_set, description: "Bind runner names to app tools." }
+    - { name: lesson_element_source, description: "Fetch an element version used by a lesson." }
+    - { name: element_state_save, description: "Save a member's element state." }
+    - { name: lesson_step_complete, description: "Record an element step; completes the lesson when all required steps are done." }
+    - { name: element_run, description: "Run input on a runner the element may use." }
+    - { name: course_export, description: "Export a course with its elements as JSON." }
+    - { name: course_import, description: "Import a course package as a new course." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -297,7 +313,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.16.0
+    ref: community/v0.17.0
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -430,6 +446,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, membershipTools()...)
 	tools = append(tools, storefrontTools()...)
 	tools = append(tools, communityDomainTools()...)
+	tools = append(tools, interactiveTools()...)
 	return secureTools(tools)
 }
 

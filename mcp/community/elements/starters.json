@@ -1,0 +1,50 @@
+[
+  {
+    "slug": "code-playground",
+    "name": "Code playground",
+    "description": "Code editor with Run, Stop, Reset and Copy, plus a console. Emits code.run {language, source}; shows run.status and serial events from other elements.",
+    "file": "code.html",
+    "runners": [],
+    "settings_schema": {
+      "type": "object",
+      "properties": {
+        "language": { "type": "string", "description": "arduino | javascript | text" },
+        "starter": { "type": "string", "description": "Initial code" },
+        "hint": { "type": "string" }
+      }
+    }
+  },
+  {
+    "slug": "finance-lab",
+    "name": "Finance lab",
+    "description": "Sliders, a live chart and KPIs for growth, loan and fee models. Runs learner JavaScript in a Web Worker and checks it against reference functions.",
+    "file": "finance-lab.html",
+    "runners": [],
+    "settings_schema": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string", "description": "growth | loan | fees" },
+        "inputs": { "type": "object" },
+        "goals": { "type": "array" }
+      }
+    }
+  },
+  {
+    "slug": "board-scene",
+    "name": "Microcontroller board scene",
+    "description": "3D board and breadboard with clickable parts, labels and a pin simulator. Runs Arduino sketches from a code playground in the browser, or through settings.runner when one is bound.",
+    "file": "board.html",
+    "runners": ["arduino"],
+    "settings_schema": {
+      "type": "object",
+      "properties": {
+        "breadboard": { "type": "boolean" },
+        "parts": { "type": "array" },
+        "wires": { "type": "array" },
+        "callouts": { "type": "array" },
+        "goal": { "type": "object" },
+        "runner": { "type": "string", "description": "Optional runner name; default translates in the browser" }
+      }
+    }
+  }
+]

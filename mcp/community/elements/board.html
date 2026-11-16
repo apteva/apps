@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board scene element</title>
+<style>
+  :root { --ink: #17202b; --muted: #5b6776; --line: #d9dfe7; --accent: #0f8b8d; --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 14px/1.45 system-ui, -apple-system, sans-serif; color: var(--ink); background: radial-gradient(ellipse at 50% 40%, #fbfcfd 0%, #eef2f6 100%); user-select: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; outline: none; }
+  canvas.dragging { cursor: grabbing; }
+  svg.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  svg.overlay .leader { fill: none; stroke: #4b5868; stroke-width: 1.2; stroke-dasharray: 4 4; opacity: .7; }
+  svg.overlay .dot { pointer-events: all; cursor: pointer; }
+  svg.overlay .dot circle.core { fill: #fff; stroke: var(--accent); stroke-width: 2.5; }
+  svg.overlay .dot.seen circle.core { fill: var(--accent); }
+  svg.overlay .dot circle.ring { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: .45; }
+  .callout { position: absolute; display: block; text-align: left; padding: 10px 12px; background: rgba(255,255,255,.94); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 2px 10px rgba(20,30,45,.06); cursor: pointer; font: inherit; color: inherit; }
+  .callout:hover { border-color: var(--accent); }
+  .callout b { display: flex; justify-content: space-between; gap: 6px; font: 600 12px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .callout span { display: block; color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .callout .ok { color: var(--accent); font-size: 12px; }
+  .callout.compact span { display: none; }
+  .hide-labels .callout, .hide-labels .leader { display: none; }
+  #pop { position: absolute; left: 14px; top: 14px; width: 290px; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(20,30,45,.14); padding: 14px 16px; z-index: 5; }
+  #pop[hidden] { display: none; }
+  #pop h3 { margin: 0 24px 4px 0; font: 600 13px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  #pop p { margin: 0; color: var(--muted); font-size: 13px; }
+  #pop .close { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; border: 0; background: none; font-size: 18px; color: var(--muted); cursor: pointer; border-radius: 6px; }
+  #pop .close:hover { background: #f2f4f7; }
+  #pop .sect { border-top: 1px dashed var(--line); margin-top: 12px; padding-top: 10px; }
+  #pop .lbl { font: 500 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .seg { display: inline-flex; gap: 6px; }
+  .seg button, .tbtn, .zoomto { height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font: 500 12px var(--mono); cursor: pointer; color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .zoomto { margin-top: 12px; }
+  .meter { height: 6px; background: #eef1f5; border-radius: 99px; overflow: hidden; }
+  .meter div { height: 100%; background: var(--accent); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #sim { position: absolute; right: 14px; top: 14px; display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: rgba(255,255,255,.94); border: 1px solid var(--line); border-radius: 99px; font: 500 12px var(--mono); }
+  #sim .led { width: 8px; height: 8px; border-radius: 50%; background: #aab3be; }
+  #sim.running .led { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.2); }
+  #sim.error .led { background: #ef4444; }
+  #hint { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%); padding: 5px 12px; background: rgba(23,32,43,.86); color: #fff; border-radius: 8px; font: 500 12px var(--mono); white-space: nowrap; pointer-events: none; transition: opacity .4s; }
+  #toolbar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; gap: 4px; padding: 5px; background: rgba(255,255,255,.96); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 2px 8px rgba(20,30,45,.06); }
+  .tbtn { width: 36px; padding: 0; display: grid; place-items: center; border-color: transparent; }
+  .tbtn:hover { background: #f2f4f7; }
+  .tbtn[aria-pressed="true"] { background: #e3f3f2; color: var(--accent); }
+  .tbtn svg { width: 17px; height: 17px; }
+  .sep { width: 1px; background: var(--line); margin: 4px 3px; }
+  @media (max-width: 560px) { #hint { display: none; } }
+</style>
+</head>
+<body>
+  <canvas id="c" tabindex="0" aria-label="Interactive circuit scene"></canvas>
+  <svg class="overlay" id="ov"></svg>
+  <div id="cards"></div>
+  <div id="pop" hidden role="dialog" aria-live="polite"></div>
+  <div id="sim"><span class="led"></span><span id="simtext">Idle</span></div>
+  <div id="hint">Drag to pan · Q / E to rotate · Scroll to zoom</div>
+  <div id="toolbar">
+    <button class="tbtn" data-act="rotl" title="Rotate left (Q)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a6 6 0 1 0 2-4.5M4 3v3h3"/></svg></button>
+    <button class="tbtn" data-act="rotr" title="Rotate right (E)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 10a6 6 0 1 1-2-4.5M16 3v3h-3"/></svg></button>
+    <span class="sep"></span>
+    <button class="tbtn" data-act="zout" title="Zoom out (−)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 10h10"/></svg></button>
+    <button class="tbtn" data-act="zin" title="Zoom in (+)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 10h10M10 5v10"/></svg></button>
+    <button class="tbtn" data-act="reset" title="Reset view (0)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10" cy="10" r="6.5"/><path d="M10 5.5l1.6 4.5L10 14.5 8.4 10z" fill="currentColor" stroke="none"/></svg></button>
+    <span class="sep"></span>
+    <button class="tbtn" data-act="labels" title="Show labels" aria-pressed="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3 4h8l6 6-6 6H3z"/><circle cx="7" cy="8" r="1.3" fill="currentColor"/></svg></button>
+  </div>
+
+<script>
+(async () => {
+// ============================================================ setup
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const ov = document.getElementById("ov");
+const cardsEl = document.getElementById("cards");
+const pop = document.getElementById("pop");
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+const DEG = Math.PI / 180;
+let W = 800, H = 600;
+
+const { settings, state: saved } = await lesson.ready();
+const parts = settings.parts || [];
+const wires = settings.wires || [];
+const callouts = settings.callouts || [];
+const goal = settings.goal || null;
+const withBreadboard = Boolean(settings.breadboard);
+
+const DEFAULT_VIEW = { theta: -30, zoom: 1, panX: 0, panY: 0 };
+const view = { ...DEFAULT_VIEW, ...(saved?.view || {}) };
+const ui = {
+  explored: new Set(saved?.explored || []),
+  labels: saved?.labels !== false,
+  knob: typeof saved?.knob === "number" ? saved.knob : 0.25,
+  variant: saved?.variant || "hold",
+  pressed: false,
+  open: null,
+};
+const persist = () => lesson.save({ view: { ...view }, explored: [...ui.explored], labels: ui.labels, knob: ui.knob, variant: ui.variant });
+
+// ============================================================ geometry
+const HEADERS = [
+  { x: 17.0, y: 0.4, labels: ["SCL", "SDA", "AREF", "GND", "13", "12", "~11", "~10", "~9", "8"], names: ["SCL", "SDA", "AREF", "GND2", "D13", "D12", "D11", "D10", "D9", "D8"], under: true },
+  { x: 44.6, y: 0.4, labels: ["7", "~6", "~5", "4", "~3", "2", "TX 1", "RX 0"], names: ["D7", "D6", "D5", "D4", "D3", "D2", "D1", "D0"], under: true },
+  { x: 26.4, y: 50.6, labels: ["", "IOREF", "RESET", "3.3V", "5V", "GND", "GND", "VIN"], names: ["NC", "IOREF", "RST", "3V3", "5V", "GND", "GND3", "VIN"] },
+  { x: 49.3, y: 50.6, labels: ["A0", "A1", "A2", "A3", "A4", "A5"], names: ["A0", "A1", "A2", "A3", "A4", "A5"] },
+];
+const HEADER_TOP = 1.6 + 8.5;
+function pinPos(name) {
+  for (const h of HEADERS) {
+    const i = h.names.indexOf(name);
+    if (i >= 0) return [h.x + i * 2.54 + 1.27, h.y + 1.27, HEADER_TOP];
+  }
+  return null;
+}
+function pinNumber(name) {
+  if (typeof name === "number") return name;
+  const s = String(name);
+  if (/^D?\d+$/.test(s)) return Number(s.replace("D", ""));
+  if (/^A[0-5]$/.test(s)) return 14 + Number(s[1]);
+  return null;
+}
+const pinLabel = (n) => (n >= 14 ? `A${n - 14}` : `D${n}`);
+
+const BB = { x: 84, y: 4, w: 82, d: 44, h: 8.5 };
+const ROWS = "abcdefghij";
+function hole(c, r) {
+  const idx = ROWS.indexOf(r);
+  return [BB.x + 5 + (c - 1) * 2.54, 13.5 + idx * 2.54 + (idx >= 5 ? 2.54 : 0), BB.h];
+}
+const CHANNEL_Y = 26.2;
+
+// ============================================================ projection
+let C = 1, S = 0, K = 4, MID = { x: 0, y: 0 };
+const SCENE = withBreadboard ? { x0: -7, x1: 167, y0: 0, y1: 54 } : { x0: -7, x1: 69, y0: 0, y1: 54 };
+const CX = (SCENE.x0 + SCENE.x1) / 2, CY = (SCENE.y0 + SCENE.y1) / 2;
+
+function rawProj(x, y, z) {
+  const dx = x - CX, dy = y - CY;
+  const rx = dx * C - dy * S;
+  const ry = dx * S + dy * C;
+  return { x: rx, y: ry * 0.55 - z * 0.82, d: ry };
+}
+function updateCamera() {
+  C = Math.cos(view.theta * DEG);
+  S = Math.sin(view.theta * DEG);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const x of [SCENE.x0, SCENE.x1]) for (const y of [SCENE.y0, SCENE.y1]) for (const z of [0, 20]) {
+    const p = rawProj(x, y, z);
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  // Fit the scene between the label columns when labels are shown.
+  const cardSpace = ui.labels && callouts.length && W >= 760 ? 2 * 175 : 0;
+  const availW = W < 640 ? W * 0.9 : Math.max(W * 0.45, W - cardSpace);
+  const base = Math.min(availW / (maxX - minX), (H * 0.66) / (maxY - minY));
+  K = base * view.zoom;
+  MID = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+}
+function proj(x, y, z = 0) {
+  const p = rawProj(x, y, z);
+  return { x: W / 2 + view.panX + (p.x - MID.x) * K, y: H / 2 - 10 + view.panY + (p.y - MID.y) * K, d: p.d };
+}
+// Canvas transform that maps world (x, y) on the plane z onto the screen.
+function planeTransform(z) {
+  const o = proj(0, 0, z), ex = proj(1, 0, z), ey = proj(0, 1, z);
+  ctx.setTransform(DPR * (ex.x - o.x), DPR * (ex.y - o.y), DPR * (ey.x - o.x), DPR * (ey.y - o.y), DPR * o.x, DPR * o.y);
+}
+const screenTransform = () => ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+// ============================================================ colors
+function rgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function shade(hex, f) {
+  const [r, g, b] = rgb(hex);
+  const m = (v) => Math.max(0, Math.min(255, Math.round(f <= 1 ? v * f : v + (255 - v) * (f - 1))));
+  return `rgb(${m(r)},${m(g)},${m(b)})`;
+}
+function mix(a, b, t) {
+  const A = rgb(a), B = rgb(b);
+  return "#" + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+
+// ============================================================ primitives
+function poly(pts, fill, stroke) {
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 0.7; ctx.stroke(); }
+}
+const sideLight = (nx, ny) => 0.66 + 0.2 * (nx * C - ny * S);
+const visible = (nx, ny) => nx * S + ny * C > 0.0001;
+
+function drawBox(it) {
+  const { x, y, w, d, z0 = 0, h, color } = it;
+  const z1 = z0 + h;
+  const corners = [[x, y], [x + w, y], [x + w, y + d], [x, y + d]];
+  const normals = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+  for (let i = 0; i < 4; i++) {
+    const [nx, ny] = normals[i];
+    if (!visible(nx, ny)) continue;
+    const a = corners[i], b = corners[(i + 1) % 4];
+    const l = sideLight(nx, ny);
+    poly([proj(a[0], a[1], z0), proj(b[0], b[1], z0), proj(b[0], b[1], z1), proj(a[0], a[1], z1)], shade(it.side || color, l), shade(it.side || color, l * 0.92));
+  }
+  poly(corners.map(([cx, cy]) => proj(cx, cy, z1)), it.topColor || color, shade(color, 0.9));
+  if (it.top) { ctx.save(); planeTransform(z1); it.top(ctx); ctx.restore(); screenTransform(); }
+}
+
+function drawCyl(it) {
+  const { cx, cy, r, z0 = 0, h, color, seg = 22 } = it;
+  const z1 = z0 + h;
+  const ring = [];
+  for (let i = 0; i < seg; i++) { const a = (i / seg) * Math.PI * 2; ring.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
+  if (h > 0.01) {
+    for (let i = 0; i < seg; i++) {
+      const am = ((i + 0.5) / seg) * Math.PI * 2;
+      const nx = Math.cos(am), ny = Math.sin(am);
+      if (!visible(nx, ny)) continue;
+      const a = ring[i], b = ring[(i + 1) % seg];
+      const col = shade(color, sideLight(nx, ny));
+      poly([proj(a[0], a[1], z0), proj(b[0], b[1], z0), proj(b[0], b[1], z1), proj(a[0], a[1], z1)], col, col);
+    }
+  }
+  poly(ring.map(([x, y]) => proj(x, y, z1)), it.topColor || color, it.outline ? shade(color, 0.85) : null);
+  if (it.top) { ctx.save(); planeTransform(z1); it.top(ctx); ctx.restore(); screenTransform(); }
+}
+
+function drawLines(it) {
+  ctx.strokeStyle = it.color;
+  ctx.lineWidth = Math.max(1, it.width * K);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const seg of it.segs) {
+    ctx.beginPath();
+    seg.forEach((p, i) => { const q = proj(...p); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); });
+    ctx.stroke();
+  }
+}
+
+function drawItem(it) {
+  if (it.type === "box") drawBox(it);
+  else if (it.type === "cyl") drawCyl(it);
+  else if (it.type === "lines") drawLines(it);
+}
+function itemDepth(it) {
+  let x, y;
+  if (it.type === "box") { x = it.x + it.w / 2; y = it.y + it.d / 2; }
+  else if (it.type === "cyl") { x = it.cx; y = it.cy; }
+  else { x = it.at[0]; y = it.at[1]; }
+  return rawProj(x, y, 0).d + (it.z0 || 0) * 0.06 + (it.bias || 0);
+}
+
+// ============================================================ simulation state
+const sim = { gen: 0, running: false, digital: {}, pwm: {}, last: {}, mode: {}, t0: 0, ticks: 0, error: false };
+function level(pin) {
+  if (!sim.running) return 0;
+  if (sim.last[pin] === "a") return (sim.pwm[pin] || 0) / 255;
+  return sim.digital[pin] ? 1 : 0;
+}
+function partLevel(part) {
+  const pin = pinNumber(part.signal?.pin);
+  return pin == null ? 0 : level(pin);
+}
+
+// ============================================================ scene
+function buildScene() {
+  const board = [], bb = [], anchors = {}, hits = [];
+  // ---- board
+  board.push({ type: "box", base: true, x: 0, y: 0, w: 68.6, d: 53.4, z0: 0, h: 1.6, color: "#2d5ca8", side: "#1e3f75", top: boardTop });
+  board.push({ type: "box", x: -6.2, y: 9, w: 16, d: 12, z0: 1.6, h: 10.9, color: "#c3cad3", topColor: "#d7dce2", top: usbTop });
+  board.push({ type: "box", x: -1.8, y: 39, w: 14, d: 9, z0: 1.6, h: 11, color: "#262b31" });
+  board.push({ type: "cyl", cx: 3.5, cy: 43.5, r: 2.6, z0: 12.6, h: 0.01, color: "#0f1216", bias: 0.2 });
+  board.push({ type: "box", x: 3, y: 2, w: 6, d: 6, z0: 1.6, h: 3.2, color: "#2a2f36" });
+  board.push({ type: "cyl", cx: 6, cy: 5, r: 1.7, z0: 4.8, h: 1.2, color: "#d9483b", topColor: "#ef6b5e" });
+  board.push({ type: "box", x: 20, y: 23, w: 10, d: 4, z0: 1.6, h: 3.6, color: "#c9ced6", topColor: "#dde1e6" });
+  board.push({ type: "cyl", cx: 15, cy: 44, r: 3.1, z0: 1.6, h: 8, color: "#aeb6c0", topColor: "#cfd5dc", top: capTop(15, 44) });
+  board.push({ type: "cyl", cx: 22.5, cy: 44, r: 3.1, z0: 1.6, h: 8, color: "#aeb6c0", topColor: "#cfd5dc", top: capTop(22.5, 44) });
+  board.push({ type: "box", x: 4, y: 29, w: 6, d: 5, z0: 1.6, h: 2, color: "#1b2129" });
+  board.push({ type: "box", x: 14, y: 13, w: 5, d: 5, z0: 1.6, h: 1.2, color: "#1b2129" });
+  board.push({ type: "box", x: 62, y: 21, w: 5.08, d: 7.62, z0: 1.6, h: 8.5, color: "#1d2229", top: icspTop });
+  // main chip + legs
+  board.push({ type: "box", x: 29.5, y: 27.5, w: 36, d: 9, z0: 1.6, h: 1.4, color: "#23272d" });
+  board.push({ type: "box", x: 30, y: 28.2, w: 35, d: 7.6, z0: 3.0, h: 3.4, color: "#1d2229", topColor: "#23282f", top: chipTop });
+  for (let i = 0; i < 14; i++) {
+    board.push({ type: "box", x: 31.6 + i * 2.54, y: 27.4, w: 0.9, d: 0.9, z0: 3.0, h: 1.4, color: "#bfc6cf" });
+    board.push({ type: "box", x: 31.6 + i * 2.54, y: 35.6, w: 0.9, d: 0.9, z0: 3.0, h: 1.4, color: "#bfc6cf" });
+  }
+  // headers
+  for (const h of HEADERS) {
+    board.push({ type: "box", x: h.x, y: h.y, w: h.names.length * 2.54, d: 2.54, z0: 1.6, h: 8.5, color: "#1d2229", topColor: "#23282f", top: headerTop(h) });
+  }
+  // on-board LEDs
+  const L = level(13);
+  board.push({ type: "box", x: 31.6, y: 9.4, w: 2.2, d: 1.4, z0: 1.6, h: 0.9, color: L > 0.05 ? mix("#d9a520", "#fff4c0", L) : "#c9a640" });
+  board.push({ type: "box", x: 58, y: 41, w: 2.2, d: 1.4, z0: 1.6, h: 0.9, color: "#5bd27b" });
+
+  anchors.usb = [2, 15, 12.5];
+  anchors.jack = [5, 43.5, 12.6];
+  anchors.chip = [47.5, 32, 6.4];
+  anchors.digital = [40.8, 1.7, HEADER_TOP];
+  anchors.power = [36.5, 51.9, HEADER_TOP];
+  anchors.analog = [56.9, 51.9, HEADER_TOP];
+  anchors["onboard-led"] = [32.7, 10.1, 2.5];
+  anchors.reset = [6, 5, 6];
+  for (const h of HEADERS) for (const n of h.names) anchors[n] = pinPos(n);
+
+  const glows = [{ at: [32.7, 10.1, 2.6], level: L, color: "#ffd24a", size: 7 }];
+
+  // ---- breadboard + parts
+  if (withBreadboard) {
+    bb.push({ type: "box", base: true, x: BB.x, y: BB.y, w: BB.w, d: BB.d, z0: 0, h: BB.h, color: "#efe9db", side: "#d9d0bb", top: breadboardTop });
+    for (const part of parts) addPart(part, bb, anchors, hits, glows);
+  }
+  return { board, bb, anchors, hits, glows };
+}
+
+function addPart(part, items, anchors, hits, glows) {
+  const [c, r] = part.hole || [1, "e"];
+  if (part.kind === "led") {
+    const a = hole(c, r), b = hole(c + 1, r);
+    const x = (a[0] + b[0]) / 2, y = a[1];
+    const lv = partLevel(part);
+    const base = part.color || "#e5484d";
+    const body = lv > 0.03 ? mix(mix(base, "#ffffff", 0.15), "#fff6f0", lv * 0.45) : mix(base, "#5a5f66", 0.35);
+    items.push({ type: "lines", at: [x, y], segs: [[a, [a[0], a[1], 12]], [b, [b[0], b[1], 12]]], color: "#9aa3ad", width: 0.45, z0: 8.6 });
+    items.push({ type: "cyl", cx: x, cy: y, r: 2.65, z0: 12, h: 0.9, color: mix(body, "#000000", 0.18) });
+    items.push({ type: "cyl", cx: x, cy: y, r: 2.35, z0: 12.9, h: 4.3, color: body });
+    items.push({ type: "cyl", cx: x, cy: y, r: 1.9, z0: 17.2, h: 0.8, color: body });
+    items.push({ type: "cyl", cx: x, cy: y, r: 1.2, z0: 18, h: 0.4, color: body, topColor: mix(body, "#ffffff", 0.35) });
+    anchors[part.id] = [x, y, 18.6];
+    glows.push({ at: [x, y, 15.5], level: lv, color: base, size: 15 });
+  } else if (part.kind === "resistor") {
+    const span = part.span || 4;
+    const a = hole(c, r), b = hole(c + span, r);
+    const mx = (a[0] + b[0]) / 2, y = a[1];
+    items.push({ type: "lines", at: [mx, y], segs: [[a, [a[0], y, 10.6], [mx - 3.2, y, 10.6]], [b, [b[0], y, 10.6], [mx + 3.2, y, 10.6]]], color: "#9aa3ad", width: 0.45, z0: 8.6 });
+    items.push({
+      type: "box", x: mx - 3.2, y: y - 1.1, w: 6.4, d: 2.2, z0: 9.5, h: 2.2, color: "#d8c397", topColor: "#e2cfa6",
+      top: (g) => {
+        const bands = part.id === "pulldown" ? ["#7a4b2a", "#1d1d1d", "#d06a1e", "#c9a227"] : ["#c0392b", "#c0392b", "#7a4b2a", "#c9a227"];
+        bands.forEach((col, i) => { g.fillStyle = col; g.fillRect(mx - 3.2 + 1.0 + i * 1.25 + (i === 3 ? 0.6 : 0), y - 1.1, 0.6, 2.2); });
+      },
+    });
+    anchors[part.id] = [mx, y, 11.7];
+  } else if (part.kind === "button") {
+    const cx = hole(c + 1, "e")[0], cy = CHANNEL_Y;
+    const legs = [hole(c, "e"), hole(c + 2, "e"), hole(c, "f"), hole(c + 2, "f")];
+    items.push({ type: "lines", at: [cx, cy], segs: legs.map((p) => [p, [p[0] + (p[0] < cx ? 0.8 : -0.8), p[1] + (p[1] < cy ? 0.8 : -0.8), 9.2]]), color: "#9aa3ad", width: 0.5, z0: 8.6 });
+    items.push({
+      type: "box", x: cx - 3, y: cy - 3, w: 6, d: 6, z0: 8.8, h: 3.4, color: "#2b3036", topColor: "#343a42",
+      top: (g) => { g.fillStyle = "#1c2026"; for (const [dx, dy] of [[-2.2, -2.2], [2.2, -2.2], [2.2, 2.2], [-2.2, 2.2]]) { g.beginPath(); g.arc(cx + dx, cy + dy, 0.45, 0, Math.PI * 2); g.fill(); } },
+    });
+    const capH = ui.pressed ? 0.6 : 1.9;
+    items.push({ type: "cyl", cx, cy, r: 1.95, z0: 12.2, h: capH, color: "#d9483b", topColor: ui.pressed ? "#c43a2e" : "#f06a5d" });
+    anchors[part.id] = [cx - 3, cy - 3, 21]; // float the label dot above the cap so the cap stays clickable
+    hits.push({ id: part.id, kind: "button", at: [cx, cy, 12.2 + capH], r: 3.2 });
+  } else if (part.kind === "potentiometer") {
+    const cx = hole(c + 1, r)[0], cy = hole(c, r)[1] - 4.2;
+    const legs = [hole(c, r), hole(c + 1, r), hole(c + 2, r)];
+    items.push({ type: "lines", at: [cx, cy], segs: legs.map((p) => [p, [p[0], p[1], 10.2], [p[0], cy + 4, 10.2]]), color: "#9aa3ad", width: 0.5, z0: 8.6 });
+    items.push({ type: "box", x: cx - 4.75, y: cy - 4.75, w: 9.5, d: 9.5, z0: 9.6, h: 4.8, color: "#3566c9", topColor: "#4174d6" });
+    items.push({ type: "cyl", cx, cy, r: 2.3, z0: 14.4, h: 1.3, color: "#a5adb7" });
+    const ang = (-225 + ui.knob * 270) * DEG;
+    items.push({
+      type: "cyl", cx, cy, r: 3.4, z0: 15.7, h: 6, color: "#2a2f36", topColor: "#444c56", seg: 26,
+      top: (g) => {
+        g.strokeStyle = "#ffffff"; g.lineWidth = 0.55; g.lineCap = "round";
+        g.beginPath(); g.moveTo(cx + Math.cos(ang) * 0.6, cy + Math.sin(ang) * 0.6); g.lineTo(cx + Math.cos(ang) * 2.9, cy + Math.sin(ang) * 2.9); g.stroke();
+      },
+    });
+    anchors[part.id] = [cx - 4, cy - 4, 29];
+    hits.push({ id: part.id, kind: "knob", at: [cx, cy, 21.7], r: 4.2 });
+  }
+}
+
+// ---- surface details (drawn in world mm on the top plane)
+function boardTop(g) {
+  g.fillStyle = "rgba(255,255,255,.08)";
+  g.strokeStyle = "rgba(160,200,255,.25)";
+  g.lineWidth = 0.35;
+  g.beginPath();
+  for (const [x1, y1, x2, y2] of [[20, 12, 30, 20], [30, 20, 30, 27], [12, 30, 24, 30], [24, 30, 29, 30], [55, 12, 60, 21], [40, 39, 50, 46], [10, 20, 14, 24]]) { g.moveTo(x1, y1); g.lineTo(x2, y2); }
+  g.stroke();
+  // mounting holes
+  for (const [x, y] of [[14, 2.5], [15.3, 50.8], [66.1, 7.6], [66.1, 35.5]]) {
+    g.fillStyle = "#d9dee5"; g.beginPath(); g.arc(x, y, 1.9, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "#7d8794"; g.beginPath(); g.arc(x, y, 1.2, 0, Math.PI * 2); g.fill();
+  }
+  g.fillStyle = "#ffffff";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.font = "700 4.6px system-ui, sans-serif";
+  g.fillText("MAKER·328", 44, 19.5);
+  g.font = "600 1.7px ui-monospace, monospace";
+  g.fillText("DIGITAL (PWM ~)", 44, 9.2);
+  g.fillText("POWER", 36.5, 47.4);
+  g.fillText("ANALOG IN", 56.9, 47.4);
+  g.fillText("L", 32.7, 12.4);
+  g.fillText("ON", 59.1, 44);
+  // pin labels
+  g.font = "500 1.05px ui-monospace, monospace";
+  for (const h of HEADERS) {
+    h.labels.forEach((label, i) => {
+      if (!label) return;
+      const x = h.x + i * 2.54 + 1.27;
+      g.save();
+      if (h.under) { g.translate(x, 3.5); g.rotate(Math.PI / 2); g.textAlign = "left"; }
+      else { g.translate(x, h.y - 1.0); g.rotate(-Math.PI / 2); g.textAlign = "left"; }
+      g.fillText(label, 0, 0);
+      g.restore();
+    });
+  }
+}
+function usbTop(g) { g.fillStyle = "#aeb5bf"; g.fillRect(-6.2, 10.5, 2.5, 9); }
+function capTop(x, y) { return (g) => { g.strokeStyle = "#8f98a3"; g.lineWidth = 0.35; g.beginPath(); g.moveTo(x - 2, y); g.lineTo(x + 2, y); g.moveTo(x, y - 2); g.lineTo(x, y + 2); g.stroke(); }; }
+function icspTop(g) { g.fillStyle = "#c8a24a"; for (let i = 0; i < 2; i++) for (let j = 0; j < 3; j++) g.fillRect(62 + 1.27 + i * 2.54 - 0.4, 21 + 1.27 + j * 2.54 - 0.4, 0.8, 0.8); }
+function chipTop(g) {
+  g.fillStyle = "#15191e"; g.beginPath(); g.arc(30, 32, 1.1, -Math.PI / 2, Math.PI / 2); g.fill();
+  g.fillStyle = "rgba(255,255,255,.55)"; g.font = "600 1.7px ui-monospace, monospace"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText("MCU-328P  ·  16 MHz", 47.5, 32);
+}
+function headerTop(h) {
+  return (g) => {
+    g.fillStyle = "#0b0d10";
+    for (let i = 0; i < h.names.length; i++) g.fillRect(h.x + i * 2.54 + 0.62, h.y + 0.62, 1.3, 1.3);
+  };
+}
+function breadboardTop(g) {
+  // power rails
+  for (const [y, col] of [[7.0, "#d23c3c"], [9.54, "#3a6fd8"], [43.0, "#d23c3c"], [45.54, "#3a6fd8"]]) {
+    g.strokeStyle = col; g.lineWidth = 0.3; g.globalAlpha = 0.7;
+    const ly = y + (col === "#d23c3c" ? -1.3 : 1.3);
+    g.beginPath(); g.moveTo(BB.x + 3, ly); g.lineTo(BB.x + BB.w - 3, ly); g.stroke();
+    g.globalAlpha = 1;
+    g.fillStyle = "#4a4f57";
+    for (let i = 0; i < 30; i++) { if (i % 6 === 5) continue; g.fillRect(BB.x + 6 + i * 2.54 - 0.45, y - 0.45, 0.9, 0.9); }
+  }
+  // channel
+  g.fillStyle = "#ddd4bf"; g.fillRect(BB.x + 2, CHANNEL_Y - 1.1, BB.w - 4, 2.2);
+  // holes
+  g.fillStyle = "#4a4f57";
+  for (let ci = 1; ci <= 30; ci++) for (const r of ROWS) { const [x, y] = hole(ci, r); g.fillRect(x - 0.45, y - 0.45, 0.9, 0.9); }
+  g.fillStyle = "#8f8775"; g.font = "500 1.25px ui-monospace, monospace"; g.textAlign = "center"; g.textBaseline = "middle";
+  for (let ci = 1; ci <= 30; ci += ci === 1 ? 4 : 5) { const [x] = hole(ci, "a"); g.fillText(String(ci), x, 11.6); g.fillText(String(ci), x, 41.0); }
+  for (const r of ROWS) { const [, y] = hole(1, r); g.fillText(r, BB.x + 2.6, y); g.fillText(r, BB.x + BB.w - 2.4, y); }
+}
+
+// ============================================================ render
+let scene = null;
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  setTimeout(() => { renderQueued = false; render(); }, 16);
+}
+
+function drawGround() {
+  ctx.save();
+  planeTransform(0);
+  ctx.strokeStyle = "rgba(23,32,43,.06)";
+  ctx.lineWidth = 0.25;
+  ctx.beginPath();
+  for (let x = -60; x <= 230; x += 10) { ctx.moveTo(x, -40); ctx.lineTo(x, 95); }
+  for (let y = -40; y <= 95; y += 10) { ctx.moveTo(-60, y); ctx.lineTo(230, y); }
+  ctx.stroke();
+  ctx.restore();
+  screenTransform();
+}
+function drawShadow(x, y, w, d) {
+  const pts = [[x, y], [x + w, y], [x + w, y + d], [x, y + d]].map(([a, b]) => proj(a + 1.5, b + 2.5, 0));
+  ctx.save();
+  ctx.filter = `blur(${Math.max(4, K * 2.2)}px)`;
+  poly(pts, "rgba(20,30,45,.18)");
+  ctx.restore();
+}
+
+function drawGroup(items) {
+  const base = items.filter((i) => i.base);
+  const rest = items.filter((i) => !i.base).sort((a, b) => itemDepth(a) - itemDepth(b));
+  for (const it of base) drawItem(it);
+  for (const it of rest) drawItem(it);
+}
+
+function wirePath(w) {
+  const start = pinPos(w.from);
+  const [c, r] = w.to;
+  const end = hole(c, r);
+  if (!start) return null;
+  const s = [start[0], start[1], start[2] + 4];
+  const e = [end[0], end[1], end[2] + 3.5];
+  const dist = Math.hypot(e[0] - s[0], e[1] - s[1]);
+  const lift = 9 + dist * 0.2;
+  const c1 = [s[0], s[1], s[2] + lift], c2 = [e[0], e[1], e[2] + lift];
+  const pts = [];
+  for (let i = 0; i <= 28; i++) {
+    const t = i / 28, u = 1 - t;
+    pts.push([0, 1, 2].map((k) => u * u * u * s[k] + 3 * u * u * t * c1[k] + 3 * u * t * t * c2[k] + t * t * t * e[k]));
+  }
+  return { start, end, pts };
+}
+function drawWires() {
+  const list = wires.map((w) => ({ w, p: wirePath(w) })).filter((x) => x.p);
+  list.sort((a, b) => rawProj(...a.p.pts[14]).d - rawProj(...b.p.pts[14]).d);
+  for (const { w, p } of list) {
+    for (const [x, y, z, h] of [[p.start[0], p.start[1], p.start[2], 4], [p.end[0], p.end[1], p.end[2], 3.5]]) {
+      drawBox({ type: "box", x: x - 1.1, y: y - 1.1, w: 2.2, d: 2.2, z0: z, h, color: "#1f242b", topColor: shade(w.color, 1.1) });
+    }
+    const scr = p.pts.map((q) => proj(...q));
+    for (const [width, col] of [[1.55, shade(w.color, 0.62)], [1.15, w.color], [0.35, "rgba(255,255,255,.35)"]]) {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = Math.max(1, width * K);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      scr.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y - (col.startsWith("rgba") ? width * K * 0.6 : 0)) : ctx.moveTo(q.x, q.y)));
+      ctx.stroke();
+    }
+  }
+}
+function drawGlows() {
+  for (const g of scene.glows) {
+    if (g.level < 0.03) continue;
+    const p = proj(...g.at);
+    const rad = g.size * K * (0.55 + 0.45 * g.level);
+    const [r, gg, b] = rgb(g.color.slice(0, 7));
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rad);
+    grad.addColorStop(0, `rgba(255,255,255,${0.55 * g.level})`);
+    grad.addColorStop(0.25, `rgba(${r},${gg},${b},${0.45 * g.level})`);
+    grad.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function render() {
+  updateCamera();
+  scene = buildScene();
+  screenTransform();
+  ctx.clearRect(0, 0, W, H);
+  drawGround();
+  drawShadow(-2, 0, 70, 54);
+  if (withBreadboard) drawShadow(BB.x, BB.y, BB.w, BB.d);
+  const groups = [{ items: scene.board, at: [34, 27] }];
+  if (withBreadboard) groups.push({ items: scene.bb, at: [BB.x + BB.w / 2, BB.y + BB.d / 2] });
+  groups.sort((a, b) => rawProj(...a.at, 0).d - rawProj(...b.at, 0).d);
+  for (const g of groups) drawGroup(g.items);
+  drawWires();
+  drawGlows();
+  layoutCallouts();
+  updateSimChip();
+}
+
+// ============================================================ callouts
+const cardNodes = new Map();
+function buildCards() {
+  cardsEl.innerHTML = "";
+  for (const c of callouts) {
+    const b = document.createElement("button");
+    b.className = "callout";
+    b.innerHTML = `<b><em style="font-style:normal"></em><i class="ok"></i></b><span></span>`;
+    b.querySelector("em").textContent = c.title;
+    b.querySelector("span").textContent = c.text;
+    b.onclick = () => openPop(c.target);
+    cardsEl.append(b);
+    cardNodes.set(c.target, b);
+  }
+}
+function layoutCallouts() {
+  document.body.classList.toggle("hide-labels", !ui.labels);
+  const cardW = W < 760 ? 150 : 200;
+  const compact = W < 760;
+  const entries = callouts.map((c) => ({ c, a: scene.anchors[c.target] })).filter((e) => e.a).map((e) => ({ ...e, p: proj(...e.a), node: cardNodes.get(e.c.target) }));
+  let svg = "";
+  for (const side of ["left", "right"]) {
+    const list = entries.filter((e) => (side === "left" ? e.p.x < W / 2 : e.p.x >= W / 2)).sort((a, b) => a.p.y - b.p.y);
+    let y = 60;
+    for (const e of list) {
+      e.node.style.width = cardW + "px";
+      e.node.classList.toggle("compact", compact);
+      e.h = e.node.offsetHeight;
+      e.y = Math.max(y, e.p.y - e.h / 2);
+      y = e.y + e.h + 10;
+    }
+    let limit = H - 76;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      if (e.y + e.h > limit) e.y = limit - e.h;
+      limit = e.y - 10;
+    }
+    for (const e of list) {
+      const x = side === "left" ? 12 : W - 12 - cardW;
+      e.node.style.left = x + "px";
+      e.node.style.top = Math.max(8, e.y) + "px";
+      e.node.querySelector(".ok").textContent = ui.explored.has(e.c.target) ? "✓" : "";
+      const sx = side === "left" ? x + cardW : x;
+      const sy = Math.max(8, e.y) + Math.min(e.h / 2, 22);
+      const mx = side === "left" ? sx + 18 : sx - 18;
+      svg += `<path class="leader" d="M${sx} ${sy} L${mx} ${sy} L${e.p.x} ${e.p.y}"/>`;
+    }
+  }
+  for (const e of entries) {
+    const seen = ui.explored.has(e.c.target);
+    svg += `<g class="dot${seen ? " seen" : ""}" data-target="${e.c.target}" transform="translate(${e.p.x} ${e.p.y})"><circle class="ring" r="10"/><circle class="core" r="5.5"/><title>${e.c.title}</title></g>`;
+  }
+  ov.innerHTML = svg;
+  ov.querySelectorAll(".dot").forEach((d) => (d.onclick = () => openPop(d.dataset.target)));
+}
+
+// ============================================================ popover
+function partById(id) { return parts.find((p) => p.id === id); }
+function openPop(target) {
+  const c = callouts.find((x) => x.target === target);
+  if (!c) return;
+  ui.open = target;
+  if (!ui.explored.has(target)) {
+    ui.explored.add(target);
+    persist();
+    checkGoal();
+  }
+  renderPop();
+  scheduleRender();
+}
+function renderPop() {
+  if (!ui.open) { pop.hidden = true; return; }
+  const c = callouts.find((x) => x.target === ui.open);
+  const part = partById(ui.open);
+  pop.hidden = false;
+  pop.innerHTML = `<button class="close" aria-label="Close">×</button><h3></h3><p></p><div class="extra"></div><button class="zoomto">⌖ Zoom to it</button>`;
+  pop.querySelector("h3").textContent = c.title;
+  pop.querySelector("p").textContent = c.text;
+  pop.querySelector(".close").onclick = () => { ui.open = null; renderPop(); };
+  pop.querySelector(".zoomto").onclick = () => zoomTo(c.target);
+  const extra = pop.querySelector(".extra");
+  if (part?.kind === "button" && part.variants?.length) {
+    extra.innerHTML = `<div class="sect"><div class="lbl">Logic</div><div class="seg"></div><p style="margin-top:8px" class="vdesc"></p></div>`;
+    const seg = extra.querySelector(".seg");
+    for (const v of part.variants) {
+      const b = document.createElement("button");
+      b.textContent = v[0].toUpperCase() + v.slice(1);
+      b.setAttribute("aria-pressed", String(ui.variant === v));
+      b.onclick = () => { ui.variant = v; persist(); lesson.emit("code.variant", { variant: v }); renderPop(); };
+      seg.append(b);
+    }
+    extra.querySelector(".vdesc").textContent = ui.variant === "toggle" ? "Each press flips the LED on or off." : "The LED is on only while you hold the button.";
+  } else if (part?.kind === "potentiometer") {
+    extra.innerHTML = `<div class="sect"><div class="lbl">Position · <span class="val"></span></div><input type="range" min="0" max="1023" aria-label="Knob position"></div>`;
+    const input = extra.querySelector("input");
+    input.value = Math.round(ui.knob * 1023);
+    extra.querySelector(".val").textContent = `analogRead = ${input.value}`;
+    input.oninput = () => { setKnob(input.value / 1023); extra.querySelector(".val").textContent = `analogRead = ${input.value}`; };
+  } else if (part?.kind === "led" || c.target === "onboard-led") {
+    const lv = part ? partLevel(part) : level(13);
+    extra.innerHTML = `<div class="sect"><div class="lbl">Brightness · ${Math.round(lv * 100)}%</div><div class="meter"><div style="width:${lv * 100}%"></div></div></div>`;
+  }
+}
+function zoomTo(target) {
+  const a = scene.anchors[target];
+  if (!a) return;
+  const target0 = Math.min(3, Math.max(view.zoom, 2));
+  animateView({ zoom: target0 }, () => {
+    updateCamera();
+    const p = proj(...a);
+    animateView({ panX: view.panX + (W / 2 - p.x), panY: view.panY + (H / 2 - p.y) });
+  });
+}
+let lastPopRefresh = 0;
+function refreshPopIfLed() {
+  const part = partById(ui.open);
+  if ((part?.kind === "led" || ui.open === "onboard-led") && performance.now() - lastPopRefresh > 120) {
+    lastPopRefresh = performance.now();
+    renderPop();
+  }
+}
+
+// ============================================================ view controls
+let anim = null;
+function animateView(to, done) {
+  clearInterval(anim);
+  const from = { ...view };
+  const t0 = performance.now();
+  anim = setInterval(() => {
+    const t = Math.min(1, (performance.now() - t0) / 220);
+    const e = 1 - Math.pow(1 - t, 3);
+    for (const k of Object.keys(to)) view[k] = from[k] + (to[k] - from[k]) * e;
+    render();
+    if (t >= 1) { clearInterval(anim); persist(); done?.(); }
+  }, 16);
+}
+const rotate = (deg) => animateView({ theta: view.theta + deg });
+const zoomBy = (f) => animateView({ zoom: Math.min(3.5, Math.max(0.5, view.zoom * f)) });
+document.getElementById("toolbar").addEventListener("click", (e) => {
+  const act = e.target.closest("button")?.dataset.act;
+  if (act === "rotl") rotate(-15);
+  if (act === "rotr") rotate(15);
+  if (act === "zin") zoomBy(1.25);
+  if (act === "zout") zoomBy(0.8);
+  if (act === "reset") animateView({ ...DEFAULT_VIEW });
+  if (act === "labels") { ui.labels = !ui.labels; e.target.closest("button").setAttribute("aria-pressed", String(ui.labels)); persist(); render(); }
+});
+document.querySelector('[data-act="labels"]').setAttribute("aria-pressed", String(ui.labels));
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  const k = e.key.toLowerCase();
+  if (k === "q") rotate(-15);
+  else if (k === "e") rotate(15);
+  else if (k === "+" || k === "=") zoomBy(1.25);
+  else if (k === "-") zoomBy(0.8);
+  else if (k === "0") animateView({ ...DEFAULT_VIEW });
+  else if ("wasd".includes(k) && k.length === 1) {
+    const d = { w: [0, 40], s: [0, -40], a: [40, 0], d: [-40, 0] }[k];
+    animateView({ panX: view.panX + d[0], panY: view.panY + d[1] });
+  } else if (k === "escape") { ui.open = null; renderPop(); }
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  view.zoom = Math.min(3.5, Math.max(0.5, view.zoom * Math.exp(-e.deltaY * 0.0015)));
+  scheduleRender();
+  clearTimeout(canvas.saveT);
+  canvas.saveT = setTimeout(persist, 300);
+}, { passive: false });
+
+function hitTest(x, y) {
+  if (!scene) return null;
+  for (const h of scene.hits) {
+    const p = proj(...h.at);
+    if (Math.hypot(p.x - x, p.y - y) < h.r * K + 6) return h;
+  }
+  return null;
+}
+let drag = null;
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.focus();
+  canvas.setPointerCapture(e.pointerId);
+  const h = hitTest(e.offsetX, e.offsetY);
+  document.getElementById("hint").style.opacity = "0";
+  if (h?.kind === "button") { drag = { kind: "button" }; setPressed(true); return; }
+  if (h?.kind === "knob") { drag = { kind: "knob", y: e.clientY, v: ui.knob }; return; }
+  drag = { kind: "pan", x: e.clientX, y: e.clientY, px: view.panX, py: view.panY };
+  canvas.classList.add("dragging");
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!drag) {
+    const h = hitTest(e.offsetX, e.offsetY);
+    canvas.style.cursor = h ? (h.kind === "knob" ? "ns-resize" : "pointer") : "";
+    return;
+  }
+  if (drag.kind === "pan") { view.panX = drag.px + e.clientX - drag.x; view.panY = drag.py + e.clientY - drag.y; scheduleRender(); }
+  if (drag.kind === "knob") setKnob(Math.min(1, Math.max(0, drag.v + (drag.y - e.clientY) / 160)));
+});
+const endDrag = () => {
+  if (drag?.kind === "button") setPressed(false);
+  if (drag?.kind === "pan") persist();
+  drag = null;
+  canvas.classList.remove("dragging");
+};
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+let pressedAt = 0;
+function setPressed(v) {
+  // Keep very short taps down long enough for the sketch's loop to see them.
+  if (!v && performance.now() - pressedAt < 150) { setTimeout(() => setPressed(false), 150 - (performance.now() - pressedAt)); return; }
+  if (v) pressedAt = performance.now();
+  if (ui.pressed === v) return;
+  ui.pressed = v;
+  inputs.lastButtonEdge = performance.now();
+  scheduleRender();
+}
+function setKnob(v) {
+  ui.knob = v;
+  inputs.knobMoved = true;
+  scheduleRender();
+  clearTimeout(setKnob.t);
+  setKnob.t = setTimeout(persist, 300);
+}
+
+// ============================================================ goals
+const inputs = { lastButtonEdge: 0, knobMoved: false };
+const goalState = { done: false, toggles: 0, lastOn: null, controlled: 0, dimSamples: 0 };
+function complete(step) {
+  if (goalState.done) return;
+  goalState.done = true;
+  lesson.complete(step);
+}
+function checkGoal() {
+  if (!goal || goalState.done) return;
+  if (goal.type === "explore-all" && callouts.every((c) => ui.explored.has(c.target))) complete(goal.step);
+}
+function onOutputs() {
+  scheduleRender();
+  refreshPopIfLed();
+  if (!goal || goalState.done || !sim.running) return;
+  const part = goal.part ? partById(goal.part) : null;
+  const lv = part ? partLevel(part) : level(13);
+  const on = lv > 0.5;
+  if (goalState.lastOn !== null && on !== goalState.lastOn) {
+    goalState.toggles++;
+    if (performance.now() - inputs.lastButtonEdge < 400) goalState.controlled++;
+  }
+  goalState.lastOn = on;
+  if (goal.type === "led-toggles" && goalState.toggles >= (goal.count || 4)) complete(goal.step);
+  if (goal.type === "button-drives-led" && goalState.controlled >= 2) complete(goal.step);
+  if (goal.type === "led-dims" && inputs.knobMoved && lv > 0.15 && lv < 0.85 && ++goalState.dimSamples >= 5) complete(goal.step);
+}
+
+// ============================================================ program runner
+class StopSignal extends Error {}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let serialBuf = [], serialPartial = "", serialTimer = null;
+function serialOut(text, newline) {
+  serialPartial += text;
+  if (newline) { serialBuf.push(serialPartial); serialPartial = ""; }
+  if (serialBuf.length > 50) serialBuf = serialBuf.slice(-50);
+  if (!serialTimer) serialTimer = setTimeout(() => { serialTimer = null; if (serialBuf.length) lesson.emit("serial", { lines: serialBuf }); serialBuf = []; }, 200);
+}
+function readDigital(pin) {
+  for (const p of parts) if (p.kind === "button" && pinNumber(p.signal?.pin) === pin) return ui.pressed ? 1 : 0;
+  return sim.mode[pin] === 2 ? 1 : 0;
+}
+function readAnalog(pin) {
+  for (const p of parts) if (p.kind === "potentiometer" && pinNumber(p.signal?.pin) === pin) return Math.round(ui.knob * 1023);
+  return Math.floor(Math.random() * 8);
+}
+function stopProgram(announce) {
+  sim.gen++;
+  sim.running = false;
+  sim.digital = {}; sim.pwm = {}; sim.last = {}; sim.mode = {};
+  onOutputs();
+  if (announce) lesson.emit("run.status", { status: "stopped" });
+}
+async function startProgram(js) {
+  const my = ++sim.gen;
+  Object.assign(sim, { running: true, error: false, digital: {}, pwm: {}, last: {}, mode: {}, t0: performance.now(), ticks: 0 });
+  goalState.lastOn = null;
+  const check = () => { if (my !== sim.gen) throw new StopSignal(); };
+  const api = {
+    pinMode: (p, m) => { check(); sim.mode[p] = m; },
+    digitalWrite: (p, v) => { check(); sim.digital[p] = v ? 1 : 0; sim.last[p] = "d"; onOutputs(); },
+    analogWrite: (p, v) => { check(); sim.pwm[p] = Math.max(0, Math.min(255, Math.round(Number(v) || 0))); sim.last[p] = "a"; onOutputs(); },
+    digitalRead: (p) => { check(); return readDigital(p); },
+    analogRead: (p) => { check(); return readAnalog(p); },
+    delay: async (ms) => { check(); await sleep(Math.max(0, Math.min(60000, Number(ms) || 0))); check(); },
+    millis: () => Math.floor(performance.now() - sim.t0),
+    map: (x, a, b, c, d) => Math.trunc(((x - a) * (d - c)) / (b - a) + c),
+    constrain: (x, a, b) => Math.min(Math.max(x, a), b),
+    min: Math.min, max: Math.max, abs: Math.abs,
+    random: (a, b) => (b === undefined ? Math.floor(Math.random() * a) : Math.floor(a + Math.random() * (b - a))),
+    __tick: async () => { check(); if (++sim.ticks % 40 === 0) await sleep(0); check(); },
+    Serial: { begin() {}, print(v) { serialOut(String(v ?? ""), false); }, println(v) { serialOut(String(v ?? ""), true); } },
+    HIGH: 1, LOW: 0, INPUT: 0, OUTPUT: 1, INPUT_PULLUP: 2, LED_BUILTIN: 13, A0: 14, A1: 15, A2: 16, A3: 17, A4: 18, A5: 19,
+  };
+  let program;
+  try {
+    program = new Function(...Object.keys(api), `"use strict";\n${js}\nreturn { setup, loop };`)(...Object.values(api));
+  } catch (e) {
+    return fail(`Could not start the sketch: ${e.message}`);
+  }
+  try {
+    await program.setup();
+    while (my === sim.gen) {
+      await program.loop();
+      await sleep(4);
+    }
+  } catch (e) {
+    if (e instanceof StopSignal) return;
+    fail(`Runtime error: ${e.message}`);
+  }
+  function fail(message) {
+    if (my !== sim.gen) return;
+    sim.running = false;
+    sim.error = true;
+    onOutputs();
+    lesson.emit("run.status", { status: "error", message });
+  }
+}
+function wiredPins() {
+  const pins = new Set([13]);
+  for (const p of parts) { const n = pinNumber(p.signal?.pin); if (n != null) pins.add(n); }
+  return [...pins];
+}
+// Arduino subset translator (beginner sketches -> async JS).
+var API = new Set([
+  "pinMode",
+  "digitalWrite",
+  "digitalRead",
+  "analogRead",
+  "analogWrite",
+  "delay",
+  "millis",
+  "map",
+  "constrain",
+  "min",
+  "max",
+  "abs",
+  "random"
+]);
+var KEYWORDS = new Set(["if", "for", "while", "switch", "return", "function", "else", "sizeof"]);
+var CONSTANTS = {
+  LED_BUILTIN: 13,
+  A0: 14,
+  A1: 15,
+  A2: 16,
+  A3: 17,
+  A4: 18,
+  A5: 19
+};
+var TYPE = String.raw`(?:unsigned\s+)?(?:int|long|float|double|bool|boolean|byte|char|short)`;
+function lineOf(src, index) {
+  return src.slice(0, index).split(`
+`).length;
+}
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " ")).replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
+}
+function transpileSketch(source, wiredPins) {
+  const src = stripComments(source.replace(/\r\n/g, `
+`));
+  const errors = [];
+  const warnings = [];
+  for (const [open, close, name] of [["{", "}", "brace"], ["(", ")", "parenthesis"]]) {
+    let depth = 0;
+    for (let i = 0;i < src.length; i++) {
+      if (src[i] === open)
+        depth++;
+      if (src[i] === close)
+        depth--;
+      if (depth < 0) {
+        errors.push({ line: lineOf(src, i), message: `Unexpected closing ${name} "${close}"` });
+        break;
+      }
+    }
+    if (depth > 0)
+      errors.push({ line: src.split(`
+`).length, message: `Missing closing ${name} "${close}"` });
+  }
+  if (errors.length)
+    return { ok: false, errors };
+  const fnDef = new RegExp(String.raw`\b(?:void|${TYPE})\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{`, "g");
+  const userFns = new Set;
+  for (const m of src.matchAll(fnDef))
+    userFns.add(m[1]);
+  if (!userFns.has("setup"))
+    errors.push({ line: 1, message: "The sketch needs a setup() function" });
+  if (!userFns.has("loop"))
+    errors.push({ line: 1, message: "The sketch needs a loop() function" });
+  for (const m of src.matchAll(/(^|[^\w.])([A-Za-z_]\w*)\s*\(/g)) {
+    const name = m[2];
+    if (API.has(name) || userFns.has(name) || KEYWORDS.has(name))
+      continue;
+    const before = src.slice(Math.max(0, (m.index ?? 0) - 20), (m.index ?? 0) + m[1].length);
+    if (new RegExp(String.raw`\b(?:void|${TYPE})\s*$`).test(before))
+      continue;
+    errors.push({ line: lineOf(src, (m.index ?? 0) + m[1].length), message: `"${name}()" is not available in this simulator` });
+  }
+  for (const m of src.matchAll(/Serial\.(\w+)/g)) {
+    if (!["begin", "print", "println"].includes(m[1])) {
+      errors.push({ line: lineOf(src, m.index ?? 0), message: `Serial.${m[1]}() is not available in this simulator` });
+    }
+  }
+  if (errors.length)
+    return { ok: false, errors };
+  const consts = { ...CONSTANTS };
+  for (const m of src.matchAll(new RegExp(String.raw`\bconst\s+${TYPE}\s+([A-Za-z_]\w*)\s*=\s*(\w+)\s*;`, "g"))) {
+    const v = /^\d+$/.test(m[2]) ? Number(m[2]) : consts[m[2]];
+    if (v !== undefined)
+      consts[m[1]] = v;
+  }
+  for (const m of src.matchAll(/#define\s+([A-Za-z_]\w*)\s+(\w+)/g)) {
+    const v = /^\d+$/.test(m[2]) ? Number(m[2]) : consts[m[2]];
+    if (v !== undefined)
+      consts[m[1]] = v;
+  }
+  const pins = { output: [], input: [] };
+  for (const m of src.matchAll(/\b(digitalWrite|analogWrite|digitalRead|analogRead)\s*\(\s*(\w+)/g)) {
+    const pin = /^\d+$/.test(m[2]) ? Number(m[2]) : consts[m[2]];
+    if (pin === undefined)
+      continue;
+    const list = m[1].endsWith("Write") ? pins.output : pins.input;
+    if (!list.includes(pin))
+      list.push(pin);
+    if (wiredPins.length && !wiredPins.includes(pin)) {
+      const label = pin >= 14 ? `A${pin - 14}` : `D${pin}`;
+      warnings.push({ line: lineOf(src, m.index ?? 0), message: `Pin ${label} is not connected to anything in this circuit` });
+    }
+    if (m[1] === "analogWrite" && ![3, 5, 6, 9, 10, 11].includes(pin)) {
+      warnings.push({ line: lineOf(src, m.index ?? 0), message: `analogWrite() needs a PWM pin (~3, ~5, ~6, ~9, ~10, ~11)` });
+    }
+  }
+  let js = src;
+  js = js.replace(/#define\s+([A-Za-z_]\w*)\s+([^\n]+)/g, "const $1 = $2;");
+  js = js.replace(fnDef, (_m, name, params) => {
+    const names = params.split(",").map((p) => p.trim().split(/\s+/).pop()).filter(Boolean);
+    return `async function ${name}(${names.join(", ")}) {`;
+  });
+  js = js.replace(new RegExp(String.raw`\bconst\s+${TYPE}\s+`, "g"), "const ");
+  js = js.replace(new RegExp(String.raw`\b${TYPE}\s+(?=[A-Za-z_]\w*\s*(=|;|,|\[))`, "g"), "let ");
+  js = js.replace(/\b(while|for)\s*\(([^{}]*)\)\s*\{/g, "$1 ($2) { await __tick();");
+  js = js.replace(/(^|[^\w.])delay\s*\(/g, "$1await delay(");
+  for (const name of userFns) {
+    js = js.replace(new RegExp(String.raw`(^|[^\w.])(?<!function\s)${name}\s*\(`, "gm"), `$1await ${name}(`);
+  }
+  js = js.replace(/\btrue\b/g, "1").replace(/\bfalse\b/g, "0");
+  return { ok: true, js, warnings, pins };
+}
+
+lesson.on("code.run", async (p) => {
+  stopProgram(false);
+  sim.error = false;
+  updateSimChip("Compiling…");
+  try {
+    // A configured runner (settings.runner) wins; otherwise translate here.
+    const input = { source: p.source, wired_pins: wiredPins() };
+    const res = settings.runner
+      ? (await lesson.run(settings.runner, input)).result
+      : transpileSketch(input.source, input.wired_pins);
+    if (!res.ok) {
+      sim.error = true;
+      updateSimChip();
+      return lesson.emit("run.status", { status: "error", errors: res.errors });
+    }
+    lesson.emit("run.status", { status: "compiled", message: "Compiled. Running on the simulated board.", warnings: res.warnings });
+    startProgram(res.js);
+  } catch (e) {
+    sim.error = true;
+    updateSimChip();
+    lesson.emit("run.status", { status: "error", message: e.message });
+  }
+});
+lesson.on("code.stop", () => stopProgram(true));
+
+function updateSimChip(text) {
+  const chip = document.getElementById("sim");
+  chip.className = sim.running ? "running" : sim.error ? "error" : "";
+  if (text) { document.getElementById("simtext").textContent = text; return; }
+  if (sim.error) { document.getElementById("simtext").textContent = "Error"; return; }
+  if (!sim.running) { document.getElementById("simtext").textContent = "Idle · press Run"; return; }
+  const outs = wiredPins().filter((p) => sim.last[p]).map((p) => {
+    const v = sim.last[p] === "a" ? `${sim.pwm[p]}/255` : sim.digital[p] ? "HIGH" : "LOW";
+    return `${pinLabel(p)} ${v}`;
+  });
+  const ins = parts.filter((p) => p.kind === "button").map((p) => `${pinLabel(pinNumber(p.signal.pin))} ${ui.pressed ? "HIGH" : "LOW"}`);
+  document.getElementById("simtext").textContent = ["Running", ...ins, ...outs].join(" · ");
+}
+
+// ============================================================ boot
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  render();
+}
+buildCards();
+new ResizeObserver(resize).observe(document.body);
+resize();
+checkGoal();
+})();
+</script>
+</body>
+</html>

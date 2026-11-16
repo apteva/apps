@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance lab element</title>
+<style>
+  :root { --ink: #17202b; --muted: #5b6776; --line: #d9dfe7; --accent: #0f8b8d; --bad: #c2410c; --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 14px/1.45 system-ui, -apple-system, sans-serif; color: var(--ink); background: #fff; display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; overflow: auto; }
+  header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .goals { display: flex; flex-direction: column; gap: 6px; max-width: 460px; }
+  .goal { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: #2c3744; }
+  .goal .tick { flex: 0 0 18px; height: 18px; border-radius: 50%; border: 1.5px solid #b8c2ce; display: grid; place-items: center; margin-top: 1px; }
+  .goal.done .tick { background: var(--accent); border-color: var(--accent); }
+  .goal.done span { color: var(--muted); }
+  .kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .kpi { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  .kpi .l { font: 500 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .kpi .v { font: 600 22px/1.25 system-ui, sans-serif; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .kpi.accent .v { color: var(--accent); }
+  .kpi.bad .v { color: var(--bad); }
+  .kpi .cmp { font: 12px var(--mono); margin-top: 2px; }
+  .kpi .cmp.ok { color: var(--accent); } .kpi .cmp.no { color: var(--bad); }
+  .chart-wrap { position: relative; flex: 1; min-height: 210px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 4px; display: flex; flex-direction: column; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); padding: 2px 4px 4px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .legend i.dash { height: 0; border-top: 2px dashed; border-radius: 0; width: 14px; vertical-align: 3px; }
+  #chart { flex: 1; min-height: 0; position: relative; }
+  #chart svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .axis text { font: 11px var(--mono); fill: #7d8996; }
+  .grid line { stroke: #edf0f4; }
+  .tip { position: absolute; pointer-events: none; background: #17202b; color: #fff; border-radius: 8px; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: nowrap; transform: translate(-50%, -100%); display: none; z-index: 2; }
+  .tip b { font-weight: 600; }
+  .tip .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: 13px; color: #2c3744; }
+  .ctl label b { font: 600 13px var(--mono); font-variant-numeric: tabular-nums; }
+  .ctl.limited label b { color: var(--bad); }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 4px 0 0; }
+  .question { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #fafbfc; }
+  .question p { margin: 0 0 10px; font-size: 13.5px; }
+  .choices { display: flex; gap: 8px; flex-wrap: wrap; }
+  .choices button { height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: #fff; font: 600 13px var(--mono); cursor: pointer; color: var(--ink); }
+  .choices button:hover { border-color: var(--accent); }
+  .choices button.right { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .choices button.wrong { border-color: var(--bad); color: var(--bad); }
+  .feedback { margin-top: 8px; font-size: 13px; color: var(--muted); min-height: 1em; }
+  @media (max-width: 640px) { .kpis { grid-template-columns: 1fr; } .controls { grid-template-columns: 1fr; } .kpi .v { font-size: 18px; } }
+</style>
+</head>
+<body>
+  <header>
+    <div><h2 id="title"></h2><div class="sub" id="subtitle"></div></div>
+    <div class="goals" id="goals"></div>
+  </header>
+  <div class="kpis" id="kpis"></div>
+  <div class="chart-wrap">
+    <div class="legend" id="legend"></div>
+    <div id="chart"><svg id="svg" role="img"></svg><div class="tip" id="tip"></div></div>
+  </div>
+  <div class="controls" id="controls"></div>
+  <div class="question" id="question" hidden></div>
+
+<script>
+(async () => {
+const $ = (id) => document.getElementById(id);
+const { settings, state } = await lesson.ready();
+const currency = settings.currency || "EUR";
+const values = Object.fromEntries((settings.controls || []).map((c) => [c.id, c.value]));
+Object.assign(values, state?.values || {});
+const done = new Set(state?.done || []);
+let answer = state?.answer ?? null;
+let learner = null;      // { series, payment, ok }
+let lastSource = null;
+
+const persist = () => lesson.save({ values, done: [...done], answer });
+
+// ---------------------------------------------------------------- formatting
+const money = (v, digits = 0) => new Intl.NumberFormat("en-IE", { style: "currency", currency, minimumFractionDigits: digits, maximumFractionDigits: digits }).format(v);
+const short = (v) => {
+  const sym = money(0).replace(/[\d.,\s]/g, "");
+  const a = Math.abs(v);
+  if (a >= 1e6) return sym + (v / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
+  if (a >= 1e3) return sym + Math.round(v / 1e3) + "k";
+  return sym + Math.round(v);
+};
+const decimals = (step) => (String(step).split(".")[1] || "").length;
+function fmtControl(c, v) {
+  if (c.unit === "currency") return money(v);
+  if (c.unit === "percent") return v.toFixed(Math.max(1, decimals(c.step))) + "%";
+  if (c.unit === "years") return `${v} ${v === 1 ? "year" : "years"}`;
+  return String(v);
+}
+
+// ---------------------------------------------------------------- models
+function growthRows(start, monthly, annualPct, years) {
+  const r = annualPct / 100 / 12;
+  let bal = start;
+  const rows = [{ x: 0, contributed: start, interest: 0, balance: start }];
+  for (let m = 1; m <= years * 12; m++) {
+    bal += monthly;
+    bal *= 1 + r;
+    if (m % 12 === 0) rows.push({ x: m / 12, contributed: start + monthly * m, interest: bal - (start + monthly * m), balance: bal });
+  }
+  return rows;
+}
+const MODELS = {
+  growth: {
+    compute(v) {
+      const rows = growthRows(v.start, v.monthly, v.rate, v.years);
+      const last = rows.at(-1);
+      return { rows, metrics: { final: last.balance, contributed: last.contributed, interest: last.interest } };
+    },
+    stack: [{ key: "contributed", label: "Your contributions", color: "#7c93e8" }, { key: "interest", label: "Interest earned", color: "#0f8b8d" }],
+    kpis: (m, v) => [
+      { label: `Balance after ${v.years} y`, value: money(m.final) },
+      { label: "You put in", value: money(m.contributed) },
+      { label: "Interest earned", value: money(m.interest), cls: "accent" },
+    ],
+  },
+  loan: {
+    compute(v) {
+      const P = v.amount, r = v.rate / 100 / 12, n = v.years * 12;
+      const pay = r ? (P * r) / (1 - Math.pow(1 + r, -n)) : P / n;
+      let bal = P, cumI = 0, cumP = 0;
+      const rows = [{ x: 0, principal: 0, interest: 0 }];
+      for (let m = 1; m <= n; m++) {
+        const i = bal * r, p = pay - i;
+        bal -= p; cumI += i; cumP += p;
+        if (m % 12 === 0) rows.push({ x: m / 12, principal: cumP, interest: cumI });
+      }
+      return { rows, metrics: { payment: pay, totalInterest: cumI, totalPaid: pay * n } };
+    },
+    stack: [{ key: "principal", label: "Principal repaid", color: "#3a6fd8" }, { key: "interest", label: "Interest paid", color: "#e5484d" }],
+    kpis: (m) => [
+      { label: "Monthly payment", value: money(m.payment, 2), learner: true },
+      { label: "Total interest", value: money(m.totalInterest), cls: "bad" },
+      { label: "Total paid", value: money(m.totalPaid) },
+    ],
+  },
+  fees: {
+    compute(v) {
+      const low = growthRows(v.start, v.monthly, v.rate - v.feeLow, v.years);
+      const high = growthRows(v.start, v.monthly, v.rate - v.feeHigh, v.years);
+      const rows = low.map((r, i) => ({ x: r.x, low: r.balance, high: high[i].balance }));
+      const finalLow = low.at(-1).balance, finalHigh = high.at(-1).balance;
+      return { rows, metrics: { finalLow, finalHigh, cost: finalLow - finalHigh } };
+    },
+    band: { from: "high", to: "low", label: "Lost to fees", color: "#e5484d" },
+    lines: [{ key: "low", label: "Low fee", color: "#0f8b8d" }, { key: "high", label: "High fee", color: "#e8833a" }],
+    kpis: (m, v) => [
+      { label: `With ${v.feeLow.toFixed(2)}% fee`, value: money(m.finalLow) },
+      { label: `With ${v.feeHigh.toFixed(2)}% fee`, value: money(m.finalHigh) },
+      { label: "Cost of the higher fee", value: money(m.cost), cls: "bad" },
+    ],
+  },
+};
+const model = MODELS[settings.model];
+
+// Reference implementations the learner's code is checked against.
+const REFERENCE = {
+  futureValue: (start, monthly, rate, years) => growthRows(start, monthly, rate * 100, years).at(-1).balance,
+  monthlyPayment: (amount, rate, years) => MODELS.loan.compute({ amount, rate: rate * 100, years }).metrics.payment,
+};
+
+// ---------------------------------------------------------------- learner code (runs in a worker)
+const WORKER = `
+self.onmessage = (e) => {
+  const { source, fn, calls } = e.data;
+  const logs = [];
+  const show = (a) => (typeof a === "object" ? JSON.stringify(a) : String(a));
+  const console = { log: (...a) => { if (logs.length < 40) logs.push(a.map(show).join(" ")); } };
+  try {
+    const f = new Function("console", '"use strict";\\n' + source + "\\n;return typeof " + fn + ' === "function" ? ' + fn + " : undefined;")(console);
+    if (!f) throw new Error("Define a function called " + fn + "()");
+    const results = calls.map((args) => { try { const v = f(...args); return typeof v === "number" ? v : { error: "returned " + show(v) + ", not a number" }; } catch (err) { return { error: String(err && err.message || err) }; } });
+    postMessage({ results, logs });
+  } catch (err) {
+    postMessage({ error: String(err && err.message || err), logs });
+  }
+};`;
+let workerUrl = null;
+function runLearner(source, fn, calls) {
+  return new Promise((resolve) => {
+    let worker;
+    try {
+      workerUrl = workerUrl || URL.createObjectURL(new Blob([WORKER], { type: "text/javascript" }));
+      worker = new Worker(workerUrl);
+    } catch {
+      return resolve({ error: "This browser blocked the code runner." });
+    }
+    const timer = setTimeout(() => { worker.terminate(); resolve({ error: "Your code took longer than 1.5 s. Is there an infinite loop?" }); }, 1500);
+    worker.onmessage = (e) => { clearTimeout(timer); worker.terminate(); resolve(e.data); };
+    worker.onerror = (e) => { e.preventDefault(); clearTimeout(timer); worker.terminate(); resolve({ error: e.message || "Error" }); };
+    worker.postMessage({ source, fn, calls });
+  });
+}
+const close = (a, b) => typeof a === "number" && Number.isFinite(a) && Math.abs(a - b) <= 0.01 + Math.abs(b) * 1e-9;
+
+const codeGoal = (settings.goals || []).find((g) => g.type === "code");
+function overlayCalls(v) {
+  if (codeGoal?.fn === "futureValue") return Array.from({ length: v.years + 1 }, (_, y) => [v.start, v.monthly, v.rate / 100, y]);
+  if (codeGoal?.fn === "monthlyPayment") return [[v.amount, v.rate / 100, v.years]];
+  return [];
+}
+let runSeq = 0;
+async function runCode(source, report) {
+  lastSource = source;
+  const seq = ++runSeq;
+  const tests = codeGoal.tests || [];
+  const overlay = overlayCalls(values);
+  const res = await runLearner(source, codeGoal.fn, [...tests, ...overlay]);
+  if (seq !== runSeq) return; // a newer run (e.g. a slider move) superseded this one
+  if (res.error) {
+    learner = null;
+    render();
+    if (report) lesson.emit("run.status", { status: "error", message: res.error });
+    return;
+  }
+  const testResults = res.results.slice(0, tests.length);
+  const over = res.results.slice(tests.length);
+  if (codeGoal.fn === "futureValue") learner = { series: over.map((v, i) => ({ x: i, v: typeof v === "number" ? v : NaN })) };
+  if (codeGoal.fn === "monthlyPayment") learner = { payment: over[0] };
+  render();
+  if (!report) return;
+  const lines = [...res.logs];
+  let passed = 0;
+  tests.forEach((args, i) => {
+    const want = REFERENCE[codeGoal.fn](...args);
+    const got = testResults[i];
+    const call = `${codeGoal.fn}(${args.join(", ")})`;
+    if (close(got, want)) { passed++; lines.push(`✓ ${call} = ${got.toFixed(2)}`); }
+    else lines.push(`✗ ${call} = ${typeof got === "number" ? got.toFixed(2) : got.error}, expected ${want.toFixed(2)}`);
+  });
+  lines.push(passed === tests.length ? `All ${tests.length} checks pass.` : `${passed} of ${tests.length} checks pass.`);
+  lesson.emit("run.status", { status: "compiled", message: `Ran ${codeGoal.fn}() against ${tests.length} checks.` });
+  lesson.emit("serial", { lines });
+  if (passed === tests.length) markDone(codeGoal.step);
+}
+lesson.on("code.run", (p) => { if (codeGoal && (p.language || "javascript") === "javascript") runCode(p.source, true); });
+
+// ---------------------------------------------------------------- goals
+function markDone(step) {
+  if (done.has(step)) return;
+  done.add(step);
+  persist();
+  lesson.complete(step);
+  renderGoals();
+}
+function within(v, rule) {
+  return (rule.min === undefined || v >= rule.min) && (rule.max === undefined || v <= rule.max);
+}
+function checkMetricGoals(metrics) {
+  for (const g of settings.goals || []) {
+    if (g.type !== "metric" || done.has(g.step)) continue;
+    const ok = Object.entries(g.when || {}).every(([id, rule]) => within(values[id], rule));
+    const m = metrics[g.metric];
+    const hit = g.op === "<=" ? m <= g.value : m >= g.value;
+    if (ok && hit) markDone(g.step);
+  }
+}
+function renderGoals() {
+  $("goals").innerHTML = "";
+  for (const g of settings.goals || []) {
+    const row = document.createElement("div");
+    row.className = "goal" + (done.has(g.step) ? " done" : "");
+    row.innerHTML = `<span class="tick">${done.has(g.step) ? '<svg viewBox="0 0 16 16" width="11" height="11"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ""}</span><span></span>`;
+    row.lastChild.textContent = g.label;
+    $("goals").append(row);
+  }
+}
+
+// ---------------------------------------------------------------- controls
+function buildControls() {
+  const wrap = $("controls");
+  for (const c of settings.controls || []) {
+    const box = document.createElement("div");
+    box.className = "ctl";
+    box.innerHTML = `<label><span></span><b></b></label><input type="range">`;
+    box.querySelector("span").textContent = c.label;
+    const input = box.querySelector("input");
+    Object.assign(input, { min: c.min, max: c.max, step: c.step, value: values[c.id] });
+    input.setAttribute("aria-label", c.label);
+    const show = () => {
+      box.querySelector("b").textContent = fmtControl(c, values[c.id]);
+      const limits = (settings.goals || []).filter((g) => g.type === "metric" && !done.has(g.step) && g.when?.[c.id]);
+      box.classList.toggle("limited", limits.some((g) => !within(values[c.id], g.when[c.id])));
+    };
+    input.oninput = () => {
+      values[c.id] = Number(input.value);
+      show();
+      render();
+      persist();
+      if (lastSource) { clearTimeout(input.t); input.t = setTimeout(() => runCode(lastSource, false), 120); }
+    };
+    box.show = show;
+    show();
+    wrap.append(box);
+  }
+}
+
+// ---------------------------------------------------------------- question
+function renderQuestion() {
+  const q = settings.question;
+  if (!q) return;
+  const box = $("question");
+  box.hidden = false;
+  const correct = model.compute({ ...values, ...q.at }).metrics[q.metric];
+  const round = (v) => Math.round(v / 1000) * 1000;
+  const options = [...new Set([round(correct), round(correct * 0.45), round(correct * 1.9), round(correct * 0.2)])];
+  const order = [2, 0, 3, 1].filter((i) => i < options.length).map((i) => options[i]);
+  box.innerHTML = `<p></p><div class="choices"></div><div class="feedback"></div>`;
+  box.querySelector("p").textContent = q.prompt;
+  const fb = box.querySelector(".feedback");
+  for (const opt of order) {
+    const b = document.createElement("button");
+    b.textContent = "≈ " + money(opt);
+    if (answer === opt) b.className = opt === round(correct) ? "right" : "wrong";
+    b.onclick = () => {
+      answer = opt;
+      persist();
+      renderQuestion();
+      if (opt === round(correct)) markDone(q.step);
+    };
+    box.querySelector(".choices").append(b);
+  }
+  if (answer !== null) {
+    if (answer === round(correct)) {
+      const finalLow = model.compute({ ...values, ...q.at }).metrics.finalLow;
+      fb.textContent = `Correct: about ${Math.round((correct / finalLow) * 100)}% of what you'd have with the low fee.`;
+    } else fb.textContent = "Not quite. Set the sliders to the values in the question, then read the cost.";
+  }
+}
+
+// ---------------------------------------------------------------- chart
+const svg = $("svg"), tip = $("tip"), chartEl = $("chart");
+let current = null;
+function niceStep(max, count) {
+  const raw = max / count;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((s) => s >= raw) || raw;
+}
+function drawChart(rows) {
+  const W = chartEl.clientWidth, H = chartEl.clientHeight;
+  if (!W || !H) return;
+  const m = { l: 58, r: 12, t: 10, b: 24 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const xMax = rows.at(-1).x || 1;
+  const stack = model.stack || [];
+  const lines = model.lines || [];
+  let yMax = 0;
+  for (const r of rows) {
+    yMax = Math.max(yMax, stack.reduce((s, k) => s + r[k.key], 0), ...lines.map((l) => r[l.key]));
+  }
+  for (const p of learner?.series || []) if (Number.isFinite(p.v)) yMax = Math.max(yMax, p.v);
+  const step = niceStep(yMax || 1, 4);
+  const top = Math.ceil((yMax || 1) / step) * step;
+  const X = (x) => m.l + (x / xMax) * iw;
+  const Y = (y) => m.t + ih - (Math.max(0, Math.min(y, top * 1.2)) / top) * ih;
+  let out = `<g class="grid">`;
+  for (let v = 0; v <= top + 1e-6; v += step) out += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/>`;
+  out += `</g><g class="axis">`;
+  for (let v = 0; v <= top + 1e-6; v += step) out += `<text x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`;
+  const xs = niceStep(xMax, Math.min(8, Math.max(2, Math.floor(iw / 70))));
+  for (let x = 0; x <= xMax + 1e-6; x += Math.max(1, xs)) out += `<text x="${X(x)}" y="${H - 6}" text-anchor="middle">${x === 0 ? "now" : x + "y"}</text>`;
+  out += `</g>`;
+  // stacked areas
+  let base = rows.map(() => 0);
+  for (const s of stack) {
+    const topVals = rows.map((r, i) => base[i] + r[s.key]);
+    const d = rows.map((r, i) => `${i ? "L" : "M"}${X(r.x)},${Y(topVals[i])}`).join("") + rows.slice().reverse().map((r, j) => `L${X(r.x)},${Y(base[rows.length - 1 - j])}`).join("") + "Z";
+    out += `<path d="${d}" fill="${s.color}" fill-opacity=".82"/>`;
+    out += `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${X(r.x)},${Y(topVals[i])}`).join("")}" fill="none" stroke="${s.color}" stroke-width="1.5"/>`;
+    base = topVals;
+  }
+  // band between two lines
+  if (model.band) {
+    const b = model.band;
+    const d = rows.map((r, i) => `${i ? "L" : "M"}${X(r.x)},${Y(r[b.to])}`).join("") + rows.slice().reverse().map((r) => `L${X(r.x)},${Y(r[b.from])}`).join("") + "Z";
+    out += `<path d="${d}" fill="${b.color}" fill-opacity=".16"/>`;
+  }
+  for (const l of lines) out += `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${X(r.x)},${Y(r[l.key])}`).join("")}" fill="none" stroke="${l.color}" stroke-width="2.4"/>`;
+  // learner overlay
+  if (learner?.series) {
+    const pts = learner.series.filter((p) => Number.isFinite(p.v));
+    if (pts.length) {
+      out += `<path d="${pts.map((p, i) => `${i ? "L" : "M"}${X(p.x)},${Y(p.v)}`).join("")}" fill="none" stroke="#e8833a" stroke-width="2.4" stroke-dasharray="6 5"/>`;
+      for (const p of pts) out += `<circle cx="${X(p.x)}" cy="${Y(p.v)}" r="2.6" fill="#e8833a"/>`;
+    }
+  }
+  out += `<line id="cross" y1="${m.t}" y2="${m.t + ih}" stroke="#17202b" stroke-opacity=".35" stroke-dasharray="3 3" visibility="hidden"/>`;
+  out += `<rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent" id="hover"/>`;
+  svg.innerHTML = out;
+  svg.setAttribute("aria-label", `Chart over ${xMax} years`);
+  const hover = svg.querySelector("#hover"), cross = svg.querySelector("#cross");
+  hover.onpointermove = (e) => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((e.clientX - rect.left - m.l) / iw) * xMax;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round(x / (rows[1]?.x || 1))));
+    const r = rows[i];
+    cross.setAttribute("x1", X(r.x)); cross.setAttribute("x2", X(r.x)); cross.setAttribute("visibility", "visible");
+    const items = [...stack.map((s) => [s, r[s.key]]), ...lines.map((l) => [l, r[l.key]])];
+    if (model.band) items.push([model.band, r[model.band.to] - r[model.band.from]]);
+    const lv = learner?.series?.[i]?.v;
+    if (Number.isFinite(lv)) items.push([{ label: "Your function", color: "#e8833a" }, lv]);
+    tip.innerHTML = `<b>${r.x === 0 ? "Now" : "Year " + r.x}</b>` + items.map(([s, v]) => `<br><span class="sw" style="background:${s.color}"></span>${s.label}: ${money(v)}`).join("");
+    tip.style.display = "block";
+    tip.style.left = Math.min(Math.max(X(r.x), 110), W - 110) + "px";
+    tip.style.top = Math.max(Y(stack.length ? base[i] : r[lines[0]?.key] || 0) - 10, 70) + "px";
+  };
+  hover.onpointerleave = () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); };
+}
+function renderLegend() {
+  const items = [...(model.stack || []).map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`), ...(model.lines || []).map((l) => `<span><i style="background:${l.color}"></i>${l.label}</span>`)];
+  if (model.band) items.push(`<span><i style="background:${model.band.color};opacity:.35"></i>${model.band.label}</span>`);
+  if (learner?.series) items.push(`<span><i class="dash" style="border-color:#e8833a"></i>Your futureValue()</span>`);
+  $("legend").innerHTML = items.join("");
+}
+
+// ---------------------------------------------------------------- render
+function render() {
+  current = model.compute(values);
+  $("kpis").innerHTML = "";
+  for (const k of model.kpis(current.metrics, values)) {
+    const div = document.createElement("div");
+    div.className = "kpi " + (k.cls || "");
+    div.innerHTML = `<div class="l"></div><div class="v"></div>`;
+    div.querySelector(".l").textContent = k.label;
+    div.querySelector(".v").textContent = k.value;
+    if (k.learner && learner && "payment" in learner) {
+      const ok = close(learner.payment, current.metrics.payment);
+      const c = document.createElement("div");
+      c.className = "cmp " + (ok ? "ok" : "no");
+      c.textContent = `your function: ${typeof learner.payment === "number" ? money(learner.payment, 2) : learner.payment?.error || "?"} ${ok ? "✓" : "✗"}`;
+      div.append(c);
+    }
+    $("kpis").append(div);
+  }
+  renderLegend();
+  drawChart(current.rows);
+  checkMetricGoals(current.metrics);
+  document.querySelectorAll(".ctl").forEach((c) => c.show?.());
+}
+
+$("title").textContent = settings.title || "";
+$("subtitle").textContent = settings.subtitle || "";
+buildControls();
+renderGoals();
+renderQuestion();
+render();
+new ResizeObserver(() => drawChart(current.rows)).observe(chartEl);
+})();
+</script>
+</body>
+</html>
