@@ -60,6 +60,7 @@ interface Metrics {
 }
 interface PackInfo { key: string; name: string; description: string; work_types: string[] }
 interface InstalledPack { key: string; name: string; version: string; brand?: string; installed_at: string }
+interface Requirement { kind: string; count?: number; quals?: string[]; zone?: string; capacity_from?: string; role?: string }
 interface SlotOption { starts_at: string; ends_at: string; resources: SlotResource[]; score: number }
 interface Config {
   work_types?: WorkType[]; forms?: Form[]; rate_items?: RateItem[]; modifiers?: Modifier[];
@@ -256,6 +257,9 @@ function FormFields({ fields, values, onChange }: { fields: FormField[]; values:
             <option value="">—</option>{f.options.map((o) => <option key={o} value={o}>{human(o)}</option>)}
           </select>
         </Field>;
+      }
+      if (f.type === "photo" || f.type === "file" || f.type === "signature") {
+        return <Field key={f.key} label={label}><span className="text-xs text-text-dim py-1">Added from the mobile app or by an agent</span></Field>;
       }
       if (f.type === "number") {
         return <Field key={f.key} label={label}>
@@ -1007,6 +1011,13 @@ function eventLabel(ev: WorkEvent): string {
     case "status": return ev.to ? `Moved to ${human(ev.to).toLowerCase()}` : "Status changed";
     case "note": return "Note";
     case "created": return "Created";
+    case "quote": return ev.to ? `Quote ${ev.to === "accept" ? "accepted" : ev.to === "decline" ? "declined" : ev.to === "approve" ? "approved" : ev.to === "send" ? "sent" : ev.to}` : "Quote";
+    case "estimate": return "Priced";
+    case "form": return `${human(ev.to ?? "form")} submitted`;
+    case "booked": return "Booked";
+    case "completed": return "Completed";
+    case "paid": return "Paid";
+    case "invoiced": return "Invoiced";
     default: return human(ev.kind);
   }
 }
@@ -1087,6 +1098,13 @@ function QuoteDialog({ ctx, work, onClose, onDone }: { ctx: Ctx; work: Work; onC
   );
 }
 
+function describeReq(r: Requirement): string {
+  const n = r.count && r.count > 1 ? `${r.count} ` : "1 ";
+  const what = r.kind === "space" ? "space" : r.kind === "person" ? (r.count && r.count > 1 ? "people" : "person") : r.kind;
+  const extra = [r.quals?.length ? `with ${r.quals.map(human).map((q) => q.toLowerCase()).join(" and ")}` : "", r.zone ? `in ${r.zone}` : "", r.capacity_from ? "seating the party" : ""].filter(Boolean).join(" ");
+  return `${n}${what}${extra ? ` ${extra}` : ""}`;
+}
+
 function ratePrice(r: RateItem): string {
   const p = r.pricing ?? { mode: "" };
   if (p.quote_only) return "on quote";
@@ -1100,7 +1118,8 @@ function ScheduleDialog({ ctx, work, onClose, onDone }: { ctx: Ctx; work: Work; 
   const { call, report } = ctx;
   const [from, setFrom] = useState(() => isoDate(new Date()));
   const [options, setOptions] = useState<SlotOption[] | null>(null);
-  const [reqs, setReqs] = useState<unknown[]>([]);
+  const [reqs, setReqs] = useState<Requirement[]>([]);
+  const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<string[]>([]);
   const [manual, setManual] = useState("");
@@ -1109,8 +1128,8 @@ function ScheduleDialog({ ctx, work, onClose, onDone }: { ctx: Ctx; work: Work; 
     setOptions(null);
     const start = new Date(from + "T00:00");
     const f = start.getTime() < Date.now() ? new Date() : start;
-    call<{ options: SlotOption[]; requirements: unknown[] }>("schedule_suggest", { number: work.number, from: f.toISOString(), to: addDays(start, 7).toISOString(), limit: 12 })
-      .then((r) => { setOptions(r.options ?? []); setReqs(r.requirements ?? []); }).catch((e) => { setOptions([]); report(e); });
+    call<{ options: SlotOption[]; requirements: Requirement[]; hint?: string }>("schedule_suggest", { number: work.number, from: f.toISOString(), to: addDays(start, 7).toISOString(), limit: 12 })
+      .then((r) => { setOptions(r.options ?? []); setReqs(r.requirements ?? []); setHint(r.hint ?? ""); }).catch((e) => { setOptions([]); report(e); });
   }, [call, from, work.number, report]);
   useEffect(search, [search]);
 
@@ -1127,10 +1146,10 @@ function ScheduleDialog({ ctx, work, onClose, onDone }: { ctx: Ctx; work: Work; 
     <Modal title={`Book ${work.number}`} onClose={onClose} wide>
       <div className="flex items-center gap-2">
         <Field label="From"><input className={input} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
-        <div className="text-xs text-text-muted self-end pb-1.5">Searches 7 days. {reqs.length ? `Needs ${reqs.length} kind${reqs.length > 1 ? "s" : ""} of resource.` : ""}</div>
+        <div className="text-xs text-text-muted self-end pb-1.5">Searches 7 days.{reqs.length ? ` Needs ${reqs.map(describeReq).join(", ")}.` : ""}</div>
       </div>
       {blocked.length > 0 && <div className="border border-yellow/40 bg-yellow/10 rounded p-2 text-xs">{blocked.join("; ")}</div>}
-      {options === null ? <Empty>Looking for free slots…</Empty> : options.length === 0 ? <Empty>No free slot found in that week. Try a later date or check shifts and opening hours.</Empty> : (
+      {options === null ? <Empty>Looking for free slots…</Empty> : options.length === 0 ? <Empty>No free slot that week.{hint ? <span className="block mt-1 text-xs">{human(hint)}</span> : null}</Empty> : (
         <div className="border border-border rounded divide-y divide-border">
           {options.map((o, i) => (
             <div key={i} className="flex items-center gap-3 px-3 py-2">
@@ -1303,7 +1322,7 @@ function ResourcesTab({ ctx }: { ctx: Ctx }) {
         <h2 className="text-sm font-medium">Resources</h2>
         <span className="text-xs text-text-dim">People, crews, spaces, equipment and vehicles that bookings need.</span>
         <label className="ml-auto flex items-center gap-1.5 text-xs text-text-muted"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} />Show inactive</label>
-        <button type="button" className={btnPrimary} onClick={() => setEdit({ kind: "person", active: true, needs_shift: true, quals: [], brand_ids: [] })}><Icon d={I.plus} />Add</button>
+        <button type="button" className={btnPrimary} onClick={() => setEdit({ kind: "person", capacity: 1, active: true, needs_shift: true, quals: [], brand_ids: [] })}><Icon d={I.plus} />Add</button>
       </div>
       {groups.length === 0 && <Empty>No resources yet.</Empty>}
       {groups.map((g) => (
@@ -1338,7 +1357,7 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
     setBusy(true);
     try {
       await ctx.call("resources_upsert", {
-        id: r.id, kind: r.kind, name: r.name, zone: r.zone ?? "", capacity: r.capacity ?? 0, site_id: r.site_id ?? undefined,
+        id: r.id, kind: r.kind, name: r.name, zone: r.zone ?? "", capacity: Math.max(1, r.capacity ?? 1), site_id: r.site_id ?? undefined,
         quals: quals.split(",").map((q) => q.trim()).filter(Boolean), cost_rate_cents: r.cost_rate_cents ?? 0,
         needs_shift: r.needs_shift ?? false, active: r.active ?? true,
         brands: (r.brand_ids ?? []).map((id) => ctx.brands.find((b) => b.id === id)?.key).filter(Boolean),
@@ -1363,7 +1382,7 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
           </select>
         </Field>
         <Field label="Skills or qualifications" hint="Comma separated, e.g. gas_safe, colour"><input className={input} value={quals} onChange={(e) => setQuals(e.target.value)} /></Field>
-        <Field label={r.kind === "space" ? "Seats or capacity" : "Capacity"}><input className={input} type="number" min={0} value={r.capacity ?? 0} onChange={(e) => set({ capacity: Number(e.target.value) })} /></Field>
+        <Field label={r.kind === "space" ? "Seats or capacity" : "Capacity"}><input className={input} type="number" min={1} value={r.capacity ?? 1} onChange={(e) => set({ capacity: Number(e.target.value) })} /></Field>
         <Field label="Zone" hint="Groups spaces, e.g. terrace"><input className={input} value={r.zone ?? ""} onChange={(e) => set({ zone: e.target.value })} /></Field>
         <Field label="Based at">
           <select className={input} value={r.site_id ?? ""} onChange={(e) => set({ site_id: e.target.value ? Number(e.target.value) : null })}>
@@ -1398,6 +1417,7 @@ function SetupTab({ ctx }: { ctx: Ctx }) {
   const [packs, setPacks] = useState<{ builtin: PackInfo[]; installed: InstalledPack[] } | null>(null);
   const [cfg, setCfg] = useState<Config>({});
   const [agreements, setAgreements] = useState<Agreement[]>([]);
+  const [pol, setPol] = useState<Config>({});
   const [editBrand, setEditBrand] = useState<Partial<Brand> | null>(null);
   const [installFor, setInstallFor] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1407,7 +1427,8 @@ function SetupTab({ ctx }: { ctx: Ctx }) {
       call<{ builtin: PackInfo[]; installed: InstalledPack[] }>("packs_list"),
       call<Config>("config_get", withBrand(ctx)),
       call<{ agreements: Agreement[] }>("agreements_list"),
-    ]).then(([p, c, a]) => { setPacks(p); setCfg(c); setAgreements(a.agreements ?? []); }).catch(report);
+      call<Config>("config_get", { section: "policies" }),
+    ]).then(([p, c, a, po]) => { setPacks(p); setCfg(c); setAgreements(a.agreements ?? []); setPol(po); }).catch(report);
   }, [call, brand, rev]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const install = async (key: string) => {
@@ -1419,7 +1440,7 @@ function SetupTab({ ctx }: { ctx: Ctx }) {
     try { await call("agreements_update", { id, status }); ctx.bump(); } catch (e) { report(e); }
   };
   const brandName = (id: number) => (id ? brands.find((b) => b.id === id)?.name ?? `#${id}` : "Shared");
-  const policies = brand ? { ...(cfg.policies ?? {}), ...(cfg.brand_policies?.[brand] ?? {}) } : cfg.policies ?? {};
+  const policies = brand ? { ...(pol.policies ?? {}), ...(pol.brand_policies?.[brand] ?? {}) } : pol.policies ?? {};
 
   return (
     <div className="p-4 space-y-6 max-w-5xl">
@@ -1476,7 +1497,7 @@ function SetupTab({ ctx }: { ctx: Ctx }) {
 
       <section>
         <h2 className="text-sm font-medium mb-2">Rules{brand ? ` for ${brands.find((b) => b.key === brand)?.name}` : ""}</h2>
-        <PoliciesEditor ctx={ctx} policies={policies} brandPolicies={brand ? cfg.brand_policies?.[brand] ?? {} : null} />
+        <PoliciesEditor ctx={ctx} policies={policies} brandPolicies={brand ? pol.brand_policies?.[brand] ?? {} : null} />
       </section>
 
       <section>
