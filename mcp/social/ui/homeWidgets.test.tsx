@@ -33,6 +33,8 @@ const json = (value: unknown) => new Response(JSON.stringify(value), { headers: 
 
 test("Home defaults, settings and links retain the selected install and scope", () => {
   expect(widgetPreferences({}).mode).toBe("upcoming");
+  expect(widgetPreferences({widgetSettings:{visibility_metric:"followers"}}).visibilityMetric).toBe("followers");
+  expect(widgetPreferences({widgetSettings:{visibility_metric:"interactions"}}).visibilityMetric).toBe("interactions");
   expect(widgetPreferences({ widgetSize: "full" }).mode).toBe("calendar");
   expect(widgetPreferences({ widgetSize: "full", widgetSettings: { view: "upcoming", days: "7", max_posts: 999 } })).toMatchObject({ mode: "upcoming", days: 7, maxPosts: 20 });
   const props = { projectId: "brand & studio", installId: 42, widgetSettings: { profile_id: 3, account_ids: "5,7" } };

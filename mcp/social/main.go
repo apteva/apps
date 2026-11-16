@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.15
+version: 0.24.16
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -212,8 +212,10 @@ provides:
           platform: { type: string, title: Platform, enum: [all, facebook, instagram, youtube, tiktok, twitter, linkedin, pinterest, threads, reddit], default: all }
           start_date: { type: string, title: Custom start date, description: 'YYYY-MM-DD; set both dates for a custom window of at most 366 complete UTC days.', default: '' }
           end_date: { type: string, title: Custom end date, description: 'Inclusive YYYY-MM-DD, no later than yesterday UTC.', default: '' }
-          visibility_metric: { type: string, title: Graph metric, enum: [views, impressions], default: views }
+          visibility_metric: { type: string, title: Graph metric, enum: [followers, views, impressions, interactions], default: views }
           show_trends: { type: boolean, title: Show graph, default: true }
+          graph_mode: { type: string, title: Graph mode, enum: [combined, by_account], default: combined }
+          graph_max_accounts: { type: integer, title: Maximum graph accounts, description: 'By account mode ranks by the graph metric; combined mode includes all matching accounts.', minimum: 1, maximum: 100, default: 20 }
           max_accounts: { type: integer, title: Maximum accounts to show, description: 'Applied after filtering and sorting. Totals and the graph still cover all matching accounts.', minimum: 1, maximum: 100, default: 10 }
           ranking_metric: { type: string, title: Rank best accounts by, enum: [views, impressions, interactions, followers], default: views }
           show_summary: { type: boolean, title: Show totals, default: true }
@@ -229,7 +231,7 @@ provides:
         steps:
           - { id: display, title: Display, fields: [max_accounts, ranking_metric, show_summary, show_trends, show_accounts, show_filters] }
           - { id: columns, title: Columns, fields: [show_profile, show_platform, show_followers, show_views, show_impressions, show_interactions] }
-          - { id: scope, title: Filters, fields: [platform, days, visibility_metric] }
+          - { id: scope, title: Filters, fields: [platform, days, visibility_metric, graph_mode, graph_max_accounts] }
         advanced: [profile_id, account_ids, start_date, end_date]
         preview: true
       preview_props: { preview: true }
@@ -262,7 +264,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.15
+    ref: social/v0.24.16
     entry: mcp/social
   port: 8080
   health_check: /health

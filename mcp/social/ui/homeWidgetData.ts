@@ -16,7 +16,7 @@ export interface PublishingSummary {
   total: number;
   attention: { failed: number; approval: number; overdue: number; membership?: number };
 }
-export interface MetricPoint { date: string; value: number | null; accounts: number }
+export interface MetricPoint { date: string; value: number | null; accounts: number; observed_at?: string }
 export interface WidgetMetric {
   value: number | null;
   accounts: number;
@@ -48,6 +48,7 @@ export function widgetPreferences(props: HomeWidgetProps) {
   // Keep invalid settings visible to the API, which reports a scope error.
   // Silently dropping an invalid ID would widen the requested scope.
   const accountIDs = rawIDs;
+  const visibilityMetric = (["followers", "views", "impressions", "interactions"] as const).find(metric => metric === settings?.visibility_metric) ?? "views";
   return {
     profileID: settingInteger(settings, "profile_id", 0, 0, Number.MAX_SAFE_INTEGER),
     accountIDs,
@@ -55,7 +56,7 @@ export function widgetPreferences(props: HomeWidgetProps) {
     horizonDays: settingInteger(settings, "horizon_days", 7, 1, 42),
     mode: settings?.view === "calendar" || (settings?.view !== "upcoming" && props.widgetSize === "full") ? "calendar" : "upcoming",
     days: [7, 28, 90].includes(Number(settings?.days)) ? Number(settings?.days) : 28,
-    visibilityMetric: settings?.visibility_metric === "impressions" ? "impressions" : "views",
+    visibilityMetric,
     showTrends: settings?.show_trends !== false,
     showAttention: settings?.show_attention !== false,
   };

@@ -67,7 +67,7 @@ func TestFollowerGrowthBoundaryEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if m.Value == nil || *m.Value != 9999 || m.Growth == nil || len(m.Trend) != 0 {
+			if m.Value == nil || *m.Value != 9999 || m.Growth == nil || len(m.Trend) != window.Days {
 				t.Fatalf("bad current count: %+v", m)
 			}
 			if tc.want == nil {
@@ -116,16 +116,16 @@ func TestFollowerGrowthAcrossPlatformsScopesAndUnrelatedEvidence(t *testing.T) {
 			at                                                        time.Time
 			value                                                     int64
 		}{
-			{"foreign", platform, scope, "snapshot", "ok", "{}", "", 0, 0, now, 9999},
-			{"test-proj", "wrong-platform", scope, "snapshot", "ok", "{}", "", 0, 0, now, 9999},
-			{"test-proj", platform, "post", "snapshot", "ok", "{}", "", 0, 0, now, 9999},
-			{"test-proj", platform, scope, "day", "ok", "{}", "", 0, 0, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "unavailable", "{}", "", 0, 0, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "ok", `{"country":"US"}`, "country", 0, 0, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "ok", `{"country":"US"}`, "", 0, 0, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 4, 0, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 0, 8, now, 9999},
-			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 0, 0, now, -1},
+			{"foreign", platform, scope, "snapshot", "ok", "{}", "", 0, 0, w.End, 9999},
+			{"test-proj", "wrong-platform", scope, "snapshot", "ok", "{}", "", 0, 0, w.End, 9999},
+			{"test-proj", platform, "post", "snapshot", "ok", "{}", "", 0, 0, w.End, 9999},
+			{"test-proj", platform, scope, "day", "ok", "{}", "", 0, 0, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "unavailable", "{}", "", 0, 0, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "ok", `{"country":"US"}`, "country", 0, 0, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "ok", `{"country":"US"}`, "", 0, 0, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 4, 0, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 0, 8, w.End, 9999},
+			{"test-proj", platform, scope, "snapshot", "ok", "{}", "", 0, 0, w.End, -1},
 		} {
 			_, err := ctx.AppDB().Exec(`INSERT INTO social_metric_points(project_id,social_account_id,platform,scope,metric,period,status,dimensions_json,dimensions_key,post_id,post_target_id,point_time,value,source) VALUES(?,?,?,?,'followers',?,?,?,?,?,?,?,?,?)`, bad.project, id, bad.platform, bad.scope, bad.period, bad.status, bad.dimensions, bad.key, bad.post, bad.target, bad.at.Format(time.RFC3339), bad.value, fmt.Sprintf("bad-%d", i))
 			if err != nil {
@@ -133,7 +133,7 @@ func TestFollowerGrowthAcrossPlatformsScopesAndUnrelatedEvidence(t *testing.T) {
 			}
 		}
 		m, err := loadWidgetFollowers(ctx, "test-proj", widgetAccount{ID: id, Platform: platform}, scope, w, now)
-		if err != nil || m.Value == nil || *m.Value != 1200 || m.Change == nil || *m.Change != 20 {
+		if err != nil || m.Value == nil || *m.Value != 1200 || m.Change == nil || *m.Change != 20 || len(m.Trend) != 28 || m.Trend[27].Value == nil || *m.Trend[27].Value != 1200 {
 			t.Fatalf("%s: %+v %v", platform, m, err)
 		}
 	}
