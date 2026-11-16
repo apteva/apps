@@ -83,7 +83,7 @@ func (d *nativeScanDecoder) decode(data []byte) (Record, error) {
 // path on a dependency upgrade; unlisted versions safely use the public
 // decoder, and TestNativeFlatDecoderCoversPinnedVersion fails until they are
 // audited. doc.go (DocBuilder/DecodeDocument) is byte-identical from alpha.5
-// through alpha.22; the encoded document layout is unchanged.
+// through alpha.23; the encoded document layout is unchanged.
 var nativeFlatCodecVersions = map[string]bool{
 	"0.2.0-alpha.5": true, "0.2.0-alpha.6": true, "0.2.0-alpha.7": true,
 	"0.2.0-alpha.8": true, "0.2.0-alpha.9": true, "0.2.0-alpha.10": true, "0.2.0-alpha.11": true,
@@ -91,6 +91,7 @@ var nativeFlatCodecVersions = map[string]bool{
 	"0.2.0-alpha.15": true, "0.2.0-alpha.16": true, "0.2.0-alpha.17": true, "0.2.0-alpha.18": true,
 	"0.2.0-alpha.19": true,
 	"0.2.0-alpha.20": true, "0.2.0-alpha.21": true, "0.2.0-alpha.22": true,
+	"0.2.0-alpha.23": true,
 }
 
 func (d *nativeScanDecoder) decodeFlat(data []byte) (bool, error) {
