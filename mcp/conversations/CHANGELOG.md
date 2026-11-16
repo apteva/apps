@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.2 — 2026-11-16
+
+- Open HTTP, HTTPS and protocol-relative links in chat messages and Markdown report sections in a new tab, keeping the conversation and draft available.
+- Apply the same link behavior across dashboard panels, widgets, app-served and packaged React hosts, with noopener/noreferrer protections.
+- Preserve relative-route, fragment and email link behavior and existing HTML sanitization.
+- Add browser regressions that open a real preview tab and verify the conversation, draft, link protections and report links.
+- Pin App SDK v0.115.2, verified as the latest release by commit ancestry.
+
 ## 0.26.1 — 2026-11-13
 
 - Scope automatic agent-message deduplication to the thread, accepted user input and full message payload, so providers reusing tool-call IDs such as `call_0` cannot block new replies or Inbox cards.

@@ -36,8 +36,7 @@ import { AttachmentContent, reportSectionsText } from "./messageContent";
 // `bun run scripts/build-panels.ts --app conversations`.
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
-import createDOMPurify from "dompurify";
-import { marked } from "marked";
+import { renderSafeMarkdown } from "./markdown";
 import ConversationChatView from "./ConversationChatView";
 import { VoiceControls } from "./voiceControls";
 import { useHostPageContext } from "./context";
@@ -47,27 +46,6 @@ import { composerRequestId, type ComposerInsertOptions, type ComposerInsertResul
 
 import { useConversationAPI } from "./context";
 import type { ConversationsClient } from "./client";
-
-// ─── markdown (the dashboard's safeMarkdown pipeline, bundled) ───────
-//
-// Agent messages are model-authored and may quote untrusted sources;
-// marked preserves raw HTML, so DOMPurify is the security boundary —
-// same options as the dashboard's renderSafeMarkdown.
-marked.setOptions({ breaks: true, gfm: true });
-
-const SANITIZE_OPTIONS = {
-  USE_PROFILES: { html: true },
-  FORBID_TAGS: ["base", "form", "iframe", "object", "embed", "style", "template"],
-  FORBID_ATTR: ["style", "srcdoc"],
-};
-
-let purifier: ReturnType<typeof createDOMPurify> | null = null;
-
-function renderSafeMarkdown(source: string): string {
-  const parsed = marked.parse(source, { async: false }) as string;
-  if (!purifier) purifier = createDOMPurify(window);
-  return purifier.isSupported ? purifier.sanitize(parsed, SANITIZE_OPTIONS) : "";
-}
 
 // closeOpenMarkdown closes unterminated bold/inline-code/fence/link
 // tokens so a partial mid-stream render doesn't flicker while the

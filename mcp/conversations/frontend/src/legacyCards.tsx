@@ -2,23 +2,7 @@ import { useState } from "react";
 import type { Message } from "./types";
 import { useConversationLocalization } from "./i18n";
 import { reportSectionsText } from "./messageContent";
-import createDOMPurify from "dompurify";
-import { marked } from "marked";
-marked.setOptions({ breaks: true, gfm: true });
-
-const SANITIZE_OPTIONS = {
-  USE_PROFILES: { html: true },
-  FORBID_TAGS: ["base", "form", "iframe", "object", "embed", "style", "template"],
-  FORBID_ATTR: ["style", "srcdoc"],
-};
-
-let purifier: ReturnType<typeof createDOMPurify> | null = null;
-
-function renderSafeMarkdown(source: string): string {
-  const parsed = marked.parse(source, { async: false }) as string;
-  if (!purifier) purifier = createDOMPurify(window);
-  return purifier.isSupported ? purifier.sanitize(parsed, SANITIZE_OPTIONS) : "";
-}
+import { renderSafeMarkdown } from "./markdown";
 
 function Glyph({ d, size = 16 }: { d: string; size?: number }) {
   return (
