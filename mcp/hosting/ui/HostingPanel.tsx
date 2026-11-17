@@ -1,132 +1,107 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface NativePanelProps {
   projectId: string;
   installId: number;
 }
 
-interface PlanLimit {
-  feature_key: string;
-  limit_value: number;
-  reset_interval: string;
-}
-
-interface Plan {
-  key: string;
-  name: string;
-  billing_mode: "free" | "paid";
-  image: string;
-  cpu: number;
-  memory_mb: number;
-  storage_mb: number;
-  limits?: PlanLimit[];
+interface Access {
+  host: string;
+  port: number;
+  user: string;
+  ssh_command: string;
+  granted: boolean;
 }
 
 interface Tenant {
   id: string;
-  customer_id: number;
-  subscription_id?: number;
-  workload_id: string;
+  external_ref: string;
+  profile_key: string;
+  backend: string;
+  machine_id?: number;
+  instance_id?: number;
   slug: string;
-  default_hostname: string;
+  default_hostname?: string;
   owner_email: string;
-  plan_key: string;
   status: string;
-  image: string;
-  last_health_status: string;
   last_error: string;
+  access?: Access;
   created_at: string;
-  updated_at: string;
+  released_at?: string;
 }
 
-interface Customer {
-  id: number;
-  email: string;
-  name: string;
+interface OperationLog {
+  at: string;
+  step: string;
+  result: string;
+  detail?: string;
 }
 
-interface UsageTotal {
-  customer_id: number;
+interface Operation {
+  id: string;
+  kind: string;
   tenant_id?: string;
-  feature_key: string;
-  quantity: number;
+  machine_id?: number;
+  steps: string[];
+  step: number;
+  status: string;
+  attempts: number;
+  error: string;
+  log: OperationLog[];
+  current_step?: string;
+  created_at: string;
+  finished_at?: string;
 }
+
+interface Pool {
+  key: string;
+  name: string;
+  platform: string;
+  execution_enabled: boolean;
+  counts: Record<string, number>;
+}
+
+interface Machine {
+  id: number;
+  pool_key: string;
+  instance_id: number;
+  name: string;
+  state: string;
+  state_reason: string;
+  online: boolean;
+  serial: string;
+  public_host: string;
+  validated: boolean;
+  tenant_id?: string;
+  for_sale: boolean;
+  operation?: Operation;
+  tenant?: Tenant;
+}
+
+interface Availability {
+  for_sale: boolean;
+  available?: number;
+  waiting?: number;
+  reason?: string;
+}
+
+interface Profile {
+  key: string;
+  name: string;
+  backend: string;
+  product_key: string;
+  pool_key?: string;
+  cpu: number;
+  memory_mb: number;
+  storage_mb: number;
+  settings: Record<string, unknown> | null;
+  status: string;
+  availability?: Availability;
+}
+
+type View = "tenants" | "machines" | "profiles";
 
 const API = "/api/apps/hosting";
-
-function tone(status: string): string {
-  switch (status) {
-    case "active":
-    case "ok":
-    case "healthy":
-      return "bg-green/15 text-green";
-    case "provisioning":
-    case "running":
-      return "bg-accent/15 text-accent";
-    case "suspended":
-    case "stopped":
-    case "past_due":
-      return "bg-warn/15 text-warn";
-    case "failed":
-    case "error":
-    case "deleted":
-      return "bg-red/15 text-red";
-    default:
-      return "bg-bg-input text-text-dim";
-  }
-}
-
-function fmtDate(s: string): string {
-  if (!s) return "";
-  const d = new Date(s);
-  if (!Number.isFinite(d.getTime())) return s;
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-function gb(mb: number): string {
-  if (!mb) return "0 GB";
-  return `${Math.round((mb / 1024) * 10) / 10} GB`;
-}
-
-function featureLabel(feature: string): string {
-  switch (feature) {
-    case "containers.storage.bytes":
-      return "Container storage";
-    case "containers.storage_mb":
-      return "Container storage";
-    case "hosting.tenants":
-      return "Hosted tenants";
-    case "hosting.seats":
-      return "Seats";
-    default:
-      return feature.replace(/\./g, " ");
-  }
-}
-
-function formatQuantity(feature: string, value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  if (feature.endsWith(".bytes")) return formatBytes(value);
-  if (feature.endsWith("_mb")) return `${new Intl.NumberFormat().format(value)} MB`;
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatBytes(value: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let n = Math.max(0, value || 0);
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  const digits = n >= 10 || i === 0 ? 0 : 1;
-  return `${n.toFixed(digits)} ${units[i]}`;
-}
-
-function limitTone(percent: number, over: boolean): string {
-  if (over) return "bg-red";
-  if (percent >= 85) return "bg-warn";
-  return "bg-accent";
-}
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API}${path}`, { credentials: "same-origin" });
@@ -134,121 +109,173 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-function eventNameFromPayload(payload: unknown): string {
-  if (!payload || typeof payload !== "object") return "";
-  const obj = payload as Record<string, unknown>;
-  const event = obj.event;
-  if (typeof obj.name === "string") return obj.name;
-  if (typeof obj.event_name === "string") return obj.event_name;
-  if (typeof obj.type === "string" && obj.type.includes(".")) return obj.type;
-  if (typeof event === "string") return event;
-  if (event && typeof event === "object") return eventNameFromPayload(event);
-  return "";
+async function callTool<T>(tool: string, args: Record<string, unknown>): Promise<T> {
+  const res = await fetch(`${API}/mcp`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),
+  });
+  if (!res.ok) throw new Error(`${tool}: ${res.status} ${await res.text().catch(() => "")}`);
+  const body = await res.json();
+  if (body.error) throw new Error(body.error.message || tool);
+  const text = body.result?.content?.[0]?.text;
+  if (body.result?.isError) throw new Error(text || `${tool} failed`);
+  return text ? (JSON.parse(text) as T) : (body.result as T);
 }
 
-function isRelevantHostEvent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const obj = payload as Record<string, unknown>;
-  const app = String(obj.app || obj.app_name || obj.source_app || "");
-  const eventName = eventNameFromPayload(payload);
-  if (app === "hosting" || app === "containers" || app === "subscriptions" || app === "billing") return true;
+function tone(status: string): string {
+  switch (status) {
+    case "active":
+    case "available":
+    case "assigned":
+    case "succeeded":
+      return "bg-green/15 text-green";
+    case "provisioning":
+    case "preparing":
+    case "cleaning":
+    case "running":
+    case "reserved":
+    case "resuming":
+    case "suspending":
+    case "releasing":
+      return "bg-accent/15 text-accent";
+    case "suspended":
+    case "waiting":
+    case "waiting_for_machine":
+    case "maintenance":
+    case "queued":
+      return "bg-warn/15 text-warn";
+    case "failed":
+    case "quarantined":
+      return "bg-red/15 text-red";
+    default:
+      return "bg-bg-input text-text-dim";
+  }
+}
+
+function Badge({ value }: { value: string }) {
+  return <span className={`px-1.5 py-0.5 rounded text-xs ${tone(value)}`}>{value.replace(/_/g, " ")}</span>;
+}
+
+function fmtDate(s?: string): string {
+  if (!s) return "";
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return s;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+const BACKEND_LABEL: Record<string, string> = {
+  container: "Container",
+  machine_pool: "Pool machine",
+  machine_on_demand: "On-demand machine",
+};
+
+const btn = "px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover disabled:opacity-50";
+const btnDanger = "px-2 py-1 rounded bg-red/15 text-red text-xs hover:bg-red/25 disabled:opacity-50";
+const input = "w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm";
+const label = "block text-xs text-text-dim mb-1";
+
+// Confirm asks for a typed value before a destructive action runs.
+function Confirm({ title, expect, detail, onCancel, onConfirm }: {
+  title: string;
+  expect: string;
+  detail: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [typed, setTyped] = useState("");
   return (
-    eventName.startsWith("hosting.") ||
-    eventName.startsWith("containers.") ||
-    eventName.startsWith("subscription.") ||
-    eventName.startsWith("invoice.")
+    <div className="fixed inset-0 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.45)", zIndex: 50 }}>
+      <div className="bg-bg border border-border rounded p-4 space-y-3" style={{ width: 380 }}>
+        <h3 className="text-sm font-semibold">{title}</h3>
+        <p className="text-xs text-text-dim">{detail}</p>
+        <label className="block">
+          <span className={label}>Type <span className="font-mono text-text">{expect}</span> to confirm</span>
+          <input autoFocus value={typed} onChange={(e) => setTyped(e.target.value)} className={`${input} font-mono`} />
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" className={btn} onClick={onCancel}>Cancel</button>
+          <button type="button" className={btnDanger} disabled={typed !== expect} onClick={onConfirm}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RunLog({ op }: { op: Operation }) {
+  return (
+    <div className="border border-border rounded p-2 space-y-1">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="font-semibold">{op.kind}</span>
+        <Badge value={op.status} />
+        <span className="text-text-dim">{op.step}/{op.steps.length}{op.current_step ? ` · ${op.current_step}` : ""}</span>
+        <span className="text-text-dim ml-auto">{fmtDate(op.created_at)}</span>
+      </div>
+      {op.error && <p className="text-xs text-red break-all">{op.error}</p>}
+      {op.log.length > 0 && (
+        <ul className="text-xs text-text-dim font-mono space-y-0.5">
+          {op.log.slice(-8).map((l, i) => (
+            <li key={i} className="break-all">{fmtDate(l.at)} {l.step} {l.result}{l.detail ? ` – ${l.detail}` : ""}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
 export default function HostingPanel(_props: NativePanelProps) {
-  const [plans, setPlans] = useState<Plan[]>([]);
+  const [view, setView] = useState<View>("tenants");
   const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [showReleased, setShowReleased] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [usage, setUsage] = useState<UsageTotal[]>([]);
+  const [detailOps, setDetailOps] = useState<Operation[]>([]);
+  const [pools, setPools] = useState<Pool[]>([]);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [failedRuns, setFailedRuns] = useState<Operation[]>([]);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [busy, setBusy] = useState("");
-  const [status, setStatus] = useState("Loading hosting...");
   const [error, setError] = useState("");
-  const [logs, setLogs] = useState<{ tenant: string; body: string } | null>(null);
-  const [createdCustomer, setCreatedCustomer] = useState<Customer | null>(null);
-  const [lastUsageSync, setLastUsageSync] = useState("");
-  const eventReloadTimer = useRef<number | null>(null);
-  const [form, setForm] = useState({
-    owner_email: "",
-    customer_name: "",
-    slug: "",
-    plan_key: "free",
-  });
+  const [notice, setNotice] = useState("");
+  const [confirm, setConfirm] = useState<null | { title: string; expect: string; detail: string; run: () => Promise<void> }>(null);
+  const [createForm, setCreateForm] = useState({ external_ref: "", profile: "", owner_email: "", ssh_keys: "" });
+  const [machineForm, setMachineForm] = useState({ pool_key: "", instance_id: "", serial: "", management_user: "" });
+  const [poolForm, setPoolForm] = useState({ key: "", name: "", platform: "macos" });
 
-  const selected = useMemo(
-    () => tenants.find((t) => t.id === selectedId) || tenants[0] || null,
-    [tenants, selectedId],
-  );
-
-  const selectedPlan = useMemo(
-    () => plans.find((p) => p.key === form.plan_key) || plans[0] || null,
-    [plans, form.plan_key],
-  );
-
-  const tenantPlan = useMemo(
-    () => plans.find((p) => p.key === selected?.plan_key) || null,
-    [plans, selected?.plan_key],
-  );
-
-  const usageRows = useMemo(() => {
-    const limits = new Map((tenantPlan?.limits || []).map((l) => [l.feature_key, l]));
-    return usage.map((u) => {
-      const limit = limits.get(u.feature_key);
-      const limitValue = limit?.limit_value || 0;
-      const percent = limitValue > 0 ? Math.min(100, Math.round((u.quantity / limitValue) * 100)) : 0;
-      const over = limitValue > 0 && u.quantity > limitValue;
-      return {
-        ...u,
-        label: featureLabel(u.feature_key),
-        formattedQuantity: formatQuantity(u.feature_key, u.quantity),
-        formattedLimit: limitValue > 0 ? formatQuantity(u.feature_key, limitValue) : "No limit",
-        percent,
-        over,
-        reset: limit?.reset_interval || "none",
-      };
-    });
-  }, [tenantPlan?.limits, usage]);
+  const selected = useMemo(() => tenants.find((t) => t.id === selectedId) || null, [tenants, selectedId]);
 
   const load = useCallback(async () => {
     try {
-      const [p, t] = await Promise.all([
-        getJSON<{ plans: Plan[] }>("/plans"),
-        getJSON<{ tenants: Tenant[] }>("/tenants"),
+      const [t, p, m, f, pr] = await Promise.all([
+        getJSON<{ tenants: Tenant[] }>(`/tenants${showReleased ? "?include_released=1" : ""}`),
+        getJSON<{ pools: Pool[] }>("/pools"),
+        getJSON<{ machines: Machine[] }>("/machines"),
+        getJSON<{ operations: Operation[] }>("/operations?status=failed"),
+        getJSON<{ profiles: Profile[] }>("/profiles"),
       ]);
-      setPlans(p.plans || []);
-      const rows = t.tenants || [];
-      setTenants(rows);
-      if (!selectedId && rows[0]) setSelectedId(rows[0].id);
-      setStatus(`${rows.length} tenant${rows.length === 1 ? "" : "s"}`);
+      setTenants(t.tenants || []);
+      setPools(p.pools || []);
+      setMachines(m.machines || []);
+      setFailedRuns(f.operations || []);
+      setProfiles(pr.profiles || []);
       setError("");
     } catch (e) {
       setError((e as Error).message);
-      setStatus("Load failed");
     }
-  }, [selectedId]);
+  }, [showReleased]);
 
-  const loadUsage = useCallback(async (tenant: Tenant | null) => {
-    if (!tenant) {
-      setUsage([]);
+  const loadDetail = useCallback(async (id: string | null) => {
+    if (!id) {
+      setDetailOps([]);
       return;
     }
     try {
-      const u = await getJSON<{ usage: UsageTotal[] }>(
-        `/usage?tenant_id=${encodeURIComponent(tenant.id)}`,
-      );
-      setUsage(u.usage || []);
+      const d = await getJSON<{ operations: Operation[] }>(`/tenants/${encodeURIComponent(id)}`);
+      setDetailOps(d.operations || []);
     } catch {
-      setUsage([]);
+      setDetailOps([]);
     }
   }, []);
-
-  const refreshSelected = useCallback(async (tenant: Tenant | null = selected) => {
-    await Promise.all([load(), loadUsage(tenant)]);
-  }, [load, loadUsage, selected]);
 
   useEffect(() => {
     load();
@@ -257,376 +284,357 @@ export default function HostingPanel(_props: NativePanelProps) {
   }, [load]);
 
   useEffect(() => {
-    loadUsage(selected);
-  }, [selected, loadUsage]);
+    loadDetail(selectedId);
+  }, [selectedId, loadDetail, tenants]);
 
-  useEffect(() => {
-    const scheduleReload = (payload: unknown) => {
-      if (!isRelevantHostEvent(payload)) return;
-      if (eventReloadTimer.current != null) window.clearTimeout(eventReloadTimer.current);
-      eventReloadTimer.current = window.setTimeout(() => {
-        refreshSelected().catch(() => undefined);
-      }, 150);
-    };
-    const onMessage = (event: MessageEvent) => scheduleReload(event.data);
-    const onCustom = (event: Event) => scheduleReload((event as CustomEvent).detail);
-    window.addEventListener("message", onMessage);
-    for (const name of ["apteva:event", "apteva:app-event", "app:event", "app-event", "hosting:event"]) {
-      window.addEventListener(name, onCustom);
-    }
-    return () => {
-      window.removeEventListener("message", onMessage);
-      for (const name of ["apteva:event", "apteva:app-event", "app:event", "app-event", "hosting:event"]) {
-        window.removeEventListener(name, onCustom);
-      }
-      if (eventReloadTimer.current != null) window.clearTimeout(eventReloadTimer.current);
-    };
-  }, [refreshSelected]);
-
-  const callTool = useCallback(async <T,>(tool: string, args: Record<string, unknown>): Promise<T> => {
-    const res = await fetch(`${API}/mcp`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name: tool, arguments: args },
-      }),
-    });
-    if (!res.ok) throw new Error(`${tool}: ${res.status} ${await res.text().catch(() => "")}`);
-    const body = await res.json();
-    if (body.error) throw new Error(body.error.message || tool);
-    const text = body.result?.content?.[0]?.text;
-    return text ? JSON.parse(text) as T : body.result as T;
-  }, []);
-
-  const createTenant = useCallback(async () => {
-    setBusy("create");
+  const act = useCallback(async (key: string, fn: () => Promise<unknown>, done: string) => {
+    setBusy(key);
     setError("");
+    setNotice("");
     try {
-      const email = form.owner_email.trim();
-      const slug = form.slug.trim();
-      if (!email || !slug) throw new Error("owner email and slug are required");
-      const created = await callTool<{ customer: Customer }>("hosting_customer_create", {
-        email,
-        name: form.customer_name.trim(),
-      });
-      setCreatedCustomer(created.customer);
+      await fn();
+      setNotice(done);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [load]);
+
+  const ask = (title: string, expect: string, detail: string, run: () => Promise<void>) =>
+    setConfirm({ title, expect, detail, run });
+
+  const createTenant = () =>
+    act("create", async () => {
+      const keys = createForm.ssh_keys.split("\n").map((k) => k.trim()).filter(Boolean);
       const out = await callTool<{ tenant: Tenant }>("hosting_tenant_create", {
-        customer_id: created.customer.id,
-        owner_email: email,
-        slug,
-        plan_key: form.plan_key,
+        external_ref: createForm.external_ref.trim(),
+        profile: createForm.profile || profiles[0]?.key,
+        owner_email: createForm.owner_email.trim(),
+        ...(keys.length ? { ssh_keys: keys } : {}),
       });
       setSelectedId(out.tenant.id);
-      setStatus(`Created ${out.tenant.slug}`);
-      setForm((f) => ({ ...f, slug: "" }));
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-      setStatus("Create failed");
-    } finally {
-      setBusy("");
-    }
-  }, [callTool, form, load]);
+      setCreateForm({ external_ref: "", profile: createForm.profile, owner_email: "", ssh_keys: "" });
+    }, "Tenant created");
 
-  const tenantAction = useCallback(async (tenant: Tenant, action: "suspend" | "resume" | "restart" | "health" | "delete") => {
-    setBusy(`${action}:${tenant.id}`);
-    setError("");
-    try {
-      const tool = {
-        suspend: "hosting_tenant_suspend",
-        resume: "hosting_tenant_resume",
-        restart: "hosting_tenant_restart",
-        health: "hosting_tenant_health",
-        delete: "hosting_tenant_delete",
-      }[action];
-      await callTool(tool, { tenant_id: tenant.id });
-      await load();
-      setStatus(`${action} complete`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, [callTool, load]);
+  const tenantAction = (t: Tenant, tool: string, done: string) =>
+    act(`${tool}:${t.id}`, () => callTool(tool, { tenant_id: t.id }), done);
 
-  const syncUsage = useCallback(async (tenant: Tenant) => {
-    setBusy(`usage:${tenant.id}`);
-    setError("");
-    try {
-      const out = await callTool<{ count: number; errors?: string[] }>("hosting_usage_sync", {
-        tenant_id: tenant.id,
-        actor: "ui",
-      });
-      await refreshSelected(tenant);
-      setLastUsageSync(new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
-      if (out.errors?.length) {
-        setError(out.errors.join("; "));
-      } else {
-        setStatus(`Usage synced for ${tenant.slug}`);
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, [callTool, refreshSelected]);
+  const machineAction = (m: Machine, tool: string, args: Record<string, unknown>, done: string) =>
+    act(`${tool}:${m.id}`, () => callTool(tool, { machine_id: m.id, ...args }), done);
 
-  const showLogs = useCallback(async (tenant: Tenant) => {
-    setBusy(`logs:${tenant.id}`);
-    setError("");
-    try {
-      const out = await callTool<{ logs: string }>("hosting_tenant_logs", { tenant_id: tenant.id, tail: 300 });
-      setLogs({ tenant: tenant.slug, body: out.logs || "" });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, [callTool]);
+  const tabs: { key: View; label: string; count?: number }[] = [
+    { key: "tenants", label: "Tenants", count: tenants.length },
+    { key: "machines", label: "Machines", count: machines.length },
+    { key: "profiles", label: "Profiles", count: profiles.length },
+  ];
 
   return (
-    <div className="grid grid-cols-[340px_1fr] h-full bg-bg text-text">
-      <aside className="border-r border-border flex flex-col min-h-0">
-        <header className="px-4 py-3 border-b border-border flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold">Hosting</h2>
-            <p className="text-xs text-text-dim">{status}</p>
-          </div>
-          <button type="button" onClick={load} className="px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
-            Refresh
-          </button>
-        </header>
-
-        <section className="p-3 border-b border-border space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <label className="col-span-2">
-              <span className="block text-[10px] uppercase text-text-dim mb-1">Owner email</span>
-              <input
-                value={form.owner_email}
-                onChange={(e) => setForm((f) => ({ ...f, owner_email: e.target.value }))}
-                className="w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm"
-                placeholder="owner@example.com"
-              />
-            </label>
-            <label className="col-span-2">
-              <span className="block text-[10px] uppercase text-text-dim mb-1">Customer name</span>
-              <input
-                value={form.customer_name}
-                onChange={(e) => setForm((f) => ({ ...f, customer_name: e.target.value }))}
-                className="w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm"
-                placeholder="Acme Inc"
-              />
-            </label>
-            <label>
-              <span className="block text-[10px] uppercase text-text-dim mb-1">Slug</span>
-              <input
-                value={form.slug}
-                onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") }))}
-                className="w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm font-mono"
-                placeholder="acme"
-              />
-            </label>
-            <label>
-              <span className="block text-[10px] uppercase text-text-dim mb-1">Plan</span>
-              <select
-                value={form.plan_key}
-                onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value }))}
-                className="w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm"
-              >
-                {plans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
-              </select>
-            </label>
-          </div>
-          {selectedPlan && (
-            <div className="grid grid-cols-3 gap-1 text-[11px] text-text-dim">
-              <span>{selectedPlan.cpu} CPU</span>
-              <span>{selectedPlan.memory_mb} MB</span>
-              <span>{gb(selectedPlan.storage_mb)}</span>
-            </div>
-          )}
-          <button
-            type="button"
-            disabled={busy === "create"}
-            onClick={createTenant}
-            className="w-full px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
-          >
-            {busy === "create" ? "Creating..." : "Create Tenant"}
-          </button>
-          {createdCustomer && (
-            <p className="text-[11px] text-text-dim">Customer #{createdCustomer.id}: {createdCustomer.email}</p>
-          )}
-        </section>
-
-        <div className="flex-1 overflow-auto">
-          {tenants.map((t) => (
+    <div className="h-full flex flex-col bg-bg text-text">
+      <header className="px-4 py-3 border-b border-border flex items-center gap-3">
+        <h2 className="text-sm font-semibold">Hosting</h2>
+        <nav className="flex gap-1">
+          {tabs.map((t) => (
             <button
-              key={t.id}
+              key={t.key}
               type="button"
-              onClick={() => setSelectedId(t.id)}
-              className={`w-full text-left px-4 py-3 border-b border-border hover:bg-bg-input ${selected?.id === t.id ? "bg-bg-input" : ""}`}
+              onClick={() => setView(t.key)}
+              className={`px-2 py-1 rounded text-xs ${view === t.key ? "bg-bg-input text-text" : "text-text-dim hover:bg-bg-hover"}`}
             >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-sm truncate flex-1">{t.slug}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(t.status)}`}>{t.status}</span>
-              </div>
-              <div className="text-xs text-text-dim truncate mt-0.5">{t.default_hostname}</div>
-              <div className="text-[11px] text-text-dim mt-1">{t.plan_key} · {fmtDate(t.created_at)}</div>
+              {t.label}{t.count != null ? ` ${t.count}` : ""}
             </button>
           ))}
-        </div>
-      </aside>
+        </nav>
+        <span className="text-xs text-text-dim ml-auto">{notice}</span>
+        <button type="button" onClick={load} className={btn}>Refresh</button>
+      </header>
+      {error && <div className="px-4 py-2 text-xs text-red border-b border-border break-all">{error}</div>}
 
-      <main className="min-w-0 min-h-0 flex flex-col">
-        {error && <div className="px-4 py-2 border-b border-red/30 bg-red/10 text-red text-xs">{error}</div>}
-        {!selected ? (
-          <div className="p-6 text-sm text-text-dim">No hosted tenants yet.</div>
-        ) : (
-          <>
-            <header className="px-5 py-4 border-b border-border flex items-start gap-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <h1 className="text-lg font-semibold font-mono truncate">{selected.slug}</h1>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${tone(selected.status)}`}>{selected.status}</span>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${tone(selected.last_health_status)}`}>health · {selected.last_health_status || "unknown"}</span>
+      <div className="flex-1 min-h-0 overflow-auto">
+        {view === "tenants" && (
+          <div className="flex h-full min-h-0">
+            <aside className="border-r border-border flex flex-col min-h-0" style={{ width: 340, flexShrink: 0 }}>
+              <section className="p-3 border-b border-border space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <label>
+                    <span className={label}>External ref</span>
+                    <input className={`${input} font-mono`} value={createForm.external_ref} placeholder="acct_123"
+                      onChange={(e) => setCreateForm((f) => ({ ...f, external_ref: e.target.value }))} />
+                  </label>
+                  <label>
+                    <span className={label}>Profile</span>
+                    <select className={input} value={createForm.profile || profiles[0]?.key || ""}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, profile: e.target.value }))}>
+                      {profiles.map((p) => <option key={p.key} value={p.key}>{p.name || p.key}</option>)}
+                    </select>
+                  </label>
+                  <label className="col-span-2">
+                    <span className={label}>Owner email</span>
+                    <input className={input} value={createForm.owner_email} placeholder="owner@example.com"
+                      onChange={(e) => setCreateForm((f) => ({ ...f, owner_email: e.target.value }))} />
+                  </label>
+                  {profiles.find((p) => p.key === (createForm.profile || profiles[0]?.key))?.backend !== "container" && (
+                    <label className="col-span-2">
+                      <span className={label}>SSH public keys, one per line</span>
+                      <textarea className={`${input} font-mono text-xs`} rows={2} value={createForm.ssh_keys}
+                        onChange={(e) => setCreateForm((f) => ({ ...f, ssh_keys: e.target.value }))} />
+                    </label>
+                  )}
                 </div>
-                <a href={`https://${selected.default_hostname}`} target="_blank" rel="noreferrer" className="text-sm text-accent hover:underline font-mono">
-                  {selected.default_hostname}
-                </a>
-                <div className="text-xs text-text-dim mt-1">
-                  customer #{selected.customer_id} · workload {selected.workload_id || "pending"} · {selected.image}
-                </div>
+                <button type="button" disabled={busy === "create" || !createForm.external_ref || !createForm.owner_email}
+                  onClick={createTenant} className="w-full px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50">
+                  {busy === "create" ? "Creating..." : "Create tenant"}
+                </button>
+              </section>
+              <label className="px-4 py-2 border-b border-border text-xs text-text-dim flex items-center gap-2">
+                <input type="checkbox" checked={showReleased} onChange={(e) => setShowReleased(e.target.checked)} />
+                Show released
+              </label>
+              <div className="flex-1 overflow-auto">
+                {tenants.length === 0 && <p className="p-4 text-xs text-text-dim">No tenants yet.</p>}
+                {tenants.map((t) => (
+                  <button key={t.id} type="button" onClick={() => setSelectedId(t.id)}
+                    className={`w-full text-left px-4 py-3 border-b border-border hover:bg-bg-hover ${selectedId === t.id ? "bg-bg-input" : ""}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium truncate">{t.owner_email}</span>
+                      <span className="ml-auto"><Badge value={t.status} /></span>
+                    </div>
+                    <div className="text-xs text-text-dim truncate">{t.profile_key} · {t.external_ref || t.slug}</div>
+                  </button>
+                ))}
               </div>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                <Action label="Health" busy={busy === `health:${selected.id}`} onClick={() => tenantAction(selected, "health")} />
-                <Action label="Logs" busy={busy === `logs:${selected.id}`} onClick={() => showLogs(selected)} />
-                <Action label="Sync usage" busy={busy === `usage:${selected.id}`} onClick={() => syncUsage(selected)} />
-                <Action label="Restart" busy={busy === `restart:${selected.id}`} onClick={() => tenantAction(selected, "restart")} />
-                {selected.status === "active" ? (
-                  <Action label="Suspend" busy={busy === `suspend:${selected.id}`} onClick={() => tenantAction(selected, "suspend")} />
-                ) : (
-                  <Action label="Resume" busy={busy === `resume:${selected.id}`} onClick={() => tenantAction(selected, "resume")} />
-                )}
-                <Action label="Delete" tone="danger" busy={busy === `delete:${selected.id}`} onClick={() => {
-                  if (window.confirm(`Delete ${selected.slug}?`)) tenantAction(selected, "delete");
-                }} />
-              </div>
-            </header>
+            </aside>
 
-            <section className="grid grid-cols-4 gap-3 p-4 border-b border-border">
-              <Metric label="Plan" value={selected.plan_key} />
-              <Metric label="Owner" value={selected.owner_email} />
-              <Metric label="Created" value={fmtDate(selected.created_at)} />
-              <Metric label="Updated" value={fmtDate(selected.updated_at)} />
+            <section className="flex-1 min-w-0 p-4 space-y-4 overflow-auto">
+              {!selected && <p className="text-sm text-text-dim">Select a tenant.</p>}
+              {selected && (
+                <>
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-base font-semibold truncate">{selected.owner_email}</h3>
+                      <p className="text-xs text-text-dim font-mono">{selected.id} · ref {selected.external_ref || "none"}</p>
+                    </div>
+                    <span className="ml-auto"><Badge value={selected.status} /></span>
+                  </div>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                    <dt className="text-text-dim">Profile</dt><dd>{selected.profile_key} ({BACKEND_LABEL[selected.backend] || selected.backend})</dd>
+                    {selected.default_hostname && (<><dt className="text-text-dim">Hostname</dt><dd className="font-mono">{selected.default_hostname}</dd></>)}
+                    {selected.machine_id ? (<><dt className="text-text-dim">Machine</dt><dd>#{selected.machine_id}</dd></>) : null}
+                    {selected.instance_id ? (<><dt className="text-text-dim">Instance</dt><dd>#{selected.instance_id}</dd></>) : null}
+                    {selected.access && (<><dt className="text-text-dim">SSH</dt><dd className="font-mono break-all">{selected.access.granted ? selected.access.ssh_command : "access removed"}</dd></>)}
+                    <dt className="text-text-dim">Created</dt><dd>{fmtDate(selected.created_at)}</dd>
+                    {selected.released_at && (<><dt className="text-text-dim">Released</dt><dd>{fmtDate(selected.released_at)}</dd></>)}
+                  </dl>
+                  {selected.last_error && <p className="text-xs text-red break-all">{selected.last_error}</p>}
+                  {selected.status !== "released" && (
+                    <div className="flex flex-wrap gap-2">
+                      {selected.status === "active" && (
+                        <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_suspend", "Suspending")}>Suspend</button>
+                      )}
+                      {selected.status === "suspended" && (
+                        <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_resume", "Resuming")}>Resume</button>
+                      )}
+                      {selected.status === "active" && (
+                        <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_restart", "Restarting")}>Restart</button>
+                      )}
+                      {selected.backend === "machine_pool" && selected.status === "active" && (
+                        <button type="button" className={btnDanger} disabled={!!busy}
+                          onClick={() => ask("Reinstall machine", selected.slug, "Erases the machine and reinstalls macOS for the same tenant. The customer's data is lost.",
+                            () => tenantAction(selected, "hosting_tenant_reinstall", "Reinstall started"))}>Reinstall</button>
+                      )}
+                      <button type="button" className={btnDanger} disabled={!!busy}
+                        onClick={() => ask("Release tenant", selected.slug,
+                          selected.backend === "container" ? "Destroys the container and its hostname." : "Removes access and wipes or destroys the machine.",
+                          () => tenantAction(selected, "hosting_tenant_release", "Release started"))}>Release</button>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-semibold text-text-dim">Runs</h4>
+                    {detailOps.length === 0 && <p className="text-xs text-text-dim">No runs.</p>}
+                    {detailOps.map((op) => <RunLog key={op.id} op={op} />)}
+                  </div>
+                </>
+              )}
+            </section>
+          </div>
+        )}
+
+        {view === "machines" && (
+          <div className="p-4 space-y-5">
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Pools</h3>
+              {pools.length === 0 && <p className="text-xs text-text-dim">No pools yet.</p>}
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+                {pools.map((p) => (
+                  <div key={p.key} className="border border-border rounded p-3 space-y-2 bg-bg-card">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{p.name || p.key}</span>
+                      <span className="text-xs text-text-dim">{p.platform}</span>
+                      <span className="ml-auto">
+                        <Badge value={p.execution_enabled ? "active" : "maintenance"} />
+                      </span>
+                    </div>
+                    <div className="text-xs text-text-dim">
+                      {p.counts.for_sale || 0} for sale · {p.counts.assigned || 0} assigned · {p.counts.reserved || 0} reserved · {p.counts.quarantined || 0} quarantined · {p.counts.offline || 0} offline
+                    </div>
+                    <button type="button" className={p.execution_enabled ? btnDanger : btn} disabled={!!busy}
+                      onClick={() => act(`exec:${p.key}`, () => callTool("hosting_pool_set_execution", { key: p.key, enabled: !p.execution_enabled }),
+                        p.execution_enabled ? "Execution off" : "Execution on")}>
+                      {p.execution_enabled ? "Stop execution" : "Allow execution"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
+                <label><span className={label}>Key</span><input className={`${input} font-mono`} style={{ width: 120 }} value={poolForm.key} onChange={(e) => setPoolForm((f) => ({ ...f, key: e.target.value }))} /></label>
+                <label><span className={label}>Name</span><input className={input} style={{ width: 160 }} value={poolForm.name} onChange={(e) => setPoolForm((f) => ({ ...f, name: e.target.value }))} /></label>
+                <label><span className={label}>Platform</span>
+                  <select className={input} value={poolForm.platform} onChange={(e) => setPoolForm((f) => ({ ...f, platform: e.target.value }))}>
+                    <option value="macos">macOS</option><option value="linux">Linux</option>
+                  </select>
+                </label>
+                <button type="button" className={btn} disabled={!poolForm.key || !!busy}
+                  onClick={() => act("pool", () => callTool("hosting_pool_upsert", poolForm), "Pool saved")}>Save pool</button>
+              </div>
             </section>
 
-            <section className="p-4 grid grid-cols-[minmax(0,1fr)_360px] gap-4 min-h-0 flex-1">
-              <div className="min-h-0 flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold">Usage</h2>
-                    <p className="text-xs text-text-dim">
-                      {lastUsageSync ? `Last synced ${lastUsageSync}` : "Updates when hosting or dependency events arrive"}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busy === `usage:${selected.id}`}
-                    onClick={() => syncUsage(selected)}
-                    className="px-2.5 py-1 rounded bg-bg-input text-xs font-medium hover:bg-bg-hover disabled:opacity-50"
-                  >
-                    {busy === `usage:${selected.id}` ? "Syncing..." : "Sync usage"}
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Machines</h3>
+              <div className="flex flex-wrap items-end gap-2">
+                <label><span className={label}>Pool</span>
+                  <select className={input} value={machineForm.pool_key || pools[0]?.key || ""} onChange={(e) => setMachineForm((f) => ({ ...f, pool_key: e.target.value }))}>
+                    {pools.map((p) => <option key={p.key} value={p.key}>{p.name || p.key}</option>)}
+                  </select>
+                </label>
+                <label><span className={label}>Instance id</span><input className={input} style={{ width: 100 }} value={machineForm.instance_id} onChange={(e) => setMachineForm((f) => ({ ...f, instance_id: e.target.value.replace(/\D/g, "") }))} /></label>
+                <label><span className={label}>Serial</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.serial} onChange={(e) => setMachineForm((f) => ({ ...f, serial: e.target.value }))} /></label>
+                <label><span className={label}>Management user</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.management_user} onChange={(e) => setMachineForm((f) => ({ ...f, management_user: e.target.value }))} /></label>
+                <button type="button" className={btn} disabled={!machineForm.instance_id || pools.length === 0 || !!busy}
+                  onClick={() => act("machine", () => callTool("hosting_machine_add", {
+                    pool_key: machineForm.pool_key || pools[0]?.key,
+                    instance_id: Number(machineForm.instance_id),
+                    serial: machineForm.serial,
+                    management_user: machineForm.management_user,
+                  }), "Machine added (quarantined until inspected and validated)")}>Add machine</button>
+              </div>
+              {machines.length === 0 ? <p className="text-xs text-text-dim">No machines yet.</p> : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-text-dim border-b border-border">
+                      <th className="py-1 pr-2">Machine</th><th className="py-1 pr-2">State</th><th className="py-1 pr-2">Tenant</th><th className="py-1 pr-2">Run</th><th className="py-1">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {machines.map((m) => (
+                      <tr key={m.id} className="border-b border-border align-top">
+                        <td className="py-2 pr-2">
+                          <div className="font-medium">#{m.id} {m.name}</div>
+                          <div className="text-text-dim">{m.pool_key} · instance {m.instance_id} · {m.online ? "online" : "offline"}{m.validated ? " · validated" : " · not validated"}</div>
+                        </td>
+                        <td className="py-2 pr-2">
+                          <Badge value={m.state} />
+                          {m.state_reason && <div className="text-text-dim break-all mt-1">{m.state_reason}</div>}
+                        </td>
+                        <td className="py-2 pr-2">{m.tenant ? m.tenant.owner_email : ""}</td>
+                        <td className="py-2 pr-2">{m.operation ? <span>{m.operation.kind} <Badge value={m.operation.status} /></span> : ""}</td>
+                        <td className="py-2">
+                          <div className="flex flex-wrap gap-1">
+                            {!m.tenant_id && (
+                              <button type="button" className={btn} disabled={!!busy} onClick={() => machineAction(m, "hosting_machine_inspect", {}, "Inspect started")}>Inspect</button>
+                            )}
+                            {!m.validated && (
+                              <button type="button" className={btn} disabled={!!busy}
+                                onClick={() => ask("Mark machine validated", String(m.id), "Only after its erase and recovery have been tested by hand. Validated machines can be wiped automatically.",
+                                  () => machineAction(m, "hosting_machine_update", { validated: true, confirm: String(m.id) }, "Machine validated"))}>Validate</button>
+                            )}
+                            {m.state === "available" && (
+                              <button type="button" className={btn} disabled={!!busy} onClick={() => machineAction(m, "hosting_machine_set_maintenance", { maintenance: true }, "Off sale")}>Maintenance</button>
+                            )}
+                            {m.state === "maintenance" && (
+                              <button type="button" className={btn} disabled={!!busy} onClick={() => machineAction(m, "hosting_machine_set_maintenance", { maintenance: false }, "Back on sale")}>End maintenance</button>
+                            )}
+                            {m.state !== "quarantined" && (
+                              <button type="button" className={btnDanger} disabled={!!busy} onClick={() => machineAction(m, "hosting_machine_quarantine", { reason: "quarantined from panel" }, "Quarantined")}>Quarantine</button>
+                            )}
+                            {!m.tenant_id && m.validated && (
+                              <button type="button" className={btnDanger} disabled={!!busy}
+                                onClick={() => ask("Clean machine", String(m.id), "Erases the machine, verifies it is clean and puts it back on sale.",
+                                  () => machineAction(m, "hosting_machine_clean", { confirm: String(m.id) }, "Clean started"))}>Clean</button>
+                            )}
+                            {!m.tenant_id && (
+                              <button type="button" className={btnDanger} disabled={!!busy}
+                                onClick={() => ask("Remove machine", String(m.id), "Removes the machine from its pool. The Instances host is not touched.",
+                                  () => machineAction(m, "hosting_machine_remove", { confirm: String(m.id) }, "Machine removed"))}>Remove</button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Failed runs</h3>
+              {failedRuns.length === 0 && <p className="text-xs text-text-dim">None.</p>}
+              {failedRuns.map((op) => (
+                <div key={op.id} className="space-y-1">
+                  <RunLog op={op} />
+                  <button type="button" className={btn} disabled={!!busy}
+                    onClick={() => ask("Retry run", "reviewed", "Retry only after checking the machine and the log above.",
+                      () => act(`retry:${op.id}`, () => callTool("hosting_operation_retry", { operation_id: op.id, reviewed: true }), "Retry started"))}>
+                    Retry after review
                   </button>
                 </div>
-                {usageRows.length === 0 ? (
-                  <div className="border border-border rounded-md p-4 text-sm text-text-dim">No usage recorded yet.</div>
-                ) : (
-                  <div className="grid gap-3 overflow-auto pr-1">
-                    {usageRows.map((u) => (
-                      <div key={`${u.customer_id}-${u.tenant_id}-${u.feature_key}`} className="border border-border rounded-md bg-bg-card p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-text truncate">{u.label}</div>
-                            <div className="text-[11px] text-text-dim font-mono truncate">{u.feature_key}</div>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <div className="text-sm font-semibold text-text">{u.formattedQuantity}</div>
-                            <div className={`text-[11px] ${u.over ? "text-red" : "text-text-dim"}`}>
-                              {u.over ? "Over limit" : `${u.percent}% used`}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mt-3 h-2 rounded bg-bg-input overflow-hidden">
-                          <div className={`h-full ${limitTone(u.percent, u.over)}`} style={{ width: `${u.percent}%` }} />
-                        </div>
-                        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-text-dim">
-                          <span>{u.formattedQuantity} / {u.formattedLimit}</span>
-                          <span>{u.reset === "none" ? "No reset" : `Resets ${u.reset}`}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-border rounded-md overflow-hidden min-h-0 flex flex-col">
-                <div className="px-3 py-2 border-b border-border">
-                  <div className="text-xs uppercase text-text-dim font-semibold">Plan Limits</div>
-                  <div className="text-[11px] text-text-dim">{tenantPlan?.name || selected.plan_key}</div>
-                </div>
-                <div className="overflow-auto">
-                  {(tenantPlan?.limits || []).map((l) => (
-                    <div key={l.feature_key} className="px-3 py-2 border-b border-border">
-                      <div className="font-mono text-xs text-text">{l.feature_key}</div>
-                      <div className="text-xs text-text-dim">{formatQuantity(l.feature_key, l.limit_value)} · {l.reset_interval}</div>
-                    </div>
-                  ))}
-                </div>
-                {(tenantPlan?.limits || []).length === 0 && (
-                  <div className="p-3 text-sm text-text-dim">No limits configured for this plan.</div>
-                )}
-              </div>
+              ))}
             </section>
-          </>
-        )}
-      </main>
-
-      {logs && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-4xl max-h-[80vh] rounded-md border border-border bg-bg-card flex flex-col">
-            <header className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Logs · {logs.tenant}</h2>
-              <button type="button" onClick={() => setLogs(null)} className="text-text-dim hover:text-text text-lg leading-none">×</button>
-            </header>
-            <pre className="p-4 overflow-auto text-xs font-mono whitespace-pre-wrap text-text-dim">{logs.body || "(empty)"}</pre>
           </div>
-        </div>
+        )}
+
+        {view === "profiles" && (
+          <div className="p-4">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-text-dim border-b border-border">
+                  <th className="py-1 pr-2">Profile</th><th className="py-1 pr-2">Backend</th><th className="py-1 pr-2">Product</th><th className="py-1 pr-2">Size or source</th><th className="py-1">Availability</th>
+                </tr>
+              </thead>
+              <tbody>
+                {profiles.map((p) => {
+                  const s = (p.settings || {}) as Record<string, string>;
+                  const size = p.backend === "container"
+                    ? `${p.cpu} CPU · ${p.memory_mb} MB · ${Math.round(p.storage_mb / 102.4) / 10} GB`
+                    : p.backend === "machine_pool" ? `pool ${p.pool_key}` : `${s.provider || ""} ${s.server_type || ""} ${s.region || ""}`;
+                  const av = p.availability;
+                  return (
+                    <tr key={p.key} className="border-b border-border">
+                      <td className="py-2 pr-2"><div className="font-medium">{p.name || p.key}</div><div className="text-text-dim font-mono">{p.key}</div></td>
+                      <td className="py-2 pr-2">{BACKEND_LABEL[p.backend] || p.backend}</td>
+                      <td className="py-2 pr-2">{p.product_key}</td>
+                      <td className="py-2 pr-2">{size}</td>
+                      <td className="py-2">
+                        {av && <Badge value={av.for_sale ? "available" : "maintenance"} />}
+                        {av?.available != null && <span className="text-text-dim"> {av.available} free</span>}
+                        {av?.waiting ? <span className="text-text-dim"> · {av.waiting} waiting</span> : null}
+                        {av?.reason && <div className="text-text-dim">{av.reason}</div>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="text-xs text-text-dim mt-3">Profiles are edited with hosting_profile_upsert. Prices and plans live in the SaaS app.</p>
+          </div>
+        )}
+      </div>
+
+      {confirm && (
+        <Confirm title={confirm.title} expect={confirm.expect} detail={confirm.detail}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => { const run = confirm.run; setConfirm(null); run(); }} />
       )}
-    </div>
-  );
-}
-
-function Action({ label, busy, onClick, tone: t = "normal" }: { label: string; busy?: boolean; onClick: () => void; tone?: "normal" | "danger" }) {
-  return (
-    <button
-      type="button"
-      disabled={busy}
-      onClick={onClick}
-      className={`px-2.5 py-1 rounded text-xs font-medium disabled:opacity-50 ${t === "danger" ? "bg-red/10 text-red hover:bg-red/15" : "bg-bg-input text-text hover:bg-bg-hover"}`}
-    >
-      {busy ? "..." : label}
-    </button>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-[10px] uppercase text-text-dim font-semibold mb-1">{label}</div>
-      <div className="text-sm text-text truncate">{value || "—"}</div>
     </div>
   );
 }
