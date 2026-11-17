@@ -50,6 +50,7 @@ func runStaticServer(args []string) {
 	root := fs.String("root", "", "directory to serve (required)")
 	assetCache := fs.String("asset-cache", "", "optional deployment/environment cache of previous hashed assets")
 	logPath := fs.String("log-path", "", "optional log file; otherwise stderr")
+	basePath := fs.String("base-path", "", "optional path prefix to serve the release under")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "static-server: parse flags: %v\n", err)
 		os.Exit(2)
@@ -76,7 +77,7 @@ func runStaticServer(args []string) {
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", *port),
-		Handler:           staticHandlerWithCache(*root, *assetCache),
+		Handler:           staticHandlerWithBase(*root, *assetCache, *basePath),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

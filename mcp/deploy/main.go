@@ -401,6 +401,7 @@ func (a *App) recordBootRecoveryFailure(rel *Release, cause error) {
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/source-capsules/", Handler: a.handleSourceCapsule, NoAuth: true},
+		{Method: http.MethodGet, Pattern: buildExportRoutePrefix, Handler: a.handleBuildExport, NoAuth: true},
 		{Pattern: "/api/deployments", Handler: a.handleDeploymentsCollection},
 		{Pattern: "/api/deployments/", Handler: a.handleDeploymentItem},
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
@@ -919,6 +920,7 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 		Port:          port,
 		Env:           envMap,
 	}
+	spec.StaticBasePath = staticBasePath(d.TargetConfigJSON)
 	// Seed the currently live release too: it may still be served by an older
 	// Deploy binary that predates the hashed-asset cache.
 	if previousID > 0 {
