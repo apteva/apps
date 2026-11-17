@@ -197,7 +197,7 @@ func (a *App) crawlTools() []sdk.Tool {
 		{Name: "actors_crawl_status", Description: "Get crawl run status and frontier counts.", InputSchema: schemaObject(map[string]any{"run_id": map[string]any{"type": "integer"}}, []string{"run_id"}), Handler: a.toolCrawlStatus},
 		{Name: "actors_crawl_resume", Description: "Resume a partial crawl run from its durable frontier, optionally retrying failed URLs.", InputSchema: schemaObject(map[string]any{"run_id": map[string]any{"type": "integer"}, "retry_failed": map[string]any{"type": "boolean"}}, []string{"run_id"}), Handler: a.toolCrawlResume},
 		{Name: "actors_frontier_list", Description: "List queued and failed crawl URLs for a run.", InputSchema: schemaObject(map[string]any{"run_id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"run_id"}), Handler: a.toolFrontierList},
-		{Name: "actors_dataset_query", Description: "Read the materialized named dataset produced by crawl runs.", InputSchema: schemaObject(map[string]any{"dataset": map[string]any{"type": "string"}, "after": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"dataset"}), Handler: a.toolDatasetQuery},
+		{Name: "actors_dataset_query", Description: "Read the materialized named dataset produced by crawl runs. Pass next_cursor back as cursor (or after) while has_more.", InputSchema: schemaObject(map[string]any{"dataset": map[string]any{"type": "string"}, "after": map[string]any{"type": "integer"}, "cursor": map[string]any{"type": "integer", "description": "next_cursor from the previous page; alias of after."}, "limit": map[string]any{"type": "integer"}}, []string{"dataset"}), Handler: a.toolDatasetQuery},
 	}
 }
 
@@ -306,13 +306,17 @@ func (a *App) toolDatasetQuery(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, errors.New("dataset is required")
 	}
 	limit := boundedInt(intArg(args, "limit"), 50, 1, 200)
-	rows, err := ctx.AppDB().Query(`SELECT id,item_json FROM actors_crawl_materialized WHERE project_id=? AND dataset=? AND id>? ORDER BY id LIMIT ?`, projectID(ctx), dataset, int64ArgLocal(args, "after"), limit+1)
+	after, err := pageAfterArg(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.AppDB().Query(`SELECT id,item_json FROM actors_crawl_materialized WHERE project_id=? AND dataset=? AND id>? ORDER BY id LIMIT ?`, projectID(ctx), dataset, after, limit+1)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
-	next := int64ArgLocal(args, "after")
+	next := after
 	hasMore := false
 	for rows.Next() {
 		var id int64

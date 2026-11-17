@@ -242,8 +242,8 @@ func (a *App) actorTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
-			Name: "actors_list", Description: "Bounded metadata discovery without definitions; follow next_cursor as after while has_more.",
-			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "after": map[string]any{"type": "integer", "minimum": 0}}, nil), Handler: a.toolActorList,
+			Name: "actors_list", Description: "Bounded metadata discovery without definitions; pass next_cursor back as cursor (or after) while has_more.",
+			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "after": map[string]any{"type": "integer", "minimum": 0}, "cursor": map[string]any{"type": "integer", "minimum": 0, "description": "next_cursor from the previous page; alias of after."}}, nil), Handler: a.toolActorList,
 		},
 		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "platform": map[string]any{"type": "string", "enum": []string{"ios", "android", "web"}}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
 
@@ -1105,6 +1105,29 @@ func listActors(ctx *sdk.AppCtx, enabled *bool, limit int) ([]actorRecord, error
 	return out, rows.Err()
 }
 
+// pageAfterArg reads a page position. Responses return next_cursor, so
+// callers naturally pass it back as "cursor"; "after" is the original name.
+// Both are accepted; conflicting values are rejected rather than one being
+// silently ignored (which restarted pagination at the first page).
+func pageAfterArg(args map[string]any) (int64, error) {
+	after, hasAfter := args["after"]
+	cursor, hasCursor := args["cursor"]
+	hasAfter = hasAfter && after != nil
+	hasCursor = hasCursor && cursor != nil
+	switch {
+	case hasAfter && hasCursor:
+		a, c := int64ArgLocal(args, "after"), int64ArgLocal(args, "cursor")
+		if a != c {
+			return 0, fmt.Errorf("after (%d) and cursor (%d) disagree; pass next_cursor as one of them", a, c)
+		}
+		return a, nil
+	case hasCursor:
+		return int64ArgLocal(args, "cursor"), nil
+	default:
+		return int64ArgLocal(args, "after"), nil
+	}
+}
+
 func int64ArgLocal(args map[string]any, key string) int64 {
 	switch v := args[key].(type) {
 	case int64:
@@ -1131,7 +1154,7 @@ func (a *App) handleActors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{}
-	for _, key := range []string{"after", "limit"} {
+	for _, key := range []string{"after", "cursor", "limit"} {
 		if raw := r.URL.Query().Get(key); raw != "" {
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {

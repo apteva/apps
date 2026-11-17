@@ -35,7 +35,7 @@ After saving it:
 {"actor_id": 1, "operation": "read", "input": {"url": "https://example.com"}}
 ```
 
-Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows. Pass `"detail": "summary"` to `actors_run_get` for the compact terminal receipt (status, operation, revision, timings, `dataset_count`, failure/effect evidence and compact read coverage) without the definition snapshot, input, previews, traces or per-round pagination IDs. The final dataset page of a finished run (`has_more: false`) includes the same receipt as `run_summary`.
+Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` back as `cursor` (or `after`) for subsequent pages. While a run is active, poll again at the last cursor for new committed rows. Pass `"detail": "summary"` to `actors_run_get` for the compact terminal receipt (status, operation, revision, timings, `dataset_count`, failure/effect evidence and compact read coverage) without the definition snapshot, input, previews, traces or per-round pagination IDs. The final dataset page of a finished run (`has_more: false`) includes the same receipt as `run_summary`.
 
 Saved read-pagination evidence records `before_count`, `after_count` and `new_count` for every round. ID lists longer than 50 keep their first and last 25 IDs and set `ids_truncated`; the run dataset holds every observed record.
 
@@ -274,7 +274,7 @@ even a latest-revision request reads its immutable version row.
 In v0.3.0, omitting `operation` returns metadata and operation names only, with
 `definition_included:false`. Follow `next_operation_after` as `operation_after`
 while `operations_complete:false`. `actors_list` also omits definitions and
-pages within the response budget; pass `next_cursor` as `after` while `has_more`.
+pages within the response budget; pass `next_cursor` back as `cursor` (or `after`) while `has_more`.
 
 Full definitions require explicit `actors_definition_export(id, revision)` for
 editing/debugging. It returns bounded base64 chunks, byte offsets, total bytes,
