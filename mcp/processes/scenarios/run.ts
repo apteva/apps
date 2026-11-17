@@ -54,13 +54,23 @@ await mkdir(outputRoot, { recursive: true });
 const outputDir = await mkdtemp(resolve(outputRoot, "run-"));
 const scenarioDir = resolve(outputDir, "scenarios");
 await mkdir(scenarioDir);
+// The default run is the core suite (top-level YAMLs). APTEVA_TEST_SUITE=extended
+// runs scenarios/extended/ and =all runs both. 19-worker-provider needs a second
+// provider and a CLI with --extra-provider, so it only runs by name.
+const SUITE = process.env.APTEVA_TEST_SUITE || "core";
+check(["core", "extended", "all"].includes(SUITE), `Unknown APTEVA_TEST_SUITE ${SUITE}`);
+async function suiteFiles(dir: string) {
+  return (await readdir(dir))
+    .filter((f) => f.endsWith(".yaml") && !f.startsWith("19-"))
+    .sort()
+    .map((f) => resolve(dir, f));
+}
 const files = process.argv[2]
   ? [resolve(appDir, process.argv[2])]
-  : (await readdir(import.meta.dir))
-      // Needs a second provider and a CLI with --extra-provider, so it runs by name.
-      .filter((f) => f.endsWith(".yaml") && !f.startsWith("19-"))
-      .sort()
-      .map((f) => resolve(import.meta.dir, f));
+  : [
+      ...(SUITE === "extended" ? [] : await suiteFiles(import.meta.dir)),
+      ...(SUITE === "core" ? [] : await suiteFiles(resolve(import.meta.dir, "extended"))),
+    ];
 const databases = new Map<string, string>();
 for (const file of files) {
   const scenario = YAML.parse(await Bun.file(file).text());
