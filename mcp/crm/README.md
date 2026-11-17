@@ -1,4 +1,13 @@
-# CRM v0.9.27
+# CRM v0.9.28
+
+Release `crm/v0.9.28`: inbound email from an automated sender (bounces, DMARC
+reports, service notifications) no longer opens one conversation per message.
+When header threading finds no match, a message classified as automated, or one
+from a contact tagged `automated`, joins that contact's latest email
+conversation, reopening it if closed. `multipart/report` and
+`message/delivery-status` mail is always classified automated. Human threading
+is unchanged. No migrations; existing per-message conversations are left as
+they are. Pins app-sdk v0.115.0.
 
 Release `crm/v0.9.27`: email replies pin the selected inbound activity (or the
 latest by occurrence time and ID) and use Messaging's `send_message` with

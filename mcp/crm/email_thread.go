@@ -26,6 +26,30 @@ func sesProviderIDFromReference(ref string) string {
 	return local
 }
 
+// automatedEmailConversationTx returns the latest email conversation of an
+// automated sender, so its messages share one thread. A sender counts as
+// automated when this message was classified so or the contact carries the
+// automated tag. Returns 0 for human senders or when no thread exists yet.
+func automatedEmailConversationTx(tx *sql.Tx, pid string, contactID int64, messageAutomated bool) (int64, error) {
+	if !messageAutomated {
+		var tagged int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM contact_tags WHERE project_id=? AND contact_id=? AND tag_name=?)`, pid, contactID, tagAutomated).Scan(&tagged); err != nil {
+			return 0, err
+		}
+		if tagged == 0 {
+			return 0, nil
+		}
+	}
+	var conversationID int64
+	err := tx.QueryRow(`SELECT id FROM contact_conversations
+		WHERE project_id=? AND contact_id=? AND channel='email'
+		ORDER BY COALESCE(last_activity_at, started_at) DESC, id DESC LIMIT 1`, pid, contactID).Scan(&conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return conversationID, err
+}
+
 // Match the full RFC header first. For old CRM rows, or a send where SES did
 // not expose its region, use the SES-only local part against the recorded
 // provider ID. Both lookups stay within the resolved project and contact.

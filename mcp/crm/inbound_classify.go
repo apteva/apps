@@ -57,6 +57,11 @@ func isAutomatedSender(channel, from string, headers map[string]any) (bool, stri
 		if headerPresent(headers, "X-Auto-Response-Suppress") {
 			return true, "X-Auto-Response-Suppress"
 		}
+		// Delivery status and feedback reports (RFC 3462/3464/5965) — bounces
+		// and complaints from any provider, whatever the sender address.
+		if ct := strings.ToLower(headerVal(headers, "Content-Type")); strings.Contains(ct, "multipart/report") || strings.Contains(ct, "message/delivery-status") {
+			return true, "delivery report"
+		}
 		if strings.TrimSpace(headerVal(headers, "Return-Path")) == "<>" {
 			return true, "null Return-Path"
 		}
