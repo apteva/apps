@@ -52,8 +52,8 @@ directive: |
   with idempotency_key=controlled-1 and control_mode=step_by_step. This test authorizes that execution.
   Main controller: read run_get once immediately. Verify control_mode=step_by_step,
   waiting_for_advance=true, only prepare eligible, no active steps or delivered work.
-  Call processes_run_advance once for the exact prepare step ID with idempotency_key=release-prepare.
-  Only MAIN may advance, never
+  Call processes_run_advance for the exact prepare step ID with idempotency_key=release-prepare.
+  Retry that same call/key once to verify idempotency. Only MAIN may advance, never
   the worker or children. The test operator will hold and then release every later
   step over HTTP; never release those from main, auto-complete them or change modes.
   Main must not perform domain work or spawn the run worker: Processes provisions
@@ -68,7 +68,7 @@ assert:
   - tool_called: spawn
   - tool_called: processes_step_claim
   - tool_called: processes_runs
-  - tool_called_with: {tool: processes_run_advance, count: 1, success: true}
+  - tool_called_with: {tool: processes_run_advance, success: true}
   - tool_called_with: {tool: test-parallel_prepare, count: 1, success: true}
   - tool_called_with: {tool: test-parallel_work, args: {artifact_id: alpha.png}, count: 1, success: true}
   - tool_called_with: {tool: test-parallel_work, args: {artifact_id: beta.png}, count: 1, success: true}

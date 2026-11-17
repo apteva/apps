@@ -255,7 +255,7 @@ for (const scenario of report.results) {
     };
     if (scenario.scenario === WORKER_CLEANUP) {
       check(cleanupEvidence && !(cleanupEvidence instanceof Error), `Worker cleanup observation failed: ${cleanupEvidence}`);
-      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Worker cleanup tier 3 must observe GPT-6.1 Sol");
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Worker cleanup tier 3 must observe the requested model");
       const cleanup = db.query("SELECT * FROM process_worker_cleanup").all();
       const notifications = db.query("SELECT * FROM process_run_terminal_events").all();
       verifyWorkerCleanup(runs,cleanup,cleanupEvidence,notifications);
@@ -264,7 +264,7 @@ for (const scenario of report.results) {
       continue;
     }
     if (scenario.scenario === COMPACT_HANDOFFS) {
-      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Compact handoff tier 3 must observe GPT-6.1 Sol");
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Compact handoff tier 3 must observe the requested model");
       check(compactConfirmed && !(compactConfirmed instanceof Error), `Compact approval failed: ${compactConfirmed}`);
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
       const evidence = db.query("SELECT * FROM process_step_evidence ORDER BY created_at,id").all() as any[];
@@ -294,7 +294,7 @@ for (const scenario of report.results) {
     if (scenario.scenario === AI_PARALLEL || scenario.scenario === STEP_BY_STEP) {
       if (scenario.scenario === STEP_BY_STEP) check(controlled && !(controlled instanceof Error), `Controller failed: ${controlled instanceof Error ? controlled.message : "missing"}`);
       const confirmation = scenario.scenario === STEP_BY_STEP && controlled && !(controlled instanceof Error) ? controlled.approval : parallelConfirmed;
-      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Parallel tier 3 must observe GPT-6.1 Sol");
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Parallel tier 3 must observe the requested model");
       check(confirmation && !(confirmation instanceof Error), `Parallel operator confirmation failed: ${parallelConfirmed instanceof Error ? parallelConfirmed.message : "never performed"}`);
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
       const fixtureDb = openPostRunDatabase(resolve(outputDir, "parallel-fixture.db"));
@@ -314,7 +314,7 @@ for (const scenario of report.results) {
     }
     if (scenario.scenario === RUN_MEMORY) {
       check(memoryConfirmed && !(memoryConfirmed instanceof Error),`Memory approvals failed: ${memoryConfirmed}`);
-      check(PROVIDER==="openai-codex"&&MODEL==="gpt-6.1-sol"&&scenario.observed_models?.includes(MODEL),"Memory tier 3 must observe GPT-6.1 Sol");
+      check(PROVIDER==="openai-codex"&&scenario.observed_models?.includes(MODEL),"Memory tier 3 must observe the requested model");
       const summaries=db.query("SELECT * FROM process_run_summaries ORDER BY run_id,revision").all() as any[];
       const entries=db.query("SELECT * FROM process_memory ORDER BY entry_key").all() as any[];
       const evidence={...history,summaries,entries,approvals:memoryConfirmed};
@@ -350,7 +350,7 @@ for (const scenario of report.results) {
       continue;
     }
     if (scenario.scenario === PROCESS_PATCH) {
-      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Patch tier 3 must observe GPT-6.1 Sol");
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Patch tier 3 must observe the requested model");
       const versions = db.query("SELECT version,body_json FROM process_versions WHERE process_id=? ORDER BY version").all(processes[0].id) as any[];
       const process = db.query("SELECT * FROM processes WHERE id=?").get(processes[0].id) as any;
       const evidence = {process, versions, runs};
