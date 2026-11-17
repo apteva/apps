@@ -20,7 +20,7 @@ export function verifyProcessPatch(calls: any[], versions: any[], process: any, 
   const canonical = (value:any):string => JSON.stringify(value, (_key,v)=>v && !Array.isArray(v) && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])) : v);
   check(canonical(third) === canonical(expected3), "Mixed patch changed unrelated content or lost dependencies/defaults");
   const good = (c:any) => c.ok && c.completed;
-  check(calls.filter(c=>good(c)&&c.name==="processes_create").length === 1 && calls.every(c=>!["processes_update","processes_activate","processes_start"].includes(c.name)), "Used full replacement or repeated creation/execution");
+  check(calls.filter(c=>good(c)&&c.name==="processes_create").length === 1 && calls.every(c=>!["processes_update","processes_activate","processes_status","processes_start"].includes(c.name)), "Used full replacement or repeated creation/execution");
   const patches = calls.filter(c=>c.name === "processes_patch" && c.completed);
   check(patches.length === 3 && patches.filter(good).length === 2, "Expected two successful patches and one rejected stale patch");
   const successes=patches.filter(good);

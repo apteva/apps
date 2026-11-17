@@ -70,10 +70,6 @@ provides:
     - { name: create, description: Create an unassigned draft company procedure. }
     - { name: update, description: Replace the complete definition with an immutable draft revision. }
     - { name: patch, description: "Edit selected fields or steps/parameters by key; receive a compact immutable draft revision receipt." }
-    - { name: activate, description: Activate a procedure for use by its assignments. }
-    - { name: pause, description: Stop future scheduled runs without interrupting current work. }
-    - { name: draft, description: Return a procedure to draft and stop new runs while preserving current work and history. }
-    - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: "Start one execution of an active assignment. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
     - { name: runs, description: Read compact paginated history with checkpoint summaries and exact detail references. }
     - { name: run_evidence, description: Recover exact oversized run sections in bounded JSON pages. }
@@ -88,13 +84,9 @@ provides:
     - { name: quality_get, description: "Read per-version quality: scores, coverage, tags, rubric, executors and review counts." }
     - { name: review_queue, description: "List review items for low-scored, failed or sampled runs." }
     - { name: review_update, description: "Claim, release, resolve or dismiss a review item." }
-    - { name: assignments, description: List saved process assignments. }
-    - { name: assignment_get, description: Read assignment settings. }
+    - { name: assignments, description: "List saved process assignments, or read one with assignment_id." }
     - { name: assignment_create, description: "Configure a new assignment with agents, parameter values, and schedule. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
     - { name: assignment_update, description: "Revise a paused assignment. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
-    - { name: assignment_activate, description: Enable an assignment. }
-    - { name: assignment_pause, description: Pause one assignment. }
-    - { name: assignment_archive, description: Archive one assignment. }
     - { name: step_claim, description: Claim an assigned step and reuse its persistent run worker. }
     - { name: step_read, description: "Recover exact current instructions, one dependency result or artifact evidence by name." }
     - { name: step_evidence_save, description: "Save immutable detailed diagnostics separately from compact step handoffs." }
@@ -107,12 +99,13 @@ provides:
     - { name: trigger_get, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_create, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_update, description: "Configure, preview and inspect assignment event triggers." }
-    - { name: trigger_activate, description: "Configure, preview and inspect assignment event triggers." }
-    - { name: trigger_pause, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_preview, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_test_run, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_events, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_event_retry, description: "Retry a failed event against current trigger rules with a stable key." }
+    - { name: status, description: "Change a procedure status: active, paused, draft or archived." }
+    - { name: assignment_status, description: "Change an assignment status: active, paused or archived." }
+    - { name: trigger_status, description: "Activate or pause an event trigger." }
   ui_panels:
     - slot: project.page
       label: Processes

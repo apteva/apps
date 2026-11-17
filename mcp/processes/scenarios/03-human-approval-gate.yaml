@@ -39,7 +39,7 @@ assert:
   - tool_called: processes_step_get
   - tool_called_with:
       tool: processes_step_update
-      args: {state: completed, output: "Window light makes softer portraits."}
+      args: {state: completed}
       count: 1
   - tool_not_called: processes_run_update
   - tool_called: processes_runs

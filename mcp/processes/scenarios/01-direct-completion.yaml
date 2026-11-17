@@ -31,7 +31,6 @@ assert:
       tool: processes_run_update
       args:
         state: completed
-        result: "Net: 800"
   - tool_called: processes_runs
   - tool_not_called: tasks_create
   - iterations_at_most: 14

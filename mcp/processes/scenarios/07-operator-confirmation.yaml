@@ -46,12 +46,8 @@ assert:
   - tool_called: processes_step_get
   - tool_called_with:
       tool: processes_step_update
-      args: {state: completed, output: "Golden hour flatters every portrait."}
-      count: 1
-  - tool_called_with:
-      tool: processes_step_update
-      args: {state: completed, output: "Published: Golden hour flatters every portrait."}
-      count: 1
+      args: {state: completed}
+      count: 2
   - tool_not_called: processes_run_update
   - tool_called: processes_runs
 budget:

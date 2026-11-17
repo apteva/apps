@@ -35,6 +35,12 @@ const DEFAULT_MODELS: Record<string, string> = {
   "opencode-go": "kimi-k3",
 };
 const PROVIDER = process.env.APTEVA_TEST_PROVIDER || "openai-codex";
+// Token budgets were calibrated on Codex. Other providers report every turn's
+// full prompt (no cache discount in the count) and use larger tool manifests,
+// so their reported totals run about twice as high for the same work.
+const TOKEN_SCALE = Number(
+  process.env.APTEVA_TEST_TOKEN_SCALE || (PROVIDER === "openai-codex" ? 1 : 2),
+);
 const MODEL = process.env.APTEVA_TEST_MODEL || DEFAULT_MODELS[PROVIDER] || "";
 check(
   MODEL !== "",
@@ -109,6 +115,9 @@ for (const file of files) {
       env: { DB_PATH: resolve(outputDir, "parallel-fixture.db") } }];
   }
   scenario.setup.app.env = { ...scenario.setup.app.env, DB_PATH: dbPath };
+  if (scenario.budget?.total_tokens && TOKEN_SCALE !== 1) {
+    scenario.budget.total_tokens = Math.round(scenario.budget.total_tokens * TOKEN_SCALE);
+  }
   databases.set(scenario.name, dbPath);
   await Bun.write(
     resolve(scenarioDir, basename(file)),

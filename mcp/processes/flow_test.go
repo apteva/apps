@@ -92,8 +92,8 @@ func TestAgentCreationRecipeIsExplicit(t *testing.T) {
 	for name, want := range map[string]string{
 		"create":              "No assignment or run is created",
 		"assignment_create":   "always created paused",
-		"activate":            "explicit user authorization",
-		"assignment_activate": "explicit user authorization",
+		"status":              "explicit user authorization",
+		"assignment_status":   "explicit user authorization",
 		"start":               "explicit user authorization",
 	} {
 		if !strings.Contains(descriptions[name], want) {

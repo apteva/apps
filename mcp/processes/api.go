@@ -263,7 +263,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			return a.executeMCP(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
-	return append(out, a.triggerTools()...)
+	return consolidatedTools(a, append(out, a.triggerTools()...))
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
 	return a.executeResponse(project, actor, action, args, false)

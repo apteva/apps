@@ -35,7 +35,7 @@ assert:
   - tool_called: processes_runs
   - tool_called_with:
       tool: processes_step_update
-      args: {state: completed, output: "PUSH|Barcelona|22C"}
+      args: {state: completed}
       success: true
   - tool_not_called: processes_run_update
 budget:

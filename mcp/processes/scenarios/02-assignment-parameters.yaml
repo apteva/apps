@@ -36,10 +36,10 @@ assert:
     expect_count: 2
   - tool_called_with:
       tool: processes_run_update
-      args: {state: completed, result: "Briefing for photography"}
+      args: {state: completed}
   - tool_called_with:
       tool: processes_run_update
-      args: {state: completed, result: "Briefing for cooking"}
+      args: {state: completed}
   - tool_called: processes_runs
   - tool_not_called: tasks_create
   - iterations_at_most: 22

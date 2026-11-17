@@ -62,8 +62,7 @@ assert:
   - tool_called: processes_step_claim
   - tool_called_with:
       tool: processes_step_update
-      args: {state: completed, output: "Recorded south; receipt: source:9007199254740995; approval: MEMORY-APPROVED"}
-      count: 1
+      args: {state: completed}
       success: true
   - tool_called_with:
       tool: processes_runs

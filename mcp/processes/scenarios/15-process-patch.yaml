@@ -48,7 +48,7 @@ assert:
   - tool_called_with: {tool: processes_get, args: {version: 3}}
   - tool_not_called: processes_update
   - tool_not_called: processes_start
-  - tool_not_called: processes_activate
+  - tool_not_called: processes_status
 budget:
   total_tokens: 1500000
   cost_usd: 3.00

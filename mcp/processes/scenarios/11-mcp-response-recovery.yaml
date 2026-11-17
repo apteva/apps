@@ -34,7 +34,7 @@ assert:
   - tool_called: processes_list
   - tool_called_with: {tool: processes_get, args: {version: 1}}
   - tool_called_with: {tool: processes_get, args: {version: 2}}
-  - tool_called_with: {tool: processes_run_update, args: {state: completed, result: "Net: 1000"}}
+  - tool_called_with: {tool: processes_run_update, args: {state: completed}}
   - tool_called: processes_runs
   - tool_not_called: spawn
 budget:

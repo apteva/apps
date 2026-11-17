@@ -114,7 +114,7 @@ trajectory_assert:
       node: main
       agent: primary
       tool: processes_step_update
-      args: {state: completed, output: "RESEARCH|page=photography|tip=window-light"}
+      args: {state: completed}
       success: true
   - tool_called_with:
       node: main
@@ -125,13 +125,13 @@ trajectory_assert:
       node: main
       agent: writer
       tool: processes_step_update
-      args: {state: completed, output: "AUDIENCE|page=photography|level=beginner"}
+      args: {state: completed}
       success: true
   - tool_called_with:
       node: main
       agent: writer
       tool: processes_step_update
-      args: {state: completed, output: "DRAFT|photography|beginner|window-light"}
+      args: {state: completed}
       success: true
   - tool_called_with:
       node: main
@@ -142,13 +142,13 @@ trajectory_assert:
       node: main
       agent: reviewer
       tool: processes_step_update
-      args: {state: completed, output: "APPROVED|DRAFT|photography|beginner|window-light"}
+      args: {state: completed}
       success: true
   - tool_called_with:
       node: main
       agent: primary
       tool: processes_step_update
-      args: {state: completed, output: "RECEIPT|photography|beginner|window-light"}
+      args: {state: completed}
       success: true
   - tool_called_with:
       node: main

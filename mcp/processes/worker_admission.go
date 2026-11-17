@@ -8,8 +8,17 @@ import (
 
 var errWorkerCapacity = errors.New("worker capacity exhausted; queued until a worker slot is released")
 
+const workerCapacityMarker = "worker capacity exhausted"
+
 func workerCapacityError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "worker capacity exhausted")
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), workerCapacityMarker)
+}
+
+// queuedForCapacity reports a step whose last delivery attempt was refused
+// only because the executor's worker slots were full. The saved warning is
+// written from errWorkerCapacity, so the marker is stable.
+func queuedForCapacity(s StepRun) bool {
+	return strings.Contains(s.DeliveryWarning, workerCapacityMarker)
 }
 
 // Processes admission is shared across this installation's runs and assignments.

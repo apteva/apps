@@ -826,7 +826,7 @@ func (a *App) refreshWorkflowState(r *Run, all []StepRun) error {
 			continue
 		}
 		total++
-		atCapacity := strings.Contains(s.DeliveryWarning, "worker capacity exhausted")
+		atCapacity := queuedForCapacity(s)
 		capacityQueued = capacityQueued || (s.State == "ready" && atCapacity)
 		if s.State == "running" || (s.State == "ready" && !atCapacity) {
 			runnable = true

@@ -81,12 +81,18 @@ must be configured before activation. Runs already created never change.
 MCP requires trusted agent/project context. Tools are scoped to a process in
 that project, or to project-level native work. The host namespaces these local tool names:
 
-- `list`, `get`, `create`, `update`, `activate`, `pause`, `draft`, `archive`
-- `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
-  `assignment_activate`, `assignment_pause`, `assignment_archive`
-- `start`, `runs`, `run_get`, `run_update`, `run_cancel`
-- `step_get`, `step_update`
-- `step_claim`
+- `list`, `get`, `validate_definition`, `create`, `update`, `patch`, `status`
+- `assignments` (pass `assignment_id` to read one), `assignment_create`,
+  `assignment_update`, `assignment_status`
+- `start`, `runs`, `run_get`, `run_update`, `run_evidence`, `run_cancel`, `run_advance`
+- `step_get`, `step_claim`, `step_read`, `step_evidence_save`, `step_update`
+- `summary_get`, `summary_update`, `memory_list`, `memory_upsert`
+- `run_rate`, `run_ratings`, `quality_get`, `review_queue`, `review_update`
+
+`status`, `assignment_status` and `trigger_status` take a `status` argument and
+replace the 0.19 per-state tools (`activate`, `pause`, `draft`, `archive`,
+`assignment_activate`/`_pause`/`_archive`, `trigger_activate`/`_pause`); they run
+the same actions, and the HTTP API is unchanged.
 [Event triggers](docs-event-triggers.md) provide assignment event configuration,
 preview, activation, and event history tools.
 
@@ -130,9 +136,11 @@ works only when exactly one non-archived assignment exists. Retries must use the
 same assignment, key, input text, and explicit overrides. They reuse the saved
 snapshot even after assignment or procedure changes.
 
-For single-agent direct work (no structured steps), read `run_get(process_id, run_id)` before domain actions.
-Use `run_update` to report running/waiting/blocked/completed/failed/cancelled,
-progress, current_step, result, and error. Only the run's original assignment
+For single-agent direct work (no structured steps), the dispatch message holds
+the whole procedure. Report with `run_update`: state
+(running/waiting/blocked/completed/failed/cancelled) and the required `outcome`,
+which fills `result` on completion, `error` for a stop and `current_step` while
+running unless those are given explicitly. Only the run's original assignment
 owner can update it, including from other threads. Completion requires result
 evidence; blockers/failures need a reason. Terminal outcomes are immutable.
 `runs` returns native run and step history plus durable `dispatches`.
@@ -202,8 +210,14 @@ and let the assigned agent use the appropriate tool or communication channel.
 The run freezes the procedure, role bindings, and parameters at creation. Each
 step receives its instructions and all completed ancestor outputs.
 
-Agents read `step_get(process_id, run_id, step_id)` before acting, then report
-`step_update` with state, progress, output, and error.
+An independent step's worker gets a brief in its directive: the step
+instructions, shared instructions, approval requirements, parameters and the
+completed direct dependency results (fields over 3 KiB and dependency sets over
+6 KiB are cut with an exact `step_read` reference). The tracked event is a
+one-line kickoff. The worker finishes with one `step_update`: state plus the
+required `outcome`, which becomes the output on completion and the reason for
+waiting/blocked/failed/cancelled unless `output`, `handoff` or `error` is given.
+Persistent workers claim each step with `step_claim`.
 Worker reads and claims contain the assigned step/checkpoint, one `dependencies`
 manifest with complete ancestor receipts, and shared frozen policy. They omit
 unrelated steps and delivery diagnostics. Retain shared policy and pass
@@ -712,89 +726,4 @@ original handling procedure ID, target assignment IDs, activation cutoff and
 idempotency-key namespace; move only routing assignments and subscriptions.
 Do not execute six model-driven no-op steps after a durable handoff.
 
-
-## Durable wait ownership (0.18.3)
-
-`step_update.wait` records why a worker must remain attached. Save the original
-blocker and an exact recoverable output checkpoint with every wait.
-
-| Kind | Ownership and recovery |
-| --- | --- |
-| `hold` | No live approval, callback, child or native timer remains. Suspend the step and automatically release its worker. Explicit operator recovery is required; no automatic replay. |
-| `timer` | New Processes-owned delay. Save an exact RFC3339 `wake_at`; release the worker and resume the same step from its checkpoint at that deadline. |
-| `approval` | Retain the owner of the exact pending approval `reference`. |
-| `callback` | Retain the owner of the exact callback/subscription `reference`. |
-| `thread_timer` | Retain the owner and exact existing native `wake_at` and timer `reference`. Never clear/recreate an armed native timer to migrate it. |
-
-The assigned worker verifies dependency records before surrendering ownership.
-A missing reference or an expired-looking message is not evidence that a real
-approval/callback/timer has settled. Unknown ownership remains attached.
-Non-delegating workers only may use releasable waits. Delegating owners keep
-their children and callbacks.
-
-Legacy waiting/blocked steps receive one tracked ownership-revalidation request
-per saved revision after ten minutes, in batches of ten per project. The event
-uses a stable identity across lost replies and sidecar restarts. The worker
-checks the original records and registers its actual dependency or parks a stale
-hold. A missing response never authorizes termination. This is a bounded upgrade
-handshake, not recurring model polling of every wait.
-
-Checkpoint, ownership, suspension and audit history commit together. A `done`
-acknowledgement follows durable retirement reservation. Timer continuations wait
-for cleanup acknowledgement, use fresh worker/delivery identities, and preserve
-output, progress, evidence and frozen policy. Legacy timers/approvals remain
-attached until explicitly classified; they are never expired just by age.
-
-
-## Unavailable owners and restored workers (0.18.4)
-
-Legacy ownership revalidation continues after an unavailable owner or failed
-tracked delivery. Each step/revision has durable retry backoff (one minute,
-doubling to fifteen minutes), and accepted requests keep their original stable
-event identity. Stopped owners are deferred without waking them or acknowledging
-their waits. Deferred failures cannot occupy the next page indefinitely; eligible
-pages drain ten at a time. Revalidation IO runs outside the action mutex, so a
-worker can immediately save its checkpoint while other deliveries are pending.
-
-Cleanup requires a live owner acknowledgement. Read-only `thread.spawn` metadata
-also repairs cleanup receipts predating a worker restore for an already terminal
-run. Only an exact app-owned agent/thread/run in the same project is eligible.
-Pending retry order and newer acknowledgements remain unchanged; unfinished runs,
-approval owners and native timer owners are excluded. Processes requests
-`platform.telemetry.observe` for this metadata repair. It does not read telemetry
-content. Backfill is paginated per agent (25 events), bounded to the preceding day on first
-start, then checks each minute with a one-hour overlap and durable cursor/backoff.
-
-The v0.18.5 repair keeps a separate cursor and retry deadline for each known
-cleanup owner, queries one agent at a time, and defers stopped owners without
-waking them. This keeps busy-project metadata reads within the host query budget.
-
-In v0.18.6, an accepted legacy inspection without a saved ownership checkpoint
-may be requested again after fifteen minutes, at most three accepted requests
-per revision. Ambiguous delivery retries keep the same request identity; a new
-inspection gets a fresh identity. Known runtime failure holds overwritten with
-a running label are repaired only when the exact original runtime audit event,
-suspended delivery and no retained dependency all agree. Evidence stays intact
-and recovery remains explicit.
-
-In v0.19.0, the panel has a project-wide Assignments tab listing every
-assignment with its process, agents, schedule, run counts and last run; it
-refreshes from assignment and run events on the app bus. `GET /processes/assignments`
-serves it, and `GET /processes/runs` accepts `process_id` (scoped to the project)
-alongside `assignment_id`. Assignment cards and the process list name every
-agent an assignment uses, and each card shows which agent handles each step.
-
-In v0.19.1, run cards draw their state colour as an inset stripe instead of a
-left border, so hover and selection outline every side evenly; waiting,
-scheduled, blocked and queued runs get matching stripes.
-
-In v0.19.2, run cards drop the coloured left stripe and tint; the status pill
-alone shows each run's state.
-
-In v0.19.3, procedure versions show in the process list, on run cards, on the
-project Assignments tab and on assignment cards; pins older than the latest
-version name it. `GET /processes/assignments` adds `process_version`.
-
-In v0.19.4, step tool activity keeps a tool result that arrives just after the
-step completes when its call was made during the step, so the call that
-completes a step no longer stays "running".
+Release-by-release notes are in [CHANGELOG.md](CHANGELOG.md).
