@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.18.0
+version: 0.18.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -94,6 +94,11 @@ description: |
   per user and per lifecycle event. Also: SPA page views carry the new
   page title, outbound link_url drops query strings, origin allowlists work
   on no-referrer sites, and the collector uses the platform-signed client IP.
+
+  v0.18.1 keeps the bus capture inbox small. Events the install will not
+  record (capture off, topic filtered, sampled out) are no longer stored,
+  and one install-wide worker deletes processed inbox rows after seven
+  days in indexed batches, including rows with no project.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [project, global]
@@ -111,6 +116,8 @@ provides:
   workers:
     - name: analytics-retention
       schedule: "@every 5m"
+    - name: analytics-capture-inbox
+      schedule: "@every 1m"
     - name: analytics-financial-refresh
       schedule: "@every 1m"
   http_routes:
@@ -421,7 +428,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.18.0
+    ref: analytics/v0.18.1
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -535,7 +542,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "analytics-retention", Schedule: "@every 5m", Run: a.retentionWorker}, {Name: "analytics-financial-refresh", Schedule: "@every 1m", Run: a.financialRefreshWorker}}
+	return []sdk.Worker{{Name: "analytics-retention", Schedule: "@every 5m", Run: a.retentionWorker}, {Name: "analytics-capture-inbox", Schedule: "@every 1m", Run: a.captureInboxWorker}, {Name: "analytics-financial-refresh", Schedule: "@every 1m", Run: a.financialRefreshWorker}}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 

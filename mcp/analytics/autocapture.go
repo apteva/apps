@@ -261,20 +261,27 @@ func streamFirehose(ctx *sdk.AppCtx, gateway, token string, lastSeq *uint64) err
 		}
 		canonical, _ := json.Marshal(ev)
 		identity := fmt.Sprintf("%x", sha256.Sum256(canonical))
-		var pendingCount int
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM capture_inbox WHERE processed_at IS NULL`).Scan(&pendingCount); err != nil {
-			return err
-		}
-		if pendingCount >= 10000 {
-			return fmt.Errorf("capture inbox limit reached; ingestion paused")
-		}
-		// Persist before acknowledging. Replays use the same delivery identity.
-		if _, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO capture_inbox(identity,payload,received_at) VALUES(?,?,?)`, identity, string(payload), time.Now().UnixMilli()); err != nil {
-			return err
-		}
-		if err = processCaptureEnvelope(ctx, identity, ev); err != nil {
-			captureError(ctx, err)
-			return err
+		// Events this install will not record (capture off for the project,
+		// topic filtered, sampled out, or analytics' own events) are decided
+		// here and never stored: the inbox only protects events we accept.
+		// The decision is deterministic per identity, so a replay of the same
+		// delivery is ignored again.
+		if captureWanted(identity, ev) {
+			var pendingCount int
+			if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM capture_inbox WHERE processed_at IS NULL`).Scan(&pendingCount); err != nil {
+				return err
+			}
+			if pendingCount >= 10000 {
+				return fmt.Errorf("capture inbox limit reached; ingestion paused")
+			}
+			// Persist before acknowledging. Replays use the same delivery identity.
+			if _, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO capture_inbox(identity,payload,received_at) VALUES(?,?,?)`, identity, string(payload), time.Now().UnixMilli()); err != nil {
+				return err
+			}
+			if err = processCaptureEnvelope(ctx, identity, ev); err != nil {
+				captureError(ctx, err)
+				return err
+			}
 		}
 		if ev.Seq > 0 {
 			gap := 0
@@ -334,6 +341,22 @@ func captureError(ctx *sdk.AppCtx, err error) {
 	_, _ = ctx.AppDB().Exec(`UPDATE capture_state SET last_error=?,updated_at=? WHERE id=1`, err.Error(), time.Now().UnixMilli())
 }
 
+// captureWanted reports whether this install records the envelope: not
+// analytics' own event, capture enabled for its project, topic allowed, and
+// inside the deterministic per-identity sample.
+func captureWanted(identity string, ev captureEnvelope) bool {
+	if ev.App == "analytics" {
+		return false
+	}
+	cfg := projectCaptureConfig(ev.ProjectID)
+	if !cfg.Enabled || !shouldCapture(ev.Topic, cfg) {
+		return false
+	}
+	hash := sha256.Sum256([]byte(identity))
+	sample := float64(binary.BigEndian.Uint64(hash[:8])>>11) / float64(uint64(1)<<53)
+	return sample < cfg.SampleRate
+}
+
 func processCaptureEnvelope(ctx *sdk.AppCtx, identity string, ev captureEnvelope) error {
 	var processed any
 	if err := ctx.AppDB().QueryRow(`SELECT processed_at FROM capture_inbox WHERE identity=?`, identity).Scan(&processed); err != nil {
@@ -342,10 +365,7 @@ func processCaptureEnvelope(ctx *sdk.AppCtx, identity string, ev captureEnvelope
 	if processed != nil {
 		return nil
 	}
-	cfg := projectCaptureConfig(ev.ProjectID)
-	hash := sha256.Sum256([]byte(identity))
-	sample := float64(binary.BigEndian.Uint64(hash[:8])>>11) / float64(uint64(1)<<53)
-	if ev.App != "analytics" && cfg.Enabled && shouldCapture(ev.Topic, cfg) && sample < cfg.SampleRate {
+	if captureWanted(identity, ev) {
 		ts := int64(0)
 		if ev.Time != "" {
 			t, err := time.Parse(time.RFC3339Nano, ev.Time)

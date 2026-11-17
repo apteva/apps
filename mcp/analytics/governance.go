@@ -7,6 +7,7 @@ import (
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -121,11 +122,79 @@ func (a *App) retentionWorker(ctx context.Context, app *sdk.AppCtx) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if _, err := pruneProject(ctx, app.AppDB(), project, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	_, err := app.AppDB().ExecContext(ctx, `DELETE FROM capture_inbox WHERE identity IN (SELECT identity FROM capture_inbox WHERE CASE WHEN json_valid(payload) THEN json_extract(payload,'$.project_id') END=? AND processed_at IS NOT NULL AND processed_at<? LIMIT 1000)`, project, time.Now().Add(-7*24*time.Hour).UnixMilli())
+	_, err := pruneProject(ctx, app.AppDB(), project, time.Now().UnixMilli())
 	return err
+}
+
+const (
+	captureInboxKeep   = 7 * 24 * time.Hour
+	captureInboxBatch  = 2000
+	captureInboxBudget = 8 * time.Second
+	captureInboxEvery  = time.Minute
+)
+
+var captureInboxRun struct {
+	sync.Mutex
+	last time.Time
+}
+
+// captureInboxWorker prunes the capture inbox for the whole install. The SDK
+// calls workers once per project, so the first call in each interval does
+// the work and the others return at once. Inbox rows are not filtered by
+// project: rows without a project, or from removed projects, expire too.
+func (a *App) captureInboxWorker(ctx context.Context, app *sdk.AppCtx) error {
+	if !captureInboxRun.TryLock() {
+		return nil
+	}
+	defer captureInboxRun.Unlock()
+	now := time.Now()
+	if now.Sub(captureInboxRun.last) < captureInboxEvery/2 {
+		return nil
+	}
+	captureInboxRun.last = now
+	_, err := pruneCaptureInbox(ctx, app.AppDB(), now.Add(-captureInboxKeep).UnixMilli(), captureInboxBatch, captureInboxBudget)
+	return err
+}
+
+// pruneCaptureInbox deletes processed inbox rows older than cutoff in short
+// batches, walking the (processed_at, received_at) index, until nothing is
+// left or the time budget runs out. Unprocessed rows are never touched.
+func pruneCaptureInbox(ctx context.Context, db *sql.DB, cutoff int64, batch int, budget time.Duration) (int64, error) {
+	deadline := time.Now().Add(budget)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		n, err := pruneCaptureInboxBatch(ctx, db, cutoff, batch)
+		total += n
+		if err != nil || n < int64(batch) || time.Now().After(deadline) {
+			return total, err
+		}
+	}
+}
+
+// captureInboxPruneSQL reads only the index: no payload JSON is parsed.
+const captureInboxPruneSQL = `DELETE FROM capture_inbox WHERE identity IN (
+	SELECT identity FROM capture_inbox INDEXED BY ix_capture_pending
+	WHERE processed_at IS NOT NULL AND processed_at<?
+	ORDER BY processed_at,received_at LIMIT ?)`
+
+func pruneCaptureInboxBatch(ctx context.Context, db *sql.DB, cutoff int64, batch int) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, captureInboxPruneSQL, cutoff, batch)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }
 
 func (a *App) handleArchiveRestore(w http.ResponseWriter, r *http.Request) {
