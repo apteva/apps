@@ -920,6 +920,12 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	if !found {
 		return nil, errNotFound
 	}
+	// An independently dispatched step is already assigned to its worker, so a
+	// claim from that worker is answered as a read instead of an error the
+	// model then has to work around.
+	if action == "step_claim" && persistentWorkerAgent(r, s, all) == 0 && s.Executor.Kind == "agent" && s.ThreadID != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, s.ThreadID) {
+		action = "step_get"
+	}
 	if action == "step_claim" {
 		recoveryClaim := s.ClaimAttempts > 0
 		if e = a.claimStep(r, s, all, actor); e != nil {

@@ -309,6 +309,34 @@ func (a *App) stepRead(project, process string, args map[string]any) (any, error
 		result["state"] = current.State
 	case "dependency":
 		key := str(args, "dependency_key")
+		if key == "" {
+			// Without a key, return every completed ancestor result that fits
+			// the dependency budget; the rest keep exact targeted rereads.
+			used := 0
+			keys := make([]string, 0, len(manifest))
+			for k := range manifest {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if manifest[keys[i]].Direct != manifest[keys[j]].Direct {
+					return manifest[keys[i]].Direct
+				}
+				return keys[i] < keys[j]
+			})
+			for _, k := range keys {
+				dep := manifest[k]
+				if used+len(dep.Output) > dependencyBudget {
+					dep.Output = ""
+					dep.Deferred = true
+					ref := targetedStepRef(process, r.ID, current.ID, "dependency", map[string]any{"dependency_key": k})
+					dep.Reread = &ref
+				}
+				used += len(dep.Output)
+				manifest[k] = dep
+			}
+			result["dependencies"] = manifest
+			break
+		}
 		dep, exists := manifest[key]
 		if !exists {
 			return nil, errors.New("dependency_key must identify an ancestor of this step")

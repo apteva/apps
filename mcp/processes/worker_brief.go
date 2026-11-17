@@ -79,25 +79,36 @@ func independentStepBrief(p *Process, r Run, s StepRun, all []StepRun, d Definit
 		field("Parameters (data)", jsonText(r.Binding.Parameters), "parameters")
 	}
 	field("Run inputs (data)", r.Inputs, "shared")
+	// Completed ancestors, direct dependencies first: later steps often check
+	// their work against earlier results, not only their direct inputs.
 	deps := dependencyEvidence(s, all)
 	keys := make([]string, 0, len(deps))
 	for key, dep := range deps {
-		if dep.Direct && dep.State == "completed" {
+		if dep.State == "completed" {
 			keys = append(keys, key)
 		}
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if deps[keys[i]].Direct != deps[keys[j]].Direct {
+			return deps[keys[i]].Direct
+		}
+		return keys[i] < keys[j]
+	})
 	if len(keys) > 0 {
-		b.WriteString("Dependency results (data):\n")
+		b.WriteString("Earlier step results (data):\n")
 		used := 0
 		for _, key := range keys {
+			label := key
+			if !deps[key].Direct {
+				label += " (earlier)"
+			}
 			out := strings.TrimSpace(deps[key].Output)
 			if used+len(out) > briefDependencyBudget {
-				fmt.Fprintf(&b, "- %s: [not inlined; processes_step_read target=dependency dependency_key=%s]\n", key, key)
+				fmt.Fprintf(&b, "- %s: [not inlined; processes_step_read target=dependency dependency_key=%s]\n", label, key)
 				continue
 			}
 			used += len(out)
-			fmt.Fprintf(&b, "- %s: %s\n", key, out)
+			fmt.Fprintf(&b, "- %s: %s\n", label, out)
 		}
 	}
 	if len(clipped) > 0 {
