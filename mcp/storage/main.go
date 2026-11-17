@@ -112,6 +112,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		defer close(a.sweepDone)
 		prepareBrowserUpload(sweepCtx, ctx, "")
 		sweepBlobCleanup(ctx)
+		pruneFileChanges(ctx, time.Now())
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)
 		enqueueChecksumScan(ctx, checksumScanBatch)
@@ -131,6 +132,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			}
 			prepareBrowserUpload(sweepCtx, ctx, "")
 			sweepBlobCleanup(ctx)
+			pruneFileChanges(ctx, time.Now())
 			sweepStaleUploads(ctx)
 			sweepStalePendingUploads(ctx)
 			enqueueChecksumScan(ctx, checksumScanBatch)
@@ -168,6 +170,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// storage fetch the bytes server-side instead of proxying them
 		// through the caller.
 		{Pattern: "/files/from-url", Handler: a.httpFromURL},
+		// Ordered change feed (see changes.go). Exact pattern, like
+		// /files/from-url, so it never parses as a file id.
+		{Pattern: "/files/changes", Handler: a.httpFileChanges},
 		{Pattern: "/folders", Handler: a.handleFolders},
 		// Resumable upload protocol (browser-only — not in MCP). See
 		// uploads.go for the on-disk session layout + endpoint shapes.
@@ -1427,6 +1432,13 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, map[string]any{"files": out})
+		return
+	}
+
+	// Keyset pagination for inventory sweeps (see changes.go). Takes
+	// precedence over offset; other filters are not applied in this mode.
+	if q.Has("after_id") {
+		httpDiscoveryPage(w, r, pid)
 		return
 	}
 

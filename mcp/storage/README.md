@@ -1,4 +1,4 @@
-# Storage 0.13.0
+# Storage 0.14.0
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
@@ -17,6 +17,21 @@ receipt. Completion replay retries stale cleanup; failed releases are logged
 and queued for repair. Startup, periodic sweeps, and new upload admission
 reconcile reservations against completion receipts and cleanup jobs without
 changing saved files or genuine unfinished uploads.
+
+## Version 0.14.0: change feed and cursor discovery
+
+Inventory consumers no longer need to re-list a project to notice changes.
+
+- `GET /files/changes?after=<seq>&limit=` returns ordered `added`, `updated`
+  and `deleted` entries (file id, revision). Database triggers write each
+  entry in the same transaction as the file write, and hard deletes leave a
+  tombstone. The response carries `next_after`, `head_seq` and
+  `pruned_through`; entries are kept 30 days, and a cursor below
+  `pruned_through` must rebuild from discovery.
+- `GET /files?after_id=<id>&limit=&fields=discovery` pages live files by id
+  instead of `OFFSET` over `updated_at`, so concurrent writes cannot shift
+  rows between pages. Discovery rows carry id, name, folder, content type,
+  size, SHA-256, revision and `updated_at` only (no URLs).
 
 ## Version 0.13.0: reading files into model context
 
