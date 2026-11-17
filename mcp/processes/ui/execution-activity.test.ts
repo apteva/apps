@@ -14,3 +14,8 @@ test("streamed reasoning and response become one turn without displaying reasoni
  const turns=thoughtsFromEvents([e("llm.start",1,{iteration:1}),e("llm.thinking",2,{iteration:1,text:"Check "}),e("llm.thinking",3,{iteration:1,text:"the receipt."}),e("llm.chunk",4,{iteration:1,text:"Weather loaded."}),e("llm.done",5,{iteration:1,reasoning:"high"})]);
  expect(turns).toHaveLength(1);expect(turns[0].reasoning).toBe("Check the receipt.");expect(turns[0].response).toBe("Weather loaded.");expect(turns[0].status).toBe("completed");
 });
+test("the call that completes a step keeps its result after completed_at",()=>{
+ const events=[e("tool.call",1,{name:"processes_step_claim",args:{step_id:"alpha"},execution_ids:["a"]}),e("tool.call",3,{id:"done",name:"processes_step_update",execution_ids:["a"]}),e("tool.result",5,{id:"done",name:"processes_step_update",result:"ok",execution_ids:["a"]}),e("tool.call",6,{id:"late",name:"notification_send",execution_ids:["a"]}),e("tool.result",7,{id:"late",name:"notification_send",execution_ids:["a"]})];
+ const kept=eventsForStep(events,"a","alpha","2026-10-06T12:00:04Z").map(e=>`${e.type}:${e.data?.id||""}`);
+ expect(kept).toEqual(["tool.call:","tool.call:done","tool.result:done"]);
+});

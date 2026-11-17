@@ -794,3 +794,7 @@ alone shows each run's state.
 In v0.19.3, procedure versions show in the process list, on run cards, on the
 project Assignments tab and on assignment cards; pins older than the latest
 version name it. `GET /processes/assignments` adds `process_version`.
+
+In v0.19.4, step tool activity keeps a tool result that arrives just after the
+step completes when its call was made during the step, so the call that
+completes a step no longer stays "running".

@@ -5,8 +5,13 @@ export function eventsForStep(events: TelemetryEvent[], executionID: string, ste
   const claims = events.filter(e => e.type === "tool.call" && e.data?.name?.endsWith("step_claim") && e.data?.args?.step_id === stepID);
   const start = claims.length ? Math.min(...claims.map(time)) : -Infinity;
   const end = completedAt ? Date.parse(completedAt) : Infinity;
+  const callID = (event: TelemetryEvent) => String(event.data?.id || event.data?.call_id || "");
+  // The call that completes a step returns after the step's completed_at, so a
+  // result is kept when it answers a call made inside the step's window.
+  const callsInWindow = new Set(events.filter(event => event.type === "tool.call" && time(event) >= start && time(event) <= end).map(callID).filter(Boolean));
   return events.filter(event => {
-    if (time(event) < start || time(event) > end) return false;
+    if (time(event) < start) return false;
+    if (time(event) > end && !(event.type === "tool.result" && callsInWindow.has(callID(event)))) return false;
     const data = event.data || {};
     const ids = data.execution_ids;
     if (Array.isArray(ids)) return ids.some(id => String(id) === executionID);
