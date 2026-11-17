@@ -552,3 +552,49 @@ token is replaced with `[redacted]` in stored results, errors and evidence.
 - Saving an enabled browser check verifies the Computer binding.
 - `tests_run` accepts `candidate` (`{deployment_id, environment?, build}`) as an
   alternative to `candidate_digest` for target suites.
+
+## Run selected checks, URL-rewriting apps, Deploy errors (0.6.0)
+
+### Run selected checks
+
+```json
+{"suite_id":3,"check_names":["screen quality"]}
+```
+
+`tests_run` with `check_names` runs only those checks, whether enabled or not,
+plus the suite's session setup check. Enabled flags are not changed. Unknown
+names fail the request. These runs are marked `partial` and never produce a
+release verdict, so `suite_revision`/`fixture_revision` are rejected with them.
+
+### Apps that rewrite their URL on load
+
+Existing-mode browser sessions now open on `about:blank`, so a check's first
+`navigate` step is always a real URL change. A `navigate` to the page that is
+already shown (for example when the app added `#/admin_dashboard` on load) is
+accepted when the browser is on the destination apart from the `#…` part.
+
+### Waiting for a page-ready signal
+
+Computer's regular tools only report whether a *visible* element matches a
+CSS selector; they don't return element text. To wait for a hidden status
+element, have the page put the status in an attribute and match it through a
+visible ancestor:
+
+```json
+{"id":"settled","kind":"browser","poll_every_ms":500,"timeout_ms":20000,
+ "browser":{"action":"observe","locator":{"selector":"body:has([data-testid=\"fx-api-test-status\"][data-status])"}},
+ "assertions":[{"path":"/visible","op":"equals","value":true}]},
+{"id":"ready","kind":"browser",
+ "browser":{"action":"observe","locator":{"selector":"body:has([data-testid=\"fx-api-test-status\"][data-status=\"ready\"])"}},
+ "assertions":[{"path":"/visible","op":"equals","value":true}]}
+```
+
+The first step polls until the page settles (ready or failed); the second
+fails the check unless it settled as `ready`.
+
+### Deploy errors
+
+- Saving a suite with `target.candidate` checks that Tests can read the Deploy
+  deployment and asks you to bind Deploy if it cannot.
+- Candidate resolution errors now include Deploy's own reason, for example
+  `Deploy could not verify build 34: release artifact differs from attested build`.

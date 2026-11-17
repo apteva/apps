@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -255,7 +256,11 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 	if pending >= 100 {
 		return Run{}, errors.New("project already has 100 pending runs")
 	}
-	rows, err := tx.Query(`SELECT `+checkColumns+` FROM test_checks WHERE project_id=? AND suite_id=? AND enabled=1 ORDER BY id`, s.project, suite)
+	partial := len(options.CheckNames) > 0
+	if partial && (options.SuiteRevision != "" || options.FixtureRevision != "") {
+		return Run{}, errors.New("check_names runs never produce a release verdict; omit suite_revision and fixture_revision")
+	}
+	rows, err := tx.Query(`SELECT `+checkColumns+` FROM test_checks WHERE project_id=? AND suite_id=? AND (enabled=1 OR ?) ORDER BY id`, s.project, suite, partial)
 	if err != nil {
 		return Run{}, err
 	}
@@ -272,6 +277,11 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 	rows.Close()
 	if err != nil {
 		return Run{}, err
+	}
+	if partial {
+		if checks, err = selectChecks(checks, options.CheckNames, v.Session); err != nil {
+			return Run{}, err
+		}
 	}
 	if len(checks) == 0 {
 		return Run{}, errors.New("suite has no enabled checks")
@@ -348,6 +358,9 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 	} else if options.CandidateDigest != "" || options.Candidate != nil || options.SuiteRevision != "" || options.FixtureRevision != "" {
 		return r, errors.New("candidate and revision options require a release suite")
 	}
+	if partial && r.Release != nil {
+		r.Release.Partial = true
+	}
 	res, err := tx.Exec(`INSERT INTO test_runs(project_id,suite_id,suite_name,environment,status,trigger,request_key,snapshot,created_at,release_record,fixture_spec) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, s.project, suite, v.Name, v.Environment, r.Status, trigger, requestKey, encode(checks), r.CreatedAt, encode(r.Release), encode(snapshot))
 	if err != nil {
 		return r, err
@@ -361,6 +374,41 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 	}
 	return r, tx.Commit()
 }
+
+// selectChecks keeps the named checks plus the session setup check. The
+// setup check must be enabled; named checks run whether enabled or not.
+func selectChecks(all []Check, names []string, session *SessionConfig) ([]Check, error) {
+	if len(names) > 50 {
+		return nil, errors.New("check_names accepts at most 50 names")
+	}
+	wanted := map[string]bool{}
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("check_names cannot contain an empty name")
+		}
+		wanted[name] = true
+	}
+	found := map[string]bool{}
+	var out []Check
+	for _, check := range all {
+		setup := session != nil && check.Name == session.SetupCheck && check.Enabled
+		if wanted[check.Name] || setup {
+			out = append(out, check)
+			found[check.Name] = true
+		}
+	}
+	var missing []string
+	for _, name := range names {
+		if !found[name] {
+			missing = append(missing, strconv.Quote(name))
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("no check named %s in this suite", strings.Join(missing, ", "))
+	}
+	return out, nil
+}
+
 func (s store) runs(suite int64) ([]Run, error) {
 	rows, err := s.db.Query(`SELECT `+runColumns+` FROM test_runs WHERE project_id=? AND (?=0 OR suite_id=?) ORDER BY id DESC LIMIT 100`, s.project, suite, suite)
 	if err != nil {

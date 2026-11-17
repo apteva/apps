@@ -43,7 +43,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{"tests_checks_list", "List all enabled and disabled checks in a suite.", object(map[string]any{"suite_id": id}, "suite_id")},
 		{"tests_check_save", "Create (omit id) or fully replace a check or scenario. Standalone Function checks invoke the active version; HTTP checks do not follow redirects. Requires at least one assertion.", object(map[string]any{"id": id, "suite_id": id, "name": str, "kind": map[string]any{"type": "string", "enum": []string{"function", "http", "scenario", "browser"}}, "enabled": map[string]any{"type": "boolean", "default": true}, "definition": definition}, "suite_id", "name", "kind", "definition")},
 		{"tests_check_delete", "Delete a check. Prior runs retain their immutable definitions and results.", object(map[string]any{"id": id}, "id")},
-		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries (a retry reuses the build resolved first). Pass candidate to resolve a Deploy build, or candidate_digest. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str, "candidate_digest": str, "candidate": candidate, "suite_revision": str, "fixture_revision": str}, "suite_id")},
+		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries (a retry reuses the build resolved first). Pass candidate to resolve a Deploy build, or candidate_digest. Pass check_names to run only those checks (enabled or not) plus the session setup check; such runs never produce a release verdict and leave enabled flags unchanged. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str, "candidate_digest": str, "candidate": candidate, "suite_revision": str, "fixture_revision": str,
+			"check_names": map[string]any{"type": "array", "items": str, "maxItems": 50, "description": "Run only these checks by name; the session setup check is added automatically."}}, "suite_id")},
 		{"tests_runs_list", "List the most recent 100 runs, optionally filtered by suite_id.", object(map[string]any{"suite_id": id})},
 		{"tests_run_cancel", "Cancel a queued or running test.", object(map[string]any{"id": id}, "id")},
 		{"tests_release_spec", "Resolve the current suite and fixture digests for release policy configuration.", object(map[string]any{"suite_id": id}, "suite_id")},
@@ -94,6 +95,11 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		}
 		if e := validateSuiteExtensions(&v); e != nil {
 			return nil, e
+		}
+		if v.Target != nil && v.Target.Candidate != nil {
+			if e := checkDeployBinding(ctx, app, v.Target.Candidate); e != nil {
+				return nil, e
+			}
 		}
 		var previous *Suite
 		if v.ID != 0 {

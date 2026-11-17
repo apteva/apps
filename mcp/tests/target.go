@@ -407,14 +407,14 @@ type deployCandidate struct {
 	Digest  string `json:"candidate_digest"`
 }
 
-func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (deployCandidate, error) {
+func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (_ deployCandidate, failure error) {
 	selector, buildID, err := ref.normalize()
 	if err != nil {
 		return deployCandidate{}, err
 	}
 	platform := app.PlatformAPI()
 	if platform == nil {
-		return deployCandidate{}, errors.New("the Deploy binding is unavailable")
+		return deployCandidate{}, errors.New("the Deploy binding is unavailable; bind the Deploy app to Tests to use target.candidate")
 	}
 	if selector == "latest_succeeded" {
 		// Deploy 0.32.0+ resolves the latest sealed build itself.
@@ -423,9 +423,18 @@ func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (
 			args["environment"] = ref.Environment
 		}
 		var native deployCandidate
-		if err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_candidate_digest", args, &native); err == nil &&
-			native.BuildID > 0 && digestPattern.MatchString(native.Digest) {
+		err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_candidate_digest", args, &native)
+		if err == nil && native.BuildID > 0 && digestPattern.MatchString(native.Digest) {
 			return native, nil
+		}
+		// Deploy before 0.32.0 has no build selector; fall back to reading the
+		// build list. Keep Deploy's answer in case the fallback fails too.
+		if err != nil {
+			defer func() {
+				if failure != nil && !strings.Contains(failure.Error(), deployReason(err)) {
+					failure = fmt.Errorf("%w (latest_succeeded lookup: %s)", failure, deployReason(err))
+				}
+			}()
 		}
 	}
 	if selector != "id" {
@@ -443,7 +452,7 @@ func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (
 			} `json:"current_release"`
 		}
 		if err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_status", args, &status); err != nil {
-			return deployCandidate{}, fmt.Errorf("could not read Deploy deployment %d", ref.DeploymentID)
+			return deployCandidate{}, fmt.Errorf("could not read Deploy deployment %d: %s. Check that the Deploy app is bound to Tests and the deployment id is right", ref.DeploymentID, deployReason(err))
 		}
 		switch selector {
 		case "live":
@@ -466,12 +475,40 @@ func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (
 	var out deployCandidate
 	if err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_candidate_digest",
 		map[string]any{"build_id": buildID, "_project_id": app.CurrentProject()}, &out); err != nil {
-		return deployCandidate{}, fmt.Errorf("Deploy could not verify build %d", buildID)
+		return deployCandidate{}, fmt.Errorf("Deploy could not verify build %d: %s", buildID, deployReason(err))
 	}
 	if out.BuildID != buildID || !digestPattern.MatchString(out.Digest) {
 		return deployCandidate{}, fmt.Errorf("Deploy returned an invalid digest for build %d", buildID)
 	}
 	return out, nil
+}
+
+// checkDeployBinding confirms at save time that Tests can read the
+// candidate's Deploy deployment, so a missing binding is reported before a run.
+func checkDeployBinding(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) error {
+	platform := app.PlatformAPI()
+	if platform == nil {
+		return errors.New("target.candidate needs the Deploy app: bind Deploy to Tests, then save the suite again")
+	}
+	args := map[string]any{"id": ref.DeploymentID, "_project_id": app.CurrentProject()}
+	if ref.Environment != "" {
+		args["environment"] = ref.Environment
+	}
+	var status map[string]any
+	if err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_status", args, &status); err != nil {
+		return fmt.Errorf("target.candidate needs the Deploy app, and Deploy deployment %d could not be read: %s. Bind Deploy to Tests and check the deployment id, then save again", ref.DeploymentID, deployReason(err))
+	}
+	return nil
+}
+
+// deployReason returns Deploy's own error text, trimmed for a run message.
+func deployReason(err error) string {
+	text := strings.TrimSpace(err.Error())
+	text, _, _ = strings.Cut(text, "\n")
+	if len(text) > 300 {
+		text = text[:300] + "…"
+	}
+	return text
 }
 
 func (t *TargetConfig) allowsRead(app, tool string) bool {

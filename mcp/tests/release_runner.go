@@ -46,8 +46,12 @@ func (a *App) queue(ctx context.Context, app *sdk.AppCtx, suite int64, trigger, 
 	if err != nil {
 		return Run{}, err
 	}
+	named := map[string]bool{}
+	for _, name := range opt.CheckNames {
+		named[name] = true
+	}
 	for _, check := range checks {
-		if check.Enabled && hasBrowser(check) {
+		if (check.Enabled || named[check.Name]) && hasBrowser(check) {
 			if err = a.checkBrowserBinding(ctx, app, v); err != nil {
 				return Run{}, err
 			}
