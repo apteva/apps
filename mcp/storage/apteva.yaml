@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.13.0
+version: 0.14.0
 description: |
   File storage for Apteva agents and human teams. Read images, PDF pages,
   DOCX body text and UTF-8 text into agent context with files_read. Upload bytes,
@@ -200,7 +200,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: storage/v0.13.0
+    ref: storage/v0.14.0
     entry: mcp/storage
   port: 8080
   health_check: /health
