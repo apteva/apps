@@ -26,6 +26,11 @@ func (a *App) triggerTools() []sdk.Tool {
 		if name != "trigger_sources" {
 			props["process_id"] = textField("Process ID")
 			required = append(required, "process_id")
+		} else {
+			props["process_id"] = textField("Process ID (with assignment_id)")
+			props["assignment_id"] = textField("Assignment to find triggers for: returns ranked events with suggested parameter mappings")
+			props["app"] = textField("Only this app (name or install ID); without an assignment, also returns its event fields")
+			props["query"] = textField("What should start the work, e.g. 'a lead is qualified'; matched against app and event names and descriptions")
 		}
 		if name == "triggers" || name == "trigger_create" || name == "trigger_update" {
 			props["assignment_id"] = textField("Assignment ID")
@@ -56,6 +61,9 @@ func (a *App) triggerTools() []sdk.Tool {
 			required = append(required, "event_record_id")
 		}
 		description := "Manage event triggers on process assignments. Create paused, preview sample events, then activate. Check sync_pending before claiming the listener is live."
+		if name == "trigger_sources" {
+			description = "Find app events that can start an assignment. With process_id+assignment_id (and ideally a query saying what should start the work) returns ranked candidates: source_install_id, topic, suggested_mappings, missing_required. Without them, lists event sources (narrow with app or query)."
+		}
 		if name == "trigger_preview" {
 			description = "Preview filters and mapped parameters without creating a run."
 		}
@@ -78,12 +86,7 @@ func (a *App) triggerTools() []sdk.Tool {
 func (a *App) executeTrigger(project, action string, args map[string]any) (any, error) {
 	process, id := str(args, "process_id"), str(args, "trigger_id")
 	if action == "trigger_sources" {
-		api := a.ctx.EventBusAPI()
-		if api == nil {
-			return nil, errors.New("event subscription API unavailable")
-		}
-		sources, e := api.ListAppEventSources(project)
-		return map[string]any{"sources": sources}, e
+		return a.triggerSources(project, args)
 	}
 	if action == "triggers" {
 		ts, e := a.triggers(project, process, str(args, "assignment_id"))

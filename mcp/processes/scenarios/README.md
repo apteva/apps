@@ -7,7 +7,7 @@ No Tasks integration is installed and no external publishing service is used.
 
 ## Core suite (default)
 
-Ten scenarios, one per behaviour the app must keep. `bun run scenarios/run.ts`
+Eleven scenarios, one per behaviour the app must keep. `bun run scenarios/run.ts`
 runs exactly these.
 
 | Scenario | Persisted outcome checked |
@@ -22,6 +22,7 @@ runs exactly these.
 | `14-run-memory.yaml` | A second run reuses the first run's checkpoint and ledger references instead of repeating discovery; human approval still holds. |
 | `15-process-patch.yaml` | `patch` saves only the changed fields as a new version and rejects a stale edit. |
 | `17-worker-cleanup.yaml` | Persistent workers complete, fail and park; Processes stops finished workers and their pending wake timers. |
+| `20-trigger-discovery.yaml` | The agent finds which app event can start an assignment with `trigger_sources`, uses the suggested mappings and a score filter; among four real pipeline events only the qualifying lead starts a run. |
 
 ## Extended suite
 

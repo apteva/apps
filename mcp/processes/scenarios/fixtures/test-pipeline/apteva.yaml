@@ -1,0 +1,22 @@
+schema: apteva-app/v1
+name: test-pipeline
+display_name: Pipeline test source
+version: 0.1.0
+scopes: [project]
+provides:
+  mcp_tools:
+    - {name: simulate, description: Simulate a burst of sales pipeline activity for isolated tests.}
+  publishes:
+    - name: lead.created
+      description: A new lead was captured.
+      payload: {lead_email: string, company: string}
+    - name: lead.qualified
+      description: A lead was scored and qualified by the sales team.
+      payload: {lead_email: string, score: integer, company: string}
+    - name: deal.won
+      description: A deal was closed as won.
+      payload: {customer_email: string, amount: number}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/processes/scenarios/fixtures/test-pipeline}
+  port: 8080

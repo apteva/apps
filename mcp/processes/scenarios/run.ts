@@ -19,6 +19,7 @@ process.on("exit", () => browserFixture?.stop());
 import {
   check,
   verifyHistory,
+  verifyDiscoveredTrigger,
   verifyMultiAgentTrajectory,
   verifyStepWorkers,
   verifySequentialWorker,
@@ -93,6 +94,19 @@ for (const file of files) {
     browserFixture = startBrowserFixture();
     scenario.directive = scenario.directive.replaceAll("__BROWSER_FIXTURE_URL__", browserFixture.url);
     scenario.setup.apps = [{path: resolve(appDir, "../computer"), spawnable: true}];
+  }
+  if (scenario.name === "processes-trigger-discovery") {
+    // The pipeline source is the real target; test-signups is a decoy install.
+    const fixtureRoot = resolve(outputDir, "discovery-fixture");
+    const processCopy = resolve(fixtureRoot, "processes");
+    await cp(appDir, processCopy, { recursive: true });
+    for (const name of ["test-pipeline", "test-signups"])
+      await cp(resolve(import.meta.dir, `fixtures/${name}`), resolve(fixtureRoot, name), { recursive: true });
+    const manifestPath = resolve(processCopy, "apteva.yaml");
+    const manifest = YAML.parse(await Bun.file(manifestPath).text());
+    manifest.requires.apps.push({ name: "test-pipeline", optional: true }, { name: "test-signups", optional: true });
+    await Bun.write(manifestPath, YAML.stringify(manifest));
+    scenario.setup.app.path = processCopy;
   }
   if (scenario.name === "processes-event-trigger-workflow") {
     const fixtureRoot = resolve(outputDir, "event-fixture");
@@ -425,6 +439,12 @@ for (const scenario of report.results) {
       );
       verifyOperatorConfirmation(runs[0], confirmed as ConfirmationReport);
       Object.assign(history, { operator_confirmation: confirmed });
+    }
+    if (scenario.scenario === "processes-trigger-discovery") {
+      const triggers = db.query("SELECT * FROM process_triggers").all() as any[];
+      const events = db.query("SELECT * FROM process_trigger_events").all() as any[];
+      verifyDiscoveredTrigger(triggers, events, runs[0]);
+      Object.assign(history, { triggers, trigger_events: events });
     }
     if (scenario.scenario === "processes-event-trigger-workflow") {
       const events = db

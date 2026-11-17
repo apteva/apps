@@ -36,6 +36,7 @@ type Trigger struct {
 	SubscriptionEnabled  bool          `json:"subscription_enabled"`
 	SyncPending          bool          `json:"sync_pending"`
 	SyncError            string        `json:"sync_error"`
+	Warnings             []string      `json:"warnings,omitempty"`
 }
 
 const triggerColumns = `id,process_id,assignment_id,project_id,revision,status,config_json,subscription_revision,subscription_enabled,sync_pending,sync_error`
@@ -240,6 +241,13 @@ func (a *App) saveTrigger(project, process, assignment, id string, expected int,
 	if e = validateTrigger(c, d); e != nil {
 		return Trigger{}, e
 	}
+	warnings, e := a.checkTriggerSource(project, c)
+	if e != nil {
+		return Trigger{}, e
+	}
+	if missing := missingTriggerParameters(d, x, c); len(missing) > 0 {
+		warnings = append(warnings, "required parameters with no mapping, assignment value or default: "+strings.Join(missing, ", ")+"; the trigger cannot be activated until they are mapped")
+	}
 	if id == "" {
 		id = newID("trigger-")
 		_, e = a.db.Exec(`INSERT INTO process_triggers(id,process_id,assignment_id,project_id,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, id, process, assignment, project, jsonText(c), timestamp(), timestamp())
@@ -265,6 +273,7 @@ func (a *App) saveTrigger(project, process, assignment, id string, expected int,
 	t, e := a.trigger(project, process, id)
 	if e == nil {
 		_ = a.syncTrigger(&t)
+		t.Warnings = warnings
 	}
 	return t, e
 }
@@ -380,6 +389,13 @@ func (a *App) setTriggerStatus(project, process, id, status string, expected int
 		}
 		if p.Status != "active" || x.Status != "active" {
 			return t, errors.New("activate process and assignment first")
+		}
+		d, e := a.definition(process, x.ProcedureVersion)
+		if e != nil {
+			return t, e
+		}
+		if missing := missingTriggerParameters(d, x, t.Config); len(missing) > 0 {
+			return t, fmt.Errorf("trigger cannot start runs: required parameters %s have no mapping, assignment value or default; map them with trigger_update", strings.Join(missing, ", "))
 		}
 	}
 	if t.Status != status {

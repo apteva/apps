@@ -2,6 +2,13 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Trigger discovery (0.21.0)
+
+`trigger_sources` with an assignment (and a `query`) returns ranked app events
+with suggested parameter mappings and missing required parameters. Triggers on
+an event the source does not publish are rejected, and activation is refused
+while a required parameter is unmapped. See `docs-release-0.21.0.md`.
+
 ## Agents write the run summary again (0.20.2)
 
 Every step worker has `processes_summary_update` again; the last step's worker

@@ -128,7 +128,54 @@ export function verifyHistory(scenario: string, history: any) {
       byKey.publish.delivered_at && byKey.publish.delivered_at > byKey.confirm.completed_at,
       "Publisher was released before the operator confirmed",
     );
+  } else if (scenario === "processes-trigger-discovery") {
+    check(runs.length === 1, `Expected exactly one triggered run, got ${runs.length}`);
+    const run = runs[0];
+    check(run.state === "completed", `Triggered run ended ${run.state}`);
+    check(run.trigger_event_id, "Run was not started by a trigger event");
+    const params = run.assignment.parameters ?? {};
+    check(
+      params.lead_email === "ana@example.test" && Number(params.lead_score) === 92,
+      `Run parameters were not mapped from the qualifying event: ${JSON.stringify(params)}`,
+    );
+    const step = run.steps.find((s: any) => s.key === "followup");
+    check(
+      step?.state === "completed" && step.output.trim() === "FOLLOWUP|ana@example.test|92",
+      `Follow-up output: ${step?.output}`,
+    );
   } else throw new Error(`No outcome verifier for ${scenario}`);
+}
+
+/** The trigger must come from discovery: the pipeline install, its qualified
+ * topic, the suggested mappings and a score filter that drops the low lead. */
+export function verifyDiscoveredTrigger(triggers: any[], events: any[], run: any) {
+  check(triggers.length >= 1, "No trigger saved");
+  const active = triggers.filter((t) => t.status === "active");
+  check(active.length === 1, `Expected one active trigger, got ${active.length}`);
+  const t = active[0];
+  const config = JSON.parse(t.config_json);
+  check(config.topic === "lead.qualified", `Trigger listens to ${config.topic}`);
+  check(
+    config.mappings?.lead_email === "data.lead_email" && config.mappings?.lead_score === "data.score",
+    `Mappings: ${JSON.stringify(config.mappings)}`,
+  );
+  check(
+    (config.filters ?? []).some((f: any) => f.path === "data.score" && ["gte", "gt"].includes(f.op)),
+    `No score filter: ${JSON.stringify(config.filters)}`,
+  );
+  const mine = events.filter((e) => e.trigger_id === t.id).map((e) => ({ ...e, event: JSON.parse(e.event_json) }));
+  check(
+    mine.every((e) => e.event.source_app === "test-pipeline" && e.event.source_install_id === config.source_install_id),
+    "Trigger events did not come from the discovered pipeline install",
+  );
+  const high = mine.filter((e) => e.event.data.event_id?.endsWith(":tier3-lead-qualified-high"));
+  const low = mine.filter((e) => e.event.data.event_id?.endsWith(":tier3-lead-qualified-low"));
+  check(high.length === 1 && high[0].status === "started" && high[0].run_id === run.id, "Qualifying event did not start exactly the one run");
+  check(low.length === 1 && low[0].status === "skipped", `Low-score event was not skipped: ${JSON.stringify(low.map((e) => e.status))}`);
+  check(
+    mine.every((e) => e.event.data.topic === "lead.qualified"),
+    "Events other than lead.qualified reached the trigger",
+  );
 }
 
 /**

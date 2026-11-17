@@ -24,6 +24,21 @@ Write approval needs into `approval_requirements` and the relevant step's
 instructions; a human review is a step with a human role. Never put credentials
 in procedures, parameters or inputs; use connection references.
 
+## Event triggers
+
+To start an assignment when something happens in another app:
+
+1. `trigger_sources` with `process_id`, `assignment_id` and a `query` saying what
+   should start the work ("a lead is qualified"). It returns ranked candidates:
+   `source_install_id`, `topic`, `suggested_mappings`, `missing_required`. Pick
+   the event that matches the request, not just the top score; `app` narrows to
+   one app, and `other_installs_of_app` flags duplicate installs.
+2. `trigger_create` paused with that source, topic and mappings; add `filters`
+   when only some events should start runs. Read the returned `warnings`.
+3. `trigger_preview` a sample event shaped like the event's payload under `data`.
+4. `trigger_status` active (refused while a required parameter is unmapped),
+   then check `sync_pending` is false.
+
 ## Editing
 
 Use `patch` with `expected_version` and only the changed fields; steps and

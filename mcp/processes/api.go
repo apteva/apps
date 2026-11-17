@@ -640,6 +640,14 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if (path == "trigger-sources" || (len(parts) == 2 && parts[1] == "trigger-sources")) && r.Method == "GET" {
 		action = "trigger_sources"
+		if len(parts) == 2 {
+			args["process_id"] = parts[0]
+		}
+		for _, k := range []string{"assignment_id", "app", "query"} {
+			if v := r.URL.Query().Get(k); v != "" {
+				args[k] = v
+			}
+		}
 	}
 	if len(parts) == 4 && parts[1] == "assignments" && parts[3] == "triggers" {
 		args["process_id"] = parts[0]

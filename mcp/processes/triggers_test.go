@@ -17,6 +17,7 @@ type triggerPlatform struct {
 	directPlatform
 	subscriptions map[string]sdk.AppEventSubscription
 	offline       bool
+	sources       []sdk.AppEventSource
 }
 
 func (f *triggerPlatform) PutAppEventSubscription(s sdk.AppEventSubscription) error {
@@ -31,6 +32,9 @@ func (f *triggerPlatform) DeleteAppEventSubscription(project, key string) error 
 	return nil
 }
 func (f *triggerPlatform) ListAppEventSources(project string) ([]sdk.AppEventSource, error) {
+	if f.sources != nil {
+		return f.sources, nil
+	}
 	return []sdk.AppEventSource{{InstallID: 41, App: "signup", Name: "Signup", Events: []sdk.EventDecl{{Name: "customer.signed_up"}}}}, nil
 }
 func (f *triggerPlatform) PublishAppEvent(project, id, topic string, data any) error { return nil }
