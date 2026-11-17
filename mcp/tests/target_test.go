@@ -92,7 +92,9 @@ func TestTargetValidation(t *testing.T) {
 		browserStep(BrowserAction{Action: "click", Locator: BrowserLocator{Text: "Go"}}),
 		browserStep(BrowserAction{Action: "navigate", Target: "admin", Path: "/"}),
 		browserStep(BrowserAction{Action: "fill", Locator: BrowserLocator{TestID: "pw"}, ValueRef: "credentials.unknown.password"}),
-		browserStep(BrowserAction{Action: "observe", Locator: BrowserLocator{Selector: "#x"}}, Assertion{Path: "/count", Op: "equals", Value: float64(1)}),
+		browserStep(BrowserAction{Action: "click", Locator: BrowserLocator{Selector: "#x"}}, Assertion{Path: "/count", Op: "equals", Value: float64(1)}),
+		browserStep(BrowserAction{Action: "observe", Locator: BrowserLocator{Text: "Ready"}}, Assertion{Path: "/text", Op: "equals", Value: "Ready"}),
+		browserStep(BrowserAction{Action: "observe", Locator: BrowserLocator{Selector: "#x"}}, Assertion{Path: "/html", Op: "exists"}),
 		{SuiteID: suite.ID, Name: "h", Kind: "http", Definition: Definition{Target: "nope", Path: "/x", Assertions: []Assertion{{Path: "/status_code", Op: "exists"}}}},
 		{SuiteID: suite.ID, Name: "h", Kind: "http", Definition: Definition{URL: "https://a.test", HeaderRefs: map[string]HeaderRef{"Authorization": {Ref: "credentials.operator.token"}}, Assertions: []Assertion{{Path: "/status_code", Op: "exists"}}}},
 		{SuiteID: suite.ID, Name: "h", Kind: "http", Definition: Definition{Target: "api", Path: "/x", HeaderRefs: map[string]HeaderRef{"Host": {Ref: "credentials.operator.token"}}, Assertions: []Assertion{{Path: "/status_code", Op: "exists"}}}},
@@ -369,6 +371,15 @@ type computerStub struct {
 	// navigate fail like Computer when the URL does not change.
 	hashRewrite bool
 	current     map[string]string
+	// Computer 0.14.0 features.
+	v14         bool
+	reads       map[string][]map[string]any // replies per selector, last one repeats
+	diagnostics []map[string]any            // replies in order, then empty
+	sinces      []int64
+	shots       []map[string]any
+	maskFail    bool
+	refuse      int // computer_context_delete refusals before success
+	deletes     []map[string]any
 }
 
 func (c *computerStub) call(tool string, args map[string]any, out any) error {
@@ -422,13 +433,56 @@ func (c *computerStub) call(tool string, args map[string]any, out any) error {
 			r["matched"] = true
 		case "set_text":
 			r["text_value"] = args["text"]
+		case "read_element":
+			queue := c.reads[args["selector"].(string)]
+			if len(queue) == 0 {
+				r["count"], r["elements"] = 0, []any{}
+				break
+			}
+			for k, v := range queue[0] {
+				r[k] = v
+			}
+			if len(queue) > 1 {
+				c.reads[args["selector"].(string)] = queue[1:]
+			}
 		}
 		reply = r
 	case "computer_context_delete":
+		c.deletes = append(c.deletes, args)
+		if c.refuse > 0 {
+			c.refuse--
+			return errors.New("context is in use by an active session")
+		}
 		c.deleted = append(c.deleted, args["id"].(string))
 		reply = map[string]any{"deleted": true}
 	case "browser_screenshot":
-		reply = map[string]any{"png_b64": ""}
+		c.shots = append(c.shots, args)
+		if _, masked := args["mask"]; masked && c.maskFail {
+			return errors.New("mask_failed: screenshot masking failed; no screenshot was captured")
+		}
+		png := ""
+		if c.v14 {
+			png = "iVBORw0KGgo="
+		}
+		reply = map[string]any{"png_b64": png}
+	case "browser_diagnostics":
+		if !c.v14 {
+			return fmt.Errorf("unknown tool %s", tool)
+		}
+		if args["session_id"] == "" {
+			return errors.New("session_id required")
+		}
+		since, _ := args["since"].(int64)
+		c.sinces = append(c.sinces, since)
+		r := map[string]any{"enabled": true, "exceptions": []any{}, "console_errors": 0, "requests": []any{}, "truncated": false, "cursor": since}
+		if len(c.diagnostics) > 0 {
+			for k, v := range c.diagnostics[0] {
+				r[k] = v
+			}
+			r["cursor"] = since + 1
+			c.diagnostics = c.diagnostics[1:]
+		}
+		reply = r
 	default:
 		return fmt.Errorf("unexpected computer tool %s", tool)
 	}

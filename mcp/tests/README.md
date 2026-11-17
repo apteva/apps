@@ -575,22 +575,11 @@ accepted when the browser is on the destination apart from the `#…` part.
 
 ### Waiting for a page-ready signal
 
-Computer's regular tools only report whether a *visible* element matches a
-CSS selector; they don't return element text. To wait for a hidden status
-element, have the page put the status in an attribute and match it through a
-visible ancestor:
-
-```json
-{"id":"settled","kind":"browser","poll_every_ms":500,"timeout_ms":20000,
- "browser":{"action":"observe","locator":{"selector":"body:has([data-testid=\"fx-api-test-status\"][data-status])"}},
- "assertions":[{"path":"/visible","op":"equals","value":true}]},
-{"id":"ready","kind":"browser",
- "browser":{"action":"observe","locator":{"selector":"body:has([data-testid=\"fx-api-test-status\"][data-status=\"ready\"])"}},
- "assertions":[{"path":"/visible","op":"equals","value":true}]}
-```
-
-The first step polls until the page settles (ready or failed); the second
-fails the check unless it settled as `ready`.
+With Computer 0.14.0 or newer, read the status element directly (see 0.7.0
+below). With older Computer versions, matching works only on visible elements
+and attributes: have the page put the status in an attribute and match it
+through a visible ancestor, e.g.
+`body:has([data-testid="fx-api-test-status"][data-status="ready"])`.
 
 ### Deploy errors
 
@@ -598,3 +587,91 @@ fails the check unless it settled as `ready`.
   deployment and asks you to bind Deploy if it cannot.
 - Candidate resolution errors now include Deploy's own reason, for example
   `Deploy could not verify build 34: release artifact differs from attested build`.
+
+## Element reads, page diagnostics, masked screenshots (0.7.0)
+
+These features need Computer 0.14.0 or newer for existing-mode browser checks.
+Tests checks once per run whether the bound Computer supports them; with an
+older Computer it keeps the 0.6.0 behaviour.
+
+### Element text and value
+
+An `observe` step with a `test_id` or `selector` locator reads the element
+with Computer's `read_element`, hidden elements included:
+
+| Path | Value |
+|---|---|
+| `/count` | number of matches |
+| `/visible` | true when any match is visible |
+| `/text` | text of the first match |
+| `/value` | form value of the first match |
+| `/checked` | checkbox state of the first match |
+| `/attributes/<name>` | attribute of the first match |
+| `/redacted` | true when Computer withheld text or value (password and sensitive fields) |
+
+Polling with `poll_every_ms` re-reads until the assertions pass or the step
+times out:
+
+```json
+{"id":"ready","kind":"browser","poll_every_ms":250,"timeout_ms":20000,
+ "browser":{"action":"observe","locator":{"test_id":"fx-api-test-status"}},
+ "assertions":[{"path":"/text","op":"equals","value":"ready"}]}
+```
+
+Saving a check that asserts `/count`, `/text`, `/value`, `/redacted` or
+`/attributes/*` is rejected when the bound Computer is older than 0.14.0
+(`computer 0.14.0 or newer required for text assertions`); a step that asserts
+them at run time against an older Computer fails with the same message.
+
+### Page diagnostics
+
+Every existing-mode browser session records page problems. After each browser
+step, Tests reads what was recorded since the previous read and stores it in
+the check's `output.browser.diagnostics` (`exceptions`, `console_errors`,
+`requests` with method, origin, path, status, error and type; `truncated`).
+
+Default rules:
+
+- a page exception fails the check;
+- a request to a declared target's origin that returns 400 or more, or fails
+  without a response, fails the check (requests the browser aborted itself,
+  `net::ERR_ABORTED`, are recorded only);
+- requests to other origins and console errors are recorded only.
+
+Override per check in `definition.diagnostics`, or turn it off with
+`"diagnostics":"off"`:
+
+```json
+{"diagnostics":{"fail_on":["exceptions","target_requests"],
+  "fail_origins":["https://api.example.com"],
+  "allow":[{"path_prefix":"/api/telemetry","status":404}],
+  "console_errors":"record"}}
+```
+
+- `fail_origins` adds origins whose failed requests fail the check, for an API
+  served from a host that is not a declared target.
+- `allow` exempts requests by path prefix, optionally only one status and one
+  origin.
+- `console_errors: "fail"` fails on any console error.
+- With an explicit `fail_on`, truncated diagnostics also fail the check, since
+  a dropped entry could hide a problem. They are always marked in the output.
+
+A page that answers 401 before sign-in (for example `/api/me` on the login
+screen) needs an `allow` entry on the login check.
+
+### Masked failure screenshots
+
+Failure screenshots are captured with `mask`: password and sensitive fields
+are always hidden, every form field is hidden in a check that typed a
+credential, and any text containing one of the run's credential values (up to
+20, longest first) is hidden. If masking fails, Computer captures nothing and
+the step records `screenshot_skipped: "mask_failed"`. Stored text is still
+scrubbed to `[redacted]`.
+
+### Sign-in profile cleanup
+
+At run end the shared sign-in context is deleted with `purge_profile`, which
+also removes the local Chrome profile folder and its cookies. If Computer
+refuses because a session still holds the profile, Tests retries once; if that
+fails too, the run records a warning in `warnings` and still passes or fails on
+its checks.

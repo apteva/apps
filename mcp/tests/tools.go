@@ -27,6 +27,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		"function": str, "event": map[string]any{}, "url": str, "target": str, "path": str, "method": str,
 		"header_refs": map[string]any{"type": "object", "description": "Header name → {ref: \"credentials.<alias>.<field>\", prefix?}. Needs a named target."},
 		"budget_ms":   map[string]any{"type": "integer", "minimum": 0, "description": "Fail the check when it takes longer than this."},
+		"diagnostics": map[string]any{"description": "Existing-mode browser checks (Computer 0.14.0+): \"off\", or {fail_on?: [exceptions, target_requests], fail_origins?: [origin], allow?: [{path_prefix, status?, origin?}], console_errors?: record|fail}. Default: page exceptions and target-origin requests with status >= 400 or no response fail the check."},
 		"session":     map[string]any{"type": "string", "enum": []string{"none"}, "description": "Opt out of the suite session, e.g. to test sign-in itself."}, "headers": map[string]any{"type": "object", "additionalProperties": str}, "body": str,
 		"timeout_ms": map[string]any{"type": "integer", "minimum": 100, "maximum": 30000, "default": 10000},
 		"assertions": map[string]any{"type": "array", "items": assertion, "minItems": 1, "maxItems": 50},
@@ -129,6 +130,9 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 			}
 			if e = a.checkBrowserBinding(ctx, app, suite); e != nil {
 				return nil, fmt.Errorf("browser checks need Computer: %w", e)
+			}
+			if suite.Target != nil && suite.Target.Mode == "existing" && usesReadPaths(v) && !computerSupportsReads(ctx, app) {
+				return nil, errors.New(computerReadVersionMessage)
 			}
 		}
 		v, e := s.saveCheck(v)

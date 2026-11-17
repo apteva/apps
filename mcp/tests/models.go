@@ -40,10 +40,13 @@ type Definition struct {
 	HeaderRefs map[string]HeaderRef `json:"header_refs,omitempty"`
 	BudgetMS   int                  `json:"budget_ms,omitempty"`
 	Session    string               `json:"session,omitempty"`
-	Body       string               `json:"body,omitempty"`
-	TimeoutMS  int                  `json:"timeout_ms"`
-	Assertions []Assertion          `json:"assertions,omitempty"`
-	Steps      []Step               `json:"steps,omitempty"`
+	// Diagnostics sets page-problem rules for existing-mode browser checks;
+	// "off" disables them.
+	Diagnostics *DiagnosticsConfig `json:"diagnostics,omitempty"`
+	Body        string             `json:"body,omitempty"`
+	TimeoutMS   int                `json:"timeout_ms"`
+	Assertions  []Assertion        `json:"assertions,omitempty"`
+	Steps       []Step             `json:"steps,omitempty"`
 }
 type Assertion struct {
 	Path   string `json:"path"`
@@ -77,6 +80,8 @@ type Run struct {
 	Results         []Result       `json:"results,omitempty"`
 	Release         *ReleaseRecord `json:"release,omitempty"`
 	CancelRequested bool           `json:"cancel_requested,omitempty"`
+	// Warnings note cleanup problems that did not fail the run.
+	Warnings []string `json:"warnings,omitempty"`
 }
 type AssertionResult struct {
 	Assertion
@@ -186,6 +191,9 @@ func validateCheck(c *Check) error {
 	}
 	if d.BudgetMS < 0 || d.BudgetMS > d.TimeoutMS {
 		return errors.New("budget_ms must be between 0 and timeout_ms")
+	}
+	if err := d.Diagnostics.validate(); err != nil {
+		return err
 	}
 	return validateAssertions(d.Assertions)
 }
