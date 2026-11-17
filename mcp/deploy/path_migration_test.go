@@ -53,7 +53,7 @@ func TestRebaseLegacyPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	summary, err := rebaseLegacyPaths(db, dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestRebaseLegacyPaths(t *testing.T) {
 }
 
 func TestRebaseCanonicalPathRejectsWrongRecordIDAndRelativePaths(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	wrongID := filepath.Join(string(filepath.Separator), "legacy", "builds", "99", "dist")
 	if got, changed := rebaseCanonicalPath(wrongID, dataDir, "builds", 12, "dist"); changed || got != wrongID {
 		t.Fatalf("wrong-ID path changed to %q", got)

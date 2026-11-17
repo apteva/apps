@@ -800,12 +800,16 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	candidate := *build
 	candidate.ArtifactPath = distDir
 	candidate.ArtifactManifestJSON = manifestJSON
-	if sealErr := sealBuildArtifact(&candidate); sealErr != nil {
+	startCmd := ""
+	if d, err := a.deploymentForBuild(build); err == nil {
+		startCmd = d.StartCmd
+	}
+	if sealErr := sealBuildArtifactProtected(&candidate, startCmd); sealErr != nil {
 		a.failBuild(build, sealErr.Error())
 		return nil
 	}
 	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, fields); err != nil {
-		_ = os.RemoveAll(distDir)
+		_ = removeArtifactTree(distDir)
 		return nil
 	}
 	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")

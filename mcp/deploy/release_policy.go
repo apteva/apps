@@ -27,11 +27,27 @@ type releaseRule struct {
 	MaximumObservationAgeSeconds int      `json:"maximum_observation_age_seconds,omitempty"`
 }
 
-func sealBuildArtifact(b *Build) error {
+func sealBuildArtifact(b *Build) error { return sealBuildArtifactAs(b, "") }
+
+// sealBuildArtifactAs records the build's attestation. Pipeline evidence is
+// checked against the tree here, once; later checks rely on the attested
+// digest proving the tree is unchanged. want, when set, is a digest already
+// verified against the tree (an imported candidate) and is recorded as-is.
+func sealBuildArtifactAs(b *Build, want string) error {
 	if b == nil {
 		return nil
 	}
-	digest, e := artifactTreeDigest(b.ArtifactPath)
+	digest := want
+	var e error
+	if digest == "" {
+		digest, e = artifactTreeDigestV2(b.ArtifactPath)
+	} else {
+		var ok bool
+		ok, e = artifactDigestMatches(b.ArtifactPath, digest)
+		if e == nil && !ok {
+			e = errors.New("artifact does not match the digest being sealed")
+		}
+	}
 	if e != nil {
 		return e
 	}
@@ -57,12 +73,12 @@ func verifiedBuildEvidence(b *Build) (string, *pipelineEvidence, error) {
 	if e != nil {
 		return "", nil, errors.New("build has no retained artifact attestation; rebuild before using release policies")
 	}
-	actual, e := artifactTreeDigest(b.ArtifactPath)
+	same, e := artifactDigestMatches(b.ArtifactPath, digest)
 	if e != nil {
 		return "", nil, fmt.Errorf("read attested artifact: %w", e)
 	}
-	if actual != digest {
-		return "", nil, errors.New("release artifact differs from attested build")
+	if !same {
+		return "", nil, fmt.Errorf("release artifact differs from attested build: %s", describeArtifactDrift(b.ArtifactPath))
 	}
 	var m artifactManifest
 	if e = json.Unmarshal([]byte(manifest), &m); e != nil {
@@ -73,7 +89,7 @@ func verifiedBuildEvidence(b *Build) (string, *pipelineEvidence, error) {
 		return "", nil, err
 	}
 	if p != nil {
-		if err = validatePipelineEvidence(p, b.ArtifactPath, m); err != nil {
+		if err = validatePipelineEvidenceFields(p, b.ArtifactPath, m); err != nil {
 			return "", nil, err
 		}
 	} else if m.Pipeline != nil {

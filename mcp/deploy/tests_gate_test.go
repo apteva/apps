@@ -44,7 +44,7 @@ func TestServicePromotionRequiresExactTestsVerdict(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
 	setBootRecoveryGlobalCtx(t, ctx)
 	runtime := &auditFastRuntime{}
-	a := &App{dataDir: t.TempDir(), runtime: runtime, registry: NewSupervisorRegistry(), portRangeStart: availableTestPort(t), retainRollbacks: 3}
+	a := &App{dataDir: writableTempDir(t), runtime: runtime, registry: NewSupervisorRegistry(), portRangeStart: availableTestPort(t), retainRollbacks: 3}
 	a.portRangeEnd = a.portRangeStart
 	runtime.app = a
 	d, env := createBootRecoveryDeployment(t, ctx)

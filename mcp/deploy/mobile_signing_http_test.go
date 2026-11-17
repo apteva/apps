@@ -50,7 +50,7 @@ func TestAndroidSigningImportAndRecoveryHTTP(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/mobile-signing/import", &body)
 	request.Header.Set("Content-Type", form.FormDataContentType())
 	recorder := httptest.NewRecorder()
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	app.httpDeploymentMobileSigningImport(recorder, request, d)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("import status=%d body=%s", recorder.Code, recorder.Body.String())

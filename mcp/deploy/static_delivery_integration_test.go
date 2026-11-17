@@ -16,7 +16,7 @@ import (
 )
 
 func TestSidecar_StaticDeliveryBuildReleaseTransitionDestroy(t *testing.T) {
-	src, dataDir := t.TempDir(), t.TempDir()
+	src, dataDir := writableTempDir(t), t.TempDir()
 	oldAsset := strings.Repeat("console.log('old released chunk');\n", 500)
 	mkFile(t, filepath.Join(src, "index.html"), "old HTML")
 	mkFile(t, filepath.Join(src, "assets", "app-1234abcd.js"), oldAsset)

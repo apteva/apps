@@ -236,7 +236,7 @@ func TestAndroidPromotionReusesVersionCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta := mobileReleaseMeta{Platform: "android", PackageName: "com.example.app", VersionCode: "88", RolloutFraction: 0.1}
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	effective := effectiveDeploymentForEnvironment(d, env)
 	if err := app.publishAndroidVersionToTrack(rel.ID, effective, "production", &meta, io.Discard); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestAndroidPromotionRequiresStoreReadinessBeforeCreatingRelease(t *testing.
 	source.ExternalID = "88"
 	source.ReleaseMetaJSON = mustJSON(mobileReleaseMeta{Platform: "android", PackageName: "com.example.gated", VersionCode: "88"})
 
-	if _, err := (&App{dataDir: t.TempDir()}).promoteMobileRelease(d, build, source, releaseOptions{Channel: "production"}); err == nil {
+	if _, err := (&App{dataDir: writableTempDir(t)}).promoteMobileRelease(d, build, source, releaseOptions{Channel: "production"}); err == nil {
 		t.Fatal("promotion succeeded without store configuration")
 	}
 	if len(platform.calls) != 0 {

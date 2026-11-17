@@ -381,7 +381,7 @@ func TestAndroidMetadataScopesShareOneValidatedEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+	result, err := (&App{dataDir: writableTempDir(t)}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
 		Scopes: []string{"localizations", "review", "privacy"}, AllowPartial: true,
 	})
 	if err != nil {
@@ -497,7 +497,7 @@ func TestAndroidDataSafetyFailurePreservesCommittedMetadataResults(t *testing.T)
 		t.Fatal(err)
 	}
 
-	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+	result, err := (&App{dataDir: writableTempDir(t)}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
 		Scopes: []string{"localizations", "review", "privacy"}, AllowPartial: true,
 	})
 	if err != nil {
@@ -531,7 +531,7 @@ func TestAndroidProviderReadOnlyScopeIsNotReportedApplied(t *testing.T) {
 	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{Scopes: []string{"version"}, AllowPartial: true})
+	result, err := (&App{dataDir: writableTempDir(t)}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{Scopes: []string{"version"}, AllowPartial: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,7 +15,7 @@ func TestMobileSigningIdentityEncryptedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	app := &App{dataDir: dataDir}
 	payload := mobileSigningSecretPayload{
 		KeystoreBase64: "sensitive-keystore", StorePassword: "store-secret",
@@ -55,7 +55,7 @@ func TestMobileSigningIdentityEncryptedAndDurable(t *testing.T) {
 func TestMobileSigningIdentityRejectsScopeTampering(t *testing.T) {
 	db := openSchemaDB(t)
 	defer db.Close()
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	identity, err := app.createMobileSigningIdentity(db, mobileSigningIdentityInput{
 		ProjectID: "project-1", Platform: "ios", AuthorityScope: "issuer-1",
 		ApplicationIdentifier: "com.example.app", Format: "pem", Source: "generated",

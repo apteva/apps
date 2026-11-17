@@ -9,7 +9,9 @@ import (
 // Host credentials are never ambient workload credentials. Explicit workload
 // values are allowed, except the platform namespace reserved for the sidecar.
 func workloadEnv(user map[string]string, extra ...string) []string {
-	values := map[string]string{}
+	// Python bytecode caches would add files to artifacts that run or are
+	// imported in place; a workload can still opt back in explicitly.
+	values := map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}
 	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "USER", "SHELL", "GOPATH", "GOCACHE", "GOMODCACHE", "GOROOT", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "SDKROOT", "BUN_INSTALL", "PNPM_HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"} {
 		if v, ok := os.LookupEnv(key); ok {
 			values[key] = v

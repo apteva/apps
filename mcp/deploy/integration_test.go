@@ -314,7 +314,7 @@ func TestSidecar_FullFlow_Node(t *testing.T) {
 	// Disjoint port range from the go full-flow test so a child
 	// process leaking past its sidecar's shutdown can't poison this
 	// run with a stale 9300-bound listener.
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithEnv("DEPLOY_DATA_DIR", dataDir),

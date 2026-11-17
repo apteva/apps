@@ -961,7 +961,7 @@ func TestBuildRetentionPrunesOldArtifactsKeepsLiveAndRollback(t *testing.T) {
 	db := openSchemaDB(t)
 	defer db.Close()
 
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	if err := os.MkdirAll(filepath.Join(dataDir, "builds"), 0o755); err != nil {
 		t.Fatal(err)
 	}

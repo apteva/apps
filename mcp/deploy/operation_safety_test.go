@@ -386,7 +386,7 @@ func TestMobileProcessingFailuresAreVisible(t *testing.T) {
 func TestArchivedSigningRevisionRemainsDecryptable(t *testing.T) {
 	db := openSchemaDB(t)
 	defer db.Close()
-	a := &App{dataDir: t.TempDir()}
+	a := &App{dataDir: writableTempDir(t)}
 	input := mobileSigningIdentityInput{ProjectID: "p1", Platform: "android", ApplicationIdentifier: "com.example", Format: "pkcs12"}
 	first, err := a.createMobileSigningIdentity(db, input, mobileSigningSecretPayload{StorePassword: "old-key"})
 	if err != nil {

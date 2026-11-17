@@ -745,7 +745,7 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 	candidate.ArtifactPath = distDir
 	candidate.ArtifactManifestJSON = artifactManifestJSON
 	candidate.TargetConfigJSON = d.TargetConfigJSON
-	if sealErr := sealBuildArtifact(&candidate); sealErr != nil {
+	if sealErr := sealBuildArtifactProtected(&candidate, d.StartCmd); sealErr != nil {
 		return a.failBuild(build, sealErr.Error()), nil
 	}
 	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{

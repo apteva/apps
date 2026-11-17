@@ -142,7 +142,17 @@ func validatePipelineEvidence(p *commandPipeline, dist string, m artifactManifes
 	if err != nil {
 		return err
 	}
-	if m.Pipeline == nil || m.Pipeline.ArtifactSHA256 != digest || m.Pipeline.ConfigSHA256 != jsonDigest(p) {
+	if m.Pipeline == nil || m.Pipeline.ArtifactSHA256 != digest {
+		return errors.New("build pipeline evidence is missing or does not match artifact/configuration")
+	}
+	return validatePipelineEvidenceFields(p, dist, m)
+}
+
+// validatePipelineEvidenceFields checks evidence without re-hashing the tree;
+// callers must already know the tree is the one the evidence was checked on.
+func validatePipelineEvidenceFields(p *commandPipeline, dist string, m artifactManifest) error {
+	var err error
+	if m.Pipeline == nil || m.Pipeline.ConfigSHA256 != jsonDigest(p) {
 		return errors.New("build pipeline evidence is missing or does not match artifact/configuration")
 	}
 	expected := []string{}

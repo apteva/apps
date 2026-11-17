@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.32.0
+version: 0.32.1
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,10 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.32.1 seals static, mobile and command artifacts read-only under a digest
+  that ignores write bits, keeps Python bytecode out of workloads, names the
+  added, removed and changed files when an artifact no longer matches, accepts
+  a numeric build in deploy_candidate_digest and marks build reads read-only.
   v0.32.0 exports sealed builds as a hashed file manifest, env template and
   signed archive without secret values, imports them into static deployments
   after re-checking the digest, resolves builds by digest or latest_succeeded,
@@ -160,8 +164,10 @@ provides:
     - name: deploy_build
       description: Build a service artifact, Android AAB, iOS IPA, or macOS PKG.
     - name: deploy_candidate_digest
+      read_only: true
       description: Resolve a build by id, digest or latest_succeeded and read its verified artifact SHA-256.
     - name: deploy_build_export
+      read_only: true
       description: Export a sealed build's file manifest, env template and signed archive URL without secret values.
     - name: deploy_build_import
       description: Import an exported static build and verify it against its candidate digest.
@@ -170,6 +176,7 @@ provides:
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
     - name: deploy_artifact_download
+      read_only: true
       description: Return an authenticated download URL for a retained build artifact.
     - name: deploy_cloud_backend_setup
       description: Discover or create a provider's shared build adapter and configure a deployment environment.
@@ -244,7 +251,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.32.0
+    ref: deploy/v0.32.1
     entry: mcp/deploy
   port: 8080
   health_check: /health
