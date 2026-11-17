@@ -278,11 +278,13 @@ func dependenciesReady(s StepRun, all []StepRun) bool {
 	return true
 }
 
-// Every Process worker needs the native read/update and run-control surface.
-// Claims are only valid for a persistent sequential worker; independently
-// dispatched steps are already assigned and must use step_get/step_update.
-const processWorkerTools = "processes_step_get,processes_step_read,processes_step_evidence_save,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel,processes_run_evidence,processes_runs,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
-const processSequentialWorkerTools = "processes_step_claim," + processWorkerTools
+// Every Process worker gets the step read/update surface. Cross-run memory
+// tools are granted only to procedures that use memory, so other workers do
+// not carry their descriptions in every turn. Claims are only valid for a
+// persistent sequential worker; independently dispatched steps are already
+// assigned and use step_update directly.
+const processWorkerTools = "processes_step_get,processes_step_read,processes_step_evidence_save,processes_step_update"
+const processMemoryWorkerTools = "processes_runs,processes_run_get,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
 const staleStepReminderAfter = 10 * time.Minute
 const staleStepReminderCooldown = 10 * time.Minute
 
@@ -347,15 +349,10 @@ func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now
 }
 
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message string) {
-	defer func() { message += "\n" + compactHandoffContract }()
-	defer func() {
-		for _, previous := range all {
-			if previous.ID != s.ID && previous.Executor == s.Executor && previous.DeliveredAt != "" {
-				return
-			}
-		}
-		message += "\n" + memoryExecutionContract
-	}()
+	d, err := a.runDefinition(r)
+	if err != nil {
+		d = p.Definition
+	}
 	// Keep the release contract on every worker delivery, including isolated
 	// workers and later events to an existing persistent worker.
 	if controlMode(r) == "step_by_step" && s.Origin == "process_step" {
@@ -363,28 +360,35 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 			message = "Control mode: step_by_step. This step has explicit controller advancement. Later ready steps remain held until separately released. Workers must never call run_advance. " + message
 		}()
 	}
-
-	if persistentWorkerAgent(r, s, all) != 0 {
-		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
-		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
-		if worker != "" {
-			if aiParallel(r) {
-				return "Assigned step ready: " + ids + ". Claim this step to read frozen instructions, dependency evidence and the compact ready_steps/active_steps set. Decide useful parallel work through Core subthreads within max_parallel_steps; keep step ownership and receipts here. Retain shared context with include_context=false once loaded. Follow next_action and settle children before finishing."
-			}
-			contextHint := ""
-			for _, previous := range all {
-				if previous.ID != s.ID && previous.ThreadID == worker && previous.DeliveredAt != "" {
-					contextHint = ". Shared policy is unchanged: use include_context=false if you retained it; omit this option to recover the full shared policy when needed"
-					break
-				}
-			}
-			return "Next assigned step ready: " + ids + contextHint + ". Claim with processes_step_claim before domain work. Keep this worker. After step_update: done=true means call done immediately; otherwise follow next_action and claim delivered ready_steps before waiting. New ready-step events override earlier completion responses. Wait only with no ready work. Before approval requests, blocker reports or pace, persist step_update waiting/blocked with the reason and saved output."
-		}
-		return "Sequential same-agent run. Processes provisions the persistent worker. Claim with processes_step_claim before domain work using " + ids + ". Keep the worker across steps; main must not execute, spawn extra workers, forward work or request per-step reports. Follow done and next_action; never poll."
+	if persistentWorkerAgent(r, s, all) == 0 {
+		return independentStepBrief(p, r, s, all, d)
 	}
-	return fmt.Sprintf("Processes assigned step ready: process_id=%s run_id=%s step_id=%s step_key=%s. Read processes_step_get before domain action to recover exact frozen instructions and direct dependency handoffs. Processes owns worker provisioning; do not spawn another worker or forward this step. Record meaningful progress and the terminal outcome with step_update; Processes dispatches downstream work. Use processes_step_read for named ancestor results or evidence when needed. This app event requires no reply.", p.ID, r.ID, s.ID, s.Key)
-
+	// Persistent workers claim each step; the claim returns the frozen step,
+	// dependency results and next_action, so only the contract is appended.
+	defer func() {
+		message += "\n" + workerContract
+		if usesRunMemory(d) {
+			message += "\n" + memoryContract
+		}
+	}()
+	worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
+	ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
+	if worker != "" {
+		if aiParallel(r) {
+			return "Assigned step ready: " + ids + ". Claim this step to read frozen instructions, dependency results and the compact ready_steps/active_steps set. Decide useful parallel work through Core subthreads within max_parallel_steps; keep step ownership and receipts here. Retain shared context with include_context=false once loaded. Follow next_action and settle children before finishing."
+		}
+		contextHint := ""
+		for _, previous := range all {
+			if previous.ID != s.ID && previous.ThreadID == worker && previous.DeliveredAt != "" {
+				contextHint = ". Shared policy is unchanged: use include_context=false if you retained it"
+				break
+			}
+		}
+		return "Next assigned step ready: " + ids + contextHint + ". Claim with processes_step_claim before domain work. Keep this worker. After step_update: done=true means stop; otherwise follow next_action and claim delivered ready steps before waiting. Wait only with no ready work."
+	}
+	return "Sequential same-agent run: " + ids + ". Processes provisioned this persistent worker. Claim with processes_step_claim before domain work and keep the worker across steps; do not spawn extra workers or forward work. Follow done and next_action; never poll."
 }
+
 func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
 	if s.RunID != "" {
 		if e := a.workerRunActive(r.ID); e != nil {
@@ -522,16 +526,19 @@ func (a *App) deliverStepToThread(p *Process, r Run, s *StepRun, all []StepRun) 
 	return err
 }
 
-func processWorkerToolList(sequential bool) []string {
+func processWorkerToolList(sequential, memory bool) []string {
 	tools := strings.Split(processWorkerTools, ",")
+	if memory {
+		tools = append(tools, strings.Split(processMemoryWorkerTools, ",")...)
+	}
 	if sequential {
 		tools = append([]string{"processes_step_claim"}, tools...)
 	}
 	return tools
 }
 
-func processRunWorkerTools(r Run) []string {
-	tools := processWorkerToolList(true)
+func processRunWorkerTools(r Run, memory bool) []string {
+	tools := processWorkerToolList(true, memory)
 	if aiParallel(r) {
 		// Core owns the descendant hierarchy, inherited capabilities and depth.
 		// Grant spawn so this owner can use the normal leader-thread machinery.
@@ -588,23 +595,31 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 	workerStep := *s
 	workerStep.ThreadID = worker
 	workerStep.DeliveryEventID = eventID
-	message := a.stepContext(p, *r, workerStep, all)
+	brief := stepDeliveryMessage(a.stepContext(p, *r, workerStep, all), s.DueAt)
+	// The brief travels once, as the worker's directive; the tracked event is
+	// a short kickoff. An envelope saved before this split keeps its original
+	// message, which was then also the directive.
+	kickoff := stepDeliveryMessage(fmt.Sprintf("Start Processes step %s (step_id=%s) now. Your directive holds its instructions, dependency results and contract.", s.Key, s.ID), s.DueAt)
 	if s.ThreadID != worker || s.DeliveryEventID != eventID {
 		if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=? WHERE id=?`, worker, eventID, s.ID); err != nil {
 			return err
 		}
 	}
 	s.ThreadID, s.DeliveryEventID, s.DeliveredAt = worker, eventID, ""
-	envelope, err := a.immutableDelivery(s.ProjectID, sdk.AgentEventRequest{AgentID: s.Executor.AgentID, ThreadID: worker, SourceEventID: eventID, Message: stepDeliveryMessage(message, s.DueAt)})
+	envelope, err := a.immutableDelivery(s.ProjectID, sdk.AgentEventRequest{AgentID: s.Executor.AgentID, ThreadID: worker, SourceEventID: eventID, Message: kickoff})
 	if err != nil {
 		return err
+	}
+	directive := brief
+	if saved, _ := envelope.Message.(string); saved != kickoff {
+		directive = saved
 	}
 	request := sdk.ThreadSpawnRequest{
 		AgentID:         s.Executor.AgentID,
 		ThreadID:        worker,
 		ProjectID:       p.ProjectID,
-		DirectiveSuffix: envelope.Message.(string),
-		Tools:           processWorkerToolList(false),
+		DirectiveSuffix: directive,
+		Tools:           processWorkerToolList(false, a.runUsesMemory(*r)),
 		Provider:        r.Binding.stepProvider(s.Key),
 		// Inherit the executor's spawnable domain tools after ensuring the
 		// current Processes installation is attached.
@@ -655,7 +670,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		ThreadID:        worker,
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
-		Tools:           processRunWorkerTools(*r),
+		Tools:           processRunWorkerTools(*r, a.runUsesMemory(*r)),
 		Provider:        r.Binding.stepProvider(s.Key),
 	}
 	if err := a.ensureProcessThread(p.ProjectID, r.ID, eventID, request); err != nil {

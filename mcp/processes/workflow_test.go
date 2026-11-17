@@ -89,8 +89,13 @@ func TestWorkflowHandoffsHumanStepAndOutputs(t *testing.T) {
 		t.Fatal("wrong role updated")
 	}
 	finishStep(t, a, p, r, "research", "agent:8:t", "Research evidence", "")
-	if len(f.events) != 2 || f.events[1].AgentID != 7 || !strings.Contains(f.events[1].Message.(string), "processes_step_get") || strings.Contains(f.events[1].Message.(string), "Research evidence") {
-		t.Fatal("handoff input missing")
+	// The completed dependency result is inlined once, in the worker's
+	// directive; the tracked event is only the kickoff.
+	if len(f.events) != 2 || f.events[1].AgentID != 7 || !strings.Contains(f.events[1].Message.(string), "Start Processes step write") || strings.Contains(f.events[1].Message.(string), "Research evidence") {
+		t.Fatal("kickoff event missing")
+	}
+	if directive := f.threads[len(f.threads)-1].DirectiveSuffix; !strings.Contains(directive, "- research: Research evidence") {
+		t.Fatalf("handoff input missing from worker brief: %s", directive)
 	}
 	finishStep(t, a, p, r, "write", "agent:7:t", "Draft v1", "")
 	if len(f.events) != 2 || stepBy(t, a, r, "review").State != "waiting" {
@@ -104,7 +109,7 @@ func TestWorkflowHandoffsHumanStepAndOutputs(t *testing.T) {
 		t.Fatal("legacy decision field accepted", e)
 	}
 	finishStep(t, a, p, r, "review", "operator", "Approved", "approved")
-	if len(f.events) != 3 || f.events[2].AgentID != 8 || !strings.Contains(f.events[2].Message.(string), "processes_step_get") || strings.Contains(f.events[2].Message.(string), "Draft v1") {
+	if len(f.events) != 3 || f.events[2].AgentID != 8 || !strings.Contains(f.events[2].Message.(string), "Start Processes step publish") || strings.Contains(f.events[2].Message.(string), "Draft v1") {
 		t.Fatal("human step did not release publisher")
 	}
 	// The completed predecessor cannot be edited after downstream work was released.

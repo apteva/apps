@@ -9,7 +9,7 @@ func TestProcessMainCoordinatorContract(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	s := stepBy(t, a, r, "research")
 	got := a.stepContext(p, r, s, []StepRun{s})
-	for _, want := range []string{"assigned step ready", "step_get", "step_update"} {
+	for _, want := range []string{"step ready", "Step instructions: Research topic", "processes_step_update", "outcome=", "operator's authorization"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("step context missing %q: %s", want, got)
 		}
