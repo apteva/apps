@@ -142,7 +142,10 @@ func immutableActorJSON(ctx *sdk.AppCtx, id int64, revision int) ([]byte, error)
 }
 func (a *App) discoverActors(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	limit := boundedInt(intArg(args, "limit"), 20, 1, 50)
-	after := int64ArgLocal(args, "after")
+	after, err := pageAfterArg(args)
+	if err != nil {
+		return nil, err
+	}
 	if after < 0 {
 		return nil, errors.New("after must be a nonnegative actor ID")
 	}

@@ -42,7 +42,7 @@ func TestRunDatasetReadsCrawlTablesWithFilteringAndPagination(t *testing.T) {
 	if len(datasets) != 2 || datasets[0]["name"] != "profiles" || datasets[0]["schema"].(map[string]string)["score"] != "number?" {
 		t.Fatal(datasets)
 	}
-	out, err = app.toolDatasetRead(ctx, map[string]any{"run_id": id, "dataset": "profiles", "limit": 1, "after": first["next_cursor"]})
+	out, err = app.toolDatasetRead(ctx, map[string]any{"run_id": id, "dataset": "profiles", "limit": 1, "cursor": first["next_cursor"]})
 	if err != nil {
 		t.Fatal(err)
 	}

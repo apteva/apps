@@ -468,7 +468,7 @@ func (a *App) platformTools() []sdk.Tool {
 		{Name: "actors_task_list", Description: "List saved tasks in the current project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolTaskList},
 		{Name: "actors_task_run", Description: "Queue a saved task using its pinned revision and inputs.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskRun},
 		{Name: "actors_task_delete", Description: "Delete a saved task; actor definitions and historical runs remain.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskDelete},
-		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page. The last page (has_more=false) of a finished run includes run_summary: the compact terminal receipt with status, revision, dataset_count and read coverage.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
+		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor back as cursor (or after) for the next page. The last page (has_more=false) of a finished run includes run_summary: the compact terminal receipt with status, revision, dataset_count and read coverage.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "cursor": map[string]any{"type": "integer", "minimum": 0, "description": "next_cursor from the previous page; alias of after."}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
 	}
 }
 
@@ -673,8 +673,12 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errors.New("dataset not found in run")
 	}
 	limit := boundedInt(intArg(args, "limit"), 50, 1, 200)
+	after, err := pageAfterArg(args)
+	if err != nil {
+		return nil, err
+	}
 	query := "SELECT id,item_json FROM " + table + " WHERE run_id=? AND project_id=? AND id>?"
-	params := []any{id, projectID(ctx), int64ArgLocal(args, "after")}
+	params := []any{id, projectID(ctx), after}
 	if definition.SchemaVersion == 2 && dataset != "" {
 		query += " AND dataset=?"
 		params = append(params, dataset)
@@ -687,7 +691,7 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	defer rows.Close()
 	items := []map[string]any{}
-	cursor := int64ArgLocal(args, "after")
+	cursor := after
 	more := false
 	size := 0
 	for rows.Next() {
@@ -756,7 +760,7 @@ func (a *App) toolRoute(handler func(*sdk.AppCtx, map[string]any) (any, error)) 
 			args["id"] = id
 			args["run_id"] = id
 		}
-		for _, key := range []string{"after", "limit", "dataset"} {
+		for _, key := range []string{"after", "cursor", "limit", "dataset"} {
 			if value := r.URL.Query().Get(key); value != "" {
 				args[key] = value
 			}
