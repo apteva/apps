@@ -331,3 +331,7 @@ refreshes from assignment and run events on the app bus. `GET /processes/assignm
 serves it, and `GET /processes/runs` accepts `process_id` (scoped to the project)
 alongside `assignment_id`. Assignment cards and the process list name every
 agent an assignment uses, and each card shows which agent handles each step.
+
+In v0.19.1, run cards draw their state colour as an inset stripe instead of a
+left border, so hover and selection outline every side evenly; waiting,
+scheduled, blocked and queued runs get matching stripes.
