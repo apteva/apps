@@ -13,6 +13,9 @@ type genericTargetConfig struct {
 	Pipeline      *commandPipeline      `json:"pipeline,omitempty"`
 	Publisher     *integrationPublisher `json:"publisher,omitempty"`
 	ReleasePolicy *releasePolicy        `json:"release_policy,omitempty"`
+	// StaticBasePath serves a static release under a path prefix (for example
+	// inside a runtime that mounts several apps on one host).
+	StaticBasePath string `json:"static_base_path,omitempty"`
 }
 
 func genericTarget(raw string) (genericTargetConfig, error) {
@@ -116,6 +119,9 @@ func validateBuildDestination(d *Deployment, b *Build) error {
 
 func validateGenericTarget(t genericTargetConfig) error {
 	if err := t.TestsGate.validate(); err != nil {
+		return err
+	}
+	if err := validateStaticBasePath(t.StaticBasePath); err != nil {
 		return err
 	}
 	if t.Pipeline != nil {

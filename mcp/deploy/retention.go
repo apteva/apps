@@ -196,7 +196,9 @@ func retainedBuildIDs(db *sql.DB, rollbackCount int) (map[int64]bool, error) {
 		       (status = 'starting' AND (provider = '' OR external_id = '' OR external_id LIKE 'uploaded-%'))
 		       OR (status = 'live' AND provider = '')
 		 ) AND build_id > 0
-	`)
+		UNION
+		SELECT build_id FROM build_pins WHERE expires_at = '' OR expires_at > ?
+	`, nowUTC())
 	if err != nil {
 		return nil, err
 	}

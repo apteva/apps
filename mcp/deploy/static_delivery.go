@@ -191,6 +191,37 @@ func hashedStaticAsset(path string) bool {
 func staticHandler(root string) http.HandlerFunc { return staticHandlerWithCache(root, "") }
 
 func staticHandlerWithCache(root, cache string) http.HandlerFunc {
+	return staticHandlerWithBase(root, cache, "")
+}
+
+// staticHandlerWithBase serves the release under basePath ("" = site root).
+// Requests outside the prefix get 404, the bare prefix redirects to prefix/,
+// and redirects issued by the handler keep the prefix.
+func staticHandlerWithBase(root, cache, basePath string) http.HandlerFunc {
+	basePath = strings.TrimRight(basePath, "/")
+	inner := staticRootHandler(root, cache, basePath)
+	if basePath == "" {
+		return inner
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == basePath {
+			target := &url.URL{Path: basePath + "/", RawQuery: r.URL.RawQuery}
+			http.Redirect(w, r, target.RequestURI(), http.StatusMovedPermanently)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, basePath+"/") {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.NotFound(w, r)
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = strings.TrimPrefix(r.URL.Path, basePath)
+		r2.URL.RawPath = ""
+		inner(w, r2)
+	}
+}
+
+func staticRootHandler(root, cache, basePath string) http.HandlerFunc {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		absRoot = root
@@ -209,7 +240,7 @@ func staticHandlerWithCache(root, cache string) http.HandlerFunc {
 		}
 		if p, ok := staticFileWithin(absRoot, filepath.Join(rel, "index.html")); ok {
 			if rel != "." && rel != "" && !strings.HasSuffix(r.URL.Path, "/") {
-				target := &url.URL{Path: "/" + strings.TrimLeft(r.URL.Path, "/") + "/", RawQuery: r.URL.RawQuery}
+				target := &url.URL{Path: basePath + "/" + strings.TrimLeft(r.URL.Path, "/") + "/", RawQuery: r.URL.RawQuery}
 				http.Redirect(w, r, target.RequestURI(), http.StatusMovedPermanently)
 				return
 			}

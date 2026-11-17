@@ -49,6 +49,7 @@ type ReleaseSpec struct {
 	StartCmd           string // override; if non-empty wins over framework default
 	Port               int    // assigned port
 	Env                map[string]string
+	StaticBasePath     string // optional path prefix for static releases
 }
 
 // RunningRelease is the supervisor's view of a live process. The
@@ -162,6 +163,9 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 	}
 	if assetCache != "" {
 		args = append(args, "--asset-cache", assetCache)
+	}
+	if spec.StaticBasePath != "" {
+		args = append(args, "--base-path", spec.StaticBasePath)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, self, args...)

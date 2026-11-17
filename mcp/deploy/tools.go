@@ -162,8 +162,66 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_candidate_digest", Handler: a.toolCandidateDigest,
-			Description: "Read the verified artifact SHA-256 of a succeeded build for release tests.",
-			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"build_id": map[string]any{"type": "integer"}}, "required": []string{"build_id"}},
+			Description: "Resolve a succeeded build and read its verified artifact SHA-256 for release tests. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?). Returns {build_id, candidate_digest}.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id":         map[string]any{"type": "integer"},
+					"candidate_digest": map[string]any{"type": "string", "description": "64-character hex artifact digest"},
+					"build":            map[string]any{"type": "string", "description": "build id, or latest_succeeded with name OR id and environment"},
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"environment":      map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name: "deploy_build_export", Handler: a.toolBuildExport,
+			Description: "Read-only export of a sealed build: file list with SHA-256 hashes, env template (keys and placeholders, never values), optional backend/release.json descriptor and a signed archive_url another Deploy install can import. Refuses if a secret env value appears in the artifact. Pins the build until the URL expires. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?), ttl_seconds? (default 3600, max 86400), public_base_url?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id":         map[string]any{"type": "integer"},
+					"candidate_digest": map[string]any{"type": "string", "description": "64-character hex artifact digest"},
+					"build":            map[string]any{"type": "string", "description": "build id, or latest_succeeded with name OR id and environment"},
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"environment":      map[string]any{"type": "string"},
+					"ttl_seconds":      map[string]any{"type": "integer"},
+					"public_base_url":  map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name: "deploy_build_import", Handler: a.toolBuildImport,
+			Description: "Import an exported static build into a framework=static deployment. Downloads archive_url, re-hashes the files and fails unless they match candidate_digest; the imported build is sealed and released with deploy_release like any other. Args: name OR id, environment?, archive_url, candidate_digest.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"environment":      map[string]any{"type": "string"},
+					"archive_url":      map[string]any{"type": "string"},
+					"candidate_digest": map[string]any{"type": "string"},
+				},
+				"required": []string{"archive_url", "candidate_digest"},
+			},
+		},
+		{
+			Name: "deploy_build_pin", Handler: a.toolBuildPin,
+			Description: "Pin (or unpin with pinned:false) a build so artifact retention never prunes it. Returns active pins, including automatic export and Tests-verdict pins. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?), pinned? (default true).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id":         map[string]any{"type": "integer"},
+					"candidate_digest": map[string]any{"type": "string", "description": "64-character hex artifact digest"},
+					"build":            map[string]any{"type": "string", "description": "build id, or latest_succeeded with name OR id and environment"},
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"environment":      map[string]any{"type": "string"},
+					"pinned":           map[string]any{"type": "boolean"},
+				},
+			},
 		},
 		{
 			Name: "deploy_build_cancel", Handler: a.toolBuildCancel,

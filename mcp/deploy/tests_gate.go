@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"time"
 
@@ -66,7 +67,12 @@ func checkTestsGate(d *Deployment, b *Build, gate *testsReleaseGate, queue bool)
 	if verdict.Allowed && verdict.State == "passed" && verdict.RunID > 0 &&
 		verdict.Release.Candidate == digest && verdict.Release.Observed == digest &&
 		verdict.Release.Suite == gate.SuiteRevision && verdict.Release.Fixture == gate.FixtureRevision {
+		pinTestedBuild(b.ID)
 		return nil
+	}
+	// A candidate under test or awaiting release must survive retention.
+	if verdict.State == "queued" || verdict.State == "running" || (verdict.State == "missing" && queue) {
+		pinTestedBuild(b.ID)
 	}
 	if verdict.State == "missing" && queue {
 		args["request_key"] = "deploy:" + jsonDigest(args)
@@ -89,17 +95,9 @@ func checkTestsGate(d *Deployment, b *Build, gate *testsReleaseGate, queue bool)
 }
 
 func (a *App) toolCandidateDigest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	project, err := resolveProjectFromArgs(args)
+	build, _, err := a.resolveBuildRef(ctx.AppDB(), args)
 	if err != nil {
 		return nil, err
-	}
-	build, err := dbGetBuild(ctx.AppDB(), int64(intArg(args, "build_id")))
-	if err != nil || build == nil || build.Status != "succeeded" {
-		return nil, errors.New("succeeded build not found")
-	}
-	deployment, err := dbGetDeployment(ctx.AppDB(), project, build.DeploymentID)
-	if err != nil || deployment == nil {
-		return nil, errors.New("succeeded build not found in this project")
 	}
 	a.artifactMu.RLock()
 	defer a.artifactMu.RUnlock()
@@ -108,4 +106,10 @@ func (a *App) toolCandidateDigest(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	return map[string]any{"build_id": build.ID, "candidate_digest": digest}, nil
+}
+
+func pinTestedBuild(buildID int64) {
+	if err := pinBuild(globalCtx.AppDB(), buildID, pinReasonTests, time.Now().Add(testsVerdictPinTTL)); err != nil {
+		log.Printf("pin tested build %d: %v", buildID, err)
+	}
 }
