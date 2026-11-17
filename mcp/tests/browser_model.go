@@ -24,10 +24,12 @@ type BrowserFile struct {
 	Base64 string `json:"base64"`
 }
 type BrowserLocator struct {
-	TestID string `json:"test_id,omitempty"`
-	Role   string `json:"role,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Text   string `json:"text,omitempty"`
+	// Selector is a CSS selector, supported in existing mode only.
+	Selector string `json:"selector,omitempty"`
+	TestID   string `json:"test_id,omitempty"`
+	Role     string `json:"role,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Text     string `json:"text,omitempty"`
 }
 type BrowserAction struct {
 	Action    string         `json:"action"`
@@ -135,6 +137,12 @@ func (s *Step) validateBrowser() error {
 	if l.TestID != "" {
 		kinds++
 	}
+	if l.Selector != "" {
+		kinds++
+		if len(l.Selector) > 512 || strings.ContainsAny(l.Selector, "\r\n") {
+			return errors.New("browser selector must be one line of at most 512 characters")
+		}
+	}
 	if l.Role != "" {
 		kinds++
 	}
@@ -143,7 +151,7 @@ func (s *Step) validateBrowser() error {
 	}
 	if b.Action != "navigate" && b.Action != "reload" && !(b.Action == "observe" && l == (BrowserLocator{})) {
 		if kinds != 1 || l.Name != "" && l.Role == "" || len(encode(l)) > 2048 {
-			return errors.New("browser locator requires one test ID, role/name or text")
+			return errors.New("browser locator requires one test ID, CSS selector, role/name or text")
 		}
 	}
 	if b.ValueRef != "" && (!browserRef.MatchString(b.ValueRef) || b.Value != nil) {

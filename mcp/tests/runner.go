@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -42,10 +43,46 @@ func pointer(v any, path string) (any, bool) {
 	}
 	return v, true
 }
+
+// pointerDecoded follows a JSON pointer and decodes JSON held in a string
+// wherever the path continues past one, e.g. functions_invoke responses.
+func pointerDecoded(v any, path string) (any, bool) {
+	if path == "" {
+		return v, true
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		if text, ok := v.(string); ok {
+			var decoded any
+			if json.Unmarshal([]byte(text), &decoded) != nil {
+				return nil, false
+			}
+			v = decoded
+		}
+		next, ok := pointer(v, "/"+part)
+		if !ok {
+			return nil, false
+		}
+		v = next
+	}
+	return v, true
+}
+
+// budgetResult records a duration budget as an assertion.
+func budgetResult(budgetMS int, durationMS int64) AssertionResult {
+	return AssertionResult{Assertion: Assertion{Path: "/duration_ms", Op: "lte", Value: float64(budgetMS)},
+		Passed: durationMS <= int64(budgetMS), Actual: float64(durationMS), Exists: true}
+}
+
 func evaluate(output any, assertions []Assertion) []AssertionResult {
 	results := make([]AssertionResult, 0, len(assertions))
 	for _, a := range assertions {
-		actual, exists := pointer(output, a.Path)
+		var actual any
+		var exists bool
+		if a.Decode == "json" {
+			actual, exists = pointerDecoded(output, a.Path)
+		} else {
+			actual, exists = pointer(output, a.Path)
+		}
 		passed := false
 		if a.Op == "exists" {
 			passed = exists
@@ -115,7 +152,7 @@ func httpClient(allowPrivate bool) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Result) {
+func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check, run *appRunContext) (result Result) {
 	result = Result{CheckID: c.ID, Name: c.Name, Kind: c.Kind, Status: "error", Assertions: []AssertionResult{}}
 	start := time.Now()
 	defer func() {
@@ -149,13 +186,31 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Res
 			err = fmt.Errorf("function invocation did not succeed (status %v)", response["status"])
 		}
 	case "http":
+		target := d.URL
+		if d.Target != "" {
+			base := run.targets[d.Target]
+			if base == nil {
+				err = fmt.Errorf("target %q is not available in this run", d.Target)
+				break
+			}
+			u := *base
+			path, query, _ := strings.Cut(d.Path, "?")
+			u.Path = strings.TrimSuffix(u.Path, "/") + path
+			u.RawQuery = query
+			target = u.String()
+		}
 		var req *http.Request
-		req, err = http.NewRequestWithContext(runCtx, d.Method, d.URL, strings.NewReader(d.Body))
+		req, err = http.NewRequestWithContext(runCtx, d.Method, target, strings.NewReader(d.Body))
 		if err != nil {
 			break
 		}
 		for k, v := range d.Headers {
 			req.Header.Set(k, v)
+		}
+		if d.Target != "" {
+			if err = run.applyAuth(req, d.HeaderRefs); err != nil {
+				break
+			}
 		}
 		var res *http.Response
 		res, err = a.client.Do(req)
@@ -198,6 +253,9 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Res
 	}
 	result.Status = "passed"
 	result.Assertions = evaluate(result.Output, d.Assertions)
+	if d.BudgetMS > 0 {
+		result.Assertions = append(result.Assertions, budgetResult(d.BudgetMS, time.Since(start).Milliseconds()))
+	}
 	for _, v := range result.Assertions {
 		if !v.Passed {
 			result.Status = "failed"
@@ -207,10 +265,29 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Res
 }
 
 type appRunContext struct {
-	ctx     *sdk.AppCtx
-	release *releaseSession
-	runID   int64
-	browser *browserCheckSession
+	ctx      *sdk.AppCtx
+	release  *releaseSession
+	runID    int64
+	browser  *browserCheckSession
+	web      *webSession
+	snapshot releaseSnapshot
+	// Existing-mode targets and the credential values this run resolved.
+	targets     map[string]*url.URL
+	credentials map[string]string
+	secrets     []string
+	// Suite session state. sessionOff is set for a check that opted out;
+	// setupCheck is set while the session's setup check runs.
+	sessionToken   string
+	sessionContext string
+	sessionOff     bool
+	setupCheck     bool
+	captures       map[string]any
+}
+
+func (r *appRunContext) addSecret(value string) {
+	if value != "" && !containsString(r.secrets, value) {
+		r.secrets = append(r.secrets, value)
+	}
 }
 
 func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
@@ -225,20 +302,43 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	snapshot, err := s.getReleaseSnapshot(r.ID)
+	if err != nil {
+		return s.finish(r.ID, "run snapshot is unavailable")
+	}
+	deadline := 5 * time.Minute
+	if snapshot.Target != nil {
+		deadline = 15 * time.Minute
+	}
+	runCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	go watchCancellation(runCtx, cancel, s, r.ID)
 	env := environmentClient{app.PlatformAPI()}
-	services := &appRunContext{ctx: app, runID: r.ID}
-	var message string
-	if r.Release != nil {
+	services := &appRunContext{ctx: app, runID: r.ID, snapshot: snapshot}
+	defer a.releaseWebContext(ctx, services)
+	message := ""
+	if err = a.prepareTarget(runCtx, services, &r); err != nil {
+		message = err.Error()
+	}
+	isolated := r.Release != nil && r.Release.Mode != "existing"
+	if isolated && message == "" {
 		services.release, err = a.prepareRelease(runCtx, s, &r, env)
 		if err != nil {
 			message = err.Error()
 		}
+		if services.release != nil {
+			for _, value := range services.release.browserValues {
+				services.addSecret(value)
+			}
+			for name, value := range services.release.identities {
+				services.addSecret(strings.TrimPrefix(value, services.release.config.Identities[name].Prefix))
+			}
+		}
 	}
 	covered := map[string]bool{}
-	for _, c := range r.Checks {
+	session := snapshot.Session
+	sessionFailed := ""
+	for _, c := range orderChecks(r.Checks, session) {
 		if message != "" {
 			break
 		}
@@ -246,12 +346,22 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 			message = runCtx.Err().Error()
 			break
 		}
+		isSetup := session != nil && c.Name == session.SetupCheck
+		services.sessionOff = session == nil || c.Definition.Session == "none"
+		services.setupCheck = isSetup
 		var result Result
-		if c.Kind == "scenario" || c.Kind == "browser" {
+		switch {
+		case !isSetup && !services.sessionOff && sessionFailed != "":
+			result = Result{CheckID: c.ID, Name: c.Name, Kind: c.Kind, Status: "blocked", Assertions: []AssertionResult{}, Error: sessionFailed}
+		case c.Kind == "scenario" || c.Kind == "browser":
 			result = a.runScenario(runCtx, c, services, covered)
-		} else {
-			result = a.execute(runCtx, app, c)
+		default:
+			result = a.execute(runCtx, app, c, services)
 		}
+		if isSetup {
+			sessionFailed = services.completeSession(session, result)
+		}
+		result = scrubResult(result, services.secrets)
 		if err = s.saveResult(r.ID, result); err != nil {
 			message = "could not persist result: " + err.Error()
 			break
@@ -260,7 +370,15 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	if runCtx.Err() != nil && message == "" {
 		message = runCtx.Err().Error()
 	}
-	if r.Release != nil && r.Release.EnvironmentRun != "" {
+	if r.Release != nil && r.Release.Mode == "existing" {
+		if message == "" {
+			message = a.observeExistingCandidate(runCtx, services, r.Release)
+		}
+		if err = s.saveReleaseRecord(r.ID, r.Release, false); err != nil && message == "" {
+			message = "could not persist release evidence"
+		}
+	}
+	if isolated && r.Release.EnvironmentRun != "" {
 		if services.release != nil {
 			services.release.setCoverage(r.Release, covered)
 			if message == "" {
@@ -279,7 +397,7 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 			message = "could not persist release evidence"
 		}
 	}
-	return s.finish(r.ID, message)
+	return s.finish(r.ID, scrubText(message, services.secrets))
 }
 
 func watchCancellation(ctx context.Context, cancel context.CancelFunc, s store, id int64) {

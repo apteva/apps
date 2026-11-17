@@ -14,15 +14,28 @@ type store struct {
 }
 type scanner interface{ Scan(...any) error }
 
-const suiteColumns = `id,name,description,environment,archived,created_at,updated_at,release_config`
+const suiteColumns = `id,name,description,environment,archived,created_at,updated_at,release_config,suite_config`
 const checkColumns = `id,suite_id,name,kind,enabled,definition`
-const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,error,created_at,started_at,finished_at,release_record,cancel_requested`
+const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,blocked,error,created_at,started_at,finished_at,release_record,cancel_requested`
+
+// suiteConfig holds the 0.5.0 suite fields in one JSON column.
+type suiteConfig struct {
+	Target      *TargetConfig            `json:"target,omitempty"`
+	Credentials map[string]CredentialRef `json:"credentials,omitempty"`
+	Session     *SessionConfig           `json:"session,omitempty"`
+}
 
 func scanSuite(row scanner) (s Suite, err error) {
-	var raw string
-	err = row.Scan(&s.ID, &s.Name, &s.Description, &s.Environment, &s.Archived, &s.CreatedAt, &s.UpdatedAt, &raw)
+	var raw, extra string
+	err = row.Scan(&s.ID, &s.Name, &s.Description, &s.Environment, &s.Archived, &s.CreatedAt, &s.UpdatedAt, &raw, &extra)
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &s.Release)
+	}
+	if err == nil {
+		var cfg suiteConfig
+		if err = json.Unmarshal([]byte(extra), &cfg); err == nil {
+			s.Target, s.Credentials, s.Session = cfg.Target, cfg.Credentials, cfg.Session
+		}
 	}
 	return
 }
@@ -36,7 +49,7 @@ func scanCheck(row scanner) (c Check, err error) {
 }
 func scanRun(row scanner) (r Run, err error) {
 	var raw string
-	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &raw, &r.CancelRequested)
+	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Blocked, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &raw, &r.CancelRequested)
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &r.Release)
 	}
@@ -83,6 +96,10 @@ func (s store) saveSuite(v Suite) (Suite, error) {
 			return v, err
 		}
 	}
+	if err := validateSuiteExtensions(&v); err != nil {
+		return v, err
+	}
+	config := encode(suiteConfig{v.Target, v.Credentials, v.Session})
 	v.Name = strings.TrimSpace(v.Name)
 	if v.Name == "" || len(v.Name) > 200 || len(v.Description) > 5000 || len(v.Environment) > 200 {
 		return v, errors.New("name (1–200 characters), description (up to 5000), and environment (up to 200) required")
@@ -96,13 +113,13 @@ func (s store) saveSuite(v Suite) (Suite, error) {
 	}
 	defer tx.Rollback()
 	if v.ID == 0 {
-		res, e := tx.Exec(`INSERT INTO test_suites(project_id,name,description,environment,created_at,updated_at,release_config) VALUES(?,?,?,?,?,?,?)`, s.project, v.Name, v.Description, v.Environment, now(), now(), encode(v.Release))
+		res, e := tx.Exec(`INSERT INTO test_suites(project_id,name,description,environment,created_at,updated_at,release_config,suite_config) VALUES(?,?,?,?,?,?,?,?)`, s.project, v.Name, v.Description, v.Environment, now(), now(), encode(v.Release), config)
 		if e != nil {
 			return v, e
 		}
 		v.ID, err = res.LastInsertId()
 	} else {
-		err = changed(tx.Exec(`UPDATE test_suites SET name=?,description=?,environment=?,updated_at=?,release_config=? WHERE project_id=? AND id=? AND archived=0`, v.Name, v.Description, v.Environment, now(), encode(v.Release), s.project, v.ID))
+		err = changed(tx.Exec(`UPDATE test_suites SET name=?,description=?,environment=?,updated_at=?,release_config=?,suite_config=? WHERE project_id=? AND id=? AND archived=0`, v.Name, v.Description, v.Environment, now(), encode(v.Release), config, s.project, v.ID))
 	}
 	if err != nil {
 		return v, err
@@ -163,7 +180,7 @@ func (s store) saveCheck(c Check) (Check, error) {
 	if err != nil {
 		return c, err
 	}
-	if err = validateScenarioBinding(c, suite.Release); err != nil {
+	if err = validateScenarioBinding(c, suite); err != nil {
 		return c, err
 	}
 	if c.ID == 0 {
@@ -205,10 +222,10 @@ func (s store) deleteCheck(id int64) error {
 	return tx.Commit()
 }
 func (s store) queue(suite int64, trigger, key string) (Run, error) {
-	return s.queueRelease(suite, trigger, key, QueueOptions{}, environmentDefinition{})
+	return s.queueRelease(suite, trigger, key, QueueOptions{}, queuePrep{})
 }
 
-func (s store) queueRelease(suite int64, trigger, key string, options QueueOptions, fixture environmentDefinition) (Run, error) {
+func (s store) queueRelease(suite int64, trigger, key string, options QueueOptions, prep queuePrep) (Run, error) {
 	if len(key) > 200 {
 		return Run{}, errors.New("request_key exceeds 200 characters")
 	}
@@ -265,16 +282,55 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 	}
 	r := Run{SuiteID: suite, SuiteName: v.Name, Environment: v.Environment, Status: "queued", Trigger: trigger, CreatedAt: now()}
 	for _, check := range checks {
-		if err = validateScenarioBinding(check, v.Release); err != nil {
+		if err = validateScenarioBinding(check, v); err != nil {
 			return r, err
 		}
 	}
-	snapshot := releaseSnapshot{}
-	if v.Release != nil {
+	snapshot := releaseSnapshot{Target: v.Target, Credentials: v.Credentials, Session: v.Session}
+	if v.Session != nil {
+		setups := 0
+		for _, check := range checks {
+			if check.Name == v.Session.SetupCheck {
+				setups++
+				if check.Kind != "scenario" && check.Kind != "browser" {
+					return r, errors.New("the session setup check must be a scenario or browser check")
+				}
+				if v.Session.Kind == "browser" && !hasBrowser(check) {
+					return r, errors.New("a browser session setup check needs browser steps")
+				}
+			}
+		}
+		if setups != 1 {
+			return r, fmt.Errorf("session.setup_check %q must name exactly one enabled check (found %d)", v.Session.SetupCheck, setups)
+		}
+	}
+	if v.Target != nil {
+		snapshot.Candidate = prep.Candidate
+		if v.Target.Mode == "isolated" {
+			config, err := generatedReleaseConfig(v.Target, prep)
+			if err != nil {
+				return r, err
+			}
+			snapshot.Config, snapshot.Fixture = config, prep.Fixture.Spec
+			r.Release = &ReleaseRecord{Mode: "isolated", CandidateDigest: options.CandidateDigest, BuildID: prep.BuildID,
+				SuiteRevision: suiteRevision(v, checks), FixtureRevision: canonicalDigest(prep.Fixture.Spec)}
+		} else if options.CandidateDigest != "" {
+			r.Release = &ReleaseRecord{Mode: "existing", CandidateDigest: options.CandidateDigest, BuildID: prep.BuildID,
+				SuiteRevision: suiteRevision(v, checks), FixtureRevision: targetRevision(v.Target)}
+		} else if options.SuiteRevision != "" || options.FixtureRevision != "" {
+			return r, errors.New("revision pins need a candidate; set target.candidate or pass candidate_digest")
+		}
+		if r.Release != nil && (options.SuiteRevision != "" && options.SuiteRevision != r.Release.SuiteRevision ||
+			options.FixtureRevision != "" && options.FixtureRevision != r.Release.FixtureRevision) {
+			return r, fmt.Errorf("revision mismatch: requested suite %s / fixture %s, current suite %s / fixture %s",
+				short(options.SuiteRevision), short(options.FixtureRevision), short(r.Release.SuiteRevision), short(r.Release.FixtureRevision))
+		}
+	} else if v.Release != nil {
+		fixture := prep.Fixture
 		if !digestPattern.MatchString(options.CandidateDigest) {
 			return r, errors.New("release run requires a lowercase SHA-256 candidate_digest")
 		}
-		if err = checkFixture(fixture, v.Release); err != nil {
+		if err := checkFixture(fixture, v.Release); err != nil {
 			return r, err
 		}
 		r.Release = &ReleaseRecord{
@@ -288,8 +344,8 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 		if len(v.Release.OpenAPI) > 0 {
 			r.Release.OpenAPIDigest = canonicalDigest(v.Release.OpenAPI)
 		}
-		snapshot = releaseSnapshot{Config: v.Release, Fixture: fixture.Spec}
-	} else if options != (QueueOptions{}) {
+		snapshot.Config, snapshot.Fixture = v.Release, fixture.Spec
+	} else if options.CandidateDigest != "" || options.Candidate != nil || options.SuiteRevision != "" || options.FixtureRevision != "" {
 		return r, errors.New("candidate and revision options require a release suite")
 	}
 	res, err := tx.Exec(`INSERT INTO test_runs(project_id,suite_id,suite_name,environment,status,trigger,request_key,snapshot,created_at,release_record,fixture_spec) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, s.project, suite, v.Name, v.Environment, r.Status, trigger, requestKey, encode(checks), r.CreatedAt, encode(r.Release), encode(snapshot))
@@ -374,8 +430,8 @@ func (s store) finish(id int64, message string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var passed, failed int
-	if err = tx.QueryRow(`SELECT COALESCE(sum(status='passed'),0),COALESCE(sum(status!='passed'),0) FROM test_results WHERE project_id=? AND run_id=?`, s.project, id).Scan(&passed, &failed); err != nil {
+	var passed, failed, blocked int
+	if err = tx.QueryRow(`SELECT COALESCE(sum(status='passed'),0),COALESCE(sum(status!='passed' AND status!='blocked'),0),COALESCE(sum(status='blocked'),0) FROM test_results WHERE project_id=? AND run_id=?`, s.project, id).Scan(&passed, &failed, &blocked); err != nil {
 		return err
 	}
 	var cancelled bool
@@ -386,10 +442,10 @@ func (s store) finish(id int64, message string) error {
 		message = "run cancelled"
 	}
 	status := "passed"
-	if failed > 0 || message != "" || passed == 0 {
+	if failed > 0 || blocked > 0 || message != "" || passed == 0 {
 		status = "failed"
 	}
-	if err = changed(tx.Exec(`UPDATE test_runs SET status=?,passed=?,failed=?,error=?,finished_at=? WHERE project_id=? AND id=? AND status='running'`, status, passed, failed, message, now(), s.project, id)); err != nil {
+	if err = changed(tx.Exec(`UPDATE test_runs SET status=?,passed=?,failed=?,blocked=?,error=?,finished_at=? WHERE project_id=? AND id=? AND status='running'`, status, passed, failed, blocked, message, now(), s.project, id)); err != nil {
 		return err
 	}
 	r, err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM test_runs WHERE project_id=? AND id=?`, s.project, id))

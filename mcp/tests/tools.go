@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -20,9 +21,13 @@ func (a *App) MCPTools() []sdk.Tool {
 	id := map[string]any{"type": "integer", "minimum": 1}
 	str := field("string")
 	releaseArgs := map[string]any{"suite_id": id, "candidate_digest": str, "suite_revision": str, "fixture_revision": str}
+	candidate := map[string]any{"type": "object", "description": "Deploy candidate resolved when the run is queued: {deployment_id, environment?, build: \"live\" | \"latest_succeeded\" | build ID}.", "properties": map[string]any{"deployment_id": id, "environment": str, "build": map[string]any{}}}
 	assertion := object(map[string]any{"path": map[string]any{"type": "string", "description": "JSON pointer into runner output; /response/total for functions, /status_code or /json/total for HTTP. Empty selects the whole output."}, "op": map[string]any{"type": "string", "enum": []string{"equals", "not_equals", "exists", "contains", "lt", "lte", "gt", "gte"}}, "value": map[string]any{}}, "path", "op")
 	definition := object(map[string]any{
-		"function": str, "event": map[string]any{}, "url": str, "method": str, "headers": map[string]any{"type": "object", "additionalProperties": str}, "body": str,
+		"function": str, "event": map[string]any{}, "url": str, "target": str, "path": str, "method": str,
+		"header_refs": map[string]any{"type": "object", "description": "Header name → {ref: \"credentials.<alias>.<field>\", prefix?}. Needs a named target."},
+		"budget_ms":   map[string]any{"type": "integer", "minimum": 0, "description": "Fail the check when it takes longer than this."},
+		"session":     map[string]any{"type": "string", "enum": []string{"none"}, "description": "Opt out of the suite session, e.g. to test sign-in itself."}, "headers": map[string]any{"type": "object", "additionalProperties": str}, "body": str,
 		"timeout_ms": map[string]any{"type": "integer", "minimum": 100, "maximum": 30000, "default": 10000},
 		"assertions": map[string]any{"type": "array", "items": assertion, "minItems": 1, "maxItems": 50},
 		"steps":      map[string]any{"type": "array", "items": field("object")},
@@ -33,12 +38,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	}{
 		{"tests_suite_get", "Get a suite including its frozen release configuration and OpenAPI contract.", object(map[string]any{"id": id}, "id")},
 		{"tests_suites_list", "List active suites in the current project.", object(map[string]any{})},
-		{"tests_suite_save", "Create (omit id) or replace a suite's name, description and environment label. Optional release configuration binds a pinned environment and candidate probe.", object(map[string]any{"id": id, "name": str, "description": str, "environment": str, "release": map[string]any{"type": []string{"object", "null"}}}, "name")},
+		{"tests_suite_save", "Create (omit id) or replace a suite. Optional target runs it against deployed endpoints (mode existing) or an isolated environment Tests generates and pins (mode isolated). credentials maps aliases to entries in the encrypted credentials setting; session signs in once per run. release keeps the hand-written isolated configuration.", object(map[string]any{"id": id, "name": str, "description": str, "environment": str, "release": map[string]any{"type": []string{"object", "null"}}, "target": map[string]any{"type": []string{"object", "null"}}, "credentials": map[string]any{"type": []string{"object", "null"}}, "session": map[string]any{"type": []string{"object", "null"}}}, "name")},
 		{"tests_suite_archive", "Archive a suite. Existing queued runs and history remain.", object(map[string]any{"id": id}, "id")},
 		{"tests_checks_list", "List all enabled and disabled checks in a suite.", object(map[string]any{"suite_id": id}, "suite_id")},
 		{"tests_check_save", "Create (omit id) or fully replace a check or scenario. Standalone Function checks invoke the active version; HTTP checks do not follow redirects. Requires at least one assertion.", object(map[string]any{"id": id, "suite_id": id, "name": str, "kind": map[string]any{"type": "string", "enum": []string{"function", "http", "scenario", "browser"}}, "enabled": map[string]any{"type": "boolean", "default": true}, "definition": definition}, "suite_id", "name", "kind", "definition")},
 		{"tests_check_delete", "Delete a check. Prior runs retain their immutable definitions and results.", object(map[string]any{"id": id}, "id")},
-		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str, "candidate_digest": str, "suite_revision": str, "fixture_revision": str}, "suite_id")},
+		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries (a retry reuses the build resolved first). Pass candidate to resolve a Deploy build, or candidate_digest. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str, "candidate_digest": str, "candidate": candidate, "suite_revision": str, "fixture_revision": str}, "suite_id")},
 		{"tests_runs_list", "List the most recent 100 runs, optionally filtered by suite_id.", object(map[string]any{"suite_id": id})},
 		{"tests_run_cancel", "Cancel a queued or running test.", object(map[string]any{"id": id}, "id")},
 		{"tests_release_spec", "Resolve the current suite and fixture digests for release policy configuration.", object(map[string]any{"suite_id": id}, "suite_id")},
@@ -84,6 +89,21 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		if e := decodeArgsLimit(args, &v, maxSuitePayload); e != nil {
 			return nil, e
 		}
+		if v.Target != nil && v.Target.Environment != nil {
+			v.Target.Environment.Pinned = nil // Tests owns the pin.
+		}
+		if e := validateSuiteExtensions(&v); e != nil {
+			return nil, e
+		}
+		var previous *Suite
+		if v.ID != 0 {
+			if old, e := s.getSuite(v.ID); e == nil {
+				previous = &old
+			}
+		}
+		if e := a.pinEnvironment(ctx, app, &v, previous); e != nil {
+			return nil, e
+		}
 		v, e := s.saveSuite(v)
 		return map[string]any{"suite": v}, e
 	case "tests_suite_archive":
@@ -95,6 +115,15 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		v := Check{Enabled: true}
 		if e := decodeArgs(args, &v); e != nil {
 			return nil, e
+		}
+		if v.Enabled && hasBrowser(v) {
+			suite, e := s.getSuite(v.SuiteID)
+			if e != nil {
+				return nil, e
+			}
+			if e = a.checkBrowserBinding(ctx, app, suite); e != nil {
+				return nil, fmt.Errorf("browser checks need Computer: %w", e)
+			}
 		}
 		v, e := s.saveCheck(v)
 		return map[string]any{"check": v}, e

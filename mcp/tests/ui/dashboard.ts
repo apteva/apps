@@ -4,7 +4,7 @@ export type WidgetHostProps = {
 };
 export type WidgetPreferences = { hours: 24 | 168; suite: number; environment: string; limit: number; group: boolean };
 export type WidgetOptions = { suites: { id: number; name: string; archived: boolean }[]; environments: string[] };
-export type WidgetRun = { id: number; suite_id: number; suite_name: string; environment: string; status: string; passed: number; failed: number; created_at: string; duration_ms: number | null };
+export type WidgetRun = { id: number; suite_id: number; suite_name: string; environment: string; status: string; passed: number; failed: number; blocked?: number; created_at: string; duration_ms: number | null };
 export type WidgetFailure = { run_id: number; suite_id: number; suite_name: string; environment: string; check_id: number; check_name: string; step_id?: string; message: string; created_at: string; occurrences: number; has_screenshot: boolean };
 export type WidgetDay = { date: string; runs: number; passed: number; failed: number; cancelled: number };
 export type WidgetData = {

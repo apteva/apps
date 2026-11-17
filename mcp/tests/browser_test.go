@@ -119,7 +119,7 @@ func TestBrowserDiagnosticsBlockVerdictAndRetainOwnedScreenshot(t *testing.T) {
 	}
 	digest := strings.Repeat("a", 64)
 	def := environmentDefinition{ID: config.EnvironmentID, SpecVersion: 1, Spec: json.RawMessage(`{"version":1,"ttl_seconds":300,"network_mode":"block","integration_mode":"mock","app_install_ids":[1]}`)}
-	r, err := s.queueRelease(suite.ID, "tool", "browser", QueueOptions{CandidateDigest: digest}, def)
+	r, err := s.queueRelease(suite.ID, "tool", "browser", QueueOptions{CandidateDigest: digest}, queuePrep{Fixture: def})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -214,22 +214,22 @@ func TestHTTPBoundsAndRedirects(t *testing.T) {
 	_, c := seed(t, s, "http", server.URL)
 	c.Definition.URL = server.URL + "/slow"
 	c.Definition.TimeoutMS = 100
-	if r := a.execute(context.Background(), ctx, c); r.Status != "error" || !strings.Contains(r.Error, "deadline") {
+	if r := a.execute(context.Background(), ctx, c, &appRunContext{}); r.Status != "error" || !strings.Contains(r.Error, "deadline") {
 		t.Fatal(r)
 	}
 	c.Definition.URL = server.URL + "/large"
 	c.Definition.TimeoutMS = 1000
-	if r := a.execute(context.Background(), ctx, c); r.Status != "error" || !strings.Contains(r.Error, "256 KiB") {
+	if r := a.execute(context.Background(), ctx, c, &appRunContext{}); r.Status != "error" || !strings.Contains(r.Error, "256 KiB") {
 		t.Fatal(r)
 	}
 	c.Definition.URL = server.URL + "/redirect"
 	c.Definition.Assertions[0].Value = float64(302)
-	if r := a.execute(context.Background(), ctx, c); r.Status != "passed" {
+	if r := a.execute(context.Background(), ctx, c, &appRunContext{}); r.Status != "passed" {
 		t.Fatal(r)
 	}
 	a.client = httpClient(false)
 	c.Definition.URL = server.URL
-	if r := a.execute(context.Background(), ctx, c); r.Status != "error" || !strings.Contains(r.Error, "private network") {
+	if r := a.execute(context.Background(), ctx, c, &appRunContext{}); r.Status != "error" || !strings.Contains(r.Error, "private network") {
 		t.Fatal(r)
 	}
 }
@@ -252,12 +252,12 @@ func TestFunctionContract(t *testing.T) {
 	}}
 	a, ctx, s := fixture(t, tk.WithPlatform(pf))
 	_, c := seed(t, s, "function", "calculate-price")
-	r := a.execute(context.Background(), ctx, c)
+	r := a.execute(context.Background(), ctx, c, &appRunContext{})
 	if r.Status != "passed" {
 		t.Fatalf("function check failed: %+v", r)
 	}
 	status = "error"
-	r = a.execute(context.Background(), ctx, c)
+	r = a.execute(context.Background(), ctx, c, &appRunContext{})
 	if r.Status != "error" {
 		t.Fatal("function errors must not pass assertions", r)
 	}
@@ -274,7 +274,7 @@ func TestFunctionTimeoutBound(t *testing.T) {
 	_, c := seed(t, s, "function", "slow")
 	c.Definition.TimeoutMS = 100
 	start := time.Now()
-	r := a.execute(context.Background(), ctx, c)
+	r := a.execute(context.Background(), ctx, c, &appRunContext{})
 	if r.Status != "error" || time.Since(start) > time.Second {
 		t.Fatal("deadline not enforced", r)
 	}

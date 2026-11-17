@@ -228,7 +228,9 @@ func TestScenarioMigrationPreservesHistoryAndCheckIDs(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	apply("002_scenarios.sql")
+	for _, name := range []string{"002_scenarios.sql", "003_browser.sql", "004_dashboard.sql", "005_targets.sql"} {
+		apply(name)
+	}
 	s := store{db, "p"}
 	r, err := s.run(7)
 	if err != nil || r.Release != nil || len(r.Results) != 1 || r.Results[0].CheckID != 12 {
@@ -250,7 +252,7 @@ func TestParallelScenarioAndRuntimeURLBoundaries(t *testing.T) {
 	}
 	session := &releaseSession{gateway: base}
 	for _, escaped := range []string{"https://example.com/steal", "//example.com/steal", "/../private", "/%2e%2e/private", "/p%2fprivate", "/p%5cprivate"} {
-		if _, _, err = scenarioURL("{{location}}", map[string]any{"location": escaped}, session); err == nil {
+		if _, _, err = scenarioURL("{{location}}", map[string]any{"location": escaped}, session.gateway); err == nil {
 			t.Fatalf("accepted %s", escaped)
 		}
 	}

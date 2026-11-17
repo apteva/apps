@@ -14,33 +14,42 @@ const maxPayload = 256 << 10
 const maxSuitePayload = 1 << 20
 
 type Suite struct {
-	ID          int64          `json:"id"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Environment string         `json:"environment"`
-	Release     *ReleaseConfig `json:"release,omitempty"`
-	Archived    bool           `json:"archived"`
-	CreatedAt   string         `json:"created_at"`
-	UpdatedAt   string         `json:"updated_at"`
+	ID          int64                    `json:"id"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	Environment string                   `json:"environment"`
+	Release     *ReleaseConfig           `json:"release,omitempty"`
+	Target      *TargetConfig            `json:"target,omitempty"`
+	Credentials map[string]CredentialRef `json:"credentials,omitempty"`
+	Session     *SessionConfig           `json:"session,omitempty"`
+	Archived    bool                     `json:"archived"`
+	CreatedAt   string                   `json:"created_at"`
+	UpdatedAt   string                   `json:"updated_at"`
 }
 
 // Definition is versioned by copying the whole check into the queued run.
 // JSON pointers address the normalized runner output (e.g. /response/total).
 type Definition struct {
-	Function   string            `json:"function,omitempty"`
-	Event      any               `json:"event,omitempty"`
-	URL        string            `json:"url,omitempty"`
-	Method     string            `json:"method,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	Body       string            `json:"body,omitempty"`
-	TimeoutMS  int               `json:"timeout_ms"`
-	Assertions []Assertion       `json:"assertions,omitempty"`
-	Steps      []Step            `json:"steps,omitempty"`
+	Function   string               `json:"function,omitempty"`
+	Event      any                  `json:"event,omitempty"`
+	URL        string               `json:"url,omitempty"`
+	Target     string               `json:"target,omitempty"`
+	Path       string               `json:"path,omitempty"`
+	Method     string               `json:"method,omitempty"`
+	Headers    map[string]string    `json:"headers,omitempty"`
+	HeaderRefs map[string]HeaderRef `json:"header_refs,omitempty"`
+	BudgetMS   int                  `json:"budget_ms,omitempty"`
+	Session    string               `json:"session,omitempty"`
+	Body       string               `json:"body,omitempty"`
+	TimeoutMS  int                  `json:"timeout_ms"`
+	Assertions []Assertion          `json:"assertions,omitempty"`
+	Steps      []Step               `json:"steps,omitempty"`
 }
 type Assertion struct {
-	Path  string `json:"path"`
-	Op    string `json:"op"`
-	Value any    `json:"value,omitempty"`
+	Path   string `json:"path"`
+	Op     string `json:"op"`
+	Value  any    `json:"value,omitempty"`
+	Decode string `json:"decode,omitempty"`
 }
 type Check struct {
 	ID         int64      `json:"id"`
@@ -59,6 +68,7 @@ type Run struct {
 	Trigger         string         `json:"trigger"`
 	Passed          int            `json:"passed"`
 	Failed          int            `json:"failed"`
+	Blocked         int            `json:"blocked"`
 	Error           string         `json:"error"`
 	CreatedAt       string         `json:"created_at"`
 	StartedAt       string         `json:"started_at"`
@@ -138,9 +148,24 @@ func validateCheck(c *Check) error {
 			return errors.New("definition.function required")
 		}
 	case "http":
-		u, err := url.Parse(d.URL)
-		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-			return errors.New("definition.url must be an HTTP(S) URL without embedded credentials")
+		if d.Target != "" || d.Path != "" {
+			if d.URL != "" {
+				return errors.New("use either definition.url or definition.target with path, not both")
+			}
+			if !slugPattern.MatchString(d.Target) || d.Path == "" || validateGatewayPath(strings.SplitN(d.Path, "?", 2)[0]) != nil {
+				return errors.New("definition.target needs a named target and a relative path")
+			}
+		} else {
+			u, err := url.Parse(d.URL)
+			if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+				return errors.New("definition.url must be an HTTP(S) URL without embedded credentials")
+			}
+			if len(d.HeaderRefs) > 0 {
+				return errors.New("header_refs require a named target")
+			}
+		}
+		if err := validateHeaderRefs(d.HeaderRefs); err != nil {
+			return err
 		}
 		if d.Method == "" {
 			d.Method = "GET"
@@ -158,6 +183,9 @@ func validateCheck(c *Check) error {
 		}
 	default:
 		return errors.New("kind must be function, http, or scenario")
+	}
+	if d.BudgetMS < 0 || d.BudgetMS > d.TimeoutMS {
+		return errors.New("budget_ms must be between 0 and timeout_ms")
 	}
 	return validateAssertions(d.Assertions)
 }
@@ -177,6 +205,9 @@ func validateAssertions(assertions []Assertion) error {
 				}
 				i++
 			}
+		}
+		if a.Decode != "" && a.Decode != "json" {
+			return errors.New(`assertion decode must be "json" when set`)
 		}
 		switch a.Op {
 		case "equals", "not_equals", "exists":

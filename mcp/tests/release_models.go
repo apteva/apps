@@ -21,6 +21,9 @@ type ReleaseConfig struct {
 	Identities          map[string]Identity `json:"identities,omitempty"`
 	ReadTools           map[string][]string `json:"read_tools,omitempty"`
 	OpenAPI             json.RawMessage     `json:"openapi,omitempty"`
+	// Generated marks a configuration Tests derived from a suite target. Its
+	// runtime app versions are observed and pinned only where declared.
+	Generated bool `json:"generated,omitempty"`
 }
 
 type ToolProbe struct {
@@ -37,7 +40,10 @@ type Identity struct {
 }
 
 type ReleaseRecord struct {
+	Mode            string            `json:"mode,omitempty"`
 	CandidateDigest string            `json:"candidate_digest"`
+	BuildID         int64             `json:"build_id,omitempty"`
+	Inconclusive    bool              `json:"inconclusive,omitempty"`
 	ObservedDigest  string            `json:"observed_digest,omitempty"`
 	SuiteRevision   string            `json:"suite_revision"`
 	FixtureRevision string            `json:"fixture_revision"`
@@ -50,14 +56,16 @@ type ReleaseRecord struct {
 }
 
 type QueueOptions struct {
-	CandidateDigest string `json:"candidate_digest"`
-	SuiteRevision   string `json:"suite_revision"`
-	FixtureRevision string `json:"fixture_revision"`
+	CandidateDigest string        `json:"candidate_digest"`
+	SuiteRevision   string        `json:"suite_revision"`
+	FixtureRevision string        `json:"fixture_revision"`
+	Candidate       *CandidateRef `json:"candidate,omitempty"`
 }
 
 type environmentDefinition struct {
 	ID          string          `json:"id"`
 	SpecVersion int             `json:"spec_version"`
+	SpecDigest  string          `json:"spec_digest,omitempty"`
 	Spec        json.RawMessage `json:"spec"`
 }
 
@@ -88,11 +96,22 @@ func canonicalDigest(v any) string {
 }
 
 func suiteRevision(v Suite, checks []Check) string {
+	if v.Target == nil && v.Session == nil && len(v.Credentials) == 0 {
+		// Unchanged from 0.4.0 so existing Deploy gate pins stay valid.
+		return canonicalDigest(struct {
+			ID      int64
+			Release *ReleaseConfig
+			Checks  []Check
+		}{v.ID, v.Release, checks})
+	}
 	return canonicalDigest(struct {
-		ID      int64
-		Release *ReleaseConfig
-		Checks  []Check
-	}{v.ID, v.Release, checks})
+		ID          int64
+		Release     *ReleaseConfig
+		Target      *TargetConfig
+		Credentials map[string]CredentialRef
+		Session     *SessionConfig
+		Checks      []Check
+	}{v.ID, v.Release, v.Target, v.Credentials, v.Session, checks})
 }
 
 func (r *ReleaseConfig) allowsRead(app, tool string) bool {
@@ -152,9 +171,15 @@ func (r *ReleaseConfig) validate() error {
 }
 
 func checkFixture(def environmentDefinition, release *ReleaseConfig) error {
-	if def.ID != release.EnvironmentID || def.SpecVersion != release.EnvironmentRevision ||
-		len(def.Spec) == 0 || len(def.Spec) > maxPayload {
-		return errors.New("environment definition does not match the pinned fixture revision")
+	switch {
+	case def.ID != release.EnvironmentID:
+		return fmt.Errorf("environment ID mismatch: pinned %q, Environments returned %q", release.EnvironmentID, def.ID)
+	case def.SpecVersion != release.EnvironmentRevision:
+		return fmt.Errorf("environment %s: pinned revision v%d, found v%d", release.EnvironmentID, release.EnvironmentRevision, def.SpecVersion)
+	case len(def.Spec) == 0 || string(def.Spec) == "null":
+		return fmt.Errorf("environment %s v%d has an empty spec", release.EnvironmentID, def.SpecVersion)
+	case len(def.Spec) > maxPayload:
+		return fmt.Errorf("environment %s v%d spec is %d KiB; hand-written release suites accept up to %d KiB (use a suite target to pin by digest instead)", release.EnvironmentID, def.SpecVersion, (len(def.Spec)+1023)>>10, maxPayload>>10)
 	}
 	var policy fixturePolicy
 	if err := json.Unmarshal(def.Spec, &policy); err != nil {

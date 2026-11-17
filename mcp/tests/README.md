@@ -438,3 +438,117 @@ complete statistics, saved-run/screenshot navigation, archived history,
 refresh/error/empty states, project changes, light/dark themes and 240px
 containers. `TESTS_HOST_VENDOR` and `TESTS_HOST_CSS` can point to a local dashboard
 build to verify its actual vendor modules and stylesheet.
+
+## Suite targets, credentials and sessions (0.5.0)
+
+A suite can declare a `target` instead of a hand-written `release`. Suites
+without either keep the earlier behaviour.
+
+### Existing mode: deployed endpoints
+
+```json
+{"name":"Staging smoke","target":{"mode":"existing",
+  "targets":{"frontend":{"base_url":"https://staging.example.com/ui"},"api":{"base_url":"https://staging.example.com/api"}},
+  "candidate":{"deployment_id":12}},
+ "credentials":{"operator":{"ref":"operator"}},
+ "session":{"kind":"browser","setup_check":"login"}}
+```
+
+- Checks address targets by name and a relative path: HTTP checks use
+  `{"target":"api","path":"/health"}` (instead of `url`), scenario HTTP steps
+  use `"target":"api"`, browser steps `navigate` with `target` and `path`.
+- `candidate` names a Deploy deployment. Tests resolves the live build and its
+  digest through Deploy when the run is queued, checks it again before the
+  checks start, and after they finish. If the live build changed, the run is
+  marked inconclusive and produces no passing verdict. Only `"build":"live"`
+  (the default) is accepted here; an existing-mode verdict needs a candidate.
+- The verdict's `fixture_revision` is a digest of the mode, targets and
+  candidate deployment; `tests_release_spec` returns it.
+- HTTP requests use the normal outbound client (private addresses still need
+  `APTEVA_TESTS_ALLOW_PRIVATE_NETWORK=true`).
+
+### Browser checks in existing mode
+
+Existing-mode browser checks use Computer's regular browser tools
+(`browser_session`, `computer_use`, `browser_screenshot`) rather than the
+isolated test browser. Consequences:
+
+- Locate elements with `test_id` (matched as `[data-testid="…"]`) or a CSS
+  `selector`. `text` locators work with `observe` only; `role` locators are
+  rejected.
+- Observations expose `/visible`, `/path`, `/url`, `/target` and
+  `/action_dispatched` (plus `/checked`, `/current_value`, `/text_value`,
+  `/verified` from non-sensitive inputs). Element counts and exact element
+  text are not available.
+- Computer reports no console errors or failed sub-requests for regular
+  sessions, and pages are not network-restricted.
+- Failure screenshots are not masked by Computer, so Tests skips the
+  screenshot for any check that entered a credential.
+
+### Credentials
+
+Put values in the Tests install's encrypted **Test credentials** setting:
+
+```json
+{"<project_id>":{"operator":{"email":"qa@example.com","password":"…"},"api":{"key":"…"}}}
+```
+
+Declare aliases on the suite (`"credentials":{"operator":{"ref":"operator"}}`)
+and reference fields only through reference fields: browser
+`"value_ref":"credentials.operator.password"`, or HTTP
+`"header_refs":{"X-API-Key":{"ref":"credentials.api.key"}}` (Authorization,
+Cookie and `X-` headers; `prefix` optional; requires a named target). Missing
+values fail the run before any check starts. Every resolved value and session
+token is replaced with `[redacted]` in stored results, errors and evidence.
+
+### Sessions
+
+- `{"kind":"browser","setup_check":"login"}` (existing mode): the setup check
+  runs first in a new saved Computer browser context; every later browser
+  check opens a fresh session from that context, so it starts signed in. The
+  context record is deleted when the run ends. Computer keeps the local Chrome
+  profile directory of a deleted context on disk.
+- `{"kind":"bearer","setup_check":"login","capture":"token"}` (existing mode):
+  the setup scenario captures a token; later HTTP steps and checks with a
+  target receive `Authorization: Bearer <token>` (`header`/`prefix`
+  configurable).
+- A check opts out with `"session":"none"` in its definition.
+- If the setup check fails, dependent checks are recorded as `blocked`. Runs
+  report `blocked` counts; blocked checks fail the run and its verdict.
+
+### Isolated mode: generated environments
+
+```json
+{"target":{"mode":"isolated","candidate":{"deployment_id":12,"build":"latest_succeeded"},
+  "targets":{"api":{"app":"api","path":"/gw/items"}},
+  "environment":{"apps":["database","functions","api","deploy"],"data":{"snapshot_id":"snap_1"},"ttl_seconds":900}}}
+```
+
+- Saving the suite creates (or updates) an Environments definition with block
+  networking and mock integrations, and pins its `spec_version` and
+  `spec_digest` (Environments 0.11.0 or newer). A changed definition fails the
+  next run with `pinned v1/abc…, found v2/def…`; save the suite to re-pin.
+- Runs start through Environments' pinned form with `seed_vars`
+  `candidate_digest` and `candidate_build_id`, so seeds can load the candidate.
+- The candidate build is resolved through Deploy when the run is queued and
+  stored with it; a retry with the same `request_key` reuses it.
+- With `deploy` in the environment, the runtime probe defaults to
+  `deploy_candidate_digest` for that build; otherwise set `candidate_probe`
+  (and optional `read_tools`). The probe still has to match before and after
+  the checks.
+- Runtime app versions are recorded from the runtime. Pin them with
+  `environment.app_versions` to fail on drift.
+- HTTP steps need a `target`. Browser checks use the isolated test browser,
+  one fresh profile per check; browser sessions are not available in this mode.
+
+### Other 0.5.0 changes
+
+- Assertions accept `"decode":"json"` to follow a JSON pointer through a
+  string-encoded value, such as a `functions_invoke` response.
+- `budget_ms` on checks and steps fails a passing check or step that took
+  longer, recorded as a `/duration_ms` assertion.
+- Hand-written release suites report the exact fixture mismatch (wrong ID,
+  wrong revision, empty spec, or spec over 256 KiB) instead of one generic error.
+- Saving an enabled browser check verifies the Computer binding.
+- `tests_run` accepts `candidate` (`{deployment_id, environment?, build}`) as an
+  alternative to `candidate_digest` for target suites.
