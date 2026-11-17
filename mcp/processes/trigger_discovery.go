@@ -53,6 +53,8 @@ func words(s string) []string {
 
 var stopWord = map[string]bool{"the": true, "and": true, "for": true, "when": true, "with": true, "this": true, "that": true, "from": true, "new": true, "run": true, "an": true, "on": true, "of": true, "to": true, "in": true, "is": true, "it": true, "be": true, "or": true, "every": true, "whenever": true, "start": true, "assignment": true, "proces": true, "procedure": true, "step": true, "event": true, "trigger": true}
 
+var eventVerb = map[string]bool{"added": true, "created": true, "changed": true, "updated": true, "deleted": true, "removed": true, "completed": true, "started": true, "failed": true, "sent": true, "received": true, "approved": true, "paid": true, "closed": true, "opened": true, "won": true, "lost": true, "cancelled": true, "canceled": true, "scheduled": true, "published": true, "archived": true, "stage": true, "statu": true}
+
 func wordSet(parts ...string) map[string]bool {
 	set := map[string]bool{}
 	for _, p := range parts {
@@ -151,26 +153,44 @@ func scoreCandidate(src sdk.AppEventSource, ev sdk.EventDecl, d Definition, x As
 	if mapped > 0 {
 		c.Reasons = append(c.Reasons, fmt.Sprintf("fills %d parameter(s) from documented fields", mapped))
 	}
-	text := wordSet(src.App, src.Name, ev.Name, ev.Description)
-	hits := func(set map[string]bool) []string {
-		out := []string{}
+	// Names (app, install, topic) are the strong signal; descriptions are
+	// prose, so a word found only there counts little. Procedure text is long
+	// prose too: only words that name the app or event count from it.
+	names := wordSet(src.App, src.Name, ev.Name)
+	described := wordSet(ev.Description)
+	hits := func(set map[string]bool, prose bool) ([]string, float64) {
+		out, weight := []string{}, 0.0
 		for w := range set {
-			if len(w) > 2 && text[w] {
-				out = append(out, w)
+			// Event verbs (added, changed…) separate events in a query but are
+			// everyday prose in a procedure, so only the query counts them.
+			if len(w) < 3 || (!prose && eventVerb[w]) {
+				continue
+			}
+			if names[w] {
+				out, weight = append(out, w), weight+1
+			} else if prose && described[w] {
+				out, weight = append(out, w), weight+0.25
 			}
 		}
 		sort.Strings(out)
-		return out
+		return out, weight
 	}
 	// The agent's query says what should start the work; it outweighs field
 	// matches. The procedure's own text is a weaker hint.
-	if q := hits(query); len(q) > 0 {
-		c.score += 4 * float64(len(q))
+	if q, w := hits(query, true); len(q) > 0 {
+		c.score += 4 * w
 		c.Reasons = append(c.Reasons, "matches query: "+strings.Join(q, ", "))
+		// Prefer the most specific event: contact.added over
+		// contact.activity.added for "a contact is added".
+		for _, word := range words(ev.Name) {
+			if !query[word] {
+				c.score -= 0.1
+			}
+		}
 	}
-	if p := hits(procedure); len(p) > 0 {
-		c.score += float64(len(p))
-		c.Reasons = append(c.Reasons, "procedure mentions: "+strings.Join(p, ", "))
+	if p, w := hits(procedure, false); len(p) > 0 {
+		c.score += w
+		c.Reasons = append(c.Reasons, "procedure names: "+strings.Join(p, ", "))
 	}
 	if !c.FieldsDocumented {
 		c.Reasons = append(c.Reasons, "fields not documented: check mappings with trigger_preview")

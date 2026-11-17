@@ -154,3 +154,36 @@ func TestTriggerCreateChecksSourceAndActivationNeedsRequiredParameters(t *testin
 		t.Fatalf("activation with full mapping: %v", e)
 	}
 }
+
+func TestTriggerSourcesIgnoresProcedureProse(t *testing.T) {
+	f := &triggerPlatform{subscriptions: map[string]sdk.AppEventSubscription{}, sources: []sdk.AppEventSource{
+		{InstallID: 60, App: "crm", Name: "CRM", Events: []sdk.EventDecl{
+			{Name: "opportunity.stage.changed", Description: "An opportunity stage changed before close; figures are not final."},
+			{Name: "contact.added", Description: "A contact was added."},
+		}},
+		{InstallID: 70, App: "billing", Name: "Billing", Events: []sdk.EventDecl{{Name: "invoice.changed", Description: "An invoice changed before payment."}}},
+	}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(f))
+	a := &App{}
+	if e := a.OnMount(ctx); e != nil {
+		t.Fatal(e)
+	}
+	d := workflowDefinition()
+	d.Name = "CRM contact stats"
+	d.Instructions = "Read the CRM contact totals. Figures are not changed before sending; only read current values."
+	p := create(t, a, d)
+	got := candidates(t, a, p, p.Assignments[0], nil)
+	if len(got) == 0 || got[0].Topic != "contact.added" {
+		t.Fatalf("procedure prose decided the ranking: %+v", got)
+	}
+	for _, c := range got {
+		if c.App == "billing" {
+			t.Fatalf("event matched only by prose words: %+v", c)
+		}
+		for _, r := range c.Reasons {
+			if strings.Contains(r, "before") || strings.Contains(r, "changed") {
+				t.Fatalf("prose word counted: %v", c.Reasons)
+			}
+		}
+	}
+}

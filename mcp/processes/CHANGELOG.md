@@ -2,6 +2,12 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Trigger ranking without a query (0.21.1)
+
+Procedure text only counts words that name an app or event subject, so
+procedure prose no longer decides the ranking; ties go to the most specific
+event. See `docs-release-0.21.1.md`.
+
 ## Trigger discovery (0.21.0)
 
 `trigger_sources` with an assignment (and a `query`) returns ranked app events
