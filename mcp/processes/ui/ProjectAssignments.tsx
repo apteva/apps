@@ -6,6 +6,7 @@ import { useScopedRevision } from "./live-events";
 export type ProjectAssignment = Assignment & {
   process_name: string;
   process_status: string;
+  process_version: number;
   run_count: number;
   ongoing_count: number;
   last_run_id?: string;
@@ -89,6 +90,9 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
                     </span>
                     <div className="sub">
                       <button className="link" onClick={(e) => { e.stopPropagation(); onProcess(x); }}>{x.process_name || "Process"}</button>
+                      {" · "}
+                      <span className="version-tag">v{x.follow_latest ? x.process_version : x.procedure_version}</span>
+                      {x.follow_latest ? " latest" : x.procedure_version < x.process_version ? ` pinned (latest v${x.process_version})` : " pinned"}
                       {x.process_status !== "active" && <> · process {x.process_status}</>}
                     </div>
                     {x.sync_error && <div className="sub">{x.sync_error}</div>}
@@ -131,6 +135,7 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
 }
 
 export const projectAssignmentStyles = `
+.ap-processes .version-tag{display:inline-block;font-size:11px;padding:1px 7px;border:1px solid var(--pc-line);border-radius:6px;color:var(--pc-text);font-variant-numeric:tabular-nums}
 .ap-processes .assignment-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ap-processes td button.link{font-weight:400;color:var(--pc-muted);text-decoration:underline;text-underline-offset:3px}
 .ap-processes td button.link:hover{color:var(--pc-text)}

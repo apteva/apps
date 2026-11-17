@@ -1079,7 +1079,7 @@ function Panel(props: Props) {
                         <Pill state={run.record.state} />
                       </span>
                       <span className="sub">
-                        {run.assignment?.name || run.record.title} · {date(run.record.created_at)}
+                        {run.assignment?.name || run.record.title} · v{run.version} · {date(run.record.created_at)}
                       </span>
                       <span className="sub">
                         {run.record.summary?.outcome || run.record.summary?.blocker || run.record.error || run.record.delivery_warning || run.record.current_step ||
@@ -1346,6 +1346,7 @@ function Panel(props: Props) {
                     <th>Agents</th>
                     <th>Assignments</th>
                     <th>Status</th>
+                    <th>Version</th>
                     <th className="hide-small">Updated</th>
                   </tr>
                 </thead>
@@ -1376,6 +1377,7 @@ function Panel(props: Props) {
                           <div className="sub">Sync pending</div>
                         )}
                       </td>
+                      <td><span className="version-tag">v{p.version}</span></td>
                       <td className="hide-small muted">{date(p.updated_at)}</td>
                     </tr>
                   ))}

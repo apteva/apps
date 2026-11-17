@@ -729,8 +729,8 @@ export default function Assignments({
                 : x.schedule.kind === "interval"
                   ? `Every ${x.schedule.every}`
                   : `${x.schedule.cron} · ${x.schedule.timezone}`}{" "}
-              · Procedure v{x.procedure_version}
-              {x.follow_latest ? " · follows latest" : " · pinned"}
+              · Procedure v{x.follow_latest ? current : x.procedure_version}
+              {x.follow_latest ? " · follows latest" : x.procedure_version < current ? ` · pinned (latest v${current})` : " · pinned"}
             </p>
             <StepAssignees
               steps={(versions.find((v) => v.version === (x.follow_latest ? current : x.procedure_version)) || versions[0])?.definition.steps || []}

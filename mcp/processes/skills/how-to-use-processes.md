@@ -338,3 +338,7 @@ scheduled, blocked and queued runs get matching stripes.
 
 In v0.19.2, run cards drop the coloured left stripe and tint; the status pill
 alone shows each run's state.
+
+In v0.19.3, procedure versions show in the process list, on run cards, on the
+project Assignments tab and on assignment cards; pins older than the latest
+version name it. `GET /processes/assignments` adds `process_version`.

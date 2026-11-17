@@ -530,9 +530,11 @@ test("main Runs tab browses executions across processes", async () => {
       button.textContent?.trim(),
     ),
   ).toEqual(["Processes", "Assignments", "Runs", "Project map"]);
+  expect(document.querySelector("tr.process-item")?.textContent).toContain("v1");
   await click("Runs");
   expect(document.body.textContent).toContain("Weekly review");
   expect(document.body.textContent).toContain("Publish digest");
+  expect(document.querySelector(".run-list")?.textContent).toContain("· v2 ·");
   expect(document.body.textContent).not.toContain("Digest published");
   expect(document.querySelector('[data-state="running"]')).toBeTruthy();
   expect(document.querySelector('[data-state="completed"]')).toBeTruthy();
@@ -562,13 +564,14 @@ test("project Assignments tab lists assignments and opens their runs", async () 
     requests.push(String(url));
     if (String(url).split("?")[0].endsWith("/processes/assignments"))
       return Response.json({ assignments: [
-        { id: "a1", process_id: "p", name: "Monday digest", owner_agent_id: 7, status: "active", process_name: "Weekly review", process_status: "active", run_count: 3, ongoing_count: 1, last_run_id: "r1", last_run_state: "running", last_run_at: "2026-09-23T10:00:00Z", parameters: {}, revision: 1, procedure_version: 1, follow_latest: true, sync_pending: false, sync_error: "" },
+        { id: "a1", process_id: "p", name: "Monday digest", owner_agent_id: 7, status: "active", process_name: "Weekly review", process_status: "active", process_version: 4, run_count: 3, ongoing_count: 1, last_run_id: "r1", last_run_state: "running", last_run_at: "2026-09-23T10:00:00Z", parameters: {}, revision: 1, procedure_version: 1, follow_latest: true, sync_pending: false, sync_error: "" },
       ] });
     return read(url as string, init);
   }) as typeof fetch;
   await click("Assignments");
   expect(document.querySelector('table[aria-label="Project assignments"]')?.textContent).toContain("Monday digest");
   expect(document.body.textContent).toContain("1 in progress");
+  expect(document.querySelector('table[aria-label="Project assignments"]')?.textContent).toContain("v4 latest");
   await click("Monday digest");
   const runsQuery = requests.filter((u) => u.includes("/processes/runs?")).at(-1)!;
   expect(runsQuery).toContain("process_id=p");

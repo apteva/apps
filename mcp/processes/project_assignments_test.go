@@ -48,7 +48,7 @@ func TestProjectAssignmentsAndProcessFilteredRuns(t *testing.T) {
 			got = y
 		}
 	}
-	if got.ID != x.ID || got.Name != "Daily digest" || got.ProcessName != p.Name || got.RunCount != 2 || got.OngoingCount != 1 || got.LastRunID != "run-new" || got.LastRunState != "running" {
+	if got.ID != x.ID || got.Name != "Daily digest" || got.ProcessName != p.Name || got.ProcessVersion != p.Version || got.RunCount != 2 || got.OngoingCount != 1 || got.LastRunID != "run-new" || got.LastRunState != "running" {
 		t.Fatalf("assignment summary: %+v", got)
 	}
 
