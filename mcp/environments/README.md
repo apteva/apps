@@ -295,3 +295,43 @@ per-install isolation, and concurrent HTTP/MCP requests through a real sidecar.
 Run with `GOWORK=off go test ./...`; `-short` skips the sidecar subprocess test.
 `GOWORK=off go test -run '^$' -bench BenchmarkDefinitionListLargeSpecifications
 -benchmem` compares the same page size across 10 and 1,000 stored definitions.
+
+## Spec digests and pinned runs (0.11.0)
+
+`environment_get`, `environment_create`, `environment_update` and each
+`environment_list` item report `spec_digest`: the canonical digest of the stored
+specification. It is the lowercase hex SHA-256 of the stored spec JSON decoded
+with numbers preserved (`UseNumber`) and re-encoded by Go's `encoding/json`, so
+object keys are sorted and insignificant whitespace is dropped. Key order and
+number spelling in a request (`1.0`, `1e0`, `1`) do not change it, because specs
+are normalised when stored. `spec_version` is only changed by callers;
+`spec_digest` changes whenever the stored spec content changes. Definitions
+saved before 0.11.0 are backfilled when the sidecar mounts.
+
+`environment_run_create` accepts exactly one of an inline `spec` (unchanged) or
+a pinned stored definition:
+
+```json
+{"kind":"test","request_id":"run_release_42","environment_id":"env_shop",
+ "spec_version":3,"spec_digest":"<64 lowercase hex>",
+ "seed_vars":{"candidate_digest":"sha256:..."}}
+```
+
+`spec_version` and `spec_digest` are required with `environment_id`. If either
+differs from the current definition, nothing starts and the call fails with
+`environment env_shop: pinned v3/abc123def456, found v4/0f1e2d3c4b5a`
+(12-character digest prefixes). On a match the run uses that stored spec, after
+`seed_vars` substitution, and passes through exactly the same validation and
+startup path as an inline spec.
+
+`seed_vars` holds up to 16 string values. Names match `^[a-z][a-z0-9_]{0,63}$`;
+values are at most 4,096 bytes and contain no CR or LF. Inside `seeds[].input`
+only, a JSON string that is exactly `{{name}}` is replaced by the value, and
+`{{name}}` inside a longer string is replaced textually. Unknown `{{...}}`
+placeholders are left unchanged. Object keys are never rewritten.
+
+The run reports `environment_id`, `spec_version` and `spec_digest` in the
+`environment_run_create` reply and in `run` from `environment_run_get`. A pinned
+run is not the definition's active run: it does not appear as `active_run`, is
+not reconciled or stopped by the definition's lifecycle, and is stopped with
+`environment_run_stop` like an inline run. Inline-spec runs omit the pin fields.

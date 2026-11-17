@@ -99,6 +99,11 @@ func assertionTypeCatalog() []string {
 
 func containsPseudoEvaluationArgs(args map[string]any) bool {
 	for _, field := range pseudoEvaluationFields {
+		// A top-level environment_id selects a pinned stored definition
+		// (0.11.0); inside spec it is still an Evals field.
+		if field == "environment_id" {
+			continue
+		}
 		if _, found := args[field]; found {
 			return true
 		}
@@ -115,13 +120,13 @@ func containsPseudoEvaluationArgs(args map[string]any) bool {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "environment_list", Description: "List one bounded page of environment summaries; use environment_get for specifications.", InputSchema: environmentListSchema, Handler: a.toolList},
-		{Name: "environment_get", Description: "Get one environment definition and runtime.", InputSchema: requiredSchema("id"), Handler: a.toolGet},
+		{Name: "environment_get", Description: "Get one environment definition, its canonical spec_digest, and runtime.", InputSchema: requiredSchema("id"), Handler: a.toolGet},
 		{Name: "environment_create", Description: "Create a durable environment definition.", InputSchema: requiredSchema("name"), Handler: a.toolSave(false)},
 		{Name: "environment_update", Description: "Update a durable environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolSave(true)},
 		{Name: "environment_delete", Description: "Delete a stopped environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolDelete},
 		{Name: "environment_start", Description: "Start a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStart},
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
-		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
+		{Name: "environment_run_create", Description: "Start an isolated runtime from an inline EnvironmentSpec, or from a stored definition pinned by environment_id, spec_version and spec_digest. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_targets", Description: "Resolve named frontend, API and Auth targets inside a running environment.", InputSchema: requiredSchema("run_id"), Handler: a.toolRunTargets},
 		{Name: "environment_run_endpoint", Description: "Resolve a running environment app’s HTTP endpoint for a test or fixture.", InputSchema: requiredSchema("run_id", "app"), Handler: a.toolRunEndpoint},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
@@ -203,15 +208,29 @@ func (a *App) toolRunCreate(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("environment_run_create creates runtime infrastructure only; prompts, cases, suites and assertions must be executed through Evals")
 	}
 	var in struct {
-		Kind      string           `json:"kind"`
-		Spec      *EnvironmentSpec `json:"spec"`
-		RequestID string           `json:"request_id"`
+		Kind          string           `json:"kind"`
+		Spec          *EnvironmentSpec `json:"spec"`
+		RequestID     string           `json:"request_id"`
+		EnvironmentID *string          `json:"environment_id"`
+		SpecVersion   *int             `json:"spec_version"`
+		SpecDigest    *string          `json:"spec_digest"`
+		SeedVars      map[string]any   `json:"seed_vars"`
 	}
 	if err := decodeStrictArgs(args, &in); err != nil {
 		return nil, err
 	}
-	if in.Spec == nil {
+	pinned := in.EnvironmentID != nil
+	if in.Spec != nil && pinned {
+		return nil, errors.New("spec and environment_id are mutually exclusive")
+	}
+	if in.Spec == nil && !pinned {
+		if in.SpecVersion != nil || in.SpecDigest != nil || in.SeedVars != nil {
+			return nil, errors.New("environment_id required with spec_version, spec_digest or seed_vars")
+		}
 		return nil, errors.New("spec required")
+	}
+	if !pinned && (in.SpecVersion != nil || in.SpecDigest != nil || in.SeedVars != nil) {
+		return nil, errors.New("spec_version, spec_digest and seed_vars require environment_id instead of spec")
 	}
 	if in.Kind == "" {
 		in.Kind = "eval"
@@ -220,6 +239,25 @@ func (a *App) toolRunCreate(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		if !validID(in.RequestID) || len(in.RequestID) > 80 || !strings.HasPrefix(in.RequestID, "run_") {
 			return nil, errors.New("request_id must be a unique run_ identifier")
 		}
+	}
+	if pinned {
+		environmentID := *in.EnvironmentID
+		if !validID(environmentID) || len(environmentID) > maxSummaryIDBytes {
+			return nil, errors.New("environment_id must be a valid environment identifier")
+		}
+		if in.SpecVersion == nil || *in.SpecVersion < 1 {
+			return nil, errors.New("spec_version required with environment_id")
+		}
+		if in.SpecDigest == nil || !specDigestPattern.MatchString(*in.SpecDigest) {
+			return nil, errors.New("spec_digest must be a lowercase hex SHA-256 with environment_id")
+		}
+		vars, err := validateSeedVars(in.SeedVars)
+		if err != nil {
+			return nil, err
+		}
+		return a.svc.startPinned(in.Kind, in.RequestID, environmentID, *in.SpecVersion, *in.SpecDigest, vars)
+	}
+	if in.RequestID != "" {
 		return a.svc.startWithID("", in.Kind, *in.Spec, in.RequestID)
 	}
 	return a.svc.start("", in.Kind, *in.Spec)

@@ -36,6 +36,7 @@ type EnvironmentSummary struct {
 	DesiredState    string      `json:"desired_state"`
 	ReconcileStatus string      `json:"reconcile_status"`
 	SpecVersion     int         `json:"spec_version"`
+	SpecDigest      string      `json:"spec_digest,omitempty"`
 	CreatedAt       time.Time   `json:"created_at"`
 	UpdatedAt       time.Time   `json:"updated_at"`
 	ActiveRun       *RunSummary `json:"active_run"`
@@ -119,7 +120,7 @@ func (s store) listDefinitionSummaries(options ListOptions) (*EnvironmentPage, e
 	}
 	// The partial unique index guarantees at most one active run per definition.
 	// No spec, fixture, error or runtime-inventory payload is selected here.
-	query := "SELECT " + strings.Join(columns, ",") + ",d.spec_version,r.environment_id IS NOT NULL FROM environment_definitions d LEFT JOIN environment_runs r ON r.environment_id=d.id AND r.environment_id<>'' AND r.status IN ('starting','running','stopping')"
+	query := "SELECT " + strings.Join(columns, ",") + ",d.spec_version," + boundedListText("d.spec_digest", 64) + ",r.environment_id IS NOT NULL FROM environment_definitions d LEFT JOIN environment_runs r ON r.environment_id=d.id AND r.environment_id<>'' AND r.status IN ('starting','running','stopping')"
 	args := []any{}
 	if cursor != nil {
 		query += " WHERE (d.created_at,d.id) < (?,?)"
@@ -142,8 +143,9 @@ func (s store) listDefinitionSummaries(options ListOptions) (*EnvironmentPage, e
 		}
 		var values [11]sql.NullString
 		var version int
+		var digest sql.NullString
 		var hasRun bool
-		if err := rows.Scan(&values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6], &values[7], &values[8], &values[9], &values[10], &version, &hasRun); err != nil {
+		if err := rows.Scan(&values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6], &values[7], &values[8], &values[9], &values[10], &version, &digest, &hasRun); err != nil {
 			return nil, err
 		}
 		for i, value := range values {
@@ -159,7 +161,7 @@ func (s store) listDefinitionSummaries(options ListOptions) (*EnvironmentPage, e
 		if err != nil {
 			return nil, errors.New("invalid summary update timestamp")
 		}
-		item := EnvironmentSummary{ID: values[0].String, Name: values[1].String, DesiredState: values[2].String, ReconcileStatus: values[3].String, CreatedAt: created, UpdatedAt: updated, SpecVersion: version}
+		item := EnvironmentSummary{ID: values[0].String, Name: values[1].String, DesiredState: values[2].String, ReconcileStatus: values[3].String, CreatedAt: created, UpdatedAt: updated, SpecVersion: version, SpecDigest: digest.String}
 		if hasRun {
 			started, err := time.Parse(time.RFC3339Nano, values[9].String)
 			if err != nil {

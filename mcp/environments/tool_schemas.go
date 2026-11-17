@@ -150,8 +150,33 @@ var environmentSpecSchema = strictObject(map[string]any{
 	}, "caller_goal")),
 })
 
+// Exactly one of spec (inline) or environment_id (pinned stored definition) is
+// required. The rule is enforced by the handler and stated in the property
+// descriptions rather than a top-level oneOf, which some tool clients reject.
 var environmentRunCreateSchema = strictObject(map[string]any{
 	"request_id": map[string]any{"type": "string", "description": "Optional unique run_ identifier, reserved before startup."},
 	"kind":       map[string]any{"type": "string"},
-	"spec":       environmentSpecSchema,
-}, "spec")
+	"spec":       withDescription(environmentSpecSchema, "Inline EnvironmentSpec. Mutually exclusive with environment_id."),
+	"environment_id": map[string]any{"type": "string", "maxLength": maxSummaryIDBytes,
+		"description": "Create the run from this stored definition instead of an inline spec. Requires spec_version and spec_digest; the run fails if either no longer matches the definition."},
+	"spec_version": map[string]any{"type": "integer", "minimum": 1,
+		"description": "Pinned spec_version, as returned by environment_get. Only with environment_id."},
+	"spec_digest": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$",
+		"description": "Pinned canonical spec_digest (lowercase hex SHA-256), as returned by environment_get. Only with environment_id."},
+	"seed_vars": map[string]any{
+		"type":                 "object",
+		"maxProperties":        maxSeedVars,
+		"propertyNames":        map[string]any{"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+		"additionalProperties": map[string]any{"type": "string", "maxLength": maxSeedVarValueBytes, "pattern": "^[^\\r\\n]*$"},
+		"description":          "Only with environment_id. In seeds[].input, a string that is exactly {{name}} becomes the value and {{name}} inside longer strings is replaced textually; unknown placeholders are left unchanged. Values are strings of at most 4096 bytes without CR or LF.",
+	},
+})
+
+func withDescription(schema map[string]any, description string) map[string]any {
+	out := make(map[string]any, len(schema)+1)
+	for key, value := range schema {
+		out[key] = value
+	}
+	out["description"] = description
+	return out
+}
