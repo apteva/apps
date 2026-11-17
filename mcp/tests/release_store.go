@@ -8,8 +8,12 @@ import (
 )
 
 type releaseSnapshot struct {
-	Config  *ReleaseConfig  `json:"config,omitempty"`
-	Fixture json.RawMessage `json:"fixture,omitempty"`
+	Config      *ReleaseConfig           `json:"config,omitempty"`
+	Fixture     json.RawMessage          `json:"fixture,omitempty"`
+	Target      *TargetConfig            `json:"target,omitempty"`
+	Candidate   *CandidateRef            `json:"candidate,omitempty"`
+	Credentials map[string]CredentialRef `json:"credentials,omitempty"`
+	Session     *SessionConfig           `json:"session,omitempty"`
 }
 
 func (s store) getSuite(id int64) (Suite, error) {
@@ -20,7 +24,11 @@ func validateRetry(r Run, suite int64, opt QueueOptions) error {
 	if r.SuiteID != suite {
 		return errors.New("request_key already used for another suite")
 	}
-	if r.Release == nil && opt == (QueueOptions{}) {
+	if r.Release == nil && opt.CandidateDigest == "" && opt.Candidate == nil && opt.SuiteRevision == "" && opt.FixtureRevision == "" {
+		return nil
+	}
+	if opt.Candidate != nil && opt.CandidateDigest == "" && r.Release != nil {
+		// The build was resolved when the run was first queued; retries reuse it.
 		return nil
 	}
 	if r.Release == nil || r.Release.CandidateDigest != opt.CandidateDigest ||
@@ -127,9 +135,17 @@ func (s store) verdict(suite int64, opt QueueOptions) (Verdict, error) {
 	if r.Release == nil {
 		return Verdict{}, fmt.Errorf("run %d has no release evidence", r.ID)
 	}
+	state := r.Status
+	if r.Release.Inconclusive {
+		state = "inconclusive"
+	}
+	measured := r.Release.EnvironmentRun != "" && r.Release.RuntimeID != ""
+	if r.Release.Mode == "existing" {
+		measured = true
+	}
 	return Verdict{
-		Allowed: r.Status == "passed" && !r.CancelRequested && r.Release.EnvironmentRun != "" && r.Release.RuntimeID != "" &&
+		Allowed: r.Status == "passed" && !r.CancelRequested && !r.Release.Inconclusive && measured &&
 			r.Release.ObservedDigest == opt.CandidateDigest && len(r.Release.Missing) == 0,
-		State: r.Status, RunID: r.ID, Release: r.Release,
+		State: state, RunID: r.ID, Release: r.Release,
 	}, nil
 }

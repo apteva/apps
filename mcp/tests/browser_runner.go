@@ -108,6 +108,9 @@ func (a *App) openBrowserCheck(ctx context.Context, check Check, app *appRunCont
 	}
 }
 func (a *App) executeBrowserStep(ctx context.Context, step Step, values map[string]any, app *appRunContext, result *StepResult) (any, error) {
+	if app.web != nil {
+		return a.executeWebStep(ctx, step, values, app, result)
+	}
 	if app.browser == nil || app.release == nil || step.Browser == nil {
 		return nil, errors.New("browser test session is unavailable")
 	}
@@ -126,6 +129,9 @@ func (a *App) executeBrowserStep(ctx context.Context, step Step, values map[stri
 	}
 	if action.ValueRef != "" {
 		value, ok := app.release.browserValues[action.ValueRef]
+		if strings.HasPrefix(action.ValueRef, "credentials.") {
+			value, ok = app.credentials[action.ValueRef]
+		}
 		if !ok {
 			return nil, errors.New("browser value reference is unavailable")
 		}

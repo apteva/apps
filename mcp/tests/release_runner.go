@@ -42,29 +42,63 @@ func (a *App) queue(ctx context.Context, app *sdk.AppCtx, suite int64, trigger, 
 	if err != nil {
 		return Run{}, err
 	}
+	v, err := s.getSuite(suite)
+	if err != nil {
+		return Run{}, err
+	}
 	for _, check := range checks {
 		if check.Enabled && hasBrowser(check) {
-			if err = a.browserCapabilities(ctx, app); err != nil {
+			if err = a.checkBrowserBinding(ctx, app, v); err != nil {
 				return Run{}, err
 			}
 			break
 		}
 	}
-	v, err := s.getSuite(suite)
-	if err != nil {
-		return Run{}, err
-	}
-	var definition environmentDefinition
-	if v.Release != nil {
+	prep := queuePrep{}
+	switch {
+	case v.Release != nil:
+		if opt.Candidate != nil {
+			return Run{}, errors.New("hand-written release suites take candidate_digest; candidate needs a suite target")
+		}
 		if !digestPattern.MatchString(opt.CandidateDigest) {
 			return Run{}, errors.New("release run requires a lowercase SHA-256 candidate_digest")
 		}
 		env := environmentClient{app.PlatformAPI()}
-		if err = env.call(ctx, "environment_get", map[string]any{"id": v.Release.EnvironmentID}, &definition); err != nil {
+		if err = env.call(ctx, "environment_get", map[string]any{"id": v.Release.EnvironmentID}, &prep.Fixture); err != nil {
 			return Run{}, errors.New("cannot resolve the bound environment definition")
 		}
+	case v.Target != nil:
+		ref := v.Target.Candidate
+		if opt.Candidate != nil {
+			if err = (&TargetConfig{Mode: v.Target.Mode, Candidate: opt.Candidate, Targets: v.Target.Targets, Environment: v.Target.Environment}).validate(); err != nil {
+				return Run{}, err
+			}
+			ref = opt.Candidate
+		}
+		if ref != nil {
+			candidate, err := resolveCandidate(ctx, app, ref)
+			if err != nil {
+				return Run{}, err
+			}
+			if opt.CandidateDigest != "" && opt.CandidateDigest != candidate.Digest {
+				return Run{}, fmt.Errorf("candidate_digest %s does not match Deploy build %d (%s)", short(opt.CandidateDigest), candidate.BuildID, short(candidate.Digest))
+			}
+			opt.CandidateDigest, prep.BuildID, prep.Candidate = candidate.Digest, candidate.BuildID, ref
+		} else if opt.CandidateDigest != "" && v.Target.Mode == "existing" {
+			return Run{}, errors.New("existing-mode verdicts need target.candidate so Tests can confirm what is deployed")
+		} else if opt.CandidateDigest != "" && !digestPattern.MatchString(opt.CandidateDigest) {
+			return Run{}, errors.New("candidate_digest must be a lowercase SHA-256 digest")
+		}
+		if v.Target.Mode == "isolated" {
+			if !digestPattern.MatchString(opt.CandidateDigest) {
+				return Run{}, errors.New("isolated runs need a candidate: set target.candidate or pass candidate / candidate_digest")
+			}
+			if prep.Fixture, err = loadPinnedEnvironment(ctx, app, v.Target.Environment.Pinned); err != nil {
+				return Run{}, err
+			}
+		}
 	}
-	return s.queueRelease(suite, trigger, key, opt, definition)
+	return s.queueRelease(suite, trigger, key, opt, prep)
 }
 
 func (a *App) releaseSpec(ctx context.Context, app *sdk.AppCtx, suite int64) (map[string]any, error) {
@@ -73,8 +107,8 @@ func (a *App) releaseSpec(ctx context.Context, app *sdk.AppCtx, suite int64) (ma
 	if err != nil {
 		return nil, err
 	}
-	if v.Release == nil {
-		return nil, errors.New("suite has no release configuration")
+	if v.Release == nil && v.Target == nil {
+		return nil, errors.New("suite has no release configuration or target")
 	}
 	checks, err := s.checks(suite)
 	if err != nil {
@@ -86,16 +120,28 @@ func (a *App) releaseSpec(ctx context.Context, app *sdk.AppCtx, suite int64) (ma
 			enabled = append(enabled, check)
 		}
 	}
-	env := environmentClient{app.PlatformAPI()}
-	var definition environmentDefinition
-	if err = env.call(ctx, "environment_get", map[string]any{"id": v.Release.EnvironmentID}, &definition); err != nil {
-		return nil, errors.New("cannot resolve the bound environment definition")
+	out := map[string]any{"suite_id": suite, "suite_revision": suiteRevision(v, enabled)}
+	switch {
+	case v.Target != nil && v.Target.Mode == "existing":
+		out["mode"], out["fixture_revision"] = "existing", targetRevision(v.Target)
+	case v.Target != nil:
+		definition, err := loadPinnedEnvironment(ctx, app, v.Target.Environment.Pinned)
+		if err != nil {
+			return nil, err
+		}
+		out["mode"], out["fixture_revision"] = "isolated", canonicalDigest(definition.Spec)
+	default:
+		env := environmentClient{app.PlatformAPI()}
+		var definition environmentDefinition
+		if err = env.call(ctx, "environment_get", map[string]any{"id": v.Release.EnvironmentID}, &definition); err != nil {
+			return nil, errors.New("cannot resolve the bound environment definition")
+		}
+		if err = checkFixture(definition, v.Release); err != nil {
+			return nil, err
+		}
+		out["fixture_revision"] = canonicalDigest(definition.Spec)
 	}
-	if err = checkFixture(definition, v.Release); err != nil {
-		return nil, err
-	}
-	return map[string]any{"suite_id": suite, "suite_revision": suiteRevision(v, enabled),
-		"fixture_revision": canonicalDigest(definition.Spec)}, nil
+	return out, nil
 }
 
 type releaseSession struct {
@@ -197,8 +243,15 @@ func (a *App) prepareRelease(ctx context.Context, s store, r *Run, env environme
 			}
 		}
 	}
+	createArgs := map[string]any{"kind": "test", "request_id": session.id, "spec": spec}
+	if frozen.Config.Generated {
+		pinned := frozen.Target.Environment.Pinned
+		createArgs = map[string]any{"kind": "test", "request_id": session.id, "environment_id": pinned.EnvironmentID,
+			"spec_version": pinned.SpecVersion, "spec_digest": pinned.SpecDigest,
+			"seed_vars": map[string]any{"candidate_digest": r.Release.CandidateDigest, "candidate_build_id": fmt.Sprint(r.Release.BuildID)}}
+	}
 	startCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = env.call(startCtx, "environment_run_create", map[string]any{"kind": "test", "request_id": session.id, "spec": spec}, &started)
+	err = env.call(startCtx, "environment_run_create", createArgs, &started)
 	cancel()
 	if err != nil || started.ID != session.id || started.Status != "running" || !slugPattern.MatchString(started.RuntimeID) {
 		return nil, errors.New("environment startup failed")
@@ -218,10 +271,16 @@ func (a *App) prepareRelease(ctx context.Context, s store, r *Run, env environme
 		return nil, err
 	}
 	r.Release.AppVersions = versions
-	gatewayCopy := *endpoints[frozen.Config.GatewayApp]
-	session.gateway = &gatewayCopy
-	session.gateway.Path += strings.TrimSuffix(frozen.Config.GatewayPath, "/")
-	if frozen.Config.Browser != nil {
+	if frozen.Config.GatewayApp != "" {
+		gatewayCopy := *endpoints[frozen.Config.GatewayApp]
+		session.gateway = &gatewayCopy
+		session.gateway.Path += strings.TrimSuffix(frozen.Config.GatewayPath, "/")
+	}
+	var declared struct {
+		Targets map[string]json.RawMessage `json:"targets"`
+	}
+	_ = json.Unmarshal(frozen.Fixture, &declared)
+	if frozen.Config.Browser != nil && (!frozen.Config.Generated || len(declared.Targets) > 0) {
 		var resolved struct {
 			RuntimeID string            `json:"runtime_id"`
 			Targets   map[string]string `json:"targets"`
@@ -279,14 +338,15 @@ func (a *App) prepareRelease(ctx context.Context, s store, r *Run, env environme
 }
 
 func (a *App) inspectRuntimeApps(ctx context.Context, session *releaseSession, apps []sdk.RuntimeApp) (map[string]*url.URL, map[string]string, error) {
-	if len(apps) != len(session.config.AppVersions) {
+	generated := session.config.Generated
+	if !generated && len(apps) != len(session.config.AppVersions) {
 		return nil, nil, errors.New("runtime app set does not match the version pins")
 	}
 	endpoints := make(map[string]*url.URL, len(apps))
 	versions := make(map[string]string, len(apps))
 	for _, app := range apps {
 		want, ok := session.config.AppVersions[app.Name]
-		if !ok || app.Kind != "install" || app.Status != "running" || endpoints[app.Name] != nil {
+		if (!ok && !generated) || app.Kind != "install" || app.Status != "running" || endpoints[app.Name] != nil {
 			return nil, nil, errors.New("runtime app set does not match the version pins")
 		}
 		var endpoint sdk.RuntimeAppEndpoint
@@ -298,7 +358,7 @@ func (a *App) inspectRuntimeApps(ctx context.Context, session *releaseSession, a
 			return nil, nil, err
 		}
 		version, err := a.inspectAppVersion(ctx, base, app.Name)
-		if err != nil || version != want {
+		if err != nil || (want != "" && version != want) {
 			return nil, nil, fmt.Errorf("runtime app %q did not report pinned version %q", app.Name, want)
 		}
 		endpoints[app.Name], versions[app.Name] = base, version

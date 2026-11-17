@@ -87,10 +87,10 @@ func expandValue(value any, values map[string]any) (any, error) {
 	}
 }
 
-func scenarioURL(template string, values map[string]any, session *releaseSession) (*url.URL, string, error) {
+func scenarioURL(template string, values map[string]any, base *url.URL) (*url.URL, string, error) {
 	path, query, hasQuery := strings.Cut(template, "?")
 	var escape func(string) string
-	if session != nil && !wholeVariable(template) {
+	if base != nil && !wholeVariable(template) {
 		escape = url.PathEscape
 	}
 	target, err := expand(path, values, escape)
@@ -109,16 +109,15 @@ func scenarioURL(template string, values map[string]any, session *releaseSession
 	if err != nil || u.User != nil || u.Fragment != "" {
 		return nil, "", errors.New("invalid scenario URL")
 	}
-	if session == nil {
+	if base == nil {
 		if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 			return nil, "", errors.New("standalone scenario requires an absolute HTTP(S) URL")
 		}
 		return u, u.Path, nil
 	}
-	base := session.gateway
 	if u.IsAbs() || u.Host != "" {
 		if u.Scheme != base.Scheme || u.Host != base.Host {
-			return nil, "", errors.New("captured URL is outside the bound Gateway")
+			return nil, "", errors.New("captured URL is outside the bound target")
 		}
 	}
 	relative := u.Path
@@ -129,7 +128,7 @@ func scenarioURL(template string, values map[string]any, session *releaseSession
 			relative = "/"
 		}
 	} else if u.IsAbs() {
-		return nil, "", errors.New("captured URL is outside the bound Gateway")
+		return nil, "", errors.New("captured URL is outside the bound target")
 	}
 	escaped := strings.ToLower(u.EscapedPath())
 	if relative == "" || validateGatewayPath(relative) != nil ||
@@ -142,8 +141,28 @@ func scenarioURL(template string, values map[string]any, session *releaseSession
 	return &out, relative, nil
 }
 
-func (a *App) scenarioHTTP(ctx context.Context, step Step, values map[string]any, session *releaseSession, result *StepResult) (any, error) {
-	u, relative, err := scenarioURL(step.Path, values, session)
+func (a *App) scenarioHTTP(ctx context.Context, step Step, values map[string]any, app *appRunContext, result *StepResult) (any, error) {
+	session := app.release
+	var base *url.URL
+	client := a.client
+	switch {
+	case step.Target != "" && session != nil:
+		parsed, err := url.Parse(session.targets[step.Target])
+		if err != nil || session.targets[step.Target] == "" {
+			return nil, fmt.Errorf("target %q is not available in this runtime", step.Target)
+		}
+		base, client = parsed, a.runtimeHTTP
+	case step.Target != "":
+		if base = app.targets[step.Target]; base == nil {
+			return nil, fmt.Errorf("target %q is not available in this run", step.Target)
+		}
+	case session != nil:
+		if session.gateway == nil {
+			return nil, errors.New("HTTP steps in this suite need a target")
+		}
+		base, client = session.gateway, a.runtimeHTTP
+	}
+	u, relative, err := scenarioURL(step.Path, values, base)
 	if err != nil {
 		return nil, err
 	}
@@ -173,9 +192,7 @@ func (a *App) scenarioHTTP(ctx context.Context, step Step, values map[string]any
 		}
 		req.Header.Set(name, value)
 	}
-	client := a.client
-	if session != nil {
-		client = a.runtimeHTTP
+	if session != nil && step.Target == "" {
 		if step.Identity != "" && step.Identity != "anonymous" {
 			req.Header.Set(session.config.Identities[step.Identity].Header, session.identities[step.Identity])
 		}
@@ -184,12 +201,17 @@ func (a *App) scenarioHTTP(ctx context.Context, step Step, values map[string]any
 			return nil, err
 		}
 	}
+	if step.Target != "" {
+		if err = app.applyAuth(req, step.HeaderRefs); err != nil {
+			return nil, err
+		}
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("HTTP request failed or timed out")
 	}
 	defer res.Body.Close()
-	if session != nil && session.config.Identities[step.Identity].Header == "Authorization" &&
+	if session != nil && step.Target == "" && session.config.Identities[step.Identity].Header == "Authorization" &&
 		res.Header.Get("X-Apteva-Runtime-Public-Auth") != "preserved" {
 		return nil, errors.New("runtime Gateway does not support preserving caller Authorization")
 	}
@@ -216,7 +238,7 @@ func (a *App) scenarioStepOutput(ctx context.Context, step Step, values map[stri
 	case "browser":
 		return a.executeBrowserStep(ctx, step, values, app, result)
 	case "http":
-		return a.scenarioHTTP(ctx, step, values, app.release, result)
+		return a.scenarioHTTP(ctx, step, values, app, result)
 	case "function":
 		input, err := expandValue(step.Event, values)
 		if err != nil {
@@ -348,9 +370,15 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result := Result{CheckID: check.ID, Name: check.Name, Kind: check.Kind, Status: "passed", Assertions: []AssertionResult{}}
-	app.browser = nil
+	app.browser, app.web = nil, nil
 	if hasBrowser(check) {
-		if _, err := a.openBrowserCheck(ctx, check, app); err != nil {
+		var err error
+		if app.targets != nil {
+			_, err = a.openWebCheck(ctx, check, app)
+		} else {
+			_, err = a.openBrowserCheck(ctx, check, app)
+		}
+		if err != nil {
 			result.Status, result.Error = "error", safeBrowserError(err)
 		}
 	}
@@ -368,8 +396,8 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 		if len(step.Parallel) == 0 {
 			var captures map[string]any
 			row, captures = a.runStep(ctx, step, values, app)
+			applyBudget(&row, step)
 			mergeCaptures(values, captures)
-
 		} else {
 			row = a.runParallel(ctx, step, values, app)
 		}
@@ -406,6 +434,15 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 		}
 		app.browser = nil
 	}
+	if app.web != nil {
+		evidence, err := a.closeWebCheck(ctx, app, &result, steps)
+		browserEvidence = evidence
+		if err != nil && result.Status == "passed" {
+			result.Status, result.Error = "error", safeBrowserError(err)
+		}
+		app.web = nil
+	}
+	app.captures = values
 	if result.Status == "passed" {
 		markScenarioCoverage(covered, steps)
 	}
@@ -415,6 +452,18 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 		result.Output.(map[string]any)["browser"] = redactValue(browserEvidence, app.release)
 	}
 	return result
+}
+
+// applyBudget fails a passing step that ran longer than its budget.
+func applyBudget(row *StepResult, step Step) {
+	if step.BudgetMS <= 0 || row.Status == "error" {
+		return
+	}
+	check := budgetResult(step.BudgetMS, row.DurationMS)
+	row.Assertions = append(row.Assertions, check)
+	if !check.Passed && row.Status == "passed" {
+		row.Status, row.Error = "failed", fmt.Sprintf("step took %d ms, over its %d ms budget", row.DurationMS, step.BudgetMS)
+	}
 }
 
 func mergeCaptures(values, captures map[string]any) {
@@ -457,6 +506,7 @@ func (a *App) runParallel(ctx context.Context, step Step, values map[string]any,
 	for i, child := range step.Parallel {
 		go func() {
 			row, captures := a.runStep(ctx, child, values, app)
+			applyBudget(&row, child)
 			done <- completion{i, row, captures}
 		}()
 	}

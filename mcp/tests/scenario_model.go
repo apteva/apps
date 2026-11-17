@@ -13,26 +13,29 @@ import (
 const maxScenarioSteps = 24
 
 type Step struct {
-	Browser     *BrowserAction    `json:"browser,omitempty"`
-	ID          string            `json:"id"`
-	Kind        string            `json:"kind,omitempty"`
-	Path        string            `json:"path,omitempty"`
-	Method      string            `json:"method,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	JSON        any               `json:"json,omitempty"`
-	Identity    string            `json:"identity,omitempty"`
-	Function    string            `json:"function,omitempty"`
-	Event       any               `json:"event,omitempty"`
-	App         string            `json:"app,omitempty"`
-	Tool        string            `json:"tool,omitempty"`
-	Input       map[string]any    `json:"input,omitempty"`
-	TimeoutMS   int               `json:"timeout_ms,omitempty"`
-	PollEveryMS int               `json:"poll_every_ms,omitempty"`
-	Assertions  []Assertion       `json:"assertions,omitempty"`
-	Schema      json.RawMessage   `json:"response_schema,omitempty"`
-	Capture     map[string]string `json:"capture,omitempty"`
-	Evidence    []string          `json:"evidence,omitempty"`
-	Parallel    []Step            `json:"parallel,omitempty"`
+	Browser     *BrowserAction       `json:"browser,omitempty"`
+	ID          string               `json:"id"`
+	Kind        string               `json:"kind,omitempty"`
+	Path        string               `json:"path,omitempty"`
+	Method      string               `json:"method,omitempty"`
+	Headers     map[string]string    `json:"headers,omitempty"`
+	JSON        any                  `json:"json,omitempty"`
+	Identity    string               `json:"identity,omitempty"`
+	Target      string               `json:"target,omitempty"`
+	HeaderRefs  map[string]HeaderRef `json:"header_refs,omitempty"`
+	BudgetMS    int                  `json:"budget_ms,omitempty"`
+	Function    string               `json:"function,omitempty"`
+	Event       any                  `json:"event,omitempty"`
+	App         string               `json:"app,omitempty"`
+	Tool        string               `json:"tool,omitempty"`
+	Input       map[string]any       `json:"input,omitempty"`
+	TimeoutMS   int                  `json:"timeout_ms,omitempty"`
+	PollEveryMS int                  `json:"poll_every_ms,omitempty"`
+	Assertions  []Assertion          `json:"assertions,omitempty"`
+	Schema      json.RawMessage      `json:"response_schema,omitempty"`
+	Capture     map[string]string    `json:"capture,omitempty"`
+	Evidence    []string             `json:"evidence,omitempty"`
+	Parallel    []Step               `json:"parallel,omitempty"`
 }
 
 type StepResult struct {
@@ -51,6 +54,7 @@ type StepResult struct {
 	Evidence          map[string]any    `json:"evidence,omitempty"`
 	Parallel          []StepResult      `json:"parallel,omitempty"`
 	ArtifactID        int64             `json:"artifact_id,omitempty"`
+	Diagnostics       any               `json:"diagnostics,omitempty"`
 	ActionDispatched  bool              `json:"action_dispatched,omitempty"`
 	coverageQualified bool
 }
@@ -97,6 +101,18 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 	ids[s.ID] = true
 	if s.TimeoutMS == 0 {
 		s.TimeoutMS = 10000
+	}
+	if s.BudgetMS < 0 || s.BudgetMS > s.TimeoutMS {
+		return fmt.Errorf("budget_ms must be between 0 and timeout_ms in %s", s.ID)
+	}
+	if err := validateHeaderRefs(s.HeaderRefs); err != nil {
+		return fmt.Errorf("step %s: %w", s.ID, err)
+	}
+	if (s.Target != "" || len(s.HeaderRefs) > 0) && s.Kind != "http" {
+		return fmt.Errorf("target and header_refs apply to HTTP steps only (%s)", s.ID)
+	}
+	if s.Target != "" && !slugPattern.MatchString(s.Target) {
+		return fmt.Errorf("invalid target in %s", s.ID)
 	}
 	if s.TimeoutMS < 100 || s.TimeoutMS > 30000 || s.PollEveryMS < 0 ||
 		s.PollEveryMS > s.TimeoutMS || s.PollEveryMS > 0 && s.PollEveryMS < 100 {
@@ -168,9 +184,31 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 	return nil
 }
 
-func validateScenarioBinding(c Check, release *ReleaseConfig) error {
+func validateScenarioBinding(c Check, suite Suite) error {
+	release, target := suite.Release, suite.Target
+	if c.Definition.Session != "" && c.Definition.Session != "none" {
+		return errors.New(`check session may only be "none"`)
+	}
+	if c.Definition.Session == "none" && suite.Session == nil {
+		return errors.New(`session "none" requires a suite session`)
+	}
+	for _, ref := range credentialReferences(c) {
+		alias, _, _ := strings.Cut(strings.TrimPrefix(ref, "credentials."), ".")
+		if _, ok := suite.Credentials[alias]; !ok {
+			return fmt.Errorf("credential alias %q is not declared on the suite", alias)
+		}
+	}
+	if c.Kind == "http" && c.Definition.Target != "" {
+		if target == nil || target.Mode != "existing" {
+			return errors.New("HTTP checks with a target need an existing-mode suite target; use scenario steps in isolated mode")
+		}
+		if _, ok := target.Targets[c.Definition.Target]; !ok {
+			return fmt.Errorf("unknown target %q", c.Definition.Target)
+		}
+	}
+	isolated := release != nil || target != nil && target.Mode == "isolated"
 	if c.Kind != "scenario" && c.Kind != "browser" {
-		if release != nil {
+		if isolated {
 			return errors.New("release suites require bound scenario checks")
 		}
 		return nil
@@ -181,9 +219,18 @@ func validateScenarioBinding(c Check, release *ReleaseConfig) error {
 			group = []Step{s}
 		}
 		for _, step := range group {
+			if target != nil {
+				if err := validateTargetStep(step, target); err != nil {
+					return err
+				}
+				continue
+			}
+			if step.Target != "" || len(step.HeaderRefs) > 0 {
+				return fmt.Errorf("step %s uses a target or header_refs, which need a suite target", step.ID)
+			}
 			if release == nil {
 				if step.Kind == "browser" {
-					return errors.New("browser steps require an isolated release environment")
+					return errors.New("browser steps require a suite target or an isolated release environment")
 				}
 				if step.Kind == "app_tool" || (step.Identity != "" && step.Identity != "anonymous") {
 					return errors.New("app-tool steps and named identities require a release environment")
@@ -197,10 +244,13 @@ func validateScenarioBinding(c Check, release *ReleaseConfig) error {
 				continue
 			}
 			if step.Kind == "browser" {
+				if step.Browser.Locator.Selector != "" {
+					return fmt.Errorf("step %s: CSS selectors are only supported in existing mode", step.ID)
+				}
 				if release.Browser == nil {
 					return errors.New("release browser configuration is required")
 				}
-				if ref := step.Browser.ValueRef; ref != "" {
+				if ref := step.Browser.ValueRef; ref != "" && !strings.HasPrefix(ref, "credentials.") {
 					if _, ok := release.Browser.ValueRefs[ref]; !ok {
 						return errors.New("unknown browser value_ref")
 					}
@@ -229,9 +279,90 @@ func validateScenarioBinding(c Check, release *ReleaseConfig) error {
 	return nil
 }
 
+// validateTargetStep checks one step of a suite that declares a target.
+func validateTargetStep(step Step, target *TargetConfig) error {
+	if step.Identity != "" && step.Identity != "anonymous" {
+		return fmt.Errorf("step %s: named identities belong to hand-written release suites; use header_refs or a bearer session", step.ID)
+	}
+	switch step.Kind {
+	case "browser":
+		b := step.Browser
+		if target.Mode == "existing" {
+			switch {
+			case b.Locator.Role != "":
+				return fmt.Errorf("step %s: existing mode locates elements by test_id or selector; role locators need the isolated test browser", step.ID)
+			case b.Locator.Text != "" && b.Action != "observe":
+				return fmt.Errorf("step %s: existing mode clicks and fills by test_id or selector; text locators only work with observe", step.ID)
+			}
+			for _, assertion := range step.Assertions {
+				switch assertion.Path {
+				case "/visible", "/path", "/url", "/target", "/action_dispatched", "/checked", "/current_value", "/text_value", "/verified":
+				default:
+					return fmt.Errorf("step %s: existing-mode browser observations expose /visible, /path, /url, /target and /action_dispatched, not %s", step.ID, assertion.Path)
+				}
+			}
+		} else if b.Locator.Selector != "" {
+			return fmt.Errorf("step %s: CSS selectors are only supported in existing mode", step.ID)
+		}
+		if b.Action == "navigate" {
+			if _, ok := target.Targets[b.Target]; !ok {
+				return fmt.Errorf("step %s navigates to unknown target %q", step.ID, b.Target)
+			}
+		}
+		if ref := b.ValueRef; ref != "" && !strings.HasPrefix(ref, "credentials.") {
+			if _, ok := browserValueRef(target, ref); !ok {
+				return fmt.Errorf("step %s uses unknown value_ref %q", step.ID, ref)
+			}
+		}
+		if ref := b.UploadRef; ref != "" {
+			if target.Browser == nil {
+				return fmt.Errorf("step %s uses unknown upload_ref %q", step.ID, ref)
+			}
+			if _, ok := target.Browser.Uploads[ref]; !ok {
+				return fmt.Errorf("step %s uses unknown upload_ref %q", step.ID, ref)
+			}
+		}
+	case "http":
+		if step.Target == "" {
+			if target.Mode == "isolated" {
+				return fmt.Errorf("step %s needs a target in isolated mode", step.ID)
+			}
+			if len(step.HeaderRefs) > 0 {
+				return fmt.Errorf("step %s: header_refs need a named target", step.ID)
+			}
+			u, err := url.Parse(step.Path)
+			if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+				return fmt.Errorf("step %s needs a target or an absolute HTTP(S) URL", step.ID)
+			}
+			return nil
+		}
+		if _, ok := target.Targets[step.Target]; !ok {
+			return fmt.Errorf("step %s uses unknown target %q", step.ID, step.Target)
+		}
+		if !wholeVariable(step.Path) {
+			if err := validateGatewayPath(strings.SplitN(step.Path, "?", 2)[0]); err != nil || step.Path == "" {
+				return fmt.Errorf("step %s needs a path relative to its target", step.ID)
+			}
+		}
+	case "app_tool":
+		if target.Mode != "isolated" || !target.allowsRead(step.App, step.Tool) {
+			return fmt.Errorf("step %s is outside the environment read-tool allowlist", step.ID)
+		}
+	}
+	return nil
+}
+
 var variables = regexp.MustCompile(`\{\{([a-zA-Z0-9][a-zA-Z0-9_-]{0,127})\}\}`)
 
 func wholeVariable(value string) bool {
 	match := variables.FindString(value)
 	return match != "" && match == value
+}
+
+func browserValueRef(target *TargetConfig, ref string) (ToolProbe, bool) {
+	if target.Browser == nil {
+		return ToolProbe{}, false
+	}
+	probe, ok := target.Browser.ValueRefs[ref]
+	return probe, ok
 }

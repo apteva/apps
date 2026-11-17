@@ -46,6 +46,7 @@ type dashboardRun struct {
 	Status      string `json:"status"`
 	Passed      int    `json:"passed"`
 	Failed      int    `json:"failed"`
+	Blocked     int    `json:"blocked"`
 	CreatedAt   string `json:"created_at"`
 	DurationMS  *int64 `json:"duration_ms"`
 }
@@ -208,7 +209,7 @@ func (s store) dashboard(ctx context.Context, f dashboardFilter, failures bool, 
 		stats.PassRate = &p
 	}
 	out.Stats = stats
-	rows, err := tx.QueryContext(ctx, `SELECT id,suite_id,suite_name,environment,status,passed,failed,created_at,started_at,finished_at,cancel_requested FROM test_runs r WHERE `+where+` ORDER BY r.created_at DESC,r.id DESC LIMIT ?`, append(args, f.Limit)...)
+	rows, err := tx.QueryContext(ctx, `SELECT id,suite_id,suite_name,environment,status,passed,failed,blocked,created_at,started_at,finished_at,cancel_requested FROM test_runs r WHERE `+where+` ORDER BY r.created_at DESC,r.id DESC LIMIT ?`, append(args, f.Limit)...)
 	if err != nil {
 		return out, err
 	}
@@ -217,7 +218,7 @@ func (s store) dashboard(ctx context.Context, f dashboardFilter, failures bool, 
 		var v dashboardRun
 		var started, finished string
 		var cancelled bool
-		if err = rows.Scan(&v.ID, &v.SuiteID, &v.SuiteName, &v.Environment, &v.Status, &v.Passed, &v.Failed, &v.CreatedAt, &started, &finished, &cancelled); err != nil {
+		if err = rows.Scan(&v.ID, &v.SuiteID, &v.SuiteName, &v.Environment, &v.Status, &v.Passed, &v.Failed, &v.Blocked, &v.CreatedAt, &started, &finished, &cancelled); err != nil {
 			rows.Close()
 			return out, err
 		}
