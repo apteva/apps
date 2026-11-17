@@ -365,6 +365,10 @@ type computerStub struct {
 	uses     []map[string]any
 	deleted  []string
 	sessions int
+	// hashRewrite makes pages add "#/app" to their URL on load, and makes
+	// navigate fail like Computer when the URL does not change.
+	hashRewrite bool
+	current     map[string]string
 }
 
 func (c *computerStub) call(tool string, args map[string]any, out any) error {
@@ -381,7 +385,18 @@ func (c *computerStub) call(tool string, args map[string]any, out any) error {
 		}
 		c.opens = append(c.opens, args)
 		c.sessions++
-		r := map[string]any{"session_id": fmt.Sprintf("br_%d", c.sessions), "current_url": args["url"]}
+		start, _ := args["url"].(string)
+		if start == "" {
+			start = "about:blank"
+		} else if c.hashRewrite && !strings.Contains(start, "#") {
+			start += "#/app"
+		}
+		id := fmt.Sprintf("br_%d", c.sessions)
+		if c.current == nil {
+			c.current = map[string]string{}
+		}
+		c.current[id] = start
+		r := map[string]any{"session_id": id, "current_url": start}
 		if args["auto_create_context"] == true {
 			r["app_context_id"] = "ctx_signin"
 		} else if args["context_id"] != nil {
@@ -393,7 +408,16 @@ func (c *computerStub) call(tool string, args map[string]any, out any) error {
 		r := map[string]any{"success": true}
 		switch args["action"] {
 		case "navigate":
-			r["current_url"] = args["url"]
+			id, target := args["session_id"].(string), args["url"].(string)
+			before, after := c.current[id], target
+			if c.hashRewrite && !strings.Contains(after, "#") {
+				after += "#/app"
+			}
+			if before == after && target != after {
+				return fmt.Errorf("navigation_ineffective: browser remained at %q; session_id=%s; action=navigate", after, id)
+			}
+			c.current[id] = after
+			r["current_url"] = after
 		case "wait_for":
 			r["matched"] = true
 		case "set_text":
@@ -484,6 +508,62 @@ func TestExistingModeBrowserSignsInOnce(t *testing.T) {
 	}
 }
 
+func TestExistingModeNavigatesHashRewritingApp(t *testing.T) {
+	computer := &computerStub{hashRewrite: true}
+	platform := &scenarioPlatform{call: func(_ context.Context, app, tool string, args map[string]any, out any) error {
+		if app == "computer" {
+			return computer.call(tool, args, out)
+		}
+		return fmt.Errorf("unexpected app %s", app)
+	}}
+	a, app, s := fixture(t, tk.WithPlatform(platform))
+	suite, err := s.saveSuite(Suite{Name: "SPA", Target: &TargetConfig{Mode: "existing", Targets: map[string]TargetEndpoint{"frontend": {BaseURL: "https://crm.example.com"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nav := BrowserAction{Action: "navigate", Target: "frontend", Path: "/?screen=admin_dashboard"}
+	other := BrowserAction{Action: "navigate", Target: "frontend", Path: "/?screen=calls"}
+	if _, err = s.saveCheck(Check{SuiteID: suite.ID, Name: "dashboard", Kind: "browser", Enabled: true, Definition: Definition{Steps: []Step{
+		{ID: "open", Kind: "browser", Browser: &nav},
+		// Navigating again to the page already shown is accepted too.
+		{ID: "again", Kind: "browser", Browser: &nav},
+		{ID: "calls", Kind: "browser", Browser: &other, Assertions: []Assertion{{Path: "/path", Op: "equals", Value: "/"}}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := a.queue(context.Background(), app, suite.ID, "tool", "", QueueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = a.work(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := s.run(r.ID)
+	if done.Status != "passed" {
+		t.Fatal(done.Status, done.Error, done.Results)
+	}
+	if _, ok := computer.opens[0]["url"]; ok {
+		t.Fatal("session opened on the destination instead of about:blank", computer.opens[0])
+	}
+}
+
+func TestSameIgnoringFragment(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"https://x.com/?s=a", "https://x.com/?s=a#/a", true},
+		{"https://X.com", "https://x.com/#top", true},
+		{"https://x.com/?s=a", "https://x.com/?s=b#/a", false},
+		{"https://x.com/login", "https://x.com/?s=a", false},
+		{"about:blank", "about:blank", false},
+	} {
+		if got := sameIgnoringFragment(c.a, c.b); got != c.want {
+			t.Errorf("%s vs %s = %v", c.a, c.b, got)
+		}
+	}
+}
+
 func TestIsolatedTargetPinsGeneratedEnvironment(t *testing.T) {
 	var mu sync.Mutex
 	version, digest := 1, strings.Repeat("d", 64)
@@ -566,4 +646,105 @@ func TestIsolatedTargetPinsGeneratedEnvironment(t *testing.T) {
 	if vars["candidate_digest"] != digestFor(9) || vars["candidate_build_id"] != "9" {
 		t.Fatal(vars)
 	}
+}
+
+func TestRunSelectedChecksAddsSetupCheck(t *testing.T) {
+	computer := &computerStub{}
+	platform := &scenarioPlatform{call: func(_ context.Context, app, tool string, args map[string]any, out any) error {
+		if app == "computer" {
+			return computer.call(tool, args, out)
+		}
+		return fmt.Errorf("unexpected app %s", app)
+	}}
+	a, app, s := fixture(t, tk.WithPlatform(platform))
+	suite, err := s.saveSuite(Suite{Name: "UI", Target: &TargetConfig{Mode: "existing", Targets: map[string]TargetEndpoint{"frontend": {BaseURL: "https://crm.example.com"}}},
+		Session: &SessionConfig{Kind: "browser", SetupCheck: "login"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	browserCheck := func(name string, enabled bool) Check {
+		nav := BrowserAction{Action: "navigate", Target: "frontend", Path: "/" + strings.ReplaceAll(name, " ", "-")}
+		return Check{SuiteID: suite.ID, Name: name, Kind: "browser", Enabled: enabled, Definition: Definition{Steps: []Step{{ID: "open", Kind: "browser", Browser: &nav}}}}
+	}
+	for _, check := range []Check{browserCheck("login", true), browserCheck("screen quality", false), browserCheck("other", true)} {
+		if _, err = s.saveCheck(check); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = a.dispatch(context.Background(), app, "tests_run", map[string]any{"suite_id": suite.ID, "check_names": []any{"nope"}}); err == nil || !strings.Contains(err.Error(), `no check named "nope"`) {
+		t.Fatal(err)
+	}
+	out, err := a.dispatch(context.Background(), app, "tests_run", map[string]any{"suite_id": suite.ID, "check_names": []any{"screen quality"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)["run"].(Run)
+	if err = a.work(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := s.run(r.ID)
+	var names []string
+	for _, result := range done.Results {
+		names = append(names, result.Name)
+	}
+	if done.Status != "passed" || fmt.Sprint(names) != "[login screen quality]" {
+		t.Fatal(done.Status, done.Error, names)
+	}
+	checks, _ := s.checks(suite.ID)
+	for _, check := range checks {
+		if check.Enabled != (check.Name != "screen quality") {
+			t.Fatal("enabled flags changed", check.Name, check.Enabled)
+		}
+	}
+}
+
+func TestPartialRunNeverYieldsVerdict(t *testing.T) {
+	_, _, s := fixture(t)
+	suite, err := s.saveSuite(Suite{Name: "UI"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.queueRelease(suite.ID, "tool", "", QueueOptions{CheckNames: []string{"a"}, SuiteRevision: digestFor(2)}, queuePrep{}); err == nil || !strings.Contains(err.Error(), "never produce a release verdict") {
+		t.Fatal(err)
+	}
+	for _, partial := range []bool{true, false} {
+		record := ReleaseRecord{Mode: "existing", Partial: partial, CandidateDigest: digestFor(1), ObservedDigest: digestFor(1), SuiteRevision: digestFor(2), FixtureRevision: digestFor(3)}
+		if _, err = s.db.Exec(`INSERT INTO test_runs(project_id,suite_id,suite_name,environment,status,trigger,snapshot,created_at,release_record,fixture_spec) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			s.project, suite.ID, "UI", "", "passed", "tool", "[]", now(), encode(&record), "{}"); err != nil {
+			t.Fatal(err)
+		}
+		v, err := s.verdict(suite.ID, QueueOptions{CandidateDigest: digestFor(1), SuiteRevision: digestFor(2), FixtureRevision: digestFor(3)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if partial && v.State != "missing" || !partial && !v.Allowed {
+			t.Fatal(partial, v)
+		}
+	}
+}
+
+func TestCandidateErrorsNameDeployAndItsReason(t *testing.T) {
+	unbound := &scenarioPlatform{call: func(_ context.Context, app, tool string, args map[string]any, out any) error {
+		return errors.New("app deploy is not bound to this install")
+	}}
+	a, app, _ := fixture(t, tk.WithPlatform(unbound))
+	suite := map[string]any{"name": "Live", "target": map[string]any{"mode": "existing", "candidate": map[string]any{"deployment_id": 1},
+		"targets": map[string]any{"web": map[string]any{"base_url": "https://crm.example.com"}}}}
+	if _, err := a.dispatch(context.Background(), app, "tests_suite_save", suite); err == nil ||
+		!strings.Contains(err.Error(), "Bind Deploy to Tests") || !strings.Contains(err.Error(), "not bound to this install") {
+		t.Fatal(err)
+	}
+
+	refusing := &scenarioPlatform{call: func(_ context.Context, app, tool string, args map[string]any, out any) error {
+		if tool == "deploy_candidate_digest" {
+			return errors.New("release artifact differs from attested build")
+		}
+		return (&deployStub{live: func() int64 { return 34 }}).call(tool, args, out)
+	}}
+	a, app, _ = fixture(t, tk.WithPlatform(refusing))
+	if _, err := resolveCandidate(context.Background(), app, &CandidateRef{DeploymentID: 1, Build: "live"}); err == nil ||
+		!strings.Contains(err.Error(), "Deploy could not verify build 34: release artifact differs from attested build") {
+		t.Fatal(err)
+	}
+	_ = a
 }

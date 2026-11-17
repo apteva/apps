@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,7 +47,7 @@ func computerUse(ctx context.Context, app *appRunContext, args map[string]any) (
 	args["session_id"] = app.web.id
 	var out map[string]any
 	if err := callComputer(ctx, app.ctx, "computer_use", args, &out); err != nil {
-		return nil, fmt.Errorf("%s failed: %s", args["action"], firstLine(err.Error()))
+		return nil, &computerError{text: fmt.Sprintf("%s failed: %s", args["action"], firstLine(err.Error())), cause: err}
 	}
 	if failed, _ := out["failed"].(bool); failed || out["success"] == false {
 		code, _ := out["error_code"].(string)
@@ -61,6 +61,16 @@ func computerUse(ctx context.Context, app *appRunContext, args map[string]any) (
 	}
 	return out, nil
 }
+
+// computerError shows a short message and keeps Computer's full error for
+// callers that need its details.
+type computerError struct {
+	text  string
+	cause error
+}
+
+func (e *computerError) Error() string { return e.text }
+func (e *computerError) Unwrap() error { return e.cause }
 
 func firstLine(text string) string {
 	text, _, _ = strings.Cut(text, "\n")
@@ -82,21 +92,10 @@ func (a *App) openWebCheck(ctx context.Context, check Check, app *appRunContext)
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(app.targets))
-	for name := range app.targets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	start := app.targets[names[0]].String()
-	for _, step := range check.Definition.Steps {
-		if step.Browser != nil && step.Browser.Action == "navigate" {
-			if u, err := targetURL(app, step.Browser.Target, step.Browser.Path); err == nil {
-				start = u
-			}
-			break
-		}
-	}
-	args := map[string]any{"action": "open", "url": start, "viewport": map[string]any{"width": config.Width, "height": config.Height}}
+	// The session opens on about:blank so the check's first navigate step is a
+	// real URL change. Opening on the destination made that step a same-URL
+	// navigation, which Computer rejects when the app rewrites its URL hash.
+	args := map[string]any{"action": "open", "viewport": map[string]any{"width": config.Width, "height": config.Height}}
 	session := app.snapshot.Session
 	useSession := session != nil && session.Kind == "browser" && !app.sessionOff
 	if useSession {
@@ -121,6 +120,42 @@ func (a *App) openWebCheck(ctx context.Context, check Check, app *appRunContext)
 		app.sessionContext = opened.AppContextID
 	}
 	return app.web, nil
+}
+
+var navigationRemained = regexp.MustCompile(`navigation_ineffective: browser remained at "([^"]*)"`)
+
+// ineffectiveNavigationURL extracts the URL from Computer's
+// navigation_ineffective error.
+func ineffectiveNavigationURL(err error) (string, bool) {
+	text := err.Error()
+	var full *computerError
+	if errors.As(err, &full) {
+		text = full.cause.Error()
+	}
+	match := navigationRemained.FindStringSubmatch(text)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
+// sameIgnoringFragment compares two URLs with their #… part removed.
+func sameIgnoringFragment(a, b string) bool {
+	normalize := func(raw string) (string, bool) {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" {
+			return "", false
+		}
+		u.Fragment, u.RawFragment = "", ""
+		u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+		if u.Path == "" {
+			u.Path = "/"
+		}
+		return u.String(), true
+	}
+	left, ok1 := normalize(a)
+	right, ok2 := normalize(b)
+	return ok1 && ok2 && left == right
 }
 
 func targetURL(app *appRunContext, name, path string) (string, error) {
@@ -237,7 +272,14 @@ func (a *App) executeWebStep(ctx context.Context, step Step, values map[string]a
 			return nil, err
 		}
 		if _, err = computerUse(ctx, app, map[string]any{"action": "navigate", "url": target}); err != nil {
-			return nil, err
+			// Navigating to the page already shown, when the app adds a URL
+			// hash on load, reads as "no URL change" to Computer. Accept it
+			// when the browser is on the destination apart from the hash.
+			remained, ok := ineffectiveNavigationURL(err)
+			if !ok || !sameIgnoringFragment(target, remained) {
+				return nil, err
+			}
+			app.web.currentURL = remained
 		}
 		result.ActionDispatched = true
 		observation["action_dispatched"] = true

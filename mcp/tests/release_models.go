@@ -40,10 +40,12 @@ type Identity struct {
 }
 
 type ReleaseRecord struct {
-	Mode            string            `json:"mode,omitempty"`
-	CandidateDigest string            `json:"candidate_digest"`
-	BuildID         int64             `json:"build_id,omitempty"`
-	Inconclusive    bool              `json:"inconclusive,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	CandidateDigest string `json:"candidate_digest"`
+	BuildID         int64  `json:"build_id,omitempty"`
+	Inconclusive    bool   `json:"inconclusive,omitempty"`
+	// Partial marks a run limited by check_names; it never yields a verdict.
+	Partial         bool              `json:"partial,omitempty"`
 	ObservedDigest  string            `json:"observed_digest,omitempty"`
 	SuiteRevision   string            `json:"suite_revision"`
 	FixtureRevision string            `json:"fixture_revision"`
@@ -60,6 +62,9 @@ type QueueOptions struct {
 	SuiteRevision   string        `json:"suite_revision"`
 	FixtureRevision string        `json:"fixture_revision"`
 	Candidate       *CandidateRef `json:"candidate,omitempty"`
+	// CheckNames limits a run to these checks (enabled or not). The session
+	// setup check is always added. Such runs never produce a release verdict.
+	CheckNames []string `json:"check_names,omitempty"`
 }
 
 type environmentDefinition struct {

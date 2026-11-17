@@ -124,7 +124,8 @@ func (s store) verdict(suite int64, opt QueueOptions) (Verdict, error) {
 	}
 	r, err := scanRun(s.db.QueryRow(`SELECT `+runColumns+` FROM test_runs WHERE project_id=? AND suite_id=? AND release_record!='null'
 		AND json_extract(release_record,'$.candidate_digest')=? AND json_extract(release_record,'$.suite_revision')=?
-		AND json_extract(release_record,'$.fixture_revision')=? ORDER BY id DESC LIMIT 1`,
+		AND json_extract(release_record,'$.fixture_revision')=?
+		AND coalesce(json_extract(release_record,'$.partial'),0)=0 ORDER BY id DESC LIMIT 1`,
 		s.project, suite, opt.CandidateDigest, opt.SuiteRevision, opt.FixtureRevision))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Verdict{State: "missing"}, nil
@@ -144,7 +145,7 @@ func (s store) verdict(suite int64, opt QueueOptions) (Verdict, error) {
 		measured = true
 	}
 	return Verdict{
-		Allowed: r.Status == "passed" && !r.CancelRequested && !r.Release.Inconclusive && measured &&
+		Allowed: r.Status == "passed" && !r.CancelRequested && !r.Release.Inconclusive && !r.Release.Partial && measured &&
 			r.Release.ObservedDigest == opt.CandidateDigest && len(r.Release.Missing) == 0,
 		State: state, RunID: r.ID, Release: r.Release,
 	}, nil
