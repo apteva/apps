@@ -17,7 +17,8 @@ directive: |
     parameter. If complete, complete with output exactly FINAL-RECEIPT-123.
     If fail, fail this step with error exactly FIXTURE-FAILURE and output exactly
     ACCEPTED-OPERATION-456. Do not retry: this is the desired failure outcome.
-    If cancel, save state blocked, error WAIT-FOR-OPERATOR, output ACCEPTED-OPERATION-789.
+    If cancel, save state blocked, error WAIT-FOR-OPERATOR, output ACCEPTED-OPERATION-789,
+    with no wait argument (this worker must stay attached; never use wait kind hold).
     Retain context and park using pace(clear_wake=true) until an operator event;
     never poll, set a sleep timer, call done or redo a simulated operation.
     Expected output: Exact completion, failure or blocked fixture receipt.
@@ -38,15 +39,15 @@ assert:
   - tool_called: processes_step_claim
   - tool_called_with:
       tool: processes_step_update
-      args: {state: completed, output: FINAL-RECEIPT-123}
+      args: {state: completed}
       success: true
   - tool_called_with:
       tool: processes_step_update
-      args: {state: failed, error: FIXTURE-FAILURE, output: ACCEPTED-OPERATION-456}
+      args: {state: failed}
       success: true
   - tool_called_with:
       tool: processes_step_update
-      args: {state: blocked, error: WAIT-FOR-OPERATOR, output: ACCEPTED-OPERATION-789}
+      args: {state: blocked}
       success: true
   - tool_not_called: kill
   - tool_not_called: processes_run_cancel

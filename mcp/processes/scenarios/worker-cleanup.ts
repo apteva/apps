@@ -73,13 +73,15 @@ async function core(rt: Runtime, path: string, body?: unknown) {
     signal: AbortSignal.timeout(3000),
   });
 }
+// Cleanup deletes the run-worker row, so cleaned workers are found through the
+// cleanup queue; without it the observer loses each worker at the moment it is stopped.
 function targets(path: string): Target[] {
   let db: Database | undefined;
   try {
     db = new Database(path, { readonly: true });
     return db
       .query(
-        `SELECT w.run_id,w.agent_id,w.thread_id,r.process_id,r.state,p.project_id,json_extract(r.assignment_json,'$.parameters.mode') mode FROM process_run_workers w JOIN process_runs r ON r.id=w.run_id JOIN processes p ON p.id=r.process_id`,
+        `SELECT w.run_id,w.agent_id,w.thread_id,r.process_id,r.state,p.project_id,json_extract(r.assignment_json,'$.parameters.mode') mode FROM (SELECT run_id,agent_id,thread_id FROM process_run_workers UNION SELECT run_id,agent_id,thread_id FROM process_worker_cleanup) w JOIN process_runs r ON r.id=w.run_id JOIN processes p ON p.id=r.process_id`,
       )
       .all() as Target[];
   } catch {
