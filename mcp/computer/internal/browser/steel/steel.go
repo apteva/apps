@@ -23,10 +23,13 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
+	"github.com/apteva/apps/mcp/computer/internal/browser/elementread"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/pagediag"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/screenmask"
 	"github.com/apteva/apps/mcp/computer/internal/browser/scrolltarget"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
@@ -100,6 +103,7 @@ type Computer struct {
 	labelMu          sync.RWMutex
 	lastLabels       map[int]som.Element
 	stabilityTracker *stability.Tracker
+	diagnostics      *pagediag.Recorder
 	scrollMu         sync.RWMutex
 	lastScrollResult *computer.ScrollResult
 	scrollRegions    []computer.ScrollRegion
@@ -630,6 +634,8 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 }
 
 func (c *Computer) attachStabilityTracker() {
+	// Diagnostics are opt-in; once enabled, follow the active tab.
+	c.diagnostics.Attach(c.ctx)
 	id := cdptabs.ActiveID(c.ctx)
 	if c.tabTrackers == nil {
 		c.tabTrackers = make(map[string]*stability.Tracker)
@@ -1059,3 +1065,32 @@ func (c *Computer) RefreshSemantics() error {
 }
 
 func (c *Computer) BindRequest(ctx context.Context) func() { return cdputil.Bind(c.ctx, ctx) }
+
+// ReadElement implements computer.ElementReader.
+func (c *Computer) ReadElement(selector string, opts computer.ElementReadOptions) (computer.ElementReadResult, error) {
+	if c.ctx == nil {
+		return computer.ElementReadResult{}, fmt.Errorf("steel: no active session — call browser_session open first")
+	}
+	return elementread.Run(c.ctx, selector, opts)
+}
+
+// EnablePageDiagnostics implements computer.PageDiagnosticsReporter.
+func (c *Computer) EnablePageDiagnostics() {
+	if c.diagnostics == nil {
+		c.diagnostics = pagediag.New()
+	}
+	c.diagnostics.Attach(c.ctx)
+}
+
+// PageDiagnostics implements computer.PageDiagnosticsReporter.
+func (c *Computer) PageDiagnostics(since uint64, clear bool) computer.PageDiagnostics {
+	return c.diagnostics.Snapshot(since, clear)
+}
+
+// MaskForScreenshot implements computer.ScreenshotMasker.
+func (c *Computer) MaskForScreenshot(mask computer.ScreenshotMask) (func(), error) {
+	if c.ctx == nil {
+		return nil, fmt.Errorf("steel: no active session — call browser_session open first")
+	}
+	return screenmask.Apply(c.ctx, mask)
+}

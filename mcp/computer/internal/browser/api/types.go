@@ -109,6 +109,7 @@ type WaitCondition struct {
 	Name          string `json:"name,omitempty"`
 	Role          string `json:"role,omitempty"`
 	State         string `json:"state,omitempty"`
+	Op            string `json:"op,omitempty"` // selector_text: equals | contains
 	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
@@ -441,6 +442,93 @@ type StabilityWaiter interface {
 // active document for rendered media and draft-save state.
 type MediaObserver interface {
 	ObserveMedia() (MediaObservation, error)
+}
+
+// ElementRead is a read-only snapshot of one element matched by a CSS
+// selector. Value is omitted for sensitive inputs (password fields,
+// credential/one-time-code/card autocomplete, or an explicit sensitive
+// marker); ValueRedacted reports that it was withheld.
+type ElementRead struct {
+	Tag           string  `json:"tag"`
+	Text          string  `json:"text"`
+	Value         *string `json:"value,omitempty"`
+	ValueRedacted bool    `json:"value_redacted,omitempty"`
+	Checked       *bool   `json:"checked,omitempty"`
+	Visible       bool    `json:"visible"`
+	// Redacted reports a sensitive element whose text was withheld too.
+	Redacted            bool              `json:"redacted,omitempty"`
+	Attributes          map[string]string `json:"attributes,omitempty"`
+	AttributesTruncated bool              `json:"attributes_truncated,omitempty"`
+	Truncated           bool              `json:"truncated,omitempty"`
+}
+
+// ElementReadOptions controls a read. VisibleOnly drops hidden matches
+// before counting; the default reads hidden elements too (status markers).
+type ElementReadOptions struct {
+	All         bool
+	VisibleOnly bool
+}
+
+// ElementReadResult reports the number of matches and the first match (or
+// up to a bounded number of matches when all were requested).
+type ElementReadResult struct {
+	Selector string        `json:"selector"`
+	Count    int           `json:"count"`
+	Elements []ElementRead `json:"elements"`
+}
+
+// ElementReader is implemented by DOM-backed providers. It never mutates the
+// page and never focuses or scrolls the matched element.
+type ElementReader interface {
+	ReadElement(selector string, opts ElementReadOptions) (ElementReadResult, error)
+}
+
+// PageRequestDiagnostic is a failed request or an HTTP response >= 400.
+// It deliberately carries no query string, fragment, headers, or body so
+// tokens in URLs cannot leak through diagnostics.
+type PageRequestDiagnostic struct {
+	Method string    `json:"method,omitempty"`
+	Origin string    `json:"origin"`
+	Path   string    `json:"path"`
+	Status int       `json:"status"`          // 0 when the request failed without a response
+	Error  string    `json:"error,omitempty"` // net::ERR_* text for failed requests
+	Type   string    `json:"type,omitempty"`  // fetch, xhr, document, script, ...
+	At     time.Time `json:"at"`
+}
+
+// PageDiagnostics is a bounded snapshot of recorded page problems. Console
+// messages are counted, never returned, because their text is page-authored
+// and may contain secrets. Cursor is passed back as since to read only newer
+// problems; Truncated reports that a cap discarded entries.
+type PageDiagnostics struct {
+	Enabled       bool                    `json:"enabled"`
+	Exceptions    []string                `json:"exceptions"`
+	ConsoleErrors int                     `json:"console_errors"`
+	Requests      []PageRequestDiagnostic `json:"requests"`
+	Truncated     bool                    `json:"truncated"`
+	Cursor        uint64                  `json:"cursor"`
+}
+
+// PageDiagnosticsReporter is implemented by CDP-backed providers that can
+// record per-session page diagnostics. Recording is opt-in: nothing is
+// recorded until EnablePageDiagnostics is called.
+type PageDiagnosticsReporter interface {
+	EnablePageDiagnostics()
+	PageDiagnostics(since uint64, clear bool) PageDiagnostics
+}
+
+// ScreenshotMask hides form inputs and any text containing a secret for one
+// capture. Password and sensitive-marked elements are always hidden when a
+// mask is supplied.
+type ScreenshotMask struct {
+	Inputs  bool
+	Secrets []string
+}
+
+// ScreenshotMasker is implemented by DOM-backed providers. The returned
+// restore function undoes the mask and must be called after capture.
+type ScreenshotMasker interface {
+	MaskForScreenshot(mask ScreenshotMask) (restore func(), err error)
 }
 
 type DownloadStatus string

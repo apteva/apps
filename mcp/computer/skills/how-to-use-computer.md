@@ -191,6 +191,33 @@ error string is absent but Computer reports a rendered media block, do not
 submit the URL again automatically; verify the player first. This avoids
 duplicate embeds caused by treating “no error text” as “nothing happened.”
 
+## Read page state and page errors (checks and tests)
+
+- **Read an element** without changing the page:
+  `computer_use(action="read_element", selector="#status")` returns
+  `{found, count, visible, text, value?, attributes?}` for the first match.
+  Hidden elements are included by default (`include_hidden=false` counts
+  visible matches only); `all=true` returns up to 20 matches. Password fields
+  and elements marked `sensitive` / `data-sensitive` / `data-test-sensitive`
+  never return text or value.
+- **Wait for text** instead of polling: a `wait_for` condition
+  `{"type":"selector_text","selector":"#status","value":"ready","op":"equals"}`
+  (or `op:"contains"`). Hidden elements count; sensitive fields never match.
+- **Page errors** are opt-in: open with
+  `browser_session(action="open", diagnostics=true)`, then
+  `browser_diagnostics(session_id, since?, clear?)` returns exception
+  messages, a console error count, and failed requests / HTTP responses
+  >= 400 as `{method, origin, path, status}`. No query strings, headers or
+  bodies are recorded. Pass the returned `cursor` as `since` for newer
+  problems only.
+- **Masked screenshots**: `browser_screenshot(session_id, mask={inputs:true,
+  secrets:["..."]})` hides form fields and any text containing a secret for
+  that capture only, then restores the page. Secrets are never stored or
+  returned; a masked result has no `screenshot_url`.
+- A `navigate` whose destination differs only by `#fragment` (an app
+  rewriting `?screen=x` to `?screen=x#/x`) succeeds; navigating to the current
+  document reports `reloaded: true`.
+
 ## Present one persistent browser view
 
 Opening or driving a browser does not create an attachment automatically.

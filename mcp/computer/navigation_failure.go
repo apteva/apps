@@ -42,7 +42,7 @@ func (a *App) toolComputerUseMCP(callCtx context.Context, ctx *sdk.AppCtx, args 
 
 func navigationMayWrite(action string) bool {
 	switch action {
-	case "screenshot", "wait", "wait_for", "wait_for_stable", "scroll", "navigate", "back", "reload":
+	case "screenshot", "wait", "wait_for", "wait_for_stable", "scroll", "navigate", "back", "reload", "read_element", "diagnostics":
 		return false
 	}
 	return true

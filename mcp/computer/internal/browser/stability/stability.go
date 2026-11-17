@@ -332,6 +332,14 @@ const outcomeScript = `(function(conditions){
       else if(type==='text_absent')matched=norm(bodyText,c.case_sensitive).indexOf(value)<0;
       else if(type==='selector_present'||type==='selector_absent'){
         var present=false,nodes=document.querySelectorAll(c.selector||'');for(var j=0;j<nodes.length;j++)if(visible(nodes[j])){present=true;break;}matched=type==='selector_present'?present:!present;
+      } else if(type==='selector_text'){
+        // Hidden elements count (status markers); sensitive controls never
+        // match so a wait cannot be used as an oracle for their contents.
+        var op=String(c.op||'equals').toLowerCase(),cand=document.querySelectorAll(c.selector||'');
+        for(var k=0;k<cand.length&&!matched;k++){var el=cand[k];
+          if(el.closest&&el.closest('input[type=password],[sensitive]:not([sensitive=false]),[data-sensitive]:not([data-sensitive=false]),[data-test-sensitive]:not([data-test-sensitive=false])'))continue;
+          var raw=(el.matches&&el.matches('input,textarea,select'))?el.value:(typeof el.innerText==='string'?el.innerText:el.textContent);
+          var got=norm(raw,c.case_sensitive);matched=op==='contains'?got.indexOf(value)>=0:got===value;}
       } else if(type==='target_present'||type==='target_absent'){
         var semantic=!!semanticTarget(c);matched=type==='target_present'?semantic:!semantic;
       } else if(type==='target_state'){

@@ -43,10 +43,13 @@ import (
 	api "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
+	"github.com/apteva/apps/mcp/computer/internal/browser/elementread"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
+	localbrowser "github.com/apteva/apps/mcp/computer/internal/browser/local"
 	"github.com/apteva/apps/mcp/computer/internal/browser/mobile"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
+	"github.com/apteva/apps/mcp/computer/internal/browser/screenmask"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -63,9 +66,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.13.0
+version: 0.14.0
 description: |
-  Adds guarded Android password entry through Mobile with image-free observation, explicit confirmation and a unique secure-field selector.
+  v0.14.0 adds read-only read_element (text, value, attributes; sensitive
+  fields withheld), a selector_text wait condition, opt-in page diagnostics
+  via browser_diagnostics (origin/path/status only), masked screenshots,
+  local profile purge on context delete, and fragment-tolerant navigate.
+  v0.13.0 adds guarded Android password entry through Mobile with image-free observation, explicit confirmation and a unique secure-field selector.
   v0.12.0 exposes native iOS and Android screen guards with exact app,
   marker, account-field and unique-target checks. Supports bounded native reads,
   verified Android replacement/clearing, scoped repeated form controls and
@@ -158,7 +165,7 @@ provides:
     - name: computer_context_update
       description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
     - name: computer_context_delete
-      description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
+      description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?, purge_profile? (local: also delete the Chrome profile folder)."
     - name: computer_proxy_profile_list
       description: "List safe proxy profiles available for agent-selected browser sessions. Returns profile ids, names, providers, countries, protocols, and sticky policies; never credentials or proxy URLs."
     - name: browser_open
@@ -166,6 +173,8 @@ provides:
       description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name. Omit every advanced optional field and never synthesize defaults. environment is only for explicitly requested QA/device emulation, never normal navigation, audits, or saved login."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
+    - name: browser_diagnostics
+      description: "Read page problems recorded for a session opened with browser_session(action=open, diagnostics=true): exception messages, a console error count, and failed requests or HTTP responses >= 400 (method, origin, path and status only). Args: session_id, since?, clear?."
     - name: browser_extract
       exposure: app_only
       description: "Extract structured rendered DOM content from an app-owned browser session. Intended for bound apps such as Web; never agent-visible. Args: session_id, formats?, max_chars?, readability?, wait_ms?."
@@ -301,7 +310,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.13.0
+    ref: computer/v0.14.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -353,6 +362,7 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
+	diagnostics          bool // page diagnostics recording was requested at open
 	navigationBlocked    bool
 	inputUncertain       bool
 	projectID            string
@@ -738,6 +748,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":              map[string]any{"type": "boolean"},
+				"diagnostics":          map[string]any{"type": "boolean", "description": "Opt-in: record page exceptions, console error counts, failed requests and HTTP responses >= 400 for this session; read them with browser_diagnostics. Default false records nothing."},
 				"extraction_only":      map[string]any{"type": "boolean", "description": "Read-only extraction lifecycle: skip automatic final screenshots on close; cleanup and usage accounting remain enabled."},
 				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "default": defaultCloudSessionTimeoutSeconds, "description": "Entire cloud browser session's maximum wall-clock lifetime in seconds, including while actively used. Omit unless the user explicitly requested this exact provider lifetime. Never infer it from estimated task duration: a one-minute task still omits timeout. This is not a page-load, action, wait, or task timeout; use computer_use timeout_ms for action waits. Default 1800 (30 minutes); accepted range 60-21600 (6 hours)."},
 				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing. profile uses a configured profile; managed uses the browser backend's proxy; direct disables proxies."},
@@ -771,7 +782,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For action=scroll, inspect returned scroll_regions BEFORE execution. If more than one region can move in the requested direction, target_id is REQUIRED: copy the intended returned ID, never guess scroll_document. Pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"For explicitly read-only navigation, set read_only=true to allow one bounded Browserbase fresh-page retry on transient network failure. Never use it to replay or recover an uncertain write. Navigation failures return structured diagnostics and block subsequent writes until a successful read-only navigation or an explicit context reopen after inspection. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. For action=screenshot OMIT observation; use annotate and include_som. Use compact=true for iterative observations, and observation=som_delta only for NON-screenshot post-action refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. For action=screenshot OMIT observation; use annotate and include_som. Use compact=true for iterative observations, and observation=som_delta only for NON-screenshot post-action refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal, read_element. " +
+				"Use action=read_element with selector to read an element's text, value, and visibility without changing the page (all=true returns up to 20 matches); sensitive inputs such as password fields never return a value. Page errors are read with browser_diagnostics on sessions opened with diagnostics=true. " +
 				"Scroll regions include bounded content_hints naming controls in each panel, including below the viewport; use those hints to choose which panel to scroll. Snapshots include checked (true/false), indeterminate for mixed checkboxes, and current_value for ordinary form fields including time inputs. Use these values to verify configuration without repeating input; password values are omitted. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
@@ -783,7 +795,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"native_values":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Exact expected values for uniquely identified screen fields, e.g. the active account header."},
 				"session_id":      map[string]any{"type": "string"},
 				"read_only":       map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
-				"action":          map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":          map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal", "read_element"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -795,7 +807,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"label":               map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
 				"target_id":           map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
 				"som_revision":        map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
-				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For upload_file it must match exactly one element; prefer a fresh label/target_id. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, set_temporal, or read_element. For upload_file it must match exactly one element; prefer a fresh label/target_id. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"all":                 map[string]any{"type": "boolean", "description": "For read_element: return up to 20 matching elements instead of only the first. count always reports the total number of matches."},
+				"include_hidden":      map[string]any{"type": "boolean", "description": "For read_element: count and read hidden matches too. Defaults true so hidden status markers can be read; false counts visible matches only."},
 				"expected_text":       map[string]any{"type": "string", "description": "For click/double_click only; omit for upload_file (use expected_name with a fresh label/target_id instead). The intended exact accessible name is verified atomically at dispatch time along with loading/disabled state. Always pass it for clicks that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
 				"expected_effect":     map[string]any{"type": "string", "enum": []string{"navigation_only", "open_configuration", "save_draft", "immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For click/double_click only. State the intended semantic effect. Required when the live target is consequential; omit for ordinary clicks unless distinguishing navigation/configuration intent."},
 				"confirm_consequence": map[string]any{"type": "string", "enum": []string{"immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For a consequential click only. Explicitly repeat the exact expected_effect to acknowledge the externally visible or irreversible consequence. Omit for ordinary navigation/editing."},
@@ -823,9 +837,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"amount":              map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":            map[string]any{"type": "integer"},
 				"conditions": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "description": "For wait_for. Declarative browser outcomes. match defaults to any.", "items": map[string]any{"type": "object", "properties": map[string]any{
-					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent", "target_state", "media_present", "media_error"}, "description": "Outcome predicate. target_state waits on one control without requiring page-wide quiet. media_present matches a rendered player/media block; media_error matches an explicit rejected-media error. Combine both conditions with match=any for a terminal media outcome."},
+					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "selector_text", "target_present", "target_absent", "target_state", "media_present", "media_error"}, "description": "Outcome predicate. selector_text matches when any element for selector (hidden included, sensitive excluded) has text (or form value) equal to / containing value per op. target_state waits on one control without requiring page-wide quiet. media_present matches a rendered player/media block; media_error matches an explicit rejected-media error. Combine both conditions with match=any for a terminal media outcome."},
 					"value":          map[string]any{"type": "string", "description": "Required for URL/text conditions. For url_changed, pass the URL before the action (success means current URL differs). For url_equals/url_contains, pass the desired destination URL/value. For text conditions, pass visible text."},
 					"selector":       map[string]any{"type": "string", "description": "CSS selector required for selector conditions."},
+					"op":             map[string]any{"type": "string", "enum": []string{"equals", "contains"}, "description": "For selector_text. Defaults equals. Whitespace is collapsed; case-insensitive unless case_sensitive=true."},
 					"target_id":      map[string]any{"type": "string", "description": "Current semantic target id required for target conditions."},
 					"state":          map[string]any{"type": "string", "enum": []string{"ready", "loading", "enabled", "disabled", "checked", "unchecked"}, "description": "Required for target_state."},
 					"case_sensitive": map[string]any{"type": "boolean"},
@@ -901,10 +916,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "computer_context_delete",
-			Description: "Delete or unlink an app-managed browser context. Args: id, delete_provider? (Browserbase only; default false).",
+			Description: "Delete or unlink an app-managed browser context. Args: id, delete_provider? (Browserbase only; default false), purge_profile? (local only; default false: also delete the on-disk Chrome profile with its cookies and storage; refused while a session uses it).",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "string"},
 				"delete_provider": map[string]any{"type": "boolean"},
+				"purge_profile":   map[string]any{"type": "boolean", "description": "Local contexts only: also delete the Chrome profile folder (cookies, storage, cache). Refused while an active session uses the context."},
 			}, []string{"id"}),
 			Handler: a.toolContextDelete,
 		},
@@ -937,6 +953,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":              map[string]any{"type": "boolean"},
+				"diagnostics":          map[string]any{"type": "boolean", "description": "Opt-in page diagnostics recording; read with browser_diagnostics."},
 				"extraction_only":      map[string]any{"type": "boolean", "description": "Skip automatic final screenshots for read-only extraction; provider release and accounting remain enabled."},
 				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "default": defaultCloudSessionTimeoutSeconds, "description": "Entire cloud browser session's maximum wall-clock lifetime in seconds, including while actively used. Omit unless explicitly requested. Default 1800 (30 minutes)."},
 				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing."},
@@ -966,8 +983,28 @@ func (a *App) MCPTools() []sdk.Tool {
 				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
 				"compact":     map[string]any{"type": "boolean", "description": "Opt-in compact response: one image envelope without the legacy png_b64 alias; structured target arrays are bounded with explicit truncation flags."},
 				"include_som": map[string]any{"type": "boolean", "description": "Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
+				"mask": map[string]any{
+					"type":        "object",
+					"description": "Hide credentials for this capture only, then restore the page. Password and sensitive-marked fields are always hidden; inputs=true hides every form field; secrets hides any text or field value containing one of the values. Secrets are used for this call only and never stored, logged or returned. A masked result has no screenshot_url.",
+					"properties": map[string]any{
+						"inputs":  map[string]any{"type": "boolean"},
+						"secrets": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
+					},
+				},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
+		},
+		{
+			Name: "browser_diagnostics",
+			Description: "Read page problems recorded for a session opened with browser_session(action=open, diagnostics=true): uncaught exception messages, a count of console errors, and failed requests / HTTP responses >= 400. " +
+				"Request entries carry method, origin, path, status (0 when no response) and error only — never query strings, headers or bodies. Lists are capped; truncated=true means older entries were dropped. " +
+				"Pass the returned cursor as since to read only newer problems, and clear=true to discard what has been recorded. Args: session_id, since?, clear?.",
+			InputSchema: strictSchemaObject(map[string]any{
+				"session_id": map[string]any{"type": "string", "description": "Active app-owned br_* session opened with diagnostics=true."},
+				"since":      map[string]any{"type": "integer", "minimum": 0, "description": "Cursor from a previous read; only newer problems are returned. Omit or 0 for everything kept."},
+				"clear":      map[string]any{"type": "boolean", "description": "Discard all recorded problems after this read. Default false."},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserDiagnostics,
 		},
 		{
 			Name:        "browser_extract",
@@ -1174,6 +1211,15 @@ func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !contextVisible(ctx, rec) {
 		return nil, errContextNotFound
 	}
+	purge := boolArgDefault(args, "purge_profile", false)
+	if purge {
+		if rec.Backend != "local" {
+			return nil, fmt.Errorf("purge_profile applies only to local contexts; %q profiles are held by the provider (use delete_provider for Browserbase)", rec.Backend)
+		}
+		if sid := a.activeSessionForContext(rec.ID); sid != "" {
+			return nil, fmt.Errorf("context %s is in use by active session %s; close it before purging the profile", rec.ID, sid)
+		}
+	}
 	providerDeleted := false
 	if boolArgDefault(args, "delete_provider", false) && rec.ProviderContextID != "" {
 		if err := deleteProviderContext(ctx, rec.Backend, rec.ProviderContextID); err != nil {
@@ -1181,13 +1227,37 @@ func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		providerDeleted = true
 	}
+	profilePurged := false
+	if purge {
+		// Purge before deleting the row so a failure leaves the context
+		// listed and the purge can be retried.
+		removed, err := localbrowser.PurgeContextProfile(rec.ProviderContextID)
+		if err != nil {
+			return nil, fmt.Errorf("purge local profile: %w", err)
+		}
+		profilePurged = removed
+	}
 	if err := dbDeleteContext(db, id); err != nil {
 		return nil, err
 	}
 	payload := contextEventPayload(rec)
 	payload["provider_deleted"] = providerDeleted
+	payload["profile_purged"] = profilePurged
 	emitEvent(ctx, "context.deleted", payload)
-	return map[string]any{"deleted": true, "provider_deleted": providerDeleted}, nil
+	return map[string]any{"deleted": true, "provider_deleted": providerDeleted, "profile_purged": profilePurged}, nil
+}
+
+// activeSessionForContext returns the id of a live session bound to the
+// app context, or "".
+func (a *App) activeSessionForContext(appContextID string) string {
+	a.reg.mu.Lock()
+	defer a.reg.mu.Unlock()
+	for id, s := range a.reg.m {
+		if s != nil && s.appContextID == appContextID {
+			return id
+		}
+	}
+	return ""
 }
 
 func (a *App) toolSettingsGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1388,7 +1458,17 @@ func (a *App) toolBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx
 			return nil, err
 		}
 		defer sess.actionMu.Unlock()
-		return decorate(a.sessionOutput(id, sess), nil)
+		out := a.sessionOutput(id, sess)
+		if reporter, ok := sess.comp.(backends.PageDiagnosticsReporter); ok && sess.diagnostics {
+			// status is a summary peek: it never clears. browser_diagnostics is
+			// the full read.
+			snap := reporter.PageDiagnostics(0, false)
+			out["page_diagnostics"] = map[string]any{
+				"exceptions": len(snap.Exceptions), "console_errors": snap.ConsoleErrors,
+				"requests": len(snap.Requests), "truncated": snap.Truncated, "cursor": snap.Cursor,
+			}
+		}
+		return decorate(out, nil)
 	case "tabs":
 		return decorate(a.toolBrowserTabs(ctx, args))
 	case "switch_tab":
@@ -1922,6 +2002,17 @@ func (a *App) openBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx
 	if backend == "mobile" {
 		openOpts.ContextID = ""
 	}
+	diagnosticsRequested := boolArgDefault(args, "diagnostics", false)
+	if diagnosticsRequested {
+		// Enable before opening so the initial page load is recorded: backends
+		// attach the recorder to each tab as they create it.
+		reporter, ok := comp.(backends.PageDiagnosticsReporter)
+		if !ok {
+			_ = comp.Close()
+			return nil, fmt.Errorf("backend_not_supported: backend %q does not record page diagnostics; omit diagnostics or use local, browserbase, steel, or browser-engine", backend)
+		}
+		reporter.EnablePageDiagnostics()
+	}
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
 			_ = comp.Close()
@@ -1960,6 +2051,7 @@ func (a *App) openBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx
 		initialURL:       openOpts.URL,
 		persist:          rc.Persist,
 		extractionOnly:   boolArgDefault(args, "extraction_only", false),
+		diagnostics:      diagnosticsRequested,
 		timeout:          effectiveTimeout,
 		proxy:            proxyPolicy.State,
 		environment:      environmentOptions,
@@ -2368,6 +2460,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	m := out.(map[string]any)
 	res := map[string]any{
 		"png_b64":        pngBase64(m["screenshot"]),
+		"masked":         rawArgPresent(args, "mask"),
 		"screenshot":     m["screenshot"],
 		"screenshot_url": a.sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
 		"current_url":    m["current_url"],
@@ -2376,6 +2469,11 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	if som, ok := m["som"]; ok {
 		res["som"] = som
+	}
+	if rawArgPresent(args, "mask") {
+		// screenshot_url serves a fresh, unmasked capture of the live page;
+		// a masked result must not point at it.
+		delete(res, "screenshot_url")
 	}
 	for _, key := range []string{
 		"observation_truncated", "coverage_incomplete", "omitted_target_count",
@@ -2838,6 +2936,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	if action == "select_option" && rawArgPresent(args, "value") && stringArg(args, "value") == "" {
 		args["values"] = []string{""}
 	}
+	if action == "read_element" {
+		return a.computerUseReadElement(ctx, id, sess, args)
+	}
 	if action == "batch" {
 		return a.toolComputerUseBatchLocked(ctx, id, sess, args)
 	}
@@ -3028,7 +3129,14 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	var waitResult *backends.WaitResult
 	if action == "screenshot" {
+		restoreMask, maskErr := applyScreenshotMask(id, sess, args)
+		if maskErr != nil {
+			return nil, maskErr
+		}
 		shot, err = screenshotWithOptions(sess.comp, annotate)
+		if restoreMask != nil {
+			restoreMask()
+		}
 	} else if action == "wait_for" || action == "wait_for_stable" {
 		observed, waitErr := executeSemanticWait(sess, act)
 		waitResult = &observed
@@ -3207,7 +3315,11 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 			"browser history did not move to a different URL",
 			"Take a fresh screenshot and use action=navigate with an explicit URL if the destination is known.", nil)
 	}
-	if action == "navigate" && slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "url") && !navigationURLChanged(beforeURL, afterURL) && !navigationURLsEquivalent(act.URL, afterURL) {
+	// A navigate is effective when the URL moved, or when the browser rests on
+	// the requested document. Fragments are client-side state: SPAs commonly
+	// rewrite ?screen=x to ?screen=x#/x, and navigating to the current document
+	// is a reload rather than a failure.
+	if action == "navigate" && slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "url") && !navigationURLChanged(beforeURL, afterURL) && !navigationURLsSameDocument(act.URL, afterURL) {
 		return nil, computerUseFailure("navigation_ineffective", id, sess, action,
 			fmt.Sprintf("browser remained at %q", afterURL),
 			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
@@ -3828,6 +3940,9 @@ func mergeNavigationDelta(payload map[string]any, action, beforeURL, afterURL, r
 		payload["requested_url"] = requestedURL
 		if !changed {
 			payload["url_changed"] = false
+			if navigationURLsSameDocument(requestedURL, beforeURL) {
+				payload["reloaded"] = true
+			}
 		}
 	case "back":
 		payload["navigation"] = "back"
@@ -3838,6 +3953,116 @@ func mergeNavigationDelta(payload map[string]any, action, beforeURL, afterURL, r
 		payload["reloaded"] = true
 		payload["url_changed"] = changed
 	}
+}
+
+func (a *App) toolBrowserDiagnostics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := stringArg(args, "session_id")
+	if id == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	if err := a.authorizeSessionProject(ctx, id); err != nil {
+		return nil, err
+	}
+	sess, ok := a.reg.get(id)
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", id)
+	}
+	since := intArg(args, "since")
+	if since < 0 {
+		return nil, fmt.Errorf("since must be a non-negative cursor")
+	}
+	if err := a.lockActiveSession(id, sess); err != nil {
+		return nil, err
+	}
+	defer sess.actionMu.Unlock()
+	reporter, ok := sess.comp.(backends.PageDiagnosticsReporter)
+	if !ok || !sess.diagnostics {
+		return map[string]any{"session_id": id, "enabled": false, "exceptions": []string{}, "console_errors": 0,
+			"requests": []backends.PageRequestDiagnostic{}, "truncated": false, "cursor": 0,
+			"text": "Diagnostics were not enabled for this session. Open a new session with diagnostics=true."}, nil
+	}
+	snap := reporter.PageDiagnostics(uint64(since), boolArgDefault(args, "clear", false))
+	return map[string]any{
+		"session_id":     id,
+		"enabled":        true,
+		"exceptions":     snap.Exceptions,
+		"console_errors": snap.ConsoleErrors,
+		"requests":       snap.Requests,
+		"truncated":      snap.Truncated,
+		"cursor":         snap.Cursor,
+	}, nil
+}
+
+// computerUseReadElement answers read-only element queries (text, value,
+// visibility) that wait_for can only answer as yes/no. It does not dispatch
+// input, so it neither dirties the semantic snapshot nor records navigation.
+func (a *App) computerUseReadElement(ctx *sdk.AppCtx, id string, sess *session, args map[string]any) (any, error) {
+	const action = "read_element"
+	reader, ok := sess.comp.(backends.ElementReader)
+	if !ok {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not support read_element", sess.backend),
+			"Use local, Browserbase, Steel, or browser-engine for read_element, or use wait_for with a text condition.", nil)
+	}
+	selector := strings.TrimSpace(stringArg(args, "selector"))
+	if selector == "" {
+		return nil, computerUseFailure("invalid_target", id, sess, action,
+			"read_element requires selector", "Pass action=read_element with a CSS selector.", nil)
+	}
+	all := boolArgDefault(args, "all", false)
+	res, err := reader.ReadElement(selector, backends.ElementReadOptions{All: all, VisibleOnly: !boolArgDefault(args, "include_hidden", true)})
+	if err != nil {
+		if errors.Is(err, elementread.ErrInvalidSelector) {
+			return nil, computerUseFailure("invalid_target", id, sess, action, err.Error(),
+				"Pass a valid CSS selector.", err)
+		}
+		if isSessionUnhealthyError(err) {
+			return nil, a.closeUnhealthySession(ctx, id, sess, action, err)
+		}
+		return nil, computerUseFailure("backend_error", id, sess, action, err.Error(),
+			"Take a fresh screenshot, then retry read_element once.", err)
+	}
+	out := map[string]any{
+		"success":    true,
+		"session_id": id,
+		"action":     action,
+		"selector":   res.Selector,
+		"count":      res.Count,
+		"found":      res.Count > 0,
+		"visible":    false,
+	}
+	if url := currentURL(sess.comp); url != "" {
+		out["current_url"] = url
+	}
+	if len(res.Elements) > 0 {
+		first := res.Elements[0]
+		out["tag"] = first.Tag
+		out["text"] = first.Text
+		out["visible"] = first.Visible
+		if first.Value != nil {
+			out["value"] = *first.Value
+		}
+		if first.ValueRedacted {
+			out["value_redacted"] = true
+		}
+		if first.Redacted {
+			out["redacted"] = true
+		}
+		if len(first.Attributes) > 0 {
+			out["attributes"] = first.Attributes
+		}
+		if first.Checked != nil {
+			out["checked"] = *first.Checked
+		}
+		if first.Truncated {
+			out["truncated"] = true
+		}
+	}
+	if all {
+		out["elements"] = res.Elements
+		out["elements_truncated"] = res.Count > len(res.Elements)
+	}
+	return out, nil
 }
 
 func navigationURLChanged(beforeURL, afterURL string) bool {
@@ -3861,6 +4086,21 @@ func navigationURLsEquivalent(left, right string) bool {
 		return u.String()
 	}
 	return normalize(left) == normalize(right)
+}
+
+// navigationURLsSameDocument reports whether two URLs address the same
+// document, ignoring the fragment. It is deliberately narrower in use than
+// navigationURLsEquivalent: back/history still treat #a -> #b as a move.
+func navigationURLsSameDocument(left, right string) bool {
+	return navigationURLsEquivalent(stripURLFragment(left), stripURLFragment(right))
+}
+
+func stripURLFragment(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if i := strings.IndexByte(raw, '#'); i >= 0 {
+		return raw[:i]
+	}
+	return raw
 }
 
 func validToolNavigationURL(raw string) bool {
@@ -5681,6 +5921,7 @@ func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
 			Type: strings.ToLower(strings.TrimSpace(stringArg(mapped, "type"))), Value: strings.TrimSpace(stringArg(mapped, "value")),
 			Selector: strings.TrimSpace(stringArg(mapped, "selector")), TargetID: strings.TrimSpace(stringArg(mapped, "target_id")),
 			State: strings.ToLower(strings.TrimSpace(stringArg(mapped, "state"))),
+			Op:    strings.ToLower(strings.TrimSpace(stringArg(mapped, "op"))),
 		}
 		condition.CaseSensitive, _ = boolArg(mapped, "case_sensitive")
 		switch condition.Type {
@@ -5691,6 +5932,19 @@ func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
 		case "selector_present", "selector_absent":
 			if condition.Selector == "" {
 				return nil, fmt.Errorf("condition %d type %s requires selector", index+1, condition.Type)
+			}
+		case "selector_text":
+			if condition.Selector == "" {
+				return nil, fmt.Errorf("condition %d type selector_text requires selector", index+1)
+			}
+			if condition.Op == "" {
+				condition.Op = "equals"
+			}
+			if condition.Op != "equals" && condition.Op != "contains" {
+				return nil, fmt.Errorf("condition %d type selector_text requires op=equals|contains", index+1)
+			}
+			if _, supplied := mapped["value"]; !supplied || (condition.Op == "contains" && condition.Value == "") {
+				return nil, fmt.Errorf("condition %d type selector_text requires value", index+1)
 			}
 		case "target_present", "target_absent":
 			if condition.TargetID == "" {
@@ -6189,6 +6443,58 @@ func mapWithDefault(args map[string]any, k string, v any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// applyScreenshotMask hides inputs and secret-bearing text before a
+// screenshot when args carry mask. It fails closed: an unsupported backend or
+// a failed mask never falls through to an unmasked capture. Error messages
+// never include secret values.
+func applyScreenshotMask(id string, sess *session, args map[string]any) (func(), error) {
+	raw, present := args["mask"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	spec, ok := raw.(map[string]any)
+	if !ok {
+		return nil, computerUseFailure("invalid_mask", id, sess, "screenshot", "mask must be an object {inputs?, secrets?}", "Pass mask={inputs:true, secrets:[...]}.", nil)
+	}
+	mask := backends.ScreenshotMask{}
+	if inputs, ok := boolArg(spec, "inputs"); ok {
+		mask.Inputs = inputs
+	}
+	if rawSecrets, ok := spec["secrets"]; ok && rawSecrets != nil {
+		list, ok := rawSecrets.([]any)
+		if !ok {
+			if typed, typedOK := rawSecrets.([]string); typedOK {
+				for _, v := range typed {
+					list = append(list, v)
+				}
+			} else {
+				return nil, computerUseFailure("invalid_mask", id, sess, "screenshot", "mask.secrets must be an array of strings", "Pass mask.secrets as an array of strings.", nil)
+			}
+		}
+		for _, item := range list {
+			secret, ok := item.(string)
+			if !ok {
+				return nil, computerUseFailure("invalid_mask", id, sess, "screenshot", "mask.secrets must be an array of strings", "Pass mask.secrets as an array of strings.", nil)
+			}
+			mask.Secrets = append(mask.Secrets, secret)
+		}
+	}
+	if err := screenmask.Validate(mask); err != nil {
+		return nil, computerUseFailure("invalid_mask", id, sess, "screenshot", err.Error(), "Pass at most 20 non-empty secrets.", nil)
+	}
+	masker, ok := sess.comp.(backends.ScreenshotMasker)
+	if !ok {
+		return nil, computerUseFailure("backend_not_supported", id, sess, "screenshot",
+			fmt.Sprintf("backend %q cannot mask screenshots", sess.backend),
+			"Omit mask, or use local, Browserbase, Steel, or browser-engine.", nil)
+	}
+	restore, err := masker.MaskForScreenshot(mask)
+	if err != nil {
+		return nil, computerUseFailure("mask_failed", id, sess, "screenshot", "screenshot masking failed; no screenshot was captured", "Retry once, or skip the screenshot.", nil)
+	}
+	return restore, nil
 }
 
 func screenshotWithOptions(comp backends.Computer, annotate bool) ([]byte, error) {

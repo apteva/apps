@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"image"
@@ -31,10 +32,13 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
+	"github.com/apteva/apps/mcp/computer/internal/browser/elementread"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/pagediag"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/screenmask"
 	"github.com/apteva/apps/mcp/computer/internal/browser/scrolltarget"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
@@ -94,6 +98,7 @@ type Computer struct {
 	labelMu          sync.RWMutex
 	lastLabels       map[int]som.Element
 	stabilityTracker *stability.Tracker
+	diagnostics      *pagediag.Recorder
 	scrollMu         sync.RWMutex
 	lastScrollResult *computer.ScrollResult
 	scrollRegions    []computer.ScrollRegion
@@ -1014,6 +1019,8 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 }
 
 func (c *Computer) attachStabilityTracker() {
+	// Diagnostics are opt-in; once enabled, follow the active tab.
+	c.diagnostics.Attach(c.ctx)
 	id := cdptabs.ActiveID(c.ctx)
 	if c.tabTrackers == nil {
 		c.tabTrackers = make(map[string]*stability.Tracker)
@@ -2065,4 +2072,78 @@ func (a *proxyAuthAttempts) allow(event *fetch.EventAuthRequired, configured str
 	a.seen[event.RequestID] = true
 	a.order = append(a.order, event.RequestID)
 	return true
+}
+
+// ReadElement implements computer.ElementReader.
+func (c *Computer) ReadElement(selector string, opts computer.ElementReadOptions) (computer.ElementReadResult, error) {
+	if c.ctx == nil {
+		return computer.ElementReadResult{}, fmt.Errorf("local: no active session — call browser_session open first")
+	}
+	return elementread.Run(c.ctx, selector, opts)
+}
+
+// EnablePageDiagnostics implements computer.PageDiagnosticsReporter.
+func (c *Computer) EnablePageDiagnostics() {
+	if c.diagnostics == nil {
+		c.diagnostics = pagediag.New()
+	}
+	c.diagnostics.Attach(c.ctx)
+}
+
+// PageDiagnostics implements computer.PageDiagnosticsReporter.
+func (c *Computer) PageDiagnostics(since uint64, clear bool) computer.PageDiagnostics {
+	return c.diagnostics.Snapshot(since, clear)
+}
+
+// MaskForScreenshot implements computer.ScreenshotMasker.
+func (c *Computer) MaskForScreenshot(mask computer.ScreenshotMask) (func(), error) {
+	if c.ctx == nil {
+		return nil, fmt.Errorf("local: no active session — call browser_session open first")
+	}
+	return screenmask.Apply(c.ctx, mask)
+}
+
+// ErrContextProfileInUse is returned by PurgeContextProfile when a live
+// Chrome process still holds the profile's SingletonLock.
+var ErrContextProfileInUse = errors.New("local context profile is in use")
+
+// PurgeContextProfile deletes the on-disk Chrome user-data-dir (cookies,
+// storage, cache) for a local context id. It refuses ids that could escape
+// the contexts directory and profiles held by a running Chrome. removed is
+// false when no profile existed.
+func PurgeContextProfile(id string) (removed bool, err error) {
+	if strings.TrimSpace(id) == "" {
+		return false, fmt.Errorf("local context id required")
+	}
+	if err := validateContextID(id); err != nil {
+		return false, err
+	}
+	base, err := filepath.Abs(localContextsBaseDir())
+	if err != nil {
+		return false, err
+	}
+	dir, err := filepath.Abs(contextDirFor(id))
+	if err != nil {
+		return false, err
+	}
+	if rel, relErr := filepath.Rel(base, dir); relErr != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.ContainsRune(rel, filepath.Separator) {
+		return false, fmt.Errorf("invalid context_id %q", id)
+	}
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("local context profile %q is not a directory", id)
+	}
+	if pid, _ := reclaimSingletonLockIfStale(dir); pid > 0 {
+		return false, fmt.Errorf("%w by PID %d; close its session first", ErrContextProfileInUse, pid)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
