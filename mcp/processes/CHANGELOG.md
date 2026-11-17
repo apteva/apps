@@ -2,6 +2,15 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Simpler agent protocol (0.20.0)
+
+Step workers get one brief holding the step, its inputs and all completed
+earlier results, and finish with one `step_update` carrying `outcome`.
+Isolated workers have 4 Processes tools (plus 6 only for memory procedures).
+Status changes are one tool per object (`status`, `assignment_status`,
+`trigger_status`); `assignments` with `assignment_id` replaces `assignment_get`.
+Agents see 43 tools instead of 49. See `docs-release-0.20.0.md`.
+
 ## Durable wait ownership (0.18.3)
 
 `step_update.wait` records why a worker must remain attached. Save the original
