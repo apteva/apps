@@ -59,8 +59,14 @@ func sanitizeStep(result *StepResult, output any, selected []string, release *re
 	allowed := map[string]bool{"/status_code": true}
 	if result.Kind == "browser" {
 		// The protocol omits sensitive element values and redacts registered secrets.
-		for _, path := range []string{"/count", "/visible", "/enabled", "/checked", "/target", "/path", "/text", "/value", "/action_dispatched"} {
+		for _, path := range []string{"/count", "/visible", "/enabled", "/checked", "/target", "/path", "/text", "/value", "/redacted", "/action_dispatched"} {
 			allowed[path] = true
+		}
+		// Element attributes read in existing mode, unless the name looks sensitive.
+		for _, assertion := range result.Assertions {
+			if name, ok := strings.CutPrefix(assertion.Path, "/attributes/"); ok && !sensitiveName(name) {
+				allowed[assertion.Path] = true
+			}
 		}
 	}
 	for _, path := range selected {

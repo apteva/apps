@@ -401,10 +401,21 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 		} else {
 			row = a.runParallel(ctx, step, values, app)
 		}
+		if app.web != nil && (step.Kind == "browser" || len(step.Parallel) > 0) {
+			if problem := a.collectWebDiagnostics(ctx, app); problem != "" && row.Status == "passed" {
+				row.Status, row.Error = "failed", problem
+			}
+		}
 		steps = append(steps, row)
 		if row.Status != "passed" {
 			result.Status = row.Status
 			break
+		}
+	}
+	if app.web != nil {
+		// Requests can finish after the last step; read once more.
+		if problem := a.collectWebDiagnostics(ctx, app); problem != "" && result.Status == "passed" {
+			result.Status, result.Error = "failed", problem
 		}
 	}
 	var browserEvidence *BrowserEvidence

@@ -75,6 +75,11 @@ type BrowserDiagnostics struct {
 	Blocked        int               `json:"blocked"`
 	BoundaryDenied int               `json:"boundary_denied"`
 	Truncated      bool              `json:"truncated"`
+	// Existing-mode sessions (Computer 0.14.0+): uncaught page exceptions,
+	// the number of console errors, and whether this backend recorded nothing.
+	Exceptions    []string `json:"exceptions,omitempty"`
+	ConsoleErrors int      `json:"console_errors,omitempty"`
+	Unavailable   bool     `json:"unavailable,omitempty"`
 }
 type BrowserEvidence struct {
 	SessionID   string             `json:"session_id"`

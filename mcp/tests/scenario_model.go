@@ -295,10 +295,16 @@ func validateTargetStep(step Step, target *TargetConfig) error {
 				return fmt.Errorf("step %s: existing mode clicks and fills by test_id or selector; text locators only work with observe", step.ID)
 			}
 			for _, assertion := range step.Assertions {
-				switch assertion.Path {
-				case "/visible", "/path", "/url", "/target", "/action_dispatched", "/checked", "/current_value", "/text_value", "/verified":
+				switch {
+				case isReadPath(assertion.Path):
+					if b.Action != "observe" || b.Locator.Selector == "" && b.Locator.TestID == "" {
+						return fmt.Errorf("step %s: %s needs an observe step with a test_id or selector locator", step.ID, assertion.Path)
+					}
+				case assertion.Path == "/visible", assertion.Path == "/path", assertion.Path == "/url", assertion.Path == "/target",
+					assertion.Path == "/action_dispatched", assertion.Path == "/checked", assertion.Path == "/current_value",
+					assertion.Path == "/text_value", assertion.Path == "/verified":
 				default:
-					return fmt.Errorf("step %s: existing-mode browser observations expose /visible, /path, /url, /target and /action_dispatched, not %s", step.ID, assertion.Path)
+					return fmt.Errorf("step %s: existing-mode browser observations expose /visible, /count, /text, /value, /attributes/<name>, /path, /url, /target and /action_dispatched, not %s", step.ID, assertion.Path)
 				}
 			}
 		} else if b.Locator.Selector != "" {
@@ -365,4 +371,33 @@ func browserValueRef(target *TargetConfig, ref string) (ToolProbe, bool) {
 	}
 	probe, ok := target.Browser.ValueRefs[ref]
 	return probe, ok
+}
+
+// isReadPath reports whether an assertion path needs Computer's read_element
+// (Computer 0.14.0 or newer).
+func isReadPath(path string) bool {
+	switch path {
+	case "/count", "/text", "/value", "/redacted":
+		return true
+	}
+	return strings.HasPrefix(path, "/attributes/") && len(path) > len("/attributes/")
+}
+
+// usesReadPaths reports whether a check asserts element text, value, count
+// or attributes in a browser step.
+func usesReadPaths(check Check) bool {
+	var steps []Step
+	steps = append(steps, check.Definition.Steps...)
+	for i := 0; i < len(steps); i++ {
+		steps = append(steps, steps[i].Parallel...)
+		if steps[i].Kind != "browser" {
+			continue
+		}
+		for _, assertion := range steps[i].Assertions {
+			if isReadPath(assertion.Path) {
+				return true
+			}
+		}
+	}
+	return false
 }

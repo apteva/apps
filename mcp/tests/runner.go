@@ -282,6 +282,7 @@ type appRunContext struct {
 	sessionOff     bool
 	setupCheck     bool
 	captures       map[string]any
+	features       computerFeatures
 }
 
 func (r *appRunContext) addSecret(value string) {
@@ -397,7 +398,11 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 			message = "could not persist release evidence"
 		}
 	}
-	return s.finish(r.ID, scrubText(message, services.secrets))
+	var warnings []string
+	if warning := a.releaseWebContext(ctx, services); warning != "" {
+		warnings = append(warnings, warning)
+	}
+	return s.finish(r.ID, scrubText(message, services.secrets), warnings...)
 }
 
 func watchCancellation(ctx context.Context, cancel context.CancelFunc, s store, id int64) {

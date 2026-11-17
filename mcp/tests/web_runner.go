@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +27,39 @@ type webSession struct {
 	id         string
 	currentURL string
 	typedValue bool // a credential or sensitive value was entered in this check
+	// Page diagnostics (Computer 0.14.0+): rules for this check, the read
+	// cursor, and everything recorded so far.
+	diagnostics bool
+	rules       diagnosticRules
+	cursor      int64
+	recorded    BrowserDiagnostics
+}
+
+// computerFeatures records what the bound Computer supports. It is probed once
+// per run.
+type computerFeatures struct {
+	probed, reads bool
+}
+
+const computerReadVersionMessage = "computer 0.14.0 or newer required for text assertions"
+
+// computerSupportsReads reports whether Computer has read_element, page
+// diagnostics, masked screenshots and profile purge (Computer 0.14.0+).
+// Computer reports no version for regular sessions, so Tests calls
+// browser_diagnostics with an empty session: 0.14.0+ answers "session_id
+// required", while older versions do not have the tool.
+func computerSupportsReads(ctx context.Context, app *sdk.AppCtx) bool {
+	var out map[string]any
+	err := callComputer(ctx, app, "browser_diagnostics", map[string]any{"session_id": ""}, &out)
+	return err != nil && strings.Contains(err.Error(), "session_id required")
+}
+
+func (r *appRunContext) computerReads(ctx context.Context) bool {
+	if !r.features.probed {
+		r.features.probed = true
+		r.features.reads = computerSupportsReads(ctx, r.ctx)
+	}
+	return r.features.reads
 }
 
 func (a *App) webBinding(ctx context.Context, app *sdk.AppCtx) error {
@@ -96,6 +131,11 @@ func (a *App) openWebCheck(ctx context.Context, check Check, app *appRunContext)
 	// real URL change. Opening on the destination made that step a same-URL
 	// navigation, which Computer rejects when the app rewrites its URL hash.
 	args := map[string]any{"action": "open", "viewport": map[string]any{"width": config.Width, "height": config.Height}}
+	rules, diagnostics := resolveDiagnosticRules(check.Definition.Diagnostics, app.targets)
+	diagnostics = diagnostics && app.computerReads(ctx)
+	if diagnostics {
+		args["diagnostics"] = true
+	}
 	session := app.snapshot.Session
 	useSession := session != nil && session.Kind == "browser" && !app.sessionOff
 	if useSession {
@@ -115,7 +155,7 @@ func (a *App) openWebCheck(ctx context.Context, check Check, app *appRunContext)
 	if err := callComputer(ctx, app.ctx, "browser_session", args, &opened); err != nil || !strings.HasPrefix(opened.SessionID, "br_") {
 		return nil, errors.New("Computer could not open a browser session")
 	}
-	app.web = &webSession{id: opened.SessionID, currentURL: opened.CurrentURL}
+	app.web = &webSession{id: opened.SessionID, currentURL: opened.CurrentURL, diagnostics: diagnostics, rules: rules}
 	if useSession && app.setupCheck {
 		app.sessionContext = opened.AppContextID
 	}
@@ -168,6 +208,129 @@ func targetURL(app *appRunContext, name, path string) (string, error) {
 	u.Path = strings.TrimSuffix(u.Path, "/") + p
 	u.RawQuery = query
 	return u.String(), nil
+}
+
+// readElement fills an observation from Computer's read_element: /visible is
+// true when any match is visible; /text, /value, /checked and /attributes come
+// from the first match. Text or values Computer withheld set /redacted.
+func readElement(ctx context.Context, app *appRunContext, selector string, observation map[string]any) error {
+	out, err := computerUse(ctx, app, map[string]any{"action": "read_element", "selector": selector, "all": true})
+	if err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(out)
+	var read struct {
+		Count    int `json:"count"`
+		Elements []struct {
+			Text          string            `json:"text"`
+			Value         *string           `json:"value"`
+			ValueRedacted bool              `json:"value_redacted"`
+			Checked       *bool             `json:"checked"`
+			Visible       bool              `json:"visible"`
+			Redacted      bool              `json:"redacted"`
+			Attributes    map[string]string `json:"attributes"`
+		} `json:"elements"`
+	}
+	if err := json.Unmarshal(raw, &read); err != nil {
+		return errors.New("Computer returned an unreadable element read")
+	}
+	visible := false
+	for _, element := range read.Elements {
+		visible = visible || element.Visible
+	}
+	observation["count"] = float64(read.Count) // compared like a JSON number
+	observation["visible"] = visible
+	if len(read.Elements) == 0 {
+		return nil
+	}
+	first := read.Elements[0]
+	redacted := first.Redacted || first.ValueRedacted
+	if !first.Redacted {
+		observation["text"] = first.Text
+	}
+	if first.Value != nil && !first.ValueRedacted && !first.Redacted {
+		observation["value"] = *first.Value
+	}
+	if first.Checked != nil {
+		observation["checked"] = *first.Checked
+	}
+	if len(first.Attributes) > 0 && !first.Redacted {
+		attributes := make(map[string]any, len(first.Attributes))
+		for name, value := range first.Attributes {
+			attributes[name] = value
+		}
+		observation["attributes"] = attributes
+	}
+	if redacted {
+		observation["redacted"] = true
+	}
+	return nil
+}
+
+// collectWebDiagnostics reads page problems recorded since the last read and
+// returns the first rule they break, or "".
+func (a *App) collectWebDiagnostics(ctx context.Context, app *appRunContext) string {
+	web := app.web
+	if web == nil || !web.diagnostics {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var out struct {
+		Enabled       *bool         `json:"enabled"`
+		Exceptions    []string      `json:"exceptions"`
+		ConsoleErrors int           `json:"console_errors"`
+		Requests      []pageRequest `json:"requests"`
+		Truncated     bool          `json:"truncated"`
+		Cursor        int64         `json:"cursor"`
+	}
+	if err := callComputer(ctx, app.ctx, "browser_diagnostics", map[string]any{"session_id": web.id, "since": web.cursor}, &out); err != nil {
+		return "page diagnostics could not be read: " + firstLine(err.Error())
+	}
+	if out.Enabled != nil && !*out.Enabled {
+		// This backend records nothing; the check runs without diagnostics.
+		web.diagnostics = false
+		web.recorded.Unavailable = true
+		return ""
+	}
+	if out.Cursor > web.cursor {
+		web.cursor = out.Cursor
+	}
+	rec := &web.recorded
+	rec.Exceptions = append(rec.Exceptions, out.Exceptions...)
+	rec.ConsoleErrors += out.ConsoleErrors
+	rec.Truncated = rec.Truncated || out.Truncated
+	problem := ""
+	for _, req := range out.Requests {
+		if raw, err := json.Marshal(req); err == nil && len(rec.Requests) < 200 {
+			rec.Requests = append(rec.Requests, raw)
+		}
+		if problem == "" && web.rules.failedRequest(req) {
+			problem = describeRequest(req)
+		}
+	}
+	switch {
+	case web.rules.exceptions && len(out.Exceptions) > 0:
+		return "page exception: " + firstLine(out.Exceptions[0])
+	case problem != "":
+		return problem
+	case web.rules.console && out.ConsoleErrors > 0:
+		return fmt.Sprintf("page logged %d console error(s)", out.ConsoleErrors)
+	case web.rules.truncated && out.Truncated:
+		return "page diagnostics were truncated, so problems may be missing"
+	}
+	return ""
+}
+
+// screenshotSecrets returns up to 20 credential values for masking, longest
+// first (Computer accepts at most 20).
+func screenshotSecrets(secrets []string) []string {
+	out := append([]string{}, secrets...)
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	return out
 }
 
 // cssSelector maps a Tests locator to a CSS selector for Computer.
@@ -265,6 +428,13 @@ func (a *App) executeWebStep(ctx context.Context, step Step, values map[string]a
 		}
 		return nil
 	}
+	if action.Action == "observe" && !app.computerReads(ctx) {
+		for _, assertion := range step.Assertions {
+			if isReadPath(assertion.Path) {
+				return nil, errors.New(computerReadVersionMessage)
+			}
+		}
+	}
 	switch action.Action {
 	case "navigate":
 		target, err := targetURL(app, action.Target, path)
@@ -291,6 +461,10 @@ func (a *App) executeWebStep(ctx context.Context, step Step, values map[string]a
 		observation["action_dispatched"] = true
 	case "observe":
 		switch {
+		case selector != "" && app.computerReads(ctx):
+			if err := readElement(ctx, app, selector, observation); err != nil {
+				return nil, err
+			}
 		case selector != "":
 			matched, err := wait([]map[string]any{{"type": "selector_present", "selector": selector}}, 500)
 			if err != nil {
@@ -335,16 +509,28 @@ func (a *App) closeWebCheck(ctx context.Context, app *appRunContext, result *Res
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	session := app.web
-	evidence := &BrowserEvidence{SessionID: session.id, Protocol: "computer/regular"}
+	evidence := &BrowserEvidence{SessionID: session.id, Protocol: "computer/regular", Diagnostics: session.recorded}
 	if result.Status != "passed" && len(steps) > 0 {
 		last := &steps[len(steps)-1]
-		if session.typedValue {
+		masked := app.computerReads(ctx)
+		if session.typedValue && !masked {
 			last.Diagnostics = map[string]any{"screenshot": "skipped because this check entered a credential"}
 		} else {
 			var shot struct {
 				PNG string `json:"png_b64"`
 			}
-			if err := callComputer(ctx, app.ctx, "browser_screenshot", map[string]any{"session_id": session.id}, &shot); err == nil && shot.PNG != "" {
+			args := map[string]any{"session_id": session.id}
+			if masked {
+				// Computer hides password and sensitive fields, every form field
+				// when inputs is set, and any text containing a secret. It
+				// captures nothing if masking fails.
+				args["mask"] = map[string]any{"inputs": session.typedValue, "secrets": screenshotSecrets(app.secrets)}
+			}
+			err := callComputer(ctx, app.ctx, "browser_screenshot", args, &shot)
+			if err != nil && masked {
+				last.Diagnostics = map[string]any{"screenshot_skipped": "mask_failed"}
+			}
+			if err == nil && shot.PNG != "" {
 				if raw, err := decodeBase64(shot.PNG); err == nil {
 					sum := sha256.Sum256(raw)
 					if id, err := saveBrowserArtifact(app.ctx, app.runID, result.CheckID, last.ID, browserArtifact{MIME: "image/png", SHA256: hex.EncodeToString(sum[:]), Base64: shot.PNG}); err == nil {
@@ -362,16 +548,45 @@ func (a *App) closeWebCheck(ctx context.Context, app *appRunContext, result *Res
 	return evidence, nil
 }
 
-// releaseWebContext unlinks the run's saved sign-in context.
-func (a *App) releaseWebContext(ctx context.Context, app *appRunContext) {
+// releaseWebContext deletes the run's saved sign-in context. With Computer
+// 0.14.0+ it also purges the local Chrome profile (cookies and storage),
+// retrying once if a session still held it. It returns a warning, not an
+// error: a leftover context never fails the run.
+func (a *App) releaseWebContext(ctx context.Context, app *appRunContext) string {
 	if app.sessionContext == "" {
-		return
+		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	var out map[string]any
-	_ = callComputer(ctx, app.ctx, "computer_context_delete", map[string]any{"id": app.sessionContext}, &out)
+	id := app.sessionContext
 	app.sessionContext = ""
+	args := map[string]any{"id": id}
+	purge := app.computerReads(ctx)
+	if purge {
+		args["purge_profile"] = true
+	}
+	var out map[string]any
+	err := callComputer(ctx, app.ctx, "computer_context_delete", args, &out)
+	if err != nil && purge && strings.Contains(err.Error(), "applies only to local contexts") {
+		// Hosted browser providers keep their own profiles; just unlink.
+		delete(args, "purge_profile")
+		purge = false
+		err = callComputer(ctx, app.ctx, "computer_context_delete", args, &out)
+	}
+	if err != nil && purge {
+		// A session may still be closing; give it a moment and retry once.
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+		err = callComputer(ctx, app.ctx, "computer_context_delete", args, &out)
+	}
+	if err != nil {
+		return fmt.Sprintf("sign-in browser context %s was not deleted: %s", id, firstLine(err.Error()))
+	}
+	return ""
 }
 
 func decodeBase64(text string) ([]byte, error) {

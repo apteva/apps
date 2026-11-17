@@ -17,7 +17,7 @@ type scanner interface{ Scan(...any) error }
 
 const suiteColumns = `id,name,description,environment,archived,created_at,updated_at,release_config,suite_config`
 const checkColumns = `id,suite_id,name,kind,enabled,definition`
-const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,blocked,error,created_at,started_at,finished_at,release_record,cancel_requested`
+const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,blocked,error,created_at,started_at,finished_at,release_record,cancel_requested,warnings`
 
 // suiteConfig holds the 0.5.0 suite fields in one JSON column.
 type suiteConfig struct {
@@ -49,10 +49,13 @@ func scanCheck(row scanner) (c Check, err error) {
 	return
 }
 func scanRun(row scanner) (r Run, err error) {
-	var raw string
-	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Blocked, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &raw, &r.CancelRequested)
+	var raw, warnings string
+	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Blocked, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &raw, &r.CancelRequested, &warnings)
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &r.Release)
+	}
+	if err == nil && warnings != "" && warnings != "[]" {
+		err = json.Unmarshal([]byte(warnings), &r.Warnings)
 	}
 	return
 }
@@ -472,7 +475,12 @@ func (s store) saveResult(id int64, r Result) error {
 	_, err := s.db.Exec(`INSERT INTO test_results(project_id,run_id,check_id,name,kind,status,duration_ms,output,assertions,error) VALUES(?,?,?,?,?,?,?,?,?,?)`, s.project, id, r.CheckID, r.Name, r.Kind, r.Status, r.DurationMS, encode(r.Output), encode(r.Assertions), r.Error)
 	return err
 }
-func (s store) finish(id int64, message string) error {
+
+// finish records a run's outcome. Warnings are kept on the run but never fail it.
+func (s store) finish(id int64, message string, warnings ...string) error {
+	if warnings == nil {
+		warnings = []string{}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -493,7 +501,7 @@ func (s store) finish(id int64, message string) error {
 	if failed > 0 || blocked > 0 || message != "" || passed == 0 {
 		status = "failed"
 	}
-	if err = changed(tx.Exec(`UPDATE test_runs SET status=?,passed=?,failed=?,blocked=?,error=?,finished_at=? WHERE project_id=? AND id=? AND status='running'`, status, passed, failed, blocked, message, now(), s.project, id)); err != nil {
+	if err = changed(tx.Exec(`UPDATE test_runs SET status=?,passed=?,failed=?,blocked=?,error=?,finished_at=?,warnings=? WHERE project_id=? AND id=? AND status='running'`, status, passed, failed, blocked, message, now(), encode(warnings), s.project, id)); err != nil {
 		return err
 	}
 	r, err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM test_runs WHERE project_id=? AND id=?`, s.project, id))
