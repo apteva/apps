@@ -75,7 +75,7 @@ What changed in the app at the same time (`git diff processes/v0.19.4`):
 
 | | 0.19.4 | now |
 | --- | ---: | ---: |
-| MCP tools agents see | 49 | 43 |
+| MCP tools agents see | 49 | 42 |
 | Tools given to an isolated worker | 13 | 4 (+6 only for memory procedures) |
 | Worker protocol | claim/get → work → update (+ reads) | brief → work → one `step_update` with `outcome` |
 | Agent skill (`how-to-use-processes.md`) | 25,283 bytes | 6,894 bytes |

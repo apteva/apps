@@ -9,7 +9,7 @@ earlier results, and finish with one `step_update` carrying `outcome`.
 Isolated workers have 4 Processes tools (plus 6 only for memory procedures).
 Status changes are one tool per object (`status`, `assignment_status`,
 `trigger_status`); `assignments` with `assignment_id` replaces `assignment_get`.
-Agents see 43 tools instead of 49. See `docs-release-0.20.0.md`.
+Agents see 42 tools instead of 49. See `docs-release-0.20.0.md`.
 
 ## Durable wait ownership (0.18.3)
 

@@ -28,7 +28,7 @@ report once; agents see fewer, merged tools.
 
 ## Merged status tools (agent-visible change)
 
-Agents now see 43 tools instead of 49:
+Agents now see 42 tools instead of 49:
 
 | Before | Now |
 | --- | --- |
