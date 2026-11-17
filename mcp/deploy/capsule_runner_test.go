@@ -27,7 +27,7 @@ func TestRunnerBackendBuildsSignedCapsuleWithoutGit(t *testing.T) {
 	}
 	platform := &cloudBuildPlatform{provider: "none"}
 	ctx := withCloudBuildContext(t, platform)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	if err := os.MkdirAll(filepath.Join(app.dataDir, "builds"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestCapsuleRunnerIdempotencyAndCredentialsAreNotPersisted(t *testing.T) {
 		_, _ = w.Write(sourceBody)
 	}))
 	defer sourceServer.Close()
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	runner, err := newCapsuleRunner(dataDir, token, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestRunnerConfigRequiresHTTPSOutsideLoopback(t *testing.T) {
 }
 
 func TestCapsuleRunnerMarksActiveJobFailedAfterRestart(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	id := strings.Repeat("a", 32)
 	jobDir := filepath.Join(dataDir, "jobs", id)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {

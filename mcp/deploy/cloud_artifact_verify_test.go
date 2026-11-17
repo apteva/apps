@@ -93,7 +93,7 @@ func newAndroidCloudSigningFixture(
 		t.Fatal(err)
 	}
 	d = effectiveDeploymentForEnvironment(d, environment)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	t.Setenv(mobileSigningVaultKeyFileEnv, filepath.Join(app.dataDir, "vault-key"))
 	input, payload, err := generateAndroidSigningIdentity("p1", "com.example.android")
 	if err != nil {

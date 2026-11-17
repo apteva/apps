@@ -247,7 +247,25 @@ func jsonDigest(v any) string {
 }
 
 // Include names, permissions, links and bytes; exclude only the root evidence manifest.
-func artifactTreeDigest(root string) (string, error) {
+// This is the v1 (legacy) formula: it also hashes write-permission bits.
+func artifactTreeDigest(root string) (string, error) { return treeDigest(root, false) }
+
+// artifactTreeDigestV2 ignores write-permission bits so sealing an artifact
+// read-only does not change its identity. Seals since Deploy 0.32.1 use it.
+func artifactTreeDigestV2(root string) (string, error) { return treeDigest(root, true) }
+
+// artifactDigestMatches accepts either digest formula, so builds sealed
+// before 0.32.1 keep verifying.
+func artifactDigestMatches(root, want string) (bool, error) {
+	v2, err := artifactTreeDigestV2(root)
+	if err != nil || v2 == want {
+		return err == nil, err
+	}
+	v1, err := artifactTreeDigest(root)
+	return err == nil && v1 == want, err
+}
+
+func treeDigest(root string, ignoreWriteBits bool) (string, error) {
 	var names []string
 	e := filepath.WalkDir(root, func(path string, d fs.DirEntry, e error) error {
 		if e != nil {
@@ -263,13 +281,20 @@ func artifactTreeDigest(root string) (string, error) {
 	}
 	sort.Strings(names)
 	h := sha256.New()
+	if ignoreWriteBits {
+		h.Write([]byte("deploy-tree-v2\x00"))
+	}
 	for _, path := range names {
 		info, e := os.Lstat(path)
 		if e != nil {
 			return "", e
 		}
 		rel, _ := filepath.Rel(root, path)
-		fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), info.Mode())
+		mode := info.Mode()
+		if ignoreWriteBits && mode&os.ModeSymlink == 0 {
+			mode &^= 0o222
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), mode)
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, e := os.Readlink(path)
 			if e != nil {

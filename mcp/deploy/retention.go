@@ -71,7 +71,7 @@ func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx
 				continue
 			}
 			size, _ := dirSize(p)
-			if err := os.RemoveAll(p); err != nil {
+			if err := removeArtifactTree(p); err != nil {
 				return summary, fmt.Errorf("prune build %d %s: %w", b.ID, p, err)
 			}
 			summary.BytesPruned += size
@@ -108,7 +108,7 @@ func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx
 			continue
 		}
 		size, _ := dirSize(p)
-		if err := os.RemoveAll(p); err != nil {
+		if err := removeArtifactTree(p); err != nil {
 			return summary, fmt.Errorf("prune orphan build dir %s: %w", p, err)
 		}
 		summary.OrphanDirsPruned++
@@ -266,6 +266,9 @@ func (a *App) prunableArtifactPaths(b Build) []string {
 		out = append(out, p)
 	}
 	add(b.ArtifactPath)
+	if b.ArtifactPath != "" {
+		add(attestedFilesPath(b.ArtifactPath))
+	}
 	add(filepath.Join(a.buildDir(b.ID), "dist"))
 	add(filepath.Join(a.buildDir(b.ID), "src"))
 	add(filepath.Join(a.buildDir(b.ID), "source-capsule-src"))
@@ -313,7 +316,7 @@ func (a *App) removeBuildDirs(builds []Build) {
 	for _, b := range builds {
 		p := a.buildDir(b.ID)
 		if a.isSafeBuildPath(p) {
-			_ = os.RemoveAll(p)
+			_ = removeArtifactTree(p)
 		}
 	}
 }

@@ -27,7 +27,7 @@ func newExportFixture(t *testing.T, files map[string]string, envJSON string) exp
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	setBootRecoveryGlobalCtx(t, ctx)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 1}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 1}
 	d, env := createBootRecoveryDeployment(t, ctx)
 	if envJSON != "" {
 		if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, map[string]any{"env_json": envJSON}); err != nil {
@@ -107,7 +107,7 @@ func TestBuildExportImportRoundTripKeepsDigestAndNoValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	importer := &App{dataDir: t.TempDir()}
+	importer := &App{dataDir: writableTempDir(t)}
 	bad, err := importer.toolBuildImport(f.ctx, map[string]any{"_project_id": "p1", "id": float64(target.ID),
 		"archive_url": out["archive_url"], "candidate_digest": strings.Repeat("0", 64)})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestTestsGatePinsCandidateWhileVerdictPending(t *testing.T) {
 	platform := &releaseTestsPlatform{state: "missing"}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
 	setBootRecoveryGlobalCtx(t, ctx)
-	dataDir := t.TempDir()
+	dataDir := writableTempDir(t)
 	d, env := createBootRecoveryDeployment(t, ctx)
 	b := createBootRecoveryBuild(t, ctx, dataDir, d.ID, env.ID, "candidate")
 	if err := sealBuildArtifact(b); err != nil {

@@ -58,6 +58,9 @@ func (a *App) resolveBuildRef(db *sql.DB, args map[string]any) (*Build, *Deploym
 		return nil, nil, err
 	}
 	ref := strings.TrimSpace(strArg(args, "build"))
+	if n, ok := args["build"].(float64); ok && n > 0 && n == float64(int64(n)) {
+		ref = strconv.FormatInt(int64(n), 10)
+	}
 	digest := strings.ToLower(strings.TrimSpace(defaultStr(strArg(args, "candidate_digest"), strArg(args, "digest"))))
 	var build *Build
 	switch {
@@ -81,7 +84,7 @@ func (a *App) resolveBuildRef(db *sql.DB, args map[string]any) (*Build, *Deploym
 		}
 		build, err = dbGetBuild(db, id)
 	default:
-		return nil, nil, errors.New(`build_id, candidate_digest or build:"latest_succeeded" required`)
+		return nil, nil, errors.New(`build_id, build (a build id or "latest_succeeded"), or candidate_digest required`)
 	}
 	if err != nil || build == nil || build.Status != "succeeded" {
 		return nil, nil, errors.New("succeeded build not found")
@@ -556,7 +559,7 @@ func (a *App) toolBuildImport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	started := time.Now()
 	distDir, size, manifestJSON, err := a.fetchAndExtractImport(build.ID, src.String(), digest)
 	if err != nil {
-		_ = os.RemoveAll(a.buildDir(build.ID))
+		_ = removeArtifactTree(a.buildDir(build.ID))
 		failed := a.failBuild(build, "import: "+err.Error())
 		return map[string]any{"build": failed, "error": failed.Error}, nil
 	}
@@ -565,10 +568,13 @@ func (a *App) toolBuildImport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	candidate.ArtifactManifestJSON = manifestJSON
 	candidate.TargetConfigJSON = d.TargetConfigJSON
 	a.artifactMu.Lock()
-	sealErr := sealBuildArtifact(&candidate)
+	// Seal under the candidate digest so Tests verdicts still match. Only a
+	// v2 candidate survives the read-only chmod; older ones stay writable.
+	v2, _ := artifactTreeDigestV2(distDir)
+	sealErr := sealProtected(&candidate, digest, v2 == digest)
 	a.artifactMu.Unlock()
 	if sealErr != nil {
-		_ = os.RemoveAll(a.buildDir(build.ID))
+		_ = removeArtifactTree(a.buildDir(build.ID))
 		failed := a.failBuild(build, "import: "+sealErr.Error())
 		return map[string]any{"build": failed, "error": failed.Error}, nil
 	}
@@ -629,11 +635,12 @@ func (a *App) fetchAndExtractImport(buildID int64, archiveURL, digest string) (s
 	if err := extractBoundedZip(&zr.Reader, distDir, sourceExpandedLimit(), true); err != nil {
 		return "", 0, "", fmt.Errorf("extract archive: %w", err)
 	}
-	actual, err := artifactTreeDigest(distDir)
+	same, err := artifactDigestMatches(distDir, digest)
 	if err != nil {
 		return "", 0, "", err
 	}
-	if actual != digest {
+	if !same {
+		actual, _ := artifactTreeDigestV2(distDir)
 		return "", 0, "", fmt.Errorf("imported artifact digest %s does not match candidate_digest %s", actual, digest)
 	}
 	manifestJSON := "{}"

@@ -79,7 +79,7 @@ func TestAndroidMobileSigningSetupProvisionsCodemagic(t *testing.T) {
 	}
 	d = effectiveDeploymentForEnvironment(d, env)
 
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	result, err := app.setupMobileSigning(t.Context(), d, "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -442,7 +442,7 @@ func TestMacSigningUsesMacAppleResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (&App{dataDir: t.TempDir()}).setupMobileSigning(t.Context(), effectiveDeploymentForEnvironment(d, env), "", false)
+	result, err := (&App{dataDir: writableTempDir(t)}).setupMobileSigning(t.Context(), effectiveDeploymentForEnvironment(d, env), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

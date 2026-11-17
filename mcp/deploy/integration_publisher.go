@@ -346,7 +346,7 @@ func (a *App) runIntegrationRelease(d *Deployment, b *Build, opts releaseOptions
 				values["upload."+k] = v
 			}
 		}
-		if after, checkErr := artifactTreeDigest(content); checkErr != nil || after != digest {
+		if same, checkErr := artifactDigestMatches(content, digest); checkErr != nil || !same {
 			return fail(errors.New("upload modified tested artifacts; publication blocked"))
 		}
 		state.Phase = "uploaded"

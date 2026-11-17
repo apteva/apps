@@ -22,7 +22,7 @@ func auditApp(t *testing.T) (*App, *sdk.AppCtx, *Deployment, *DeploymentEnvironm
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
 	setBootRecoveryGlobalCtx(t, ctx)
 	rt := &bootRecoveryRuntime{}
-	a := &App{dataDir: t.TempDir(), runtime: rt, registry: NewSupervisorRegistry(), portRangeStart: availableTestPort(t), autoRestartState: map[int64]autoRestartInfo{}, retainRollbacks: 3}
+	a := &App{dataDir: writableTempDir(t), runtime: rt, registry: NewSupervisorRegistry(), portRangeStart: availableTestPort(t), autoRestartState: map[int64]autoRestartInfo{}, retainRollbacks: 3}
 	a.portRangeEnd = a.portRangeStart
 	d, e := createBootRecoveryDeployment(t, ctx)
 	return a, ctx, d, e, rt
@@ -179,7 +179,7 @@ func TestAuditAndroidRotationFailurePreservesKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	first, err := app.setupMobileSigning(t.Context(), d, "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +311,7 @@ func TestAuditRetentionProtectsRequestedRelease(t *testing.T) {
 func TestAuditCloudCancelledBuildCannotBecomeSucceeded(t *testing.T) {
 	p := &cloudBuildPlatform{provider: "codemagic"}
 	ctx := withCloudBuildContext(t, p)
-	a := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	a := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	d, _ := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{Name: "cloud", SourceKind: "local", SourceRef: "/src", Framework: "static", BuildBackend: "codemagic", BuildBackendJSON: `{"app_id":"app","workflow_id":"w","branch":"main","artifact_mode":"none"}`})
 	b, _ := dbCreateBuildForEnvBackend(ctx.AppDB(), d.ID, 0, "static", "", "codemagic", d.BuildBackendJSON)
 	dbUpdateBuild(ctx.AppDB(), b.ID, map[string]any{"status": "cancelled", "external_status": "cancelled"})

@@ -178,7 +178,7 @@ settings:
 	}); err != nil {
 		t.Fatal(err)
 	}
-	build, err := (&App{dataDir: t.TempDir()}).submitCloudBuild(t.Context(), effective)
+	build, err := (&App{dataDir: writableTempDir(t)}).submitCloudBuild(t.Context(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	if err := os.MkdirAll(filepath.Join(app.dataDir, "builds"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestSourceCapsuleRejectsExpiredURLAndCleanupRemovesIt(t *testing.T) {
 	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{"status": "running"}); err != nil {
 		t.Fatal(err)
 	}
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	if err := os.MkdirAll(app.buildDir(build.ID), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ targets:
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	build, err := app.submitCloudBuild(context.Background(), effectiveDeploymentForEnvironment(d, env))
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +483,7 @@ func TestCodemagicCloudBuildStagesBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	effective := effectiveDeploymentForEnvironment(d, env)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	build, err := app.submitCloudBuild(context.Background(), effective)
 	if err != nil {
 		t.Fatal(err)
@@ -531,7 +531,7 @@ func TestGitHubFileArtifactExtractsSelectedMobileBinary(t *testing.T) {
 	platform := &cloudBuildPlatform{provider: "github"}
 	withCloudBuildContext(t, platform)
 	dist := t.TempDir()
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	deployment := &Deployment{
 		TargetKind: "android", TargetConfigJSON: `{"package_name":"com.example.app"}`,
 	}
@@ -575,7 +575,7 @@ func TestCloudBuildCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	build, err := app.submitCloudBuild(context.Background(), effectiveDeploymentForEnvironment(d, env))
 	if err != nil {
 		t.Fatal(err)
@@ -603,7 +603,7 @@ func TestIOSCloudBuildAdoptsStoreUpload(t *testing.T) {
 	}
 	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
 	effective := effectiveDeploymentForEnvironment(d, env)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	build, err := app.submitCloudBuild(context.Background(), effective)
 	if err != nil {
 		t.Fatal(err)
@@ -647,7 +647,7 @@ func TestAndroidCloudBuildAdoptsStoreUpload(t *testing.T) {
 	}
 	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
 	effective := effectiveDeploymentForEnvironment(d, env)
-	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	app := &App{dataDir: writableTempDir(t), retainRollbacks: 3}
 	build, err := app.submitCloudBuildWithOptions(context.Background(), effective, &releaseOptions{Channel: "internal"})
 	if err != nil {
 		t.Fatal(err)
@@ -804,7 +804,7 @@ func TestUnavailableCodemagicJobIsBounded(t *testing.T) {
 				t.Fatal(err)
 			}
 			build, _ = dbGetBuild(ctx.AppDB(), build.ID)
-			app := &App{dataDir: t.TempDir()}
+			app := &App{dataDir: writableTempDir(t)}
 			if err := app.syncCloudBuild(context.Background(), build); err != nil {
 				t.Fatal(err)
 			}
@@ -849,7 +849,7 @@ func TestCodemagicCancelNotFoundConfirmsCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	build, err := app.submitCloudBuild(context.Background(), effectiveDeploymentForEnvironment(d, env))
 	if err != nil {
 		t.Fatal(err)
@@ -974,7 +974,7 @@ func TestGitHubCompactContractUnwrapsSealedArchiveAndRetainsNativeEvidence(t *te
 		artifact.URL = server.URL
 		artifact.NeedsGitHubAuth = false
 		dist := t.TempDir()
-		err = (&App{dataDir: t.TempDir()}).downloadAndStageCloudArtifact(bound, &Deployment{TargetKind: "ios", TargetConfigJSON: `{"bundle_id":"com.example.app","device_families":["iphone"]}`}, &Build{}, artifact, "file", dist)
+		err = (&App{dataDir: writableTempDir(t)}).downloadAndStageCloudArtifact(bound, &Deployment{TargetKind: "ios", TargetConfigJSON: `{"bundle_id":"com.example.app","device_families":["iphone"]}`}, &Build{}, artifact, "file", dist)
 		if err != nil {
 			t.Fatal(err)
 		}

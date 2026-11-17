@@ -65,7 +65,7 @@ func TestReconcileReleasesRecoversCurrentOrphanFromExactBuild(t *testing.T) {
 	port := availableTestPort(t)
 	runtime := &bootRecoveryRuntime{adoptErr: errors.New("process gone")}
 	app := &App{
-		dataDir:          t.TempDir(),
+		dataDir:          writableTempDir(t),
 		runtime:          runtime,
 		registry:         NewSupervisorRegistry(),
 		portRangeStart:   port,

@@ -426,7 +426,11 @@ func copyTreeAll(src, dst string) error {
 		}
 		out := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return os.MkdirAll(out, info.Mode())
+			// Owner write keeps copies of read-only (sealed) trees usable.
+			if err := os.MkdirAll(out, info.Mode().Perm()|0o700); err != nil {
+				return err
+			}
+			return os.Chmod(out, info.Mode().Perm()|0o700)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
@@ -456,7 +460,8 @@ func copyTreeAll(src, dst string) error {
 			return err
 		}
 		defer in.Close()
-		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		// Owner write keeps copies of read-only (sealed) trees usable.
+		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm()|0o200)
 		if err != nil {
 			return err
 		}

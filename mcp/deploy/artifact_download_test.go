@@ -53,7 +53,7 @@ func TestBuildArtifactDownloadServesCanonicalMobileFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	build, _ = dbGetBuild(ctx.AppDB(), build.ID)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 
 	requestPath := "/api/builds/" + strconv.FormatInt(build.ID, 10) + "/artifact?project_id=p1"
 	recorder := httptest.NewRecorder()

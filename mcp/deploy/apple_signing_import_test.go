@@ -45,7 +45,7 @@ func appleImportRequest(t *testing.T, archive []byte, preview bool) *http.Reques
 func TestAppleRecoveryImportUsesSelectedAccountAndNewProfile(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, original := newIOSSigningDeployment(t, platform)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	first, err := app.setupMobileSigning(t.Context(), original, "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestAppleRecoveryImportUsesSelectedAccountAndNewProfile(t *testing.T) {
 func TestAppleCertificateReusedAcrossAppsButNotProjects(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, original := newIOSSigningDeployment(t, platform)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	first, err := app.setupMobileSigning(t.Context(), original, "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestAppleCertificateReusedAcrossAppsButNotProjects(t *testing.T) {
 func TestAppleImportRejectsMismatchedPrivateKey(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, d := newIOSSigningDeployment(t, platform)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	first, err := app.setupMobileSigning(t.Context(), d, "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func testAppleRecoveryArchive(t *testing.T, certificate, key string) []byte {
 func TestReadyAppleBundleCannotChangeWhileSwitchingProviders(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, deployment := newIOSSigningDeployment(t, platform)
-	app := &App{dataDir: t.TempDir()}
+	app := &App{dataDir: writableTempDir(t)}
 	if _, err := app.setupMobileSigning(t.Context(), deployment, "", false); err != nil {
 		t.Fatal(err)
 	}
