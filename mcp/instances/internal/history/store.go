@@ -92,13 +92,69 @@ func OpenStore(path string, budget int64) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS incidents_age ON incidents(updated)`,
 		`CREATE INDEX IF NOT EXISTS incidents_host_start ON incidents(host,start DESC,id)`,
 		`CREATE INDEX IF NOT EXISTS incidents_detail_budget ON incidents(updated DESC,host,id,length(detail)) WHERE detail IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS incidents_host_detail ON incidents(host,updated,id) WHERE detail IS NOT NULL`,
+		`INSERT OR IGNORE INTO metadata(key,value) VALUES('detail_bytes',0)`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
+	if err := initDetailCounters(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
+}
+
+// Retained detail bytes are tracked per host (hosts.detail_bytes) and for the
+// installation (metadata 'detail_bytes') by triggers, so every path that writes,
+// replaces, evicts or deletes detail — including raw maintenance statements and
+// rolled-back transactions — keeps the counters exact without application
+// bookkeeping. Budget checks read two counters instead of scanning incidents.
+var detailCounterTriggers = []string{
+	`CREATE TRIGGER IF NOT EXISTS incidents_detail_insert AFTER INSERT ON incidents WHEN NEW.detail IS NOT NULL BEGIN
+		UPDATE hosts SET detail_bytes=detail_bytes+length(NEW.detail) WHERE id=NEW.host;
+		UPDATE metadata SET value=value+length(NEW.detail) WHERE key='detail_bytes';
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS incidents_detail_update AFTER UPDATE OF detail ON incidents WHEN coalesce(length(NEW.detail),0)<>coalesce(length(OLD.detail),0) BEGIN
+		UPDATE hosts SET detail_bytes=detail_bytes+coalesce(length(NEW.detail),0)-coalesce(length(OLD.detail),0) WHERE id=NEW.host;
+		UPDATE metadata SET value=value+coalesce(length(NEW.detail),0)-coalesce(length(OLD.detail),0) WHERE key='detail_bytes';
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS incidents_detail_delete AFTER DELETE ON incidents WHEN OLD.detail IS NOT NULL BEGIN
+		UPDATE hosts SET detail_bytes=detail_bytes-length(OLD.detail) WHERE id=OLD.host;
+		UPDATE metadata SET value=value-length(OLD.detail) WHERE key='detail_bytes';
+	END`,
+}
+
+// Adds the counter column on upgrade, installs the triggers and reconciles the
+// counters once per open. length() of a blob is read from the row header, so this
+// reads no blob pages. Runs atomically with trigger installation.
+func initDetailCounters(db *sql.DB) error {
+	var hasColumn bool
+	if err := db.QueryRow(`SELECT count(*)>0 FROM pragma_table_info('hosts') WHERE name='detail_bytes'`).Scan(&hasColumn); err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []string{}
+	if !hasColumn {
+		stmts = append(stmts, `ALTER TABLE hosts ADD COLUMN detail_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	stmts = append(stmts, detailCounterTriggers...)
+	stmts = append(stmts,
+		`UPDATE hosts SET detail_bytes=(SELECT coalesce(sum(length(detail)),0) FROM incidents INDEXED BY incidents_host_detail WHERE host=hosts.id AND detail IS NOT NULL)`,
+		`UPDATE metadata SET value=(SELECT coalesce(sum(length(detail)),0) FROM incidents WHERE detail IS NOT NULL) WHERE key='detail_bytes'`,
+	)
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -411,7 +467,9 @@ func (s *Store) commitLocked(id int64, p *pendingHost, now time.Time) error {
 		if _, err := tx.Exec(`DELETE FROM incidents WHERE host=? AND id IN (SELECT id FROM incidents WHERE host=? ORDER BY start DESC,id LIMIT 50 OFFSET 200)`, id, id); err != nil {
 			return err
 		}
-		if err := s.trimDetails(tx); err != nil {
+		// O(1) counter checks; eviction reads only a few index entries, and only
+		// when this commit pushed a budget over.
+		if err := s.enforceDetailBudget(tx, id); err != nil {
 			return err
 		}
 	}
@@ -476,7 +534,8 @@ func (s *Store) pruneLocked(now time.Time, drain bool) error {
 			break
 		}
 	}
-	if err := s.trimDetails(s.DB); err != nil {
+	// Safety net only: commits already enforce the budgets they touch.
+	if err := s.enforceDetailBudget(s.DB); err != nil {
 		return err
 	}
 	// Size reclamation avoids a large retained file after expiry. Work is bounded
@@ -487,49 +546,107 @@ func (s *Store) pruneLocked(now time.Time, drain bool) error {
 
 type detailDatabase interface {
 	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
 	Exec(string, ...any) (sql.Result, error)
 }
 
-func (s *Store) trimDetails(db detailDatabase) error {
-	rows, err := db.Query(`SELECT host,id,length(detail) FROM incidents INDEXED BY incidents_detail_budget WHERE detail IS NOT NULL ORDER BY updated DESC,host`)
+const detailEvictBatch = 16
+
+// Keeps each host within IncidentBudgetBytes and the installation within a
+// quarter of the store budget, evicting the oldest detail first (summaries stay).
+// With hosts given, only those hosts' limits are checked (a commit); with none,
+// every host over its limit is (scheduled maintenance). Checks read the trigger-
+// maintained counters; eviction reads small index batches until under budget.
+func (s *Store) enforceDetailBudget(db detailDatabase, hosts ...int64) error {
+	if len(hosts) == 0 {
+		rows, err := db.Query(`SELECT id FROM hosts WHERE detail_bytes>?`, monitor.IncidentBudgetBytes)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var h int64
+			if err := rows.Scan(&h); err != nil {
+				rows.Close()
+				return err
+			}
+			hosts = append(hosts, h)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	for _, h := range hosts {
+		for {
+			var used int64
+			if err := db.QueryRow(`SELECT detail_bytes FROM hosts WHERE id=?`, h).Scan(&used); err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if used <= monitor.IncidentBudgetBytes {
+				break
+			}
+			n, err := evictOldestDetails(db, used-monitor.IncidentBudgetBytes, `SELECT host,id,length(detail) FROM incidents INDEXED BY incidents_host_detail WHERE host=? AND detail IS NOT NULL ORDER BY updated,id LIMIT ?`, h, detailEvictBatch)
+			if err != nil || n == 0 {
+				return err
+			}
+		}
+	}
+	for {
+		var total int64
+		if err := db.QueryRow(`SELECT value FROM metadata WHERE key='detail_bytes'`).Scan(&total); err != nil {
+			return err
+		}
+		if total <= s.budget/4 {
+			return nil
+		}
+		n, err := evictOldestDetails(db, total-s.budget/4, `SELECT host,id,length(detail) FROM incidents INDEXED BY incidents_detail_budget WHERE detail IS NOT NULL ORDER BY updated,host DESC,id DESC LIMIT ?`, detailEvictBatch)
+		if err != nil || n == 0 {
+			return err
+		}
+	}
+}
+
+// Evicts details from one batch, oldest first, until at least `over` bytes are
+// freed or the batch is exhausted. The triggers update the byte counters.
+func evictOldestDetails(db detailDatabase, over int64, query string, args ...any) (int, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	type key struct {
-		host int64
-		id   string
+		host, size int64
+		id         string
 	}
-	evict := []key{}
-	sizes := map[int64]int64{}
-	total := int64(0)
+	var batch []key
 	for rows.Next() {
-		var h, n int64
-		var id string
-		if err := rows.Scan(&h, &id, &n); err != nil {
+		var k key
+		if err := rows.Scan(&k.host, &k.id, &k.size); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
-		if sizes[h]+n > monitor.IncidentBudgetBytes || total+n > s.budget/4 {
-			evict = append(evict, key{h, id})
-		} else {
-			sizes[h] += n
-			total += n
-		}
+		batch = append(batch, k)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
+	err = rows.Err()
 	rows.Close()
-	for _, k := range evict {
+	if err != nil {
+		return 0, err
+	}
+	evicted := 0
+	for _, k := range batch {
+		if over <= 0 {
+			break
+		}
 		if _, err := db.Exec(`UPDATE incidents SET detail=NULL WHERE host=? AND id=?`, k.host, k.id); err != nil {
-			return err
+			return evicted, err
 		}
 		if _, err := db.Exec(`UPDATE hosts SET evicted=evicted+1 WHERE id=?`, k.host); err != nil {
-			return err
+			return evicted, err
 		}
+		over -= k.size
+		evicted++
 	}
-	return nil
+	return evicted, nil
 }
 
 func (s *Store) deletePoints(query string, args ...any) (int64, error) {

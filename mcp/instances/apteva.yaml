@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.17.1
+version: 0.17.2
 description: |
+  v0.17.2 stops rescanning incident history on every monitoring flush.
+  Retained incident detail bytes are tracked per host and per install by
+  database triggers; budgets are checked from those counters and only the
+  oldest details are evicted when a limit is exceeded.
   v0.17.1 encrypts SSH credentials in a per-install AES-256-GCM vault.
   Existing instance and OVH order keys migrate transactionally after a
   verified encrypted database snapshot, preserving records and SSH identity.
@@ -282,7 +286,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.17.1
+    ref: instances/v0.17.2
     entry: mcp/instances
   port: 8080
   health_check: /health
