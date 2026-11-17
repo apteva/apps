@@ -142,7 +142,8 @@ func TestRunRelativeDeadlineDoesNotDelayExecution(t *testing.T) {
 	}
 	r := raw.(map[string]any)["run"].(Run)
 	s := stepBy(t, a, r, "research")
-	if len(f.events) != 1 || s.State != "ready" || s.DueAt != r.CreatedAt {
+	// A dispatched step is running once its worker starts.
+	if len(f.events) != 1 || s.State != "running" || s.DueAt != r.CreatedAt {
 		t.Fatalf("deadline blocked execution: %+v", s)
 	}
 	overview, err := a.overview(p.ProjectID)

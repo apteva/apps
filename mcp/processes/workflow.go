@@ -627,7 +627,38 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 	if err := a.ensureProcessThread(p.ProjectID, r.ID, eventID, request); err != nil {
 		return err
 	}
-	return a.deliverStepToThread(p, *r, s, all)
+	if err := a.deliverStepToThread(p, *r, s, all); err != nil {
+		return err
+	}
+	return a.markWorkerStarted(s)
+}
+
+// markWorkerStarted records that an isolated worker now holds the step. The
+// worker reports only its outcome, so without this the step would stay ready
+// until it finished. The worker can finish before delivery returns, so only a
+// step that is still ready moves to running. Called under App.mu, like delivery.
+func (a *App) markWorkerStarted(s *StepRun) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := timestamp()
+	res, err := tx.Exec(`UPDATE process_step_runs SET state='running',updated_by='workflow',updated_at=?,revision=revision+1 WHERE id=? AND state='ready'`, now, s.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return tx.Commit()
+	}
+	if _, err = tx.Exec(`INSERT INTO process_step_events(step_id,actor,state,output,error,created_at) VALUES(?,'workflow','running',?,'',?)`, s.ID, "Worker started", now); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	s.State = "running"
+	return nil
 }
 
 func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {

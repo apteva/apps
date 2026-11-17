@@ -39,3 +39,38 @@ func TestWorkerBriefInlinesEarlierResultsAndForgivingReads(t *testing.T) {
 		t.Fatalf("keyless dependency read: %+v", deps)
 	}
 }
+
+func TestIsolatedWorkerStartMarksStepRunning(t *testing.T) {
+	a, _, p, r := workflowSetup(t)
+	research := stepBy(t, a, r, "research")
+	if research.State != "running" || research.UpdatedBy != "workflow" || research.DeliveredAt == "" {
+		t.Fatalf("dispatched step not marked running: %+v", research)
+	}
+	rows, err := a.db.Query(`SELECT state||'/'||actor||'/'||output FROM process_step_events WHERE step_id=? ORDER BY id`, research.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var states []string
+	for rows.Next() {
+		var v string
+		rows.Scan(&v)
+		states = append(states, v)
+	}
+	rows.Close()
+	if strings.Join(states, ",") != "ready/workflow/,running/workflow/Worker started" {
+		t.Fatalf("unexpected step history: %v", states)
+	}
+	// The worker's one write still completes it, and a later redelivery of the
+	// finished step does not move it back to running.
+	actor := "agent:8:" + research.ThreadID
+	if _, err = a.stepAction(p.ProjectID, actor, p.ID, r.ID, research.ID, "step_update", map[string]any{"state": "completed", "outcome": "R"}); err != nil {
+		t.Fatal(err)
+	}
+	s := stepBy(t, a, r, "research")
+	if err = a.markWorkerStarted(&s); err != nil {
+		t.Fatal(err)
+	}
+	if got := stepBy(t, a, r, "research"); got.State != "completed" || got.Output != "R" {
+		t.Fatalf("finished step changed: %+v", got)
+	}
+}

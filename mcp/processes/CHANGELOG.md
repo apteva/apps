@@ -2,6 +2,12 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Worker started marks the step running (0.20.1)
+
+Processes moves an isolated step from ready to running when its worker starts,
+with a "Worker started" history entry, so the panel shows the step as being
+worked on. See `docs-release-0.20.1.md`.
+
 ## Simpler agent protocol (0.20.0)
 
 Step workers get one brief holding the step, its inputs and all completed

@@ -174,7 +174,7 @@ func TestIndependentStepRejectsDefaultThreadCompletion(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "Processes worker") {
 		t.Fatalf("default thread completion was accepted: %v", err)
 	}
-	if got := stepBy(t, a, r, "research"); got.State != "ready" {
+	if got := stepBy(t, a, r, "research"); got.State != "running" || got.Output != "" || got.UpdatedBy != "workflow" {
 		t.Fatalf("rejected completion changed step state: %+v", got)
 	}
 }
@@ -189,7 +189,7 @@ func TestGenericHumanStepBehavesLikeAnyDependency(t *testing.T) {
 	}
 	finishStep(t, a, p, r, "review", "operator", "Review complete", "")
 	fresh, _ := a.getRun(p.ProjectID, p.ID, r.ID)
-	if fresh.State == "failed" || len(f.events) != 3 || stepBy(t, a, r, "publish").State != "ready" {
+	if fresh.State == "failed" || len(f.events) != 3 || stepBy(t, a, r, "publish").State != "running" {
 		t.Fatal("generic human step did not advance")
 	}
 	a.tickDirect(context.Background(), time.Now())
@@ -218,7 +218,7 @@ func TestWorkflowParallelJoinAndValidation(t *testing.T) {
 		t.Fatal("join released early")
 	}
 	finishStep(t, a, p, r, "write", "agent:7:t", "draft", "")
-	if stepBy(t, a, r, "review").State != "ready" {
+	if stepBy(t, a, r, "review").State != "running" {
 		t.Fatal("join not released")
 	}
 	d.Steps[0].DependsOn = []string{"review"}
