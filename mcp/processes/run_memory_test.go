@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +133,7 @@ func TestRunCheckpointRecoveryIdempotencyAndPermissions(t *testing.T) {
 		t.Fatal("wrong owner wrote memory")
 	}
 	bad := map[string]any{"process_id": p.ID, "run_id": r.ID, "expected_revision": float64(0), "idempotency_key": "second", "summary": map[string]any{"outcome": "done", "references": []string{}}}
-	if _, e := a.executeMCP(p.ProjectID, "agent:7:owner", "summary_update", bad); e != errConflict {
+	if _, e := a.executeMCP(p.ProjectID, "agent:7:owner", "summary_update", bad); !errors.Is(e, errConflict) {
 		t.Fatalf("stale revision accepted: %v", e)
 	}
 	bad["expected_revision"] = float64(1)

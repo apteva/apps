@@ -283,8 +283,8 @@ func dependenciesReady(s StepRun, all []StepRun) bool {
 // not carry their descriptions in every turn. Claims are only valid for a
 // persistent sequential worker; independently dispatched steps are already
 // assigned and use step_update directly.
-const processWorkerTools = "processes_step_get,processes_step_read,processes_step_evidence_save,processes_step_update"
-const processMemoryWorkerTools = "processes_runs,processes_run_get,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
+const processWorkerTools = "processes_step_get,processes_step_read,processes_step_evidence_save,processes_step_update,processes_summary_update"
+const processMemoryWorkerTools = "processes_runs,processes_run_get,processes_summary_get,processes_memory_list,processes_memory_upsert"
 const staleStepReminderAfter = 10 * time.Minute
 const staleStepReminderCooldown = 10 * time.Minute
 
@@ -366,7 +366,7 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 	// Persistent workers claim each step; the claim returns the frozen step,
 	// dependency results and next_action, so only the contract is appended.
 	defer func() {
-		message += "\n" + workerContract
+		message += "\n" + workerContract + " " + runSummaryContract(r, s, all)
 		if usesRunMemory(d) {
 			message += "\n" + memoryContract
 		}

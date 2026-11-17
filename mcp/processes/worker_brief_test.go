@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,41 @@ func TestIsolatedWorkerStartMarksStepRunning(t *testing.T) {
 	}
 	if got := stepBy(t, a, r, "research"); got.State != "completed" || got.Output != "R" {
 		t.Fatalf("finished step changed: %+v", got)
+	}
+}
+
+func TestLastStepWorkerWritesRunSummary(t *testing.T) {
+	a, f, p, r := workflowSetup(t)
+	first := f.threads[0].DirectiveSuffix
+	if strings.Contains(first, "run's last step") || !strings.Contains(first, "summary={blocker:") {
+		t.Fatalf("non-final brief summary contract: %s", first)
+	}
+	finishStep(t, a, p, r, "research", "agent:8:t", "R-RESULT", "")
+	finishStep(t, a, p, r, "write", "agent:7:t", "W-RESULT", "")
+	finishStep(t, a, p, r, "review", "operator", "V-RESULT", "")
+	last := f.threads[len(f.threads)-1]
+	if !strings.Contains(last.DirectiveSuffix, "This is the run's last step") {
+		t.Fatalf("final brief lacks summary instruction: %s", last.DirectiveSuffix)
+	}
+	hasTool := false
+	for _, tool := range last.Tools {
+		hasTool = hasTool || tool == "processes_summary_update"
+	}
+	if !hasTool {
+		t.Fatalf("worker cannot write the summary: %v", last.Tools)
+	}
+	publish := stepBy(t, a, r, "publish")
+	actor := fmt.Sprintf("agent:%d:%s", publish.Executor.AgentID, publish.ThreadID)
+	args := map[string]any{"process_id": p.ID, "run_id": r.ID, "step_id": publish.ID, "expected_revision": float64(0), "idempotency_key": "summary-" + publish.ID, "summary": map[string]any{"outcome": "Published P-1"}}
+	if _, err := a.executeMCP(p.ProjectID, actor, "summary_update", args); err != nil {
+		t.Fatal(err)
+	}
+	s, err := a.summary(r.ID, 0)
+	if err != nil || s == nil || s.Outcome != "Published P-1" {
+		t.Fatalf("summary not saved: %+v %v", s, err)
+	}
+	args["idempotency_key"] = "again"
+	if _, err = a.executeMCP(p.ProjectID, actor, "summary_update", args); err == nil || !strings.Contains(err.Error(), "expected_revision=1") {
+		t.Fatalf("conflict should name the current revision: %v", err)
 	}
 }

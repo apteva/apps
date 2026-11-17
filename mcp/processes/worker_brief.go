@@ -114,11 +114,35 @@ func independentStepBrief(p *Process, r Run, s StepRun, all []StepRun, d Definit
 	if len(clipped) > 0 {
 		fmt.Fprintf(&b, "Some text was cut; reread it with processes_step_read target=%s.\n", strings.Join(uniqueStrings(clipped), "|"))
 	}
-	b.WriteString(workerContract)
+	b.WriteString(workerContract + " " + runSummaryContract(r, s, all))
 	if usesRunMemory(d) {
 		b.WriteString("\n" + memoryContract)
 	}
 	return b.String()
+}
+
+// finalStep reports whether no other step in the run depends on s: its worker
+// is the last agent on that branch of the run.
+func finalStep(s StepRun, all []StepRun) bool {
+	for _, other := range all {
+		for _, dep := range other.Definition.DependsOn {
+			if dep == s.Key && other.ID != s.ID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// runSummaryContract asks the worker to write the run summary the run card
+// shows, as workers did before 0.20.0: the last step's worker on completion,
+// any worker when it blocks or fails.
+func runSummaryContract(r Run, s StepRun, all []StepRun) string {
+	call := fmt.Sprintf("processes_summary_update run_id=%s step_id=%s idempotency_key=summary-%s expected_revision=<current revision, 0 if none; on conflict the error gives it>", r.ID, s.ID, s.ID)
+	if finalStep(s, all) {
+		return "This is the run's last step: just before that step_update, save the run summary with " + call + " summary={outcome:<one or two sentences: what the run achieved, with key figures and receipts>, completed:<what each step did>, references:[evidence ids or receipts]}. If you block or fail instead, save summary={blocker:<the reason>}."
+	}
+	return "If you block or fail, first save the run summary with " + call + " summary={blocker:<the reason>}."
 }
 
 func uniqueStrings(in []string) []string {

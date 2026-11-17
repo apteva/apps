@@ -2,6 +2,12 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Agents write the run summary again (0.20.2)
+
+Every step worker has `processes_summary_update` again; the last step's worker
+saves the run summary the run card shows, and a blocked worker saves the
+reason. See `docs-release-0.20.2.md`.
+
 ## Worker started marks the step running (0.20.1)
 
 Processes moves an isolated step from ready to running when its worker starts,

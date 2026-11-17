@@ -196,7 +196,7 @@ func (a *App) summaryAction(project, actor, process string, args map[string]any,
 		return nil, e
 	}
 	if revision != expected {
-		return nil, errConflict
+		return nil, fmt.Errorf("%w: summary revision is %d; retry with expected_revision=%d", errConflict, revision, revision)
 	}
 	_, e = tx.Exec(`INSERT INTO process_run_summaries(run_id,revision,body_json,author,request_key,created_at) VALUES(?,?,?,?,?,?)`, r.ID, revision+1, body, actor, key, timestamp())
 	if e != nil {
