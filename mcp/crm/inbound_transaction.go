@@ -228,6 +228,16 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 				break
 			}
 		}
+		// Machine mail (bounces, DMARC reports, service notifications) rarely
+		// references a message we stored, so header threading would open one
+		// conversation per message — a newsletter's bounces flooded the inbox.
+		// Keep a single conversation per automated sender instead.
+		if convoID == 0 {
+			convoID, err = automatedEmailConversationTx(tx, pid, cid, automated)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	threadCreated := convoID == 0
 	if threadCreated {
