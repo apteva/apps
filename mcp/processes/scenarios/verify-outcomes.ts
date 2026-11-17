@@ -285,21 +285,8 @@ export function verifyMultiAgentTrajectory(calls: any[], run: any) {
       doneIndex >= 0,
       `${step.key}: no successful real-agent completion trace`,
     );
-    const read = calls
-      .slice(0, doneIndex)
-      .some(
-        (c) =>
-          c.agent === alias &&
-          c.node === "main" &&
-          c.name === "processes_step_get" &&
-          c.completed &&
-          c.ok &&
-          c.args.step_id === step.id,
-      );
-    check(
-      read,
-      `${step.key}: executor did not read its step before completion`,
-    );
+    // Workers get their step, inputs and dependency results in their brief,
+    // so a step_get before completion is optional, not required.
   }
 }
 

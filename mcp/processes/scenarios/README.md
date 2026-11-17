@@ -5,28 +5,42 @@ These tests run real Apteva Core agents with the `openai-codex` provider and
 gets fresh app storage; the runner creates and removes a disposable server.
 No Tasks integration is installed and no external publishing service is used.
 
+## Core suite (default)
+
+Ten scenarios, one per behaviour the app must keep. `bun run scenarios/run.ts`
+runs exactly these.
+
 | Scenario | Persisted outcome checked |
 | --- | --- |
-| `01-direct-completion.yaml` | Exactly one direct occurrence completes with `Net: 800`. |
-| `02-assignment-parameters.yaml` | Two assignments reuse `day-1` independently and retain distinct page parameters and results. |
-| `03-human-approval-gate.yaml` | The agent finishes the draft; a generic human review step remains waiting and publication remains pending and undispatched. |
-| `04-multi-agent-workflow.yaml` | Three distinct agents complete five generic steps with parallel inputs, a dependency join, review evidence, and a simulated receipt. |
-| `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
-| `06-sequential-worker.yaml` | Three simulated weather/receipt steps complete in order using exactly one persisted worker and one spawn. |
-| `07-operator-confirmation.yaml` | A run parks on a human work step, the operator confirms it mid-run over HTTP, and the agent publishes only afterwards. |
-| `07-browser-continuity.yaml` | One local browser page stays open across three steps; the final real page submission proves the same session and worker were reused. |
+| `01-direct-completion.yaml` | A procedure without steps runs once on the owner's thread and completes with `Net: 800`. |
+| `02-assignment-parameters.yaml` | Two assignments reuse `day-1` independently and keep distinct parameters and results. |
+| `04-multi-agent-workflow.yaml` | Three agents complete five steps: parallel inputs, a dependency join, review, a simulated receipt. |
+| `05-event-trigger-workflow.yaml` | A duplicate signup on the real app bus starts exactly one five-step run. |
+| `06-sequential-worker.yaml` | Three ordered steps complete on one persistent worker with one spawn. |
+| `07-operator-confirmation.yaml` | A run parks on a human step; the operator confirms over HTTP and only then the agent publishes. |
+| `13-step-by-step.yaml` | Nothing dispatches until each step is released (over MCP and HTTP); parallel branches and the human approval hold. |
+| `14-run-memory.yaml` | A second run reuses the first run's checkpoint and ledger references instead of repeating discovery; human approval still holds. |
+| `15-process-patch.yaml` | `patch` saves only the changed fields as a new version and rejects a stale edit. |
+| `17-worker-cleanup.yaml` | Persistent workers complete, fail and park; Processes stops finished workers and their pending wake timers. |
 
-| `10-executor-continuity.yaml` | Same-agent branches and a validation join reuse one worker, prepared context and tools; save exact source/artifact/digest receipts; and publish once after HTTP operator approval. |
+## Extended suite
 
-| `11-mcp-response-recovery.yaml` | Discovery metadata and immutable version rereads lead to one direct occurrence, a compact receipt, and exact saved-state recovery. |
-
-Run from the Processes app directory:
+`scenarios/extended/` holds the narrower cases: the human approval gate (03,
+covered in the core suite by 07), browser continuity (07), executor continuity
+(10), MCP response recovery (11), AI parallel steps (12), compact handoffs (16),
+ratings (18) and the worker provider (19, needs `--extra-provider`, so it runs
+only by name).
 
 ```sh
-bun run scenarios/run.ts
-# One case:
+bun run scenarios/run.ts                                   # core suite
+APTEVA_TEST_SUITE=extended bun run scenarios/run.ts        # extended (or =all)
 bun run scenarios/run.ts scenarios/04-multi-agent-workflow.yaml
+bun run scenarios/run.ts scenarios/extended/12-ai-parallel-steps.yaml
 ```
+
+`APTEVA_TEST_TOKEN_SCALE` multiplies every token budget (default 1 on Codex,
+2 elsewhere). `bun run scenarios/compare.ts <before-run-dir> <after-run-dir>`
+compares two reports scenario by scenario (add `--md` for a table).
 
 The wrapper invokes `apteva test` with per-scenario limits and a cumulative cost
 ceiling of $7.50. `APTEVA_TEST_PROVIDER` selects the provider (default

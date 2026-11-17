@@ -28,22 +28,20 @@ directive: |
   you, and confirmer is {"kind":"human"}. The confirmer role must be human: you
   are not authorized to complete or confirm that step yourself.
   You are authorized to activate this test procedure and assignment, then start one
-  occurrence with idempotency_key=confirm-day-1. Use run_get to discover step IDs,
-  then step_get before acting. Complete the draft step with output exactly
+  occurrence with idempotency_key=confirm-day-1. Use run_get to discover step IDs.
+  Complete the draft step with output exactly
   "Golden hour flatters every portrait." using step_update.
   Then stop acting and remain available. Do not call run_update for this
   structured run. Do not complete the confirm step, do not publish before the
   confirm step is completed, and do not poll or sleep in a loop.
   Processes will notify you when the publish step becomes ready after the
-  operator confirms. When that notification arrives, call step_get for the
-  publish step and complete it with output exactly
+  operator confirms. When that notification arrives, complete the publish step with output exactly
   "Published: Golden hour flatters every portrait." using step_update.
   Finish by calling runs to verify all three steps are completed. Then stop.
 assert:
   - http: GET /api/apps/processes/processes
     expect_count_at: processes
     expect_count: 1
-  - tool_called: processes_step_get
   - tool_called_with:
       tool: processes_step_update
       args: {state: completed}

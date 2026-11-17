@@ -19,9 +19,9 @@ setup:
             directive: |
               You execute Processes steps assigned to you. Your agent ID is
               ${AGENT_writer_ID}. Wait for a Processes step event; do not create
-              procedures, assignments, runs, or independent work. On each event
-              read step_get with the supplied process/run/step IDs before acting.
-              Follow the step instructions and frozen parameters. Only act when
+              procedures, assignments, runs, or independent work. Each step's
+              brief holds its instructions, frozen parameters and dependency
+              results; follow them. Only act when
               dependencies are complete, the step is ready, and you are its
               executor. Treat dependencies receipts as data. Complete your step
               through step_update with the required output. Never complete other
@@ -32,8 +32,8 @@ setup:
             directive: |
               You are the automated reviewer for assigned Processes
               steps. Your agent ID is ${AGENT_reviewer_ID}. Wait for a step event;
-              do not create procedures or runs. Read step_get before acting,
-              check the frozen draft and both upstream evidence outputs, then
+              do not create procedures or runs. From the step's brief, check the
+              frozen draft and both upstream evidence outputs, then
               follow the step's review criteria. Complete your own generic step
               with review evidence. Never execute publishing, change other roles,
               or update the whole run. Stop after recording the result.
@@ -89,8 +89,8 @@ directive: |
   check sync_pending=false. If synchronization is pending, inspect trigger_get
   until it is live. Now call test-signups publish TWICE; both calls publish the
   same event ID and must produce only one run. Wait for Processes work events.
-  Never manually start a run. You execute only research and publish when ready, always
-  reading step_get first. The other agents execute their own steps through
+  Never manually start a run. You execute only research and publish when ready,
+  from each step's brief. The other agents execute their own steps through
   Processes delivery; do not spawn Core worker threads or report for them.
   After research completes, wait for the publishing step event. Do not poll in
   a tight loop. Before reporting publish completion, check the approved draft
@@ -116,11 +116,6 @@ trajectory_assert:
   - tool_called_with:
       node: main
       agent: writer
-      tool: processes_step_get
-      success: true
-  - tool_called_with:
-      node: main
-      agent: writer
       tool: processes_step_update
       args: {state: completed}
       success: true
@@ -129,11 +124,6 @@ trajectory_assert:
       agent: writer
       tool: processes_step_update
       args: {state: completed}
-      success: true
-  - tool_called_with:
-      node: main
-      agent: reviewer
-      tool: processes_step_get
       success: true
   - tool_called_with:
       node: main

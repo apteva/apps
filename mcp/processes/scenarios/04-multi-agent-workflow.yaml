@@ -22,9 +22,9 @@ setup:
               Processes provisions an isolated worker for each independent step,
               inheriting this agent's spawnable MCP servers and the Processes
               coordination tools. Do not spawn a worker or call step_assign.
-              Workers read the authoritative record and its dependencies,
-              complete their own step, then report once. Main may read the
-              record for visibility but must not complete the step itself.
+              Each worker's brief holds its step and dependency results; it
+              completes its own step and reports once. Main must not complete
+              the step itself.
               Use known ownership rather than listing threads for every new step.
               Wait for Processes events; do not manually forward downstream work.
           - id: reviewer
@@ -35,8 +35,8 @@ setup:
               Processes provisions an isolated worker for every independent
               review step, inheriting the agent's spawnable MCP servers and
               Processes coordination tools. Do not spawn a worker or call
-              step_assign. The worker reads the frozen context, verifies
-              evidence, records the review output and reports
+              step_assign. The worker's brief holds the frozen context; it
+              verifies the evidence, records the review output and reports
               once. Do not publish, create runs or execute another agent's
               work. Wait for Processes events.
 directive: |
@@ -119,11 +119,6 @@ trajectory_assert:
   - tool_called_with:
       node: main
       agent: writer
-      tool: processes_step_get
-      success: true
-  - tool_called_with:
-      node: main
-      agent: writer
       tool: processes_step_update
       args: {state: completed}
       success: true
@@ -132,11 +127,6 @@ trajectory_assert:
       agent: writer
       tool: processes_step_update
       args: {state: completed}
-      success: true
-  - tool_called_with:
-      node: main
-      agent: reviewer
-      tool: processes_step_get
       success: true
   - tool_called_with:
       node: main

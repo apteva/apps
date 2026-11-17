@@ -133,11 +133,11 @@ function teamCalls(run: ReturnType<typeof teamRun>) {
     args: { step_id: s.id, state: "completed" },
   })));
 }
-test("requires a successful read and completion by each assigned real agent", () => {
+test("requires a successful completion by each assigned real agent; the read is optional", () => {
   const run = teamRun();
   expect(() => verifyMultiAgentTrajectory(teamCalls(run), run)).not.toThrow();
   const noRead = teamCalls(run).filter(c => !(c.agent === "reviewer" && c.name === "processes_step_get"));
-  expect(() => verifyMultiAgentTrajectory(noRead, run)).toThrow("did not read its step");
+  expect(() => verifyMultiAgentTrajectory(noRead, run)).not.toThrow();
   const wrongActor = teamCalls(run).map(c => c.agent === "reviewer" ? { ...c, agent: "primary" } : c);
   expect(() => verifyMultiAgentTrajectory(wrongActor, run)).toThrow("no successful real-agent completion trace");
   const failed = teamCalls(run).map(c => c.agent === "reviewer" ? { ...c, ok: false } : c);
