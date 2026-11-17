@@ -103,7 +103,12 @@
 .chat-md h2 { font-size: 0.95rem; }
 .chat-md h3 { font-size: 0.85rem; }
 .chat-md h4 { font-size: 0.8rem; }
-.chat-md ul, .chat-md ol { margin: 0.3rem 0 0.7rem 1.1rem; padding: 0; }
+/* Markers sit outside the text, so the indent must fit the widest marker in
+   the current font: "1. " is three characters wide in a monospace theme, and
+   wider than a fixed rem indent, so numbers would hang left of the text. */
+.chat-md ul, .chat-md ol { margin: 0.3rem 0 0.7rem 0; padding: 0 0 0 max(1.1rem, 2ch); }
+.chat-md ol { padding-left: max(1.1rem, 3ch); }
+.chat-md ol:has(> li:nth-child(10)) { padding-left: max(1.1rem, 4ch); }
 .chat-md ul { list-style: disc; }
 .chat-md ol { list-style: decimal; }
 .chat-md li { margin: 0.1rem 0; }

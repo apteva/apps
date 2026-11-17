@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.26.3 — 2026-11-17
+
+- Align numbered and bulleted list markers with the surrounding message text. The list indent now fits the marker in the current font, so `1.` no longer hangs left of the paragraph edge in monospace themes, and lists with ten or more items get room for two-digit numbers.
+
 ## 0.26.2 — 2026-11-16
 
 - Open HTTP, HTTPS and protocol-relative links in chat messages and Markdown report sections in a new tab, keeping the conversation and draft available.
