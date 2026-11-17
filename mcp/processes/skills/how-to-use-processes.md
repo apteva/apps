@@ -335,3 +335,6 @@ agent an assignment uses, and each card shows which agent handles each step.
 In v0.19.1, run cards draw their state colour as an inset stripe instead of a
 left border, so hover and selection outline every side evenly; waiting,
 scheduled, blocked and queued runs get matching stripes.
+
+In v0.19.2, run cards drop the coloured left stripe and tint; the status pill
+alone shows each run's state.
