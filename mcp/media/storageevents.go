@@ -81,7 +81,11 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 		return
 	}
 
-	var lastSeq uint64
+	// The replay cursor survives restarts. Events missed beyond the
+	// platform's short replay buffer are covered by the change feed or, on
+	// older Storage, by the reconciliation sweep restarted here.
+	lastSeq := loadEventSeq(app.AppDB(), projectID)
+	restartLegacySweeps(app.AppDB())
 	backoff := 1 * time.Second
 	const backoffCap = 30 * time.Second
 
@@ -178,10 +182,13 @@ func connectAndStream(app *sdk.AppCtx, gatewayURL, projectID, token string, sinc
 		case line == "":
 			// End of event frame. Process accumulated data.
 			if dataLine != "" {
+				// Handle (which durably queues the work) before moving
+				// the persisted cursor, so a crash replays the event.
+				handleStorageEvent(app, []byte(dataLine))
 				if seq, err := strconv.ParseUint(idLine, 10, 64); err == nil {
 					*sinceSeq = seq
+					saveEventSeq(app.AppDB(), projectID, seq)
 				}
-				handleStorageEvent(app, []byte(dataLine))
 			}
 			dataLine, idLine = "", ""
 		case strings.HasPrefix(line, "data: "):
@@ -195,8 +202,8 @@ func connectAndStream(app *sdk.AppCtx, gatewayURL, projectID, token string, sinc
 	return scanner.Err()
 }
 
-// handleStorageEvent decodes one event and dispatches it. Only
-// file.deleted is interesting today; other topics are ignored.
+// handleStorageEvent decodes one event and dispatches it.
+// Adds and updates are queued durably; deletes cascade immediately.
 func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 	var ev struct {
 		Topic     string         `json:"topic"`
@@ -215,8 +222,15 @@ func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 	case "file.deleted":
 		cascadeDeleteFromEvent(app, ev.Data, ev.ProjectID)
 	case "file.added":
+		// Queue first so the work survives a saturated pool or a crash;
+		// the immediate attempt below is only a latency optimisation.
+		if existed, _ := ev.Data["was_existing"].(bool); !existed {
+			_ = enqueueIndexWork(app.AppDB(), ev.ProjectID, eventFileID(ev.Data), eventRevision(ev.Data), "changed", "event")
+		}
 		indexFromEvent(app, ev.Data, ev.ProjectID)
 	case "file.updated":
+		// Replacements change the content hash; the queue re-checks it.
+		_ = enqueueIndexWork(app.AppDB(), ev.ProjectID, eventFileID(ev.Data), eventRevision(ev.Data), "changed", "event")
 		// files_move (and other PATCHes) emit file.updated. We only
 		// react to folder changes — the row's probe data hasn't
 		// changed. updateFolder is a single SQL UPDATE; no probe
@@ -372,7 +386,6 @@ func storageFileFromEvent(data map[string]any) *StorageFile {
 // derivation blobs (thumbnail / waveform) from storage so they don't
 // linger as orphan bytes.
 func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
-	log := app.Logger()
 	// projectID is ev.ProjectID from the bus envelope. See
 	// indexFromEvent — storage tags every file event with its row's
 	// project_id, so this is always the right project to cascade in.
@@ -396,6 +409,14 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 		return
 	}
 
+	applyStorageDeletion(app, projectID, fileID)
+}
+
+// applyStorageDeletion removes Media state for a Storage file known to be
+// deleted (an SSE file.deleted event or a change-feed tombstone). Safe to
+// repeat: a second call finds nothing to remove.
+func applyStorageDeletion(app *sdk.AppCtx, projectID, fileID string) {
+	log := app.Logger()
 	// A file.deleted event may describe a hidden thumbnail/keyframe rather
 	// than a catalogued source. Invalidate that pointer before looking for a
 	// media row whose source ID matches the event ID. This closes the stale-ID

@@ -558,6 +558,22 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 		return 0, nil
 	}
 
+	return purgeOrphansAmong(app, sc, db, projectID, allMediaIDs, precomputedPresent)
+}
+
+// orphanConfirmLimit bounds the per-file 404 confirmations one purge run
+// makes. Unconfirmed candidates stay and are re-checked next sweep.
+const orphanConfirmLimit = 100
+
+// purgeOrphansAmong runs the orphan check for a bounded subset of media
+// rows (the reconciliation sweep passes one slice per tick). A row is only
+// purged when Storage explicitly answers 404 for its exact ID: a batch
+// lookup that merely omits it (scope mismatch, partial response) is
+// inconclusive and leaves the row alone.
+func purgeOrphansAmong(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID string, allMediaIDs, precomputedPresent []string) (int64, error) {
+	if len(allMediaIDs) == 0 {
+		return 0, nil
+	}
 	// 2. Determine which of those still exist in storage. Two paths
 	//    depending on what the caller supplied:
 	//
@@ -593,9 +609,19 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 
 	// 3. Compute the orphan set.
 	orphanIDs := make([]string, 0)
+	confirmed := 0
 	for _, fid := range allMediaIDs {
 		if _, ok := present[fid]; ok {
 			continue
+		}
+		if sc != nil {
+			if confirmed >= orphanConfirmLimit {
+				break
+			}
+			confirmed++
+			if !storageFileConfirmedMissing(sc, projectID, fid) {
+				continue
+			}
 		}
 		orphanIDs = append(orphanIDs, fid)
 	}
@@ -1457,6 +1483,14 @@ func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string, esse
 // indexerCandidates returns file IDs from storage that need probing —
 // missing media row, or marked pending/failed (with an exponential
 // retry gate so we don't flap).
+// derivationRepairDueSQL is true for an indexed row whose thumbnail,
+// waveform or keyframes need (re)generation now. Takes one bind: whether
+// keyframes are enabled.
+const derivationRepairDueSQL = `((derivation_retry_at IS NOT NULL AND julianday(derivation_retry_at)<=julianday('now')) OR
+ (derivation_retry_at IS NULL AND (((has_video=1 OR is_image=1) AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='thumbnail' AND d.status='ok')) OR
+ (has_audio=1 AND has_video=0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='waveform' AND d.status='ok')) OR
+ (? AND has_video=1 AND is_image=0 AND duration_ms>0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='keyframe' AND d.status='ok')))))`
+
 func indexerCandidates(db *sql.DB, projectID string, all []StorageFile, limit int, withKeyframes ...bool) []StorageFile {
 	if len(all) == 0 || limit <= 0 {
 		return nil
@@ -1467,13 +1501,25 @@ func indexerCandidates(db *sql.DB, projectID string, all []StorageFile, limit in
 	}
 	known := map[string]knownRow{}
 	wantKeyframes := len(withKeyframes) > 0 && withKeyframes[0]
-	rows, err := db.Query(`SELECT file_id,probe_status,source_sha256,COALESCE(name,''),COALESCE(folder,''),
- ((derivation_retry_at IS NOT NULL AND julianday(derivation_retry_at)<=julianday('now')) OR
- (derivation_retry_at IS NULL AND (((has_video=1 OR is_image=1) AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='thumbnail' AND d.status='ok')) OR
- (has_audio=1 AND has_video=0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='waveform' AND d.status='ok')) OR
- (? AND has_video=1 AND is_image=0 AND duration_ms>0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='keyframe' AND d.status='ok')))))
- FROM media WHERE project_id=?`, wantKeyframes, projectID)
-	if err == nil {
+	// Look up only the files being considered (a queue batch or one sweep
+	// page), never the whole media table.
+	ids := make([]string, 0, len(all))
+	for _, f := range all {
+		ids = append(ids, fmt.Sprint(f.ID))
+	}
+	for start := 0; start < len(ids); start += 400 {
+		end := min(start+400, len(ids))
+		chunk := ids[start:end]
+		args := []any{wantKeyframes, projectID}
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := db.Query(`SELECT file_id,probe_status,source_sha256,COALESCE(name,''),COALESCE(folder,''),
+ `+derivationRepairDueSQL+`
+ FROM media WHERE project_id=? AND file_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")+`)`, args...)
+		if err != nil {
+			continue
+		}
 		for rows.Next() {
 			var id string
 			var k knownRow

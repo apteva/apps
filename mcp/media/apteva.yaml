@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.8
+version: 0.16.0
 description: |
+  v0.16.0 indexes incrementally: a durable queue fed by Storage's change feed
+  replaces the full-inventory scan on every tick; a bounded sweep reconciles.
   v0.15.8 persists queue deadlines across capacity waits and restarts, and
   preserves audio presentation extents with sample-accurate redaction bounds.
   v0.15.7 adds per-request transcription model/language with queue-time
@@ -727,7 +729,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.8
+    ref: media/v0.16.0
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -743,7 +745,12 @@ config_schema:
     type: text
     default: "30"
     label: Poll interval (seconds)
-    description: How often the indexer scans storage for new media files.
+    description: How often the indexer reads Storage's change feed and processes queued media files. Each run does bounded work; it does not list the whole Storage inventory.
+  - name: reconcile_interval_hours
+    type: text
+    default: "12"
+    label: Reconciliation interval (hours)
+    description: How long to wait after a completed reconciliation sweep before starting the next. The sweep pages through Storage one page per indexer run to catch missed changes and remove media rows whose files Storage confirms are gone.
   - name: max_probe_size_mb
     type: text
     default: "0"

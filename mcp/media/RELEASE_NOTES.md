@@ -1,3 +1,12 @@
+## 0.16.0 — incremental indexing
+
+The indexer no longer lists every Storage file and re-checks every media row
+on each 30-second run. It reads Storage's change feed (Storage 0.14+) into a
+durable, deduplicated queue, advances a bounded reconciliation sweep with saved
+progress, and deletes media rows only on a tombstone or an explicit 404. Older
+Storage keeps working through events plus the sweep. See [release
+details](RELEASE-v0.16.0.md).
+
 ## 0.15.8 — durable capacity waits and sample-accurate audio extents
 
 Renders remain queued under the same ID and a persisted overall deadline rather

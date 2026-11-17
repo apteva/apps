@@ -31,9 +31,8 @@ import (
 )
 
 const (
-	indexerBatchSize         = 25
-	directIndexerBatchSize   = 20
-	storageInventoryPageSize = 5000
+	indexerBatchSize       = 25
+	directIndexerBatchSize = 20
 )
 
 // runIndexer is the worker body. The framework calls it on the
@@ -95,71 +94,25 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	sc := newStorageClient()
 	retryDerivationCleanup(ctx, app, sc, projectID)
 
-	// Cascade-cleanup: any media row whose source file is no longer
-	// in storage (soft-deleted, re-uploaded under a new id, etc.)
-	// gets dropped along with its derivations + transcripts. Skipped
-	// when the storage listing might be incomplete — the safety guard
-	// is "did we hit the page limit". Storage soft-deletes by default
-	// so re-creation later just re-indexes the file fresh.
-	// Orphan cleanup. purgeOrphans now verifies each media row
-	// individually against storage (via the explicit-id ResolveFiles
-	// batch) rather than diffing against a paginated listing. So we
-	// no longer have to guard on "did the listing return everything"
-	// — the storage call is bounded by media's row count, not
-	// storage's file count, and is correct under any listing cap.
-	//
-	if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, nil); err != nil {
-		app.Logger().Warn("purge orphan media failed", "err", err)
-	} else if n > 0 {
-		app.Logger().Info("purged orphan media", "count", n)
-	}
-
-	// Resolve known pending/failed rows by exact Storage ID first. This is
-	// the durable queue behind media_reindex: a requested file is eligible
-	// even when it sits outside every formerly fixed inventory window.
-	candidates, err := resolvePendingIndexerFiles(
-		ctx, sc, app.AppDB(), projectID, directIndexerBatchSize,
-	)
+	// Bounded work only — see incremental.go. No step lists the whole
+	// Storage inventory or re-verifies every media row.
+	db := app.AppDB()
+	st, err := loadSyncState(db, projectID)
 	if err != nil {
-		app.Logger().Warn("resolve pending media failed", "err", err)
-		candidates = nil
+		app.Logger().Warn("indexer sync state unavailable", "err", err)
+		return nil
 	}
-	directCount := len(candidates)
-
-	// Reserve part of each tick for discovery so a permanently failing row
-	// cannot starve new uploads. Discovery itself walks every Storage page;
-	// there is no 5,000/10,000-row catalog ceiling.
-	var files []StorageFile
-	var media []StorageFile
-	remaining := indexerBatchSize - len(candidates)
-	if remaining > 0 {
-		files, err = sc.SearchAllFiles(ctx, projectID, storageInventoryPageSize)
-		if err != nil {
-			app.Logger().Warn("storage inventory scan failed", "err", err)
-		} else {
-			media = filterMediaFiles(files)
-			selected := make(map[int64]struct{}, len(candidates))
-			for _, f := range candidates {
-				selected[f.ID] = struct{}{}
-			}
-			unselected := make([]StorageFile, 0, len(media))
-			for _, f := range media {
-				if _, exists := selected[f.ID]; !exists {
-					unselected = append(unselected, f)
-				}
-			}
-			candidates = append(candidates,
-				indexerCandidates(app.AppDB(), projectID, unselected, remaining, keyframesEnabled(app))...)
-		}
-	}
+	keyframes := keyframesEnabled(app)
+	mode := syncChangeFeed(ctx, app, sc, db, projectID, st)
+	candidates, acks := drainIndexQueue(ctx, app, sc, db, projectID, indexerBatchSize, keyframes)
+	sweeping := reconcileStep(ctx, app, sc, db, projectID, st, mode, keyframes)
 	if len(candidates) == 0 {
 		return nil
 	}
 	app.Logger().Info("indexer tick",
-		"total_in_storage", len(files),
-		"media_in_storage", len(media),
-		"direct_candidates", directCount,
+		"mode", mode,
 		"candidates", len(candidates),
+		"sweeping", sweeping,
 	)
 
 	for _, f := range candidates {
@@ -168,6 +121,11 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 		}
 		processOne(ctx, app, sc, projectID, f, ffmpegPath, ffprobePath,
 			maxSizeMB, thumbSeek, thumbWidth, waveW, waveH)
+		// processOne leaves a durable pending/failed media row when it
+		// cannot finish, so the queue entry is safe to retire now.
+		if w, ok := acks[f.ID]; ok {
+			ackIndexWork(db, projectID, w.fileID, w.gen)
+		}
 	}
 	return nil
 }

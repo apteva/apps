@@ -89,6 +89,7 @@ type StorageFile struct {
 	ContentType string   `json:"content_type"`
 	SizeBytes   int64    `json:"size_bytes"`
 	SHA256      string   `json:"sha256"`
+	Revision    int64    `json:"revision,omitempty"`
 	Source      string   `json:"source"`
 	Tags        []string `json:"tags"`
 	Visibility  string   `json:"visibility"`
@@ -984,4 +985,99 @@ func (c *storageClient) do(ctx context.Context, method, path string, jsonBody an
 func errMsg(op string, resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("%s: %d %s: %s", op, resp.StatusCode, resp.Status, string(body))
+}
+
+// isStorageStatus reports whether err is a non-2xx Storage response with
+// the given status code (c.do formats them as "METHOD path: code: body").
+func isStorageStatus(err error, code int) bool {
+	return err != nil && strings.Contains(err.Error(), fmt.Sprintf(": %d: ", code))
+}
+
+// storageFileConfirmedMissing asks Storage for one exact file. Only an
+// explicit 404 counts as deleted; any other failure is inconclusive.
+func storageFileConfirmedMissing(sc *storageClient, projectID, fileID string) bool {
+	id, err := strconv.ParseInt(fileID, 10, 64)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err = sc.GetFile(ctx, projectID, id)
+	return isStorageStatus(err, http.StatusNotFound)
+}
+
+// FileChange is one entry of Storage's /files/changes feed (Storage 0.14+).
+type FileChange struct {
+	Seq      int64  `json:"seq"`
+	FileID   int64  `json:"file_id"`
+	Revision int64  `json:"revision"`
+	Op       string `json:"op"`
+}
+
+type FileChangesPage struct {
+	Changes       []FileChange `json:"changes"`
+	NextAfter     int64        `json:"next_after"`
+	HasMore       bool         `json:"has_more"`
+	HeadSeq       int64        `json:"head_seq"`
+	PrunedThrough int64        `json:"pruned_through"`
+}
+
+// errChangeFeedUnsupported marks Storage releases without /files/changes.
+var errChangeFeedUnsupported = errors.New("storage change feed unsupported")
+
+// FileChanges reads one page of Storage's ordered change feed.
+func (c *storageClient) FileChanges(ctx context.Context, projectID string, after int64, limit int) (*FileChangesPage, error) {
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	q.Set("after", strconv.FormatInt(after, 10))
+	q.Set("limit", strconv.Itoa(limit))
+	body, err := c.do(ctx, http.MethodGet, "/files/changes?"+q.Encode(), nil, "")
+	if err != nil {
+		// Older Storage routes /files/changes to the item handler, which
+		// rejects "changes" as an id.
+		if isStorageStatus(err, http.StatusNotFound) || isStorageStatus(err, http.StatusBadRequest) || isStorageStatus(err, http.StatusMethodNotAllowed) {
+			return nil, errChangeFeedUnsupported
+		}
+		return nil, err
+	}
+	var page FileChangesPage
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse file changes: %w", err)
+	}
+	if !bytes.Contains(body, []byte(`"head_seq"`)) {
+		return nil, errChangeFeedUnsupported
+	}
+	return &page, nil
+}
+
+// DiscoveryPage lists live files after afterID in id order with slim rows
+// (Storage 0.14+). Stable under concurrent writes, unlike offset paging.
+func (c *storageClient) DiscoveryPage(ctx context.Context, projectID string, afterID int64, limit int) ([]StorageFile, int64, bool, error) {
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	q.Set("after_id", strconv.FormatInt(afterID, 10))
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("fields", "discovery")
+	body, err := c.do(ctx, http.MethodGet, "/files?"+q.Encode(), nil, "")
+	if err != nil {
+		return nil, 0, false, err
+	}
+	var resp struct {
+		Files       []StorageFile `json:"files"`
+		NextAfterID *int64        `json:"next_after_id"`
+		HasMore     bool          `json:"has_more"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, 0, false, fmt.Errorf("parse discovery page: %w", err)
+	}
+	if resp.NextAfterID == nil {
+		// Storage ignored after_id (pre-0.14): refuse rather than loop on
+		// the first page forever.
+		return nil, 0, false, errChangeFeedUnsupported
+	}
+	return resp.Files, *resp.NextAfterID, resp.HasMore, nil
 }

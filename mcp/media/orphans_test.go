@@ -190,6 +190,17 @@ func TestPurgeOrphans_VerifyByID_DeletesUnreported(t *testing.T) {
 			http.Error(w, "unexpected path "+r.URL.Path, 404)
 			return
 		}
+		// Exact-id confirmation: an orphan is only purged after Storage
+		// answers 404 for that one id.
+		if rest := strings.TrimPrefix(r.URL.Path, "/api/apps/callback/apps/storage/proxy/files/"); rest != r.URL.Path && r.Method == http.MethodGet {
+			id, _ := parseInt64Local(rest)
+			if !stillPresent[id] {
+				http.Error(w, "not found", 404)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"file": StorageFile{ID: id, Name: "f.bin", Folder: "/"}})
+			return
+		}
 		// We expect ids= queries only. A bulk listing (no ids) means
 		// the code regressed to the listing-cap path → fail loud.
 		idsRaw := r.URL.Query().Get("ids")

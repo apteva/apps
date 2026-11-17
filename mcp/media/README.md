@@ -3,6 +3,28 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Incremental indexing (v0.16.0)
+
+The indexer run (every `poll_interval_seconds`) does bounded work only. It reads
+new entries from Storage's change feed, processes up to 25 queued files, and
+advances a reconciliation sweep by one page. An unchanged catalog costs one
+small feed request per run, regardless of its size.
+
+- **Queue.** Uploads, replacements, moves, deletions and `media_reindex` requests
+  land in `index_queue`, one row per file. Feed entries and the feed cursor
+  commit in one transaction; a queue row is retired only after its file has
+  been processed, so a restart neither loses nor repeats work.
+- **Sweep.** Initial discovery and missed-change recovery page through Storage
+  by file id (one page of 1,000 per run) and check 500 media rows per run for
+  orphans. Progress is saved; a completed sweep waits `reconcile_interval_hours`
+  (default 12). A feed cursor older than Storage's retention restarts the sweep.
+- **Deletes.** A media row is removed on a Storage tombstone, a `file.deleted`
+  event, or an explicit 404 for that exact file. A lookup that merely omits a
+  file, or any failed request, changes nothing.
+- **Older Storage.** Without the change feed (Storage before 0.14), events feed
+  the queue, the sweep pages by offset, and each restart starts a sweep. The
+  feed is re-checked hourly, so upgrading Storage switches over automatically.
+
 ## Render queue and audio extents (v0.15.8)
 
 Renders keep their original ID while waiting for weighted host capacity. Supply
