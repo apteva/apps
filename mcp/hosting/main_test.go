@@ -4,12 +4,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,12 +22,31 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestMain(m *testing.M) {
+	// Runs execute synchronously so tests can assert on their outcome.
+	kickOperation = func(a *App, ctx *sdk.AppCtx, id string) { a.drive(ctx, id) }
+	os.Exit(m.Run())
+}
+
+// ─── Fake platform: Containers + Instances ───────────────────────────────
+
+type fakeInstance struct {
+	instanceInfo
+}
+
 type platformStub struct {
 	tk.BasePlatformClient
-	callAppCalls  []callAppCall
-	ingressCalls  []sdk.IngressExposeRequest
-	unexposeHosts []string
-	authMissing   bool
+	mu            sync.Mutex
+	calls         []callAppCall
+	commands      []string
+	ingress       []sdk.IngressExposeRequest
+	unexposed     []string
+	instances     map[int64]*fakeInstance
+	nextInstance  int64
+	failStep      string // access/reset step that exits non-zero
+	pendingClean  int    // verify_clean polls that report "not yet"
+	createErr     error
+	destroyCalled []int64
 }
 
 type callAppCall struct {
@@ -32,306 +55,165 @@ type callAppCall struct {
 	Input map[string]any
 }
 
+func newStub() *platformStub {
+	return &platformStub{instances: map[int64]*fakeInstance{}, nextInstance: 500}
+}
+
+func (p *platformStub) addInstance(id int64, platform, status string) {
+	p.instances[id] = &fakeInstance{instanceInfo{ID: id, Name: fmt.Sprintf("host-%d", id), Status: status, Platform: platform, PublicIPv4: fmt.Sprintf("10.0.0.%d", id%250), SSHPort: 22}}
+}
+
+var opIDRE = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+var allMarkerSteps = []string{"prepare", "preflight", "grant", "verify_access", "revoke", "verify_revoked", "check_clean", "reboot",
+	"wipe", "reinstall", "verify_clean", "install_wipe", "install_reinstall", "install_verify-clean"}
+
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
-	p.callAppCalls = append(p.callAppCalls, callAppCall{App: appName, Tool: tool, Input: input})
-	if appName == "auth" && p.authMissing {
-		return errors.New("auth app not installed")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, callAppCall{App: appName, Tool: tool, Input: input})
+	reply := func(v any) error {
+		b, _ := json.Marshal(v)
+		return json.Unmarshal(b, out)
 	}
 	switch tool {
-	case "catalog_prices_get":
-		trialDays := int64(0)
-		if int64Arg(input, "id") == 100 {
-			trialDays = 14
-		}
-		b, _ := json.Marshal(map[string]any{
-			"price": map[string]any{
-				"id":                input["id"],
-				"product_id":        501,
-				"nickname":          "Apteva Starter",
-				"unit_amount_cents": 1900,
-				"currency":          "USD",
-				"interval":          "month",
-				"interval_count":    1,
-				"trial_days":        trialDays,
-				"metadata": map[string]any{
-					"plan_key":                "starter",
-					"on_trial_end_unpaid":     "suspend",
-					"unpaid_grace_days":       7,
-					"on_unpaid_grace_expired": "delete",
-				},
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "catalog_products_get":
-		b, _ := json.Marshal(map[string]any{
-			"product": map[string]any{
-				"id":   input["id"],
-				"name": "Apteva Hosting",
-				"slug": "apteva-hosting",
-				"metadata": map[string]any{
-					"product_key":  "apteva",
-					"product_type": "apteva_hosting",
-					"runtime_config": map[string]any{
-						"image":       "ghcr.io/apteva/apteva:latest",
-						"port":        5280,
-						"health_path": "/health",
-					},
-				},
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "customers_upsert_by_email":
-		b, _ := json.Marshal(map[string]any{
-			"customer": map[string]any{
-				"id":    55,
-				"email": input["email"],
-				"name":  "Checkout Buyer",
-			},
-			"was_created": true,
-		})
-		return json.Unmarshal(b, out)
-	case "subscriptions_create":
-		b, _ := json.Marshal(map[string]any{
-			"subscription": map[string]any{
-				"id":             66,
-				"status":         input["status"],
-				"customer_id":    input["customer_id"],
-				"customer_email": input["customer_email"],
-				"metadata":       input["metadata"],
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "subscriptions_update_status":
-		b, _ := json.Marshal(map[string]any{
-			"subscription": map[string]any{
-				"id":     input["id"],
-				"status": input["status"],
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "invoices_create":
-		b, _ := json.Marshal(map[string]any{
-			"invoice": map[string]any{
-				"id":          77,
-				"status":      "draft",
-				"customer_id": input["customer_id"],
-				"currency":    input["currency"],
-				"metadata":    input["metadata"],
-				"line_items":  input["line_items"],
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "invoices_finalize":
-		b, _ := json.Marshal(map[string]any{
-			"invoice": map[string]any{
-				"id":     input["invoice_id"],
-				"status": "open",
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "invoices_send_payment_link":
-		b, _ := json.Marshal(map[string]any{
-			"url":               "https://checkout.stripe.test/session",
-			"stripe_session_id": "cs_test_123",
-		})
-		return json.Unmarshal(b, out)
-	case "payment_method_setup_create":
-		b, _ := json.Marshal(map[string]any{
-			"url": "https://checkout.stripe.test/setup",
-			"setup_session": map[string]any{
-				"id":          88,
-				"customer_id": input["customer_id"],
-				"status":      "pending",
-				"metadata":    input["metadata"],
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "invoices_get":
-		b, _ := json.Marshal(map[string]any{
-			"found": true,
-			"invoice": map[string]any{
-				"id":             input["id"],
-				"customer_id":    42,
-				"customer_email": "buyer@example.com",
-				"customer_name":  "WP Buyer",
-				"status":         "paid",
-				"currency":       "USD",
-				"metadata": map[string]any{
-					"product_type":     "wordpress_hosting",
-					"product_key":      "wordpress-single",
-					"plan_key":         "wordpress-starter",
-					"owner_email":      "owner@example.com",
-					"slug":             "paid-wp-sale",
-					"subscription_id":  int64(66),
-					"fulfillment_app":  "hosting",
-					"fulfillment_type": "hosting_tenant_provision",
-				},
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "orders_create_from_invoice":
-		b, _ := json.Marshal(map[string]any{
-			"order": map[string]any{
-				"id":             10,
-				"source":         "billing",
-				"source_ref":     "invoice:77",
-				"order_type":     "hosting",
-				"payment_status": "paid",
-			},
-			"fulfillment": map[string]any{
-				"id":               20,
-				"order_id":         10,
-				"fulfillment_app":  "hosting",
-				"fulfillment_type": "hosting_tenant_provision",
-				"status":           "queued",
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "containers_run", "containers_start", "containers_stop", "containers_restart", "containers_health":
-		b, _ := json.Marshal(map[string]any{
-			"workload": map[string]any{
-				"id":            "wrk_test",
-				"name":          input["name"],
-				"status":        "running",
-				"public_url":    "http://127.0.0.1:53123",
-				"health_status": "ok",
-				"ports": []map[string]any{{
-					"container_port": 5280,
-					"host_port":      53123,
-					"bind_addr":      "127.0.0.1",
-					"protocol":       "tcp",
-				}},
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "containers_logs":
-		b, _ := json.Marshal(map[string]any{"workload_id": input["workload_id"], "logs": "hello"})
-		return json.Unmarshal(b, out)
-	case "containers_usage_get":
-		b, _ := json.Marshal(map[string]any{
-			"usage": map[string]any{
-				"workload_id": input["workload_id"],
-				"metrics": []map[string]any{{
-					"feature_key": "containers.storage.bytes",
-					"quantity":    int64(700 * 1024 * 1024),
-					"unit":        "bytes",
-					"kind":        "gauge",
-					"source":      "docker_volume_total",
-				}},
-			},
-			"metrics": []map[string]any{{
-				"feature_key": "containers.storage.bytes",
-				"quantity":    int64(700 * 1024 * 1024),
-				"unit":        "bytes",
-				"kind":        "gauge",
-				"source":      "docker_volume_total",
-			}},
-		})
-		return json.Unmarshal(b, out)
+	case "containers_run":
+		return reply(map[string]any{"workload": map[string]any{"id": "wl_" + strFromAny(input["name"]), "status": "running", "health_status": "healthy",
+			"ports": []map[string]any{{"container_port": 80, "host_port": 18080, "bind_addr": "127.0.0.1"}}}})
+	case "containers_stop", "containers_start", "containers_restart", "containers_health":
+		return reply(map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "running", "health_status": "healthy"}})
 	case "containers_destroy":
-		b, _ := json.Marshal(map[string]any{"destroyed": true})
-		return json.Unmarshal(b, out)
-	case "entitlement_limits_set":
-		b, _ := json.Marshal(map[string]any{"limit": input})
-		return json.Unmarshal(b, out)
-	case "entitlement_grants_create":
-		b, _ := json.Marshal(map[string]any{"grant": input})
-		return json.Unmarshal(b, out)
-	case "usage_record":
-		b, _ := json.Marshal(map[string]any{"usage": map[string]any{"quantity": input["quantity"], "deduped": false}})
-		return json.Unmarshal(b, out)
-	case "llm_policy_set":
-		b, _ := json.Marshal(map[string]any{"policy": map[string]any{"subject_type": input["subject_type"], "subject_id": input["subject_id"]}})
-		return json.Unmarshal(b, out)
-	case "llm_tokens_create":
-		b, _ := json.Marshal(map[string]any{"id": 42, "token": "llm_test_token", "subject_type": input["subject_type"], "subject_id": input["subject_id"]})
-		return json.Unmarshal(b, out)
-	case "llm_subject_suspend", "llm_subject_resume":
-		b, _ := json.Marshal(map[string]any{"ok": true})
-		return json.Unmarshal(b, out)
-	case "auth_orgs_create":
-		b, _ := json.Marshal(map[string]any{
-			"organization": map[string]any{
-				"id":   int64(901),
-				"slug": input["slug"],
-				"name": input["name"],
-			},
-		})
-		return json.Unmarshal(b, out)
-	case "auth_orgs_list":
-		b, _ := json.Marshal(map[string]any{
-			"organizations": []map[string]any{{
-				"id":   int64(901),
-				"slug": input["slug"],
-				"name": "Existing Org",
-			}},
-			"count": 1,
-		})
-		return json.Unmarshal(b, out)
-	case "auth_users_create":
-		b, _ := json.Marshal(map[string]any{
-			"user": map[string]any{
-				"id":    int64(902),
-				"email": input["email"],
-			},
-			"password_reset_sent": input["send_password_reset"],
-		})
-		return json.Unmarshal(b, out)
-	case "auth_users_search":
-		b, _ := json.Marshal(map[string]any{
-			"users": []map[string]any{{
-				"id":    int64(902),
-				"email": input["q"],
-			}},
-			"count": 1,
-		})
-		return json.Unmarshal(b, out)
-	case "auth_clients_create":
-		b, _ := json.Marshal(map[string]any{
-			"client": map[string]any{
-				"client_id": "akc_hosting_test",
-				"name":      input["name"],
-				"type":      input["type"],
-			},
-			"client_id": "akc_hosting_test",
-		})
-		return json.Unmarshal(b, out)
-	default:
-		return nil
+		return reply(map[string]any{"destroyed": true})
+	case "containers_logs":
+		return reply(map[string]any{"logs": "line"})
+	case "containers_usage_get":
+		return reply(map[string]any{"usage": map[string]any{"storage_mb": 12}})
+	case "instance_get":
+		inst, ok := p.instances[int64Arg(input, "id")]
+		if !ok {
+			return errors.New("instance not found")
+		}
+		return reply(map[string]any{"instance": inst.instanceInfo})
+	case "instance_list":
+		var list []instanceInfo
+		for _, i := range p.instances {
+			list = append(list, i.instanceInfo)
+		}
+		return reply(map[string]any{"instances": list})
+	case "instance_create":
+		if p.createErr != nil {
+			return p.createErr
+		}
+		p.nextInstance++
+		id := p.nextInstance
+		platform := "linux"
+		if strings.HasPrefix(strFromAny(input["size"]), "apple-silicon/") {
+			platform = "macos"
+		}
+		p.instances[id] = &fakeInstance{instanceInfo{ID: id, Name: strFromAny(input["name"]), Status: "provisioning", Platform: platform, PublicIPv4: "203.0.113.9", SSHPort: 22}}
+		return reply(map[string]any{"instance": p.instances[id].instanceInfo})
+	case "instance_destroy":
+		id := int64Arg(input, "id")
+		p.destroyCalled = append(p.destroyCalled, id)
+		if inst, ok := p.instances[id]; ok {
+			inst.Status = "destroyed"
+		}
+		return reply(map[string]any{"destroyed": true, "id": id})
+	case "instance_upload_file":
+		return reply(map[string]any{"ok": true})
+	case "instance_metrics":
+		return reply(map[string]any{"cpu_percent": 3})
+	case "instance_run_command":
+		cmd := strFromAny(input["cmd"])
+		p.commands = append(p.commands, cmd)
+		op := opIDRE.FindString(cmd)
+		if p.failStep != "" && strings.Contains(cmd, "'"+p.failStep+"'") {
+			return reply(map[string]any{"output": "boom", "exit_code": 1})
+		}
+		if p.pendingClean > 0 && strings.Contains(cmd, "/verify-clean") {
+			p.pendingClean--
+			return reply(map[string]any{"output": "", "exit_code": 17})
+		}
+		var b strings.Builder
+		for _, s := range allMarkerSteps {
+			b.WriteString(marker(op, s) + "\n")
+		}
+		return reply(map[string]any{"output": b.String(), "exit_code": 0})
 	}
+	return fmt.Errorf("unexpected tool %s/%s", appName, tool)
 }
 
 func (p *platformStub) ExposeIngress(req sdk.IngressExposeRequest) (*sdk.IngressRoute, error) {
-	p.ingressCalls = append(p.ingressCalls, req)
+	p.ingress = append(p.ingress, req)
 	return &sdk.IngressRoute{ID: 1, Hostname: req.Hostname, Target: req.Target, Status: "active"}, nil
 }
 
 func (p *platformStub) UnexposeIngress(hostname string) error {
-	p.unexposeHosts = append(p.unexposeHosts, hostname)
+	p.unexposed = append(p.unexposed, hostname)
 	return nil
 }
 
-func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*sdk.AppCtx, *sql.DB) {
+func (p *platformStub) called(tool string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, c := range p.calls {
+		if c.Tool == tool {
+			n++
+		}
+	}
+	return n
+}
+
+func (p *platformStub) lastCall(tool string) map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := len(p.calls) - 1; i >= 0; i-- {
+		if p.calls[i].Tool == tool {
+			return p.calls[i].Input
+		}
+	}
+	return nil
+}
+
+// ─── Harness ─────────────────────────────────────────────────────────────
+
+func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hosting.db"))
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hosting.db")+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	migrations, err := filepath.Glob("migrations/*.sql")
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func applyMigrations(t *testing.T, db *sql.DB, upTo string) {
+	t.Helper()
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sort.Strings(migrations)
-	for _, migration := range migrations {
-		raw, err := os.ReadFile(migration)
+	sort.Strings(files)
+	for _, f := range files {
+		if upTo != "" && filepath.Base(f) > upTo {
+			break
+		}
+		raw, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(string(raw)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
+			t.Fatalf("apply %s: %v", f, err)
 		}
 	}
+}
+
+func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*App, *sdk.AppCtx, *sql.DB) {
+	t.Helper()
+	db := openTestDB(t)
+	applyMigrations(t, db, "")
 	app := &App{}
 	manifest := app.Manifest()
 	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{
@@ -341,1234 +223,673 @@ func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*sdk.AppCtx, *sql.DB) {
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatal(err)
 	}
-	return ctx, db
+	return app, ctx, db
 }
 
-func TestEmbeddedManifest_Valid(t *testing.T) {
-	app := &App{}
-	m := app.Manifest()
-	if m.Name != "hosting" {
-		t.Errorf("manifest.Name=%q, want hosting", m.Name)
+func call(t *testing.T, fn func(*sdk.AppCtx, map[string]any) (any, error), ctx *sdk.AppCtx, args map[string]any) map[string]any {
+	t.Helper()
+	out, err := fn(ctx, args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Version != "1.11.1" {
-		t.Errorf("manifest.Version=%q, want 1.11.0", m.Version)
+	b, _ := json.Marshal(out)
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	return m
+}
+
+func callErr(t *testing.T, fn func(*sdk.AppCtx, map[string]any) (any, error), ctx *sdk.AppCtx, args map[string]any, want string) {
+	t.Helper()
+	_, err := fn(ctx, args)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want containing %q", err, want)
 	}
-	if m.DB == nil {
-		t.Fatal("manifest.DB missing")
+}
+
+func tenant(t *testing.T, db *sql.DB, id string) *Tenant {
+	t.Helper()
+	tn, err := dbTenantGet(db, id)
+	if err != nil || tn == nil {
+		t.Fatalf("tenant %s: %v", id, err)
 	}
-	if m.DB.Migrations != "migrations/" {
-		t.Errorf("manifest.DB.Migrations=%q, want migrations/", m.DB.Migrations)
+	return tn
+}
+
+func machine(t *testing.T, db *sql.DB, id int64) *Machine {
+	t.Helper()
+	m, err := dbMachineGet(db, id)
+	if err != nil || m == nil {
+		t.Fatalf("machine %d: %v", id, err)
 	}
-	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Entry != "/ui/HostingPanel.mjs" {
-		t.Fatalf("hosting panel not declared correctly: %+v", m.Provides.UIPanels)
+	return m
+}
+
+const testKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0jXv1vYw3wCw5JpQ8 customer@laptop"
+
+// setupMacPool creates a validated, inspected macOS pool with n machines and
+// a machine_pool profile "mac-m4".
+func setupMacPool(t *testing.T, a *App, ctx *sdk.AppCtx, stub *platformStub, n int) []int64 {
+	t.Helper()
+	call(t, a.toolPoolUpsert, ctx, map[string]any{"key": "macs", "name": "Macs", "platform": "macos"})
+	call(t, a.toolPoolSetExecution, ctx, map[string]any{"key": "macs", "enabled": true})
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "pool_key": "macs"})
+	var ids []int64
+	for i := 0; i < n; i++ {
+		instID := int64(100 + i)
+		stub.addInstance(instID, "macos", "ready")
+		out := call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": instID, "serial": fmt.Sprintf("SER%d", i), "management_user": "admin"})
+		id := int64Arg(mapFromAny(out["machine"]), "id")
+		call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": id, "validated": true, "confirm": fmt.Sprint(id)})
+		call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": id})
+		if m := machine(t, ctx.AppDB(), id); m.State != MachineAvailable {
+			t.Fatalf("machine %d after inspect = %s (%s)", id, m.State, m.StateReason)
+		}
+		ids = append(ids, id)
 	}
-	gotScopes := map[string]bool{}
-	for _, s := range m.Scopes {
-		gotScopes[string(s)] = true
+	return ids
+}
+
+// ─── Manifest and schema ─────────────────────────────────────────────────
+
+func TestEmbeddedManifestValid(t *testing.T) {
+	m := (&App{}).Manifest()
+	if m.Name != "hosting" || m.Version != appVersion {
+		t.Fatalf("manifest name/version = %s/%s, want hosting/%s", m.Name, m.Version, appVersion)
 	}
-	if !gotScopes["global"] {
-		t.Error("manifest missing global scope")
-	}
-	if !gotScopes["project"] {
-		t.Error("manifest missing project scope")
-	}
-	gotRequired := map[string]bool{}
-	gotEvents := map[string][]string{}
 	for _, dep := range m.Requires.Apps {
-		gotRequired[dep.Name] = !dep.Optional
-		gotEvents[dep.Name] = dep.Events
+		if !dep.Optional {
+			t.Fatalf("dependency %s must be optional", dep.Name)
+		}
+		if dep.Name != "containers" && dep.Name != "instances" {
+			t.Fatalf("unexpected dependency %s", dep.Name)
+		}
+		if len(dep.Events) > 0 {
+			t.Fatalf("hosting must not subscribe to %s events", dep.Name)
+		}
 	}
-	if !gotRequired["containers"] {
-		t.Error("manifest should require containers")
-	}
-	if !gotRequired["catalog"] {
-		t.Error("manifest should require catalog")
-	}
-	if !containsString(gotEvents["billing"], "invoice.paid") {
-		t.Errorf("manifest should subscribe to billing invoice.paid, got %v", gotEvents["billing"])
-	}
-	if !containsString(gotEvents["billing"], "payment_method.attached") {
-		t.Errorf("manifest should subscribe to billing payment_method.attached, got %v", gotEvents["billing"])
-	}
-	if !containsString(gotEvents["subscriptions"], "subscription.cancelled") {
-		t.Errorf("manifest should subscribe to subscription lifecycle events, got %v", gotEvents["subscriptions"])
-	}
-	if gotRequired["auth"] {
-		t.Error("auth dependency should be optional")
-	}
-	if !containsString(gotEvents["llm"], "llm.usage.recorded") {
-		t.Errorf("manifest should subscribe to llm usage events, got %v", gotEvents["llm"])
+	if len((&App{}).EventHandlers()) != 0 {
+		t.Fatal("hosting must not handle events")
 	}
 }
 
-func TestCheckoutCreatePaidPlanCreatesSubscriptionInvoiceAndPaymentLink(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolCheckoutCreate(ctx, map[string]any{
-		"catalog_price_id": int64(99),
-		"owner_email":      "buyer@example.com",
-		"customer_name":    "Checkout Buyer",
-		"slug":             "checkout-apteva",
-		"success_url":      "https://example.com/success",
-		"cancel_url":       "https://example.com/cancel",
-	})
-	if err != nil {
-		t.Fatalf("checkout create: %v", err)
-	}
-	result := got.(map[string]any)
-	checkout := result["checkout"].(map[string]any)
-	if checkout["requires_payment"] != true || checkout["url"] != "https://checkout.stripe.test/session" {
-		t.Fatalf("unexpected checkout: %+v", checkout)
-	}
-	if result["tenant"] != nil {
-		t.Fatalf("paid checkout should wait for invoice.paid, got tenant %+v", result["tenant"])
-	}
-
-	wantCalls := []string{
-		"catalog:catalog_prices_get",
-		"catalog:catalog_products_get",
-		"billing:customers_upsert_by_email",
-		"subscriptions:subscriptions_create",
-		"billing:invoices_create",
-		"billing:invoices_finalize",
-		"billing:invoices_send_payment_link",
-	}
-	for _, want := range wantCalls {
-		parts := strings.Split(want, ":")
-		if !containsToolCall(pf.callAppCalls, parts[0], parts[1]) {
-			t.Fatalf("missing call %s in %+v", want, pf.callAppCalls)
-		}
-	}
-
-	var invoiceCall *callAppCall
-	var subCall *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "invoices_create" {
-			invoiceCall = &pf.callAppCalls[i]
-		}
-		if pf.callAppCalls[i].Tool == "subscriptions_create" {
-			subCall = &pf.callAppCalls[i]
-		}
-	}
-	if invoiceCall == nil || int64Arg(mapArg(invoiceCall.Input, "metadata"), "subscription_id") != 66 {
-		t.Fatalf("invoice metadata missing subscription_id: %+v", invoiceCall)
-	}
-	if subCall == nil || subCall.Input["status"] != "past_due" {
-		t.Fatalf("subscription status should start past_due before payment: %+v", subCall)
-	}
-	line := invoiceCall.Input["line_items"].([]any)[0].(map[string]any)
-	if line["price_id"] != int64(99) {
-		t.Fatalf("invoice line should reference catalog price: %+v", line)
-	}
-}
-
-func TestCheckoutCreateNoCardTrialProvisionsImmediately(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolCheckoutCreate(ctx, map[string]any{
-		"catalog_price_id": int64(100),
-		"owner_email":      "trial@example.com",
-		"customer_name":    "Trial Buyer",
-		"slug":             "trial-apteva",
-	})
-	if err != nil {
-		t.Fatalf("checkout create: %v", err)
-	}
-	result := got.(map[string]any)
-	checkout := result["checkout"].(map[string]any)
-	if checkout["status"] != "trialing" || checkout["requires_payment"] != false || checkout["trial_end"] == "" {
-		t.Fatalf("unexpected checkout: %+v", checkout)
-	}
-	tenant, ok := result["tenant"].(*Tenant)
-	if !ok || tenant == nil {
-		t.Fatalf("trial checkout should provision tenant immediately: %+v", result["tenant"])
-	}
-	if containsToolCall(pf.callAppCalls, "billing", "invoices_create") || containsToolCall(pf.callAppCalls, "billing", "invoices_send_payment_link") {
-		t.Fatalf("no-card trial should not create invoice/payment link: %+v", pf.callAppCalls)
-	}
-
-	var subCall *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "subscriptions_create" {
-			subCall = &pf.callAppCalls[i]
-			break
-		}
-	}
-	if subCall == nil {
-		t.Fatalf("missing subscriptions_create call")
-	}
-	if subCall.Input["status"] != "trialing" || subCall.Input["trial_start"] == "" || subCall.Input["trial_end"] == "" {
-		t.Fatalf("trial subscription missing status/dates: %+v", subCall.Input)
-	}
-	meta := mapArg(subCall.Input, "metadata")
-	if int64Arg(meta, "trial_days") != 14 || meta["on_unpaid_grace_expired"] != "delete" {
-		t.Fatalf("trial metadata not carried through: %+v", meta)
-	}
-}
-
-func TestCheckoutCreateCardRequiredTrialCreatesSetupSession(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolCheckoutCreate(ctx, map[string]any{
-		"catalog_price_id":              int64(100),
-		"owner_email":                   "card-trial@example.com",
-		"customer_name":                 "Card Trial Buyer",
-		"slug":                          "card-trial-apteva",
-		"trial_requires_payment_method": true,
-		"success_url":                   "https://example.com/trial/success",
-		"cancel_url":                    "https://example.com/trial/cancel",
-		"payment_method_types":          []any{"card", "sepa_debit"},
-	})
-	if err != nil {
-		t.Fatalf("checkout create: %v", err)
-	}
-	result := got.(map[string]any)
-	checkout := result["checkout"].(map[string]any)
-	if checkout["status"] != "payment_method_required" || checkout["requires_payment_method"] != true || checkout["url"] != "https://checkout.stripe.test/setup" {
-		t.Fatalf("unexpected checkout: %+v", checkout)
-	}
-	if result["tenant"] != nil {
-		t.Fatalf("card-required trial should wait for payment_method.attached, got tenant %+v", result["tenant"])
-	}
-	if containsToolCall(pf.callAppCalls, "billing", "invoices_create") || containsToolCall(pf.callAppCalls, "billing", "invoices_send_payment_link") {
-		t.Fatalf("card-required trial should not create invoice/payment link: %+v", pf.callAppCalls)
-	}
-	var setupCall *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "payment_method_setup_create" {
-			setupCall = &pf.callAppCalls[i]
-			break
-		}
-	}
-	if setupCall == nil {
-		t.Fatalf("missing payment_method_setup_create call in %+v", pf.callAppCalls)
-	}
-	if setupCall.Input["customer_id"] != int64(55) {
-		t.Fatalf("setup session should use billing customer id: %+v", setupCall.Input)
-	}
-	meta := mapArg(setupCall.Input, "metadata")
-	if meta["source_app"] != "hosting" || meta["flow"] != "hosting_checkout" || int64Arg(meta, "subscription_id") != 66 {
-		t.Fatalf("setup metadata missing hosting checkout context: %+v", meta)
-	}
-	if meta["runtime_config"] == nil || meta["trial_requires_payment_method"] != "true" {
-		t.Fatalf("setup metadata should be stripe-safe strings: %+v", meta)
-	}
-}
-
-func TestPaymentMethodAttachedEventProvisionsCardRequiredTrial(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	err := app.handlePaymentMethodAttachedEvent(ctx, sdk.Event{
-		Event:     "payment_method.attached",
-		SourceApp: "billing",
-		ProjectID: "proj-test",
-		Data: map[string]any{
-			"id":          int64(501),
-			"customer_id": int64(55),
-			"provider":    "stripe",
-			"type":        "card",
-			"metadata": map[string]any{
-				"source_app":          "hosting",
-				"flow":                "hosting_checkout",
-				"owner_email":         "card-trial@example.com",
-				"customer_email":      "card-trial@example.com",
-				"customer_name":       "Card Trial Buyer",
-				"slug":                "card-trial-apteva",
-				"product_key":         "apteva",
-				"plan_key":            "starter",
-				"subscription_id":     "66",
-				"billing_customer_id": "55",
-				"runtime_config":      `{"image":"ghcr.io/apteva/apteva:latest","port":5280,"health_path":"/health"}`,
-				"addons":              `[{"addon_key":"managed-llm","feature_key":"llm.tokens","included_quantity":1000}]`,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("handle payment_method.attached: %v", err)
-	}
-	tenant, err := dbTenantGetBySlug(db, "card-trial-apteva")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tenant == nil {
-		t.Fatal("expected tenant to be provisioned")
-	}
-	if tenant.SubscriptionID == nil || *tenant.SubscriptionID != 66 {
-		t.Fatalf("tenant subscription_id=%v, want 66", tenant.SubscriptionID)
-	}
-	if !containsToolCall(pf.callAppCalls, "containers", "containers_run") {
-		t.Fatalf("expected containers_run, got %+v", pf.callAppCalls)
-	}
-	if !containsToolCall(pf.callAppCalls, "llm", "llm_tokens_create") {
-		t.Fatalf("expected LLM addon provisioning, got %+v", pf.callAppCalls)
-	}
-	beforeCalls := len(pf.callAppCalls)
-	if err := app.handlePaymentMethodAttachedEvent(ctx, sdk.Event{
-		Event:     "payment_method.attached",
-		SourceApp: "billing",
-		ProjectID: "proj-test",
-		Data: map[string]any{
-			"id": int64(501),
-			"metadata": map[string]any{
-				"source_app": "hosting",
-				"flow":       "hosting_checkout",
-				"slug":       "card-trial-apteva",
-			},
-		},
-	}); err != nil {
-		t.Fatalf("idempotent payment_method.attached: %v", err)
-	}
-	if len(pf.callAppCalls) != beforeCalls {
-		t.Fatalf("idempotent event should not provision again: before %d after %d calls=%+v", beforeCalls, len(pf.callAppCalls), pf.callAppCalls)
-	}
-}
-
-func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
-	app := &App{}
-	m := app.Manifest()
+func TestMCPToolsMatchManifest(t *testing.T) {
+	a := &App{}
+	m := a.Manifest()
 	declared := map[string]bool{}
 	for _, tool := range m.Provides.MCPTools {
 		declared[tool.Name] = true
 	}
-	implemented := map[string]bool{}
-	for _, tool := range app.MCPTools() {
-		implemented[tool.Name] = true
+	handlers := map[string]bool{}
+	for _, tool := range a.MCPTools() {
+		if tool.Handler == nil {
+			t.Fatalf("%s has no handler", tool.Name)
+		}
+		handlers[tool.Name] = true
+		if !declared[tool.Name] {
+			t.Fatalf("%s is not declared in apteva.yaml", tool.Name)
+		}
 	}
 	for name := range declared {
-		if !implemented[name] {
-			t.Errorf("manifest declares tool %q but no handler implements it", name)
+		if !handlers[name] {
+			t.Fatalf("%s declared but has no handler", name)
 		}
 	}
-	for name := range implemented {
-		if !declared[name] {
-			t.Errorf("handler implements %q but manifest doesn't declare it", name)
-		}
-	}
-}
-
-func TestSeedPlansIncludeFreePlanLimits(t *testing.T) {
-	ctx, db := newTestCtx(t, &platformStub{})
-	defer db.Close()
-
-	app := &App{}
-	out, err := app.toolPlanList(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plans := out.(map[string]any)["plans"].([]*Plan)
-	byKey := map[string]*Plan{}
-	for _, p := range plans {
-		byKey[p.Key] = p
-	}
-	free := byKey["free"]
-	if free == nil {
-		t.Fatalf("free plan missing: %+v", plans)
-	}
-	if free.BillingMode != "free" {
-		t.Errorf("free billing_mode=%q, want free", free.BillingMode)
-	}
-	limits := map[string]int64{}
-	for _, l := range free.Limits {
-		limits[l.FeatureKey] = l.LimitValue
-	}
-	if limits["hosting.tenants"] != 1 {
-		t.Errorf("free hosting.tenants limit=%d, want 1", limits["hosting.tenants"])
-	}
-	if limits["containers.storage_mb"] != 512 {
-		t.Errorf("free containers.storage_mb limit=%d, want 512", limits["containers.storage_mb"])
-	}
-	if limits["containers.storage.bytes"] != 512*1024*1024 {
-		t.Errorf("free containers.storage.bytes limit=%d, want %d", limits["containers.storage.bytes"], int64(512*1024*1024))
-	}
-	if free.ProductKey != "apteva" {
-		t.Errorf("free product_key=%q, want apteva", free.ProductKey)
-	}
-	if byKey["docker-free"] == nil || byKey["docker-free"].ProductKey != "custom-docker" {
-		t.Fatalf("docker-free plan missing or unbound: %+v", byKey["docker-free"])
-	}
-	if byKey["wordpress-free"] == nil || byKey["wordpress-free"].ProductKey != "wordpress-single" {
-		t.Fatalf("wordpress-free plan missing or unbound: %+v", byKey["wordpress-free"])
-	}
-}
-
-func TestProductListSeedsCatalog(t *testing.T) {
-	ctx, db := newTestCtx(t, &platformStub{})
-	defer db.Close()
-
-	app := &App{}
-	out, err := app.toolProductList(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	products := out.(map[string]any)["products"].([]*Product)
-	byKey := map[string]*Product{}
-	for _, p := range products {
-		byKey[p.Key] = p
-	}
-	for _, key := range []string{"apteva", "custom-docker", "wordpress-single"} {
-		if byKey[key] == nil {
-			t.Fatalf("product %q missing from %+v", key, products)
-		}
-		if len(byKey[key].Versions) == 0 {
-			t.Fatalf("product %q has no versions", key)
-		}
-		if len(byKey[key].Plans) == 0 {
-			t.Fatalf("product %q has no plans", key)
+	for _, gone := range []string{"hosting_checkout_create", "hosting_paid_invoice_provision", "hosting_subscription_sync", "hosting_addon_enable", "hosting_metered_invoice_create"} {
+		if handlers[gone] {
+			t.Fatalf("%s should be removed in 2.0", gone)
 		}
 	}
 }
 
-func TestFreePlanLimit(t *testing.T) {
-	ctx, db := newTestCtx(t, &platformStub{})
-	defer db.Close()
-
-	c, err := dbCustomerUpsert(db, map[string]any{"email": "owner@example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := enforceTenantLimit(db, c.ID, "free"); err != nil {
-		t.Fatalf("first tenant should be allowed: %v", err)
-	}
-	if err := dbTenantInsert(db, &Tenant{
-		ID:              "htn_1",
-		CustomerID:      c.ID,
-		Slug:            "one",
-		DefaultHostname: "one.hosted.example.com",
-		OwnerEmail:      "owner@example.com",
-		PlanKey:         "free",
-		Status:          StatusActive,
-		Image:           "apteva:test",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := enforceTenantLimit(ctx.AppDB(), c.ID, "free"); err == nil {
-		t.Fatal("second free tenant should be refused")
-	}
-}
-
-func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "acme",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	if tenant.Status != StatusActive {
-		t.Fatalf("status = %s, want active", tenant.Status)
-	}
-	if tenant.WorkloadID != "wrk_test" {
-		t.Fatalf("workload_id = %s", tenant.WorkloadID)
-	}
-	if tenant.DefaultHostname != "acme.hosted.example.com" {
-		t.Fatalf("hostname = %s", tenant.DefaultHostname)
-	}
-	if len(pf.callAppCalls) == 0 || pf.callAppCalls[0].Tool != "containers_run" {
-		t.Fatalf("expected containers_run call, got %+v", pf.callAppCalls)
-	}
-	if got := pf.callAppCalls[0].Input["blueprint_slug"]; got != "apteva" {
-		t.Fatalf("blueprint_slug=%v, want apteva", got)
-	}
-	if len(pf.ingressCalls) != 1 {
-		t.Fatalf("expected one ingress call, got %d", len(pf.ingressCalls))
-	}
-	if pf.ingressCalls[0].Target != "http://127.0.0.1:53123" {
-		t.Fatalf("ingress target = %s", pf.ingressCalls[0].Target)
-	}
-	usage, err := dbUsageTotals(db, map[string]any{"tenant_id": tenant.ID, "feature_key": "hosting.tenants"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(usage) != 1 || usage[0].Quantity != 1 {
-		t.Fatalf("usage = %+v", usage)
-	}
-}
-
-func TestTenantCreateProvisionsOptionalAuthIdentity(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email":   "owner@example.com",
-		"customer_name": "Owner Person",
-		"slug":          "authdemo",
-		"plan_key":      "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	meta := mapFromAny(tenant.Metadata)
-	if meta["auth_enabled"] != true {
-		t.Fatalf("tenant metadata missing auth_enabled: %s", tenant.Metadata)
-	}
-	if strArg(meta, "auth_org_slug") == "" || int64Arg(meta, "auth_org_id") != 901 || int64Arg(meta, "auth_user_id") != 902 {
-		t.Fatalf("tenant metadata missing auth refs: %+v", meta)
-	}
-	if strArg(meta, "auth_client_id") != "akc_hosting_test" {
-		t.Fatalf("tenant metadata missing auth client: %+v", meta)
-	}
-	for _, want := range []string{"auth_orgs_create", "auth_users_create", "auth_clients_create"} {
-		if !containsToolCall(pf.callAppCalls, "auth", want) {
-			t.Fatalf("missing %s call in %+v", want, pf.callAppCalls)
+func TestMigrationKeepsLegacyTenants(t *testing.T) {
+	db := openTestDB(t)
+	applyMigrations(t, db, "003_addons_metering.sql")
+	mustExec := func(q string, args ...any) {
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
 		}
 	}
+	mustExec(`INSERT INTO hosting_products (key, name) VALUES ('apteva', 'Apteva')`)
+	mustExec(`INSERT INTO hosting_plans (key, name, image, cpu, memory_mb, storage_mb) VALUES ('starter', 'Starter', 'img', 1, 1024, 2048)`)
+	mustExec(`INSERT INTO hosting_plan_bindings (plan_key, product_key) VALUES ('starter', 'apteva')`)
+	mustExec(`INSERT INTO hosting_customers (id, email) VALUES (1, 'a@example.com')`)
+	mustExec(`INSERT INTO hosting_tenants (id, customer_id, workload_id, slug, default_hostname, owner_email, plan_key, status) VALUES ('htn_live', 1, 'wl1', 'live', 'live.example.com', 'a@example.com', 'starter', 'active')`)
+	mustExec(`INSERT INTO hosting_tenants (id, customer_id, workload_id, slug, default_hostname, owner_email, plan_key, status) VALUES ('htn_old', 1, 'wl2', 'old', 'old.example.com', 'a@example.com', 'starter', 'deleted')`)
+	mustExec(`INSERT INTO hosting_tenant_addons (tenant_id, customer_id, addon_key, feature_key) VALUES ('htn_live', 1, 'llm', 'llm.tokens')`)
+	applyMigrations(t, db, "")
+
+	live, err := dbTenantGet(db, "htn_live")
+	if err != nil || live == nil {
+		t.Fatalf("legacy tenant lost: %v", err)
+	}
+	if live.ProfileKey != "starter" || live.Backend != BackendContainer || live.Status != TenantActive || live.DefaultHostname != "live.example.com" {
+		t.Fatalf("legacy tenant = %+v", live)
+	}
+	old, _ := dbTenantGet(db, "htn_old")
+	if old.Status != TenantReleased || old.ReleasedAt == "" {
+		t.Fatalf("deleted tenant should map to released, got %s", old.Status)
+	}
+	p, _ := dbProfileGet(db, "starter")
+	if p == nil || p.Backend != BackendContainer || p.ProductKey != "apteva" || p.StorageMB != 2048 {
+		t.Fatalf("plan not migrated to profile: %+v", p)
+	}
+	var fkProblems int
+	rows, _ := db.Query(`PRAGMA foreign_key_check`)
+	for rows.Next() {
+		fkProblems++
+	}
+	rows.Close()
+	if fkProblems != 0 {
+		t.Fatalf("foreign key check reported %d problems", fkProblems)
+	}
 }
 
-func TestTenantCreateDoesNotRequireAuthApp(t *testing.T) {
-	pf := &platformStub{authMissing: true}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "noauth",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant with missing auth should still succeed: %v", err)
-	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	if tenant.Status != StatusActive {
-		t.Fatalf("status = %s, want active", tenant.Status)
-	}
-	meta := mapFromAny(tenant.Metadata)
-	if _, ok := meta["auth_error"]; ok {
-		t.Fatalf("missing optional auth should not store tenant auth_error: %+v", meta)
-	}
-	if !containsToolCall(pf.callAppCalls, "containers", "containers_run") {
-		t.Fatalf("expected container provisioning, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestAddonEnableConfiguresGenericEntitlementsAndLLM(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email":     "owner@example.com",
-		"slug":            "addon",
-		"plan_key":        "free",
-		"subscription_id": int64(123),
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-
-	out, err := app.toolAddonEnable(ctx, map[string]any{
-		"tenant_id":         tenant.ID,
-		"addon_key":         "managed-llm",
-		"feature_key":       "llm.tokens",
-		"included_quantity": int64(1000),
-		"unit_amount_cents": int64(200),
-		"unit_size":         int64(1000),
-		"currency":          "usd",
-	})
-	if err != nil {
-		t.Fatalf("enable addon: %v", err)
-	}
-	addon := out.(map[string]any)["addon"].(*TenantAddon)
-	if addon.ExternalApp != "llm" || addon.ExternalSubjectType != "hosting_tenant" || addon.ExternalSubjectID != tenant.ID {
-		t.Fatalf("unexpected external binding: %+v", addon)
-	}
-	if addon.IncludedQuantity != 1000 || addon.UnitAmountCents != 200 || addon.UnitSize != 1000 {
-		t.Fatalf("unexpected addon pricing: %+v", addon)
-	}
-	for _, want := range []string{"llm_policy_set", "llm_tokens_create", "entitlement_grants_create", "entitlement_limits_set"} {
-		if !containsToolCallAny(pf.callAppCalls, want) {
-			t.Fatalf("expected %s call, got %+v", want, pf.callAppCalls)
+func TestScriptsAreEmbeddedAndParse(t *testing.T) {
+	for _, platform := range []string{"macos", "linux"} {
+		b, err := accessScript(platform)
+		if err != nil || len(b) == 0 {
+			t.Fatalf("%s access script: %v", platform, err)
 		}
 	}
-}
-
-func TestCheckoutTrialCanProvisionLLMAddon(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolCheckoutCreate(ctx, map[string]any{
-		"catalog_price_id": int64(100),
-		"owner_email":      "trial-addon@example.com",
-		"customer_name":    "Trial Addon Buyer",
-		"slug":             "trial-addon",
-		"addons": []any{map[string]any{
-			"addon_key":         "managed-llm",
-			"feature_key":       "llm.tokens",
-			"included_quantity": int64(5000),
-			"unit_amount_cents": int64(150),
-			"unit_size":         int64(1000),
-			"currency":          "USD",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("checkout create: %v", err)
-	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	addons, err := dbAddonList(db, map[string]any{"tenant_id": tenant.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(addons) != 1 || addons[0].AddonKey != "managed-llm" || addons[0].IncludedQuantity != 5000 {
-		t.Fatalf("unexpected addons: %+v", addons)
-	}
-	if !containsToolCall(pf.callAppCalls, "llm", "llm_tokens_create") {
-		t.Fatalf("expected llm token create, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestLLMUsageEventRecordsIdempotentHostingAndEntitlementsUsage(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "llmusage",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-	ev := sdk.Event{Event: "llm.usage.recorded", Data: map[string]any{
-		"subject_type":    "hosting_tenant",
-		"subject_id":      tenant.ID,
-		"total_tokens":    123,
-		"request_id":      "req_123",
-		"provider":        "openai",
-		"model":           "openai/gpt-test",
-		"request_tokens":  100,
-		"response_tokens": 23,
-	}}
-	if err := app.handleLLMUsageRecorded(ctx, ev); err != nil {
-		t.Fatalf("usage event: %v", err)
-	}
-	if err := app.handleLLMUsageRecorded(ctx, ev); err != nil {
-		t.Fatalf("usage event replay: %v", err)
-	}
-	usage, err := dbUsageTotals(db, map[string]any{"tenant_id": tenant.ID, "feature_key": "llm.tokens"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(usage) != 1 || usage[0].Quantity != 123 {
-		t.Fatalf("usage = %+v, want one idempotent 123-token row", usage)
-	}
-	if !containsToolCall(pf.callAppCalls, "entitlements", "usage_record") {
-		t.Fatalf("expected entitlements usage_record call, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestMeteredInvoiceCreatesBillingLineForOverage(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "metered",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-	if _, err := db.Exec(`UPDATE hosting_customers SET billing_customer_id=77 WHERE id=?`, tenant.CustomerID); err != nil {
-		t.Fatal(err)
-	}
-	addon, err := dbAddonUpsert(db, &TenantAddon{
-		TenantID:            tenant.ID,
-		CustomerID:          tenant.CustomerID,
-		AddonKey:            "managed-llm",
-		Status:              AddonStatusActive,
-		FeatureKey:          "llm.tokens",
-		IncludedQuantity:    100,
-		ResetInterval:       "month",
-		UnitAmountCents:     200,
-		UnitSize:            1000,
-		Currency:            "USD",
-		ExternalApp:         "llm",
-		ExternalSubjectType: "hosting_tenant",
-		ExternalSubjectID:   tenant.ID,
-		Metadata:            json.RawMessage(`{}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := recordUsage(db, tenant.ID, tenant.CustomerID, "llm.tokens", 2500, "metered-test", nil); err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	end := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-	out, err := app.toolMeteredInvoiceCreate(ctx, map[string]any{
-		"addon_id":     addon.ID,
-		"period_start": start,
-		"period_end":   end,
-	})
-	if err != nil {
-		t.Fatalf("metered invoice: %v", err)
-	}
-	period := out.(map[string]any)["metering_period"].(*MeteringPeriod)
-	if period.TotalQuantity != 2500 || period.BillableQuantity != 2400 || period.InvoiceID == nil || *period.InvoiceID != 77 {
-		t.Fatalf("period = %+v", period)
-	}
-	var invoiceCall *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "invoices_create" {
-			invoiceCall = &pf.callAppCalls[i]
+	hashes := shippedResetHashes()
+	for _, name := range []string{"wipe", "reinstall", "verify-clean"} {
+		if len(hashes[name]) != 64 {
+			t.Fatalf("missing hash for %s", name)
 		}
 	}
-	if invoiceCall == nil {
-		t.Fatalf("expected invoices_create call, got %+v", pf.callAppCalls)
+	files, _ := filepath.Glob("scripts/*/*.sh")
+	for _, f := range files {
+		if out, err := exec.Command("/bin/sh", "-n", f).CombinedOutput(); err != nil {
+			t.Fatalf("%s does not parse: %v %s", f, err, out)
+		}
+		raw, _ := os.ReadFile(f)
+		if strings.Contains(strings.ToLower(string(raw)), "my-cloud-mac") || strings.Contains(string(raw), "mcm_") {
+			t.Fatalf("%s still uses My Cloud Mac names", f)
+		}
 	}
-	if invoiceCall.Input["customer_id"] != int64(77) {
-		t.Fatalf("billing customer = %#v", invoiceCall.Input["customer_id"])
+	if id := newOperationID(); !regexp.MustCompile(`^[a-f0-9-]{36}$`).MatchString(id) {
+		t.Fatalf("operation id %q does not satisfy the reset scripts", id)
+	}
+	if u := customerUser("x"); !regexp.MustCompile(`^hst_[a-f0-9]{20}$`).MatchString(u) {
+		t.Fatalf("customer user %q does not satisfy the access script", u)
 	}
 }
 
-func TestUsageSyncRecordsGaugeAndSuspendsOverLimitTenant(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
+// ─── Container backend ───────────────────────────────────────────────────
 
-	app := &App{}
-	got, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "overlimit",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
+func TestContainerTenantLifecycleIsIdempotent(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	args := map[string]any{"external_ref": "acct-1", "profile": "wordpress-starter", "owner_email": "Owner@Example.com", "slug": "blog"}
+	out := call(t, a.toolTenantCreate, ctx, args)
+	tn := mapFromAny(out["tenant"])
+	id := strArg(tn, "id")
+	if strArg(tn, "status") != TenantActive || strArg(tn, "default_hostname") != "blog.hosted.example.com" || strArg(tn, "owner_email") != "owner@example.com" {
+		t.Fatalf("tenant = %v", tn)
 	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	pf.callAppCalls = nil
+	if len(stub.ingress) != 1 || stub.ingress[0].Target != "http://127.0.0.1:18080" {
+		t.Fatalf("ingress = %+v", stub.ingress)
+	}
+	if run := stub.lastCall("containers_run"); strFromAny(run["image"]) != "wordpress:php8.3-apache" {
+		t.Fatalf("containers_run image = %v", run["image"])
+	}
 
-	out, err := app.toolUsageSync(ctx, map[string]any{"tenant_id": tenant.ID})
-	if err != nil {
-		t.Fatalf("usage sync: %v", err)
+	again := call(t, a.toolTenantCreate, ctx, args)
+	if strArg(mapFromAny(again["tenant"]), "id") != id || stub.called("containers_run") != 1 {
+		t.Fatal("repeat create must return the same tenant without a second container")
 	}
-	if out.(map[string]any)["count"] != 1 {
-		t.Fatalf("sync response=%+v", out)
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-1", "profile": "starter", "owner_email": "o@example.com"}, "already has tenant")
+
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"external_ref": "acct-1"})
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"external_ref": "acct-1"})
+	if tenant(t, db, id).Status != TenantSuspended || stub.called("containers_stop") != 1 {
+		t.Fatalf("suspend not idempotent: stops=%d", stub.called("containers_stop"))
 	}
-	usage, err := dbUsageTotals(db, map[string]any{"tenant_id": tenant.ID, "feature_key": "containers.storage.bytes"})
+	call(t, a.toolTenantResume, ctx, map[string]any{"external_ref": "acct-1"})
+	if tenant(t, db, id).Status != TenantActive || stub.called("containers_start") != 1 {
+		t.Fatal("resume did not start the container")
+	}
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1"})
+	rel := call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1"})
+	if rel["already_released"] != true || stub.called("containers_destroy") != 1 || len(stub.unexposed) != 1 {
+		t.Fatalf("release not idempotent: %v destroys=%d", rel, stub.called("containers_destroy"))
+	}
+	released := tenant(t, db, id)
+	if released.Status != TenantReleased || released.DefaultHostname != "" {
+		t.Fatalf("released tenant = %+v", released)
+	}
+	// The same account can come back, and reuse the slug.
+	back := call(t, a.toolTenantCreate, ctx, args)
+	if strArg(mapFromAny(back["tenant"]), "id") == id {
+		t.Fatal("a released tenant must not be reused")
+	}
+}
+
+func TestContainerProfileRejectsMachineProduct(t *testing.T) {
+	a, ctx, _ := newTestCtx(t, newStub())
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "bad", "backend": "container", "product_key": "ssh-access"}, "needs a machine backend")
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "bad", "backend": "machine_pool", "product_key": "ssh-access"}, "pool_key")
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "bad", "backend": "machine_on_demand", "product_key": "ssh-access", "settings": map[string]any{"provider": "hetzner"}}, "server_type")
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "x", "profile": "nope", "owner_email": "o@example.com"}, "not found")
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"profile": "starter", "owner_email": "o@example.com"}, "external_ref required")
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "x", "profile": "starter", "owner_email": "o@example.com", "ssh_keys": []any{"not a key"}}, "not an SSH public key")
+}
+
+// ─── Pool backend ────────────────────────────────────────────────────────
+
+func TestPoolMachineFullCycle(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	mid := ids[0]
+
+	av := call(t, a.toolAvailability, ctx, map[string]any{"profile": "mac-m4"})
+	if mapFromAny(av["availability"])["for_sale"] != true {
+		t.Fatalf("availability = %v", av)
+	}
+	res := call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-9"})
+	rid := strArg(mapFromAny(res["reservation"]), "id")
+	if again := call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-9"}); strArg(mapFromAny(again["reservation"]), "id") != rid {
+		t.Fatal("repeat reservation must return the same hold")
+	}
+	if machine(t, db, mid).State != MachineReserved {
+		t.Fatal("machine should be reserved")
+	}
+	callErr(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-other"}, "no machine available")
+
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-9", "profile": "mac-m4", "owner_email": "c@example.com", "reservation_id": rid, "ssh_keys": []any{testKey}})
+	tn := tenant(t, db, strArg(mapFromAny(out["tenant"]), "id"))
+	if tn.Status != TenantActive || tn.MachineID != mid {
+		t.Fatalf("tenant = %+v", tn)
+	}
+	if tn.Access == nil || !tn.Access.Granted || tn.Access.Command != fmt.Sprintf("ssh %s@10.0.0.100 -p 22", tn.SSHUser) {
+		t.Fatalf("access = %+v", tn.Access)
+	}
+	if m := machine(t, db, mid); m.State != MachineAssigned || m.TenantID != tn.ID {
+		t.Fatalf("machine = %s tenant=%s", m.State, m.TenantID)
+	}
+	if r, _ := dbReservationGet(db, rid); r.Status != "confirmed" || r.TenantID != tn.ID {
+		t.Fatalf("reservation = %+v", r)
+	}
+	// Every command goes through the hash check as root.
+	for _, c := range stub.commands {
+		if !strings.Contains(c, "sudo -n /bin/sh -c") {
+			t.Fatalf("command not run as root: %s", c)
+		}
+	}
+
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"external_ref": "acct-9"})
+	if tenant(t, db, tn.ID).Status != TenantSuspended || machine(t, db, mid).State != MachineSuspended {
+		t.Fatal("suspend did not revoke access")
+	}
+	if tenant(t, db, tn.ID).Access.Granted {
+		t.Fatal("suspended tenant must not report access")
+	}
+	call(t, a.toolTenantResume, ctx, map[string]any{"external_ref": "acct-9"})
+	if tenant(t, db, tn.ID).Status != TenantActive || machine(t, db, mid).State != MachineAssigned {
+		t.Fatal("resume did not restore access")
+	}
+
+	before := len(stub.commands)
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-9"})
+	if got := tenant(t, db, tn.ID); got.Status != TenantReleased {
+		t.Fatalf("tenant after release = %s", got.Status)
+	}
+	m := machine(t, db, mid)
+	if m.State != MachineAvailable || m.TenantID != "" {
+		t.Fatalf("machine after release = %s tenant=%q reason=%q", m.State, m.TenantID, m.StateReason)
+	}
+	joined := strings.Join(stub.commands[before:], "\n")
+	for _, want := range []string{"'revoke'", "'verify_revoked'", "/usr/local/libexec/apteva-hosting/wipe", "/usr/local/libexec/apteva-hosting/verify-clean", "'prepare'", "'check_clean'"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("release did not run %s", want)
+		}
+	}
+	// The account is free to buy again.
+	if again := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-9", "profile": "mac-m4", "owner_email": "c@example.com"}); strArg(mapFromAny(again["tenant"]), "id") == tn.ID {
+		t.Fatal("released tenant reused")
+	}
+}
+
+func TestPoolTenantWaitsForMachine(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-w", "profile": "mac-m4", "owner_email": "w@example.com", "ssh_keys": testKey})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	if tenant(t, db, id).Status != TenantWaitingForMachine {
+		t.Fatalf("status = %s", tenant(t, db, id).Status)
+	}
+	av := call(t, a.toolAvailability, ctx, map[string]any{"profile": "mac-m4"})
+	if mapFromAny(av["availability"])["for_sale"] != false {
+		t.Fatal("empty pool must not be for sale")
+	}
+	// A machine arrives: the waiting tenant gets it once inspect passes.
+	stub.addInstance(300, "macos", "ready")
+	m := call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 300, "serial": "S300", "management_user": "admin"})
+	mid := int64Arg(mapFromAny(m["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": fmt.Sprint(mid)})
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	got := tenant(t, db, id)
+	if got.Status != TenantActive || got.MachineID != mid {
+		t.Fatalf("waiting tenant not assigned: %+v", got)
+	}
+}
+
+func TestUnvalidatedMachineIsNeverSold(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addInstance(301, "macos", "ready")
+	m := call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 301, "serial": "S", "management_user": "admin"})
+	mid := int64Arg(mapFromAny(m["machine"]), "id")
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	got := machine(t, db, mid)
+	if got.State != MachineQuarantined || !strings.Contains(got.StateReason, "validated") {
+		t.Fatalf("unvalidated machine = %s (%s)", got.State, got.StateReason)
+	}
+	if len(got.ScriptHashes) != 3 {
+		t.Fatalf("inspect should pin reset script hashes, got %v", got.ScriptHashes)
+	}
+	callErr(t, a.toolMachineClean, ctx, map[string]any{"machine_id": mid, "confirm": fmt.Sprint(mid)}, "not validated")
+	callErr(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": "nope"}, "confirm must be")
+	callErr(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 301}, "already a machine")
+}
+
+func TestExecutionSwitchHoldsRunsWithoutQuarantine(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-x", "profile": "mac-m4", "owner_email": "x@example.com", "ssh_keys": testKey})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	call(t, a.toolPoolSetExecution, ctx, map[string]any{"key": "macs", "enabled": false})
+	before := len(stub.commands)
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": id})
+	if len(stub.commands) != before {
+		t.Fatal("a command ran while execution was off")
+	}
+	op, _ := activeOperationFor(db, id, 0)
+	if op == nil || op.Status != OpWaiting {
+		t.Fatalf("run should wait, got %+v", op)
+	}
+	if machine(t, db, ids[0]).State == MachineQuarantined {
+		t.Fatal("switching execution off must not quarantine")
+	}
+	call(t, a.toolPoolSetExecution, ctx, map[string]any{"key": "macs", "enabled": true})
+	advanceClock(t, time.Minute)
+	if err := a.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if tenant(t, db, id).Status != TenantSuspended {
+		t.Fatalf("suspend did not finish after execution came back: %s", tenant(t, db, id).Status)
+	}
+}
+
+func TestFailedStepQuarantinesAndNeedsReviewedRetry(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	stub.failStep = "grant"
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-f", "profile": "mac-m4", "owner_email": "f@example.com", "ssh_keys": testKey})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	if tenant(t, db, id).Status != TenantFailed {
+		t.Fatalf("tenant = %s", tenant(t, db, id).Status)
+	}
+	m := machine(t, db, ids[0])
+	if m.State != MachineQuarantined || !strings.Contains(m.StateReason, "grant") {
+		t.Fatalf("machine = %s (%s)", m.State, m.StateReason)
+	}
+	ops, _ := dbOperationList(db, map[string]any{"tenant_id": id})
+	opID := ops[0].ID
+	callErr(t, a.toolOperationRetry, ctx, map[string]any{"operation_id": opID, "reviewed": false}, "reviewed=true")
+	stub.failStep = ""
+	call(t, a.toolOperationRetry, ctx, map[string]any{"operation_id": opID, "reviewed": true, "actor": "ops@example.com"})
+	if tenant(t, db, id).Status != TenantActive || machine(t, db, ids[0]).State != MachineAssigned {
+		t.Fatalf("retry did not finish: tenant=%s machine=%s", tenant(t, db, id).Status, machine(t, db, ids[0]).State)
+	}
+	op, _ := dbOperationGet(db, opID)
+	if op.Attempts != 1 || op.Status != OpSucceeded {
+		t.Fatalf("op = %+v", op)
+	}
+}
+
+func TestVerifyCleanIsPolledUntilItPasses(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-p", "profile": "mac-m4", "owner_email": "p@example.com"})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	stub.pendingClean = 2
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	if tenant(t, db, id).Status != TenantReleasing || machine(t, db, ids[0]).State != MachineCleaning {
+		t.Fatal("release should wait for verify-clean")
+	}
+	for i := 0; i < 3; i++ {
+		advanceClock(t, time.Minute)
+		_ = a.tick(ctx)
+	}
+	if tenant(t, db, id).Status != TenantReleased || machine(t, db, ids[0]).State != MachineAvailable {
+		t.Fatalf("release did not finish: %s / %s", tenant(t, db, id).Status, machine(t, db, ids[0]).State)
+	}
+	// Wipe ran once; only verification was repeated.
+	wipes := 0
+	for _, c := range stub.commands {
+		if strings.Contains(c, "-wipe '") { // the pinned copy run with its arguments
+			wipes++
+		}
+	}
+	if wipes != 1 {
+		t.Fatalf("wipe ran %d times", wipes)
+	}
+}
+
+func TestVerifyCleanTimeoutQuarantines(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-t", "profile": "mac-m4", "owner_email": "t@example.com"})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	stub.pendingClean = 1000
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	advanceClock(t, 61*time.Minute)
+	_ = a.tick(ctx)
+	if m := machine(t, db, ids[0]); m.State != MachineQuarantined || !strings.Contains(m.StateReason, "verify_clean") {
+		t.Fatalf("machine = %s (%s)", m.State, m.StateReason)
+	}
+	if tenant(t, db, id).Status != TenantReleasing {
+		t.Fatal("tenant should stay releasing until an operator resolves the machine")
+	}
+}
+
+func TestReservationExpiresBackToSale(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	res := call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-r"})
+	rid := strArg(mapFromAny(res["reservation"]), "id")
+	advanceClock(t, 31*time.Minute)
+	_ = a.tick(ctx)
+	if r, _ := dbReservationGet(db, rid); r.Status != "expired" {
+		t.Fatalf("reservation = %s", r.Status)
+	}
+	if machine(t, db, ids[0]).State != MachineAvailable {
+		t.Fatal("expired hold must return the machine")
+	}
+	// A late payment with the expired hold still gets the machine if free.
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-r", "profile": "mac-m4", "owner_email": "r@example.com", "reservation_id": rid})
+	if tenant(t, db, strArg(mapFromAny(out["tenant"]), "id")).MachineID != ids[0] {
+		t.Fatal("late tenant should take the free machine")
+	}
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-z", "profile": "mac-m4", "owner_email": "z@example.com", "reservation_id": rid}, "another profile or external_ref")
+}
+
+func TestQuarantineFencesRunsAndMaintenanceToggle(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	mid := ids[0]
+	call(t, a.toolMachineSetMaintenance, ctx, map[string]any{"machine_id": mid, "maintenance": true})
+	if machine(t, db, mid).State != MachineMaintenance {
+		t.Fatal("maintenance on")
+	}
+	call(t, a.toolMachineSetMaintenance, ctx, map[string]any{"machine_id": mid, "maintenance": false})
+	if machine(t, db, mid).State != MachineAvailable {
+		t.Fatal("maintenance off should return to available without inspect")
+	}
+	// A run held by the execution switch is stopped by quarantine.
+	call(t, a.toolPoolSetExecution, ctx, map[string]any{"key": "macs", "enabled": false})
+	_, err := enqueueOperation(db, OpInspect, "", mid, 0, []string{"preflight"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(usage) != 1 || usage[0].Quantity != int64(700*1024*1024) {
-		t.Fatalf("storage usage=%+v", usage)
+	call(t, a.toolMachineQuarantine, ctx, map[string]any{"machine_id": mid, "reason": "disk noise"})
+	if op, _ := activeOperationFor(db, "", mid); op != nil {
+		t.Fatalf("quarantine left run %s %s", op.ID, op.Status)
 	}
-	updated, err := dbTenantGet(db, tenant.ID)
-	if err != nil {
-		t.Fatal(err)
+	if m := machine(t, db, mid); m.State != MachineQuarantined || m.StateReason != "disk noise" {
+		t.Fatalf("machine = %s (%s)", m.State, m.StateReason)
 	}
-	if updated.Status != StatusSuspended || !strings.Contains(updated.LastError, "usage over limit") {
-		t.Fatalf("tenant not suspended for usage: %+v", updated)
-	}
-	for _, want := range []string{"containers_usage_get", "containers_stop", "entitlement_limits_set", "usage_record"} {
-		if !containsToolCallAny(pf.callAppCalls, want) {
-			t.Fatalf("expected %s in calls: %+v", want, pf.callAppCalls)
-		}
+	callErr(t, a.toolMachineRemove, ctx, map[string]any{"machine_id": mid, "confirm": "1x"}, "confirm must be")
+	call(t, a.toolMachineRemove, ctx, map[string]any{"machine_id": mid, "confirm": fmt.Sprint(mid)})
+	if m, _ := dbMachineGet(db, mid); m != nil {
+		t.Fatal("machine not removed")
 	}
 }
 
-func TestFulfillmentProvisionReportsTenantToOrders(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolFulfillmentProvision(ctx, map[string]any{
-		"order_id":       int64(10),
-		"fulfillment_id": int64(20),
-		"owner_email":    "owner@example.com",
-		"slug":           "paid-wp",
-		"plan_key":       "wordpress-free",
-		"product_key":    "wordpress-single",
-	})
-	if err != nil {
-		t.Fatalf("fulfillment provision: %v", err)
+func TestRunsForOneTenantKeepRequestOrder(t *testing.T) {
+	stub := newStub()
+	_, ctx, db := newTestCtx(t, stub)
+	first, _ := enqueueOperation(db, OpSuspend, "htn_x", 0, 0, []string{"preflight"}, "t")
+	second, _ := enqueueOperation(db, OpResume, "htn_x", 0, 0, []string{"preflight"}, "t")
+	if op, _, err := claimOperation(ctx.AppDB(), second.ID); err != nil || op != nil {
+		t.Fatalf("second run claimed before the first: %v %v", op, err)
 	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	if tenant.Status != StatusActive {
-		t.Fatalf("status=%s, want active", tenant.Status)
-	}
-	if !strings.Contains(string(tenant.Metadata), `"order_id":10`) || !strings.Contains(string(tenant.Metadata), `"fulfillment_id":20`) {
-		t.Fatalf("metadata missing order trace: %s", tenant.Metadata)
-	}
-	var ordersCall *callAppCall
-	for i := range pf.callAppCalls {
-		c := &pf.callAppCalls[i]
-		if c.App == "orders" && c.Tool == "fulfillments_update" {
-			ordersCall = c
-			break
-		}
-	}
-	if ordersCall == nil {
-		t.Fatalf("expected orders fulfillments_update call, got %+v", pf.callAppCalls)
-	}
-	if ordersCall.Input["id"] != int64(20) || ordersCall.Input["status"] != "succeeded" || ordersCall.Input["external_ref"] != tenant.ID {
-		t.Fatalf("unexpected orders update input: %+v", ordersCall.Input)
+	if op, _, err := claimOperation(ctx.AppDB(), first.ID); err != nil || op == nil {
+		t.Fatalf("first run not claimable: %v", err)
 	}
 }
 
-func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
+func TestLinuxPoolReleaseWaitsForManualClean(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	call(t, a.toolPoolUpsert, ctx, map[string]any{"key": "boxes", "platform": "linux"})
+	call(t, a.toolPoolSetExecution, ctx, map[string]any{"key": "boxes", "enabled": true})
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "box", "backend": "machine_pool", "product_key": "ssh-access", "pool_key": "boxes"})
+	stub.addInstance(400, "linux", "ready")
+	m := call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "boxes", "instance_id": 400})
+	mid := int64Arg(mapFromAny(m["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": fmt.Sprint(mid)})
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-l", "profile": "box", "owner_email": "l@example.com", "ssh_keys": testKey})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	if tenant(t, db, id).Status != TenantReleased {
+		t.Fatal("tenant should be released")
+	}
+	if got := machine(t, db, mid); got.State != MachineQuarantined || !strings.Contains(got.StateReason, "no automatic reset") {
+		t.Fatalf("linux machine after release = %s (%s)", got.State, got.StateReason)
+	}
+	callErr(t, a.toolMachineClean, ctx, map[string]any{"machine_id": mid, "confirm": fmt.Sprint(mid)}, "only available for macOS")
+	callErr(t, a.toolTenantReinstall, ctx, map[string]any{"external_ref": "acct-l"}, "no live tenant")
+}
 
-	app := &App{}
-	got, err := app.toolPaidInvoiceProvision(ctx, map[string]any{"invoice_id": int64(77)})
-	if err != nil {
-		t.Fatalf("paid invoice provision: %v", err)
+// ─── On-demand backend ───────────────────────────────────────────────────
+
+func TestOnDemandMachineCreateAndDelayedDestroy(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-ondemand", "backend": "machine_on_demand", "product_key": "ssh-access",
+		"settings": map[string]any{"provider": "scaleway", "server_type": "apple-silicon/M4-S", "region": "fr-par-3", "platform": "macos"}})
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-o", "profile": "mac-ondemand", "owner_email": "o@example.com", "ssh_keys": []any{testKey}})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	tn := tenant(t, db, id)
+	if tn.Status != TenantProvisioning || tn.InstanceID == 0 {
+		t.Fatalf("tenant after create = %+v", tn)
 	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	if tenant.Slug != "paid-wp-sale" {
-		t.Fatalf("tenant slug=%q, want paid-wp-sale", tenant.Slug)
+	create := stub.lastCall("instance_create")
+	if create["provider"] != "scaleway" || create["size"] != "apple-silicon/M4-S" || create["region"] != "fr-par-3" {
+		t.Fatalf("instance_create input = %v", create)
 	}
-	if tenant.PlanKey != "wordpress-starter" || tenant.Image != "wordpress:php8.3-apache" {
-		t.Fatalf("unexpected tenant plan/image: %+v", tenant)
+	// Instance becomes ready; the worker finishes provisioning.
+	stub.instances[tn.InstanceID].Status = "ready"
+	stub.instances[tn.InstanceID].DeletableAt = sqlTime(now().Add(24 * time.Hour))
+	advanceClock(t, time.Minute)
+	_ = a.tick(ctx)
+	tn = tenant(t, db, id)
+	if tn.Status != TenantActive || tn.Access == nil || tn.Access.Host != "203.0.113.9" {
+		t.Fatalf("tenant after ready = %s access=%+v", tn.Status, tn.Access)
 	}
-	if tenant.SubscriptionID == nil || *tenant.SubscriptionID != 66 {
-		t.Fatalf("tenant subscription_id=%v, want 66", tenant.SubscriptionID)
+	// Release inside the 24-hour minimum: access goes now, destroy waits.
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-o"})
+	if len(stub.destroyCalled) != 0 || tenant(t, db, id).Status != TenantReleasing {
+		t.Fatal("destroy must wait for deletable_at")
 	}
-	wantCalls := []string{"billing:invoices_get", "orders:orders_create_from_invoice", "containers:containers_run", "orders:fulfillments_update", "subscriptions:subscriptions_update_status"}
-	var gotCalls []string
-	for _, c := range pf.callAppCalls {
-		gotCalls = append(gotCalls, c.App+":"+c.Tool)
+	if strArg(mapFromAny(tenant(t, db, id).Metadata), "destroy_scheduled_at") == "" {
+		t.Fatal("scheduled destroy time not recorded")
 	}
-	for _, want := range wantCalls {
-		found := false
-		for _, got := range gotCalls {
-			if got == want {
-				found = true
-				break
+	advanceClock(t, 25*time.Hour)
+	_ = a.tick(ctx)
+	if len(stub.destroyCalled) != 1 || tenant(t, db, id).Status != TenantReleased {
+		t.Fatalf("destroy after deletable_at: calls=%v status=%s", stub.destroyCalled, tenant(t, db, id).Status)
+	}
+}
+
+func TestOnDemandCreateAdoptsInstanceAfterLostLease(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "vps", "backend": "machine_on_demand", "product_key": "ssh-access", "settings": map[string]any{"provider": "hetzner", "server_type": "cx22"}})
+	stub.createErr = errors.New("provider timeout")
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-v", "profile": "vps", "owner_email": "v@example.com"})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	if tenant(t, db, id).Status != TenantFailed {
+		t.Fatal("create error should fail the tenant")
+	}
+	// The provider did create it after all: retry adopts instead of buying twice.
+	stub.createErr = nil
+	stub.instances[900] = &fakeInstance{instanceInfo{ID: 900, Name: "hosting-" + id, Status: "ready", Platform: "linux", PublicIPv4: "198.51.100.4"}}
+	ops, _ := dbOperationList(db, map[string]any{"tenant_id": id})
+	call(t, a.toolOperationRetry, ctx, map[string]any{"operation_id": ops[0].ID, "reviewed": true})
+	if stub.called("instance_create") != 1 {
+		t.Fatalf("instance_create called %d times", stub.called("instance_create"))
+	}
+	if tn := tenant(t, db, id); tn.InstanceID != 900 || tn.Status != TenantActive {
+		t.Fatalf("tenant = %+v", tn)
+	}
+}
+
+// ─── HTTP ────────────────────────────────────────────────────────────────
+
+func TestHTTPRoutesServePanelData(t *testing.T) {
+	stub := newStub()
+	a, ctx, _ := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 1)
+	call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-h", "profile": "starter", "owner_email": "h@example.com"})
+	for _, path := range []string{"/overview", "/profiles", "/products", "/pools", "/machines", "/tenants", "/operations"} {
+		var h http.HandlerFunc
+		for _, r := range a.routes() {
+			if r.Pattern == path {
+				h = r.Handler
 			}
 		}
-		if !found {
-			t.Fatalf("missing call %s in %+v", want, gotCalls)
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", path, rec.Code, rec.Body.String())
 		}
-	}
-	var orderCall *callAppCall
-	var containersCall *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "orders_create_from_invoice" {
-			orderCall = &pf.callAppCalls[i]
-		}
-		if pf.callAppCalls[i].Tool == "containers_run" {
-			containersCall = &pf.callAppCalls[i]
-		}
-	}
-	if orderCall == nil || orderCall.Input["fulfillment_app"] != "hosting" || orderCall.Input["fulfillment_type"] != "hosting_tenant_provision" {
-		t.Fatalf("unexpected orders_create_from_invoice input: %+v", orderCall)
-	}
-	if containersCall == nil || containersCall.Input["health_path"] != "/wp-admin/setup-config.php" {
-		t.Fatalf("unexpected containers_run health path: %+v", containersCall)
-	}
-	if !containsToolCall(pf.callAppCalls, "subscriptions", "subscriptions_update_status") {
-		t.Fatalf("expected subscription active update, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestInvoicePaidEventUsesPaidInvoiceProvisioning(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	err := app.handleInvoicePaidEvent(ctx, sdk.Event{
-		Event:     "invoice.paid",
-		ProjectID: "proj-test",
-		Data:      map[string]any{"id": int64(77)},
-	})
-	if err != nil {
-		t.Fatalf("handle invoice.paid: %v", err)
-	}
-	tenant, err := dbTenantGetBySlug(db, "paid-wp-sale")
-	if err != nil || tenant == nil {
-		t.Fatalf("expected tenant from invoice event, tenant=%+v err=%v", tenant, err)
-	}
-	if tenant.PlanKey != "wordpress-starter" {
-		t.Fatalf("tenant plan=%q, want wordpress-starter", tenant.PlanKey)
-	}
-}
-
-func TestSubscriptionEventSyncsTenantLifecycle(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email":     "owner@example.com",
-		"slug":            "subevent",
-		"plan_key":        "free",
-		"subscription_id": int64(123),
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-	if _, err := app.toolAddonEnable(ctx, map[string]any{
-		"tenant_id":         tenant.ID,
-		"addon_key":         "managed-llm",
-		"feature_key":       "llm.tokens",
-		"included_quantity": int64(1000),
-	}); err != nil {
-		t.Fatalf("enable addon: %v", err)
-	}
-	pf.callAppCalls = nil
-
-	err = app.handleSubscriptionEvent(ctx, sdk.Event{
-		Event:     "subscription.cancelled",
-		SourceApp: "subscriptions",
-		Data:      map[string]any{"id": int64(123)},
-	})
-	if err != nil {
-		t.Fatalf("handle subscription.cancelled: %v", err)
-	}
-	got, err := dbTenantGet(db, tenant.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != StatusSuspended {
-		t.Fatalf("tenant status=%q, want suspended", got.Status)
-	}
-	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
-		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
-	}
-	if !containsToolCall(pf.callAppCalls, "llm", "llm_subject_suspend") {
-		t.Fatalf("expected llm subject suspend call, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestSubscriptionPastDueSuspendsTenant(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email":     "owner@example.com",
-		"slug":            "pastdue",
-		"plan_key":        "free",
-		"subscription_id": int64(124),
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-	pf.callAppCalls = nil
-
-	err = app.handleSubscriptionEvent(ctx, sdk.Event{
-		Event:     "subscription.past_due",
-		SourceApp: "subscriptions",
-		Data:      map[string]any{"id": int64(124), "status": "past_due"},
-	})
-	if err != nil {
-		t.Fatalf("handle subscription.past_due: %v", err)
-	}
-	got, err := dbTenantGet(db, tenant.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != StatusSuspended {
-		t.Fatalf("tenant status=%q, want suspended", got.Status)
-	}
-	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
-		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestSubscriptionEndedPolicyDeletesTenant(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email":     "owner@example.com",
-		"slug":            "ended-delete",
-		"plan_key":        "free",
-		"subscription_id": int64(125),
-		"metadata": map[string]any{
-			"on_unpaid_grace_expired":  "delete",
-			"delete_volumes_on_expiry": true,
-		},
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-	pf.callAppCalls = nil
-
-	err = app.handleSubscriptionEvent(ctx, sdk.Event{
-		Event:     "subscription.ended",
-		SourceApp: "subscriptions",
-		Data: map[string]any{
-			"id":     int64(125),
-			"status": "ended",
-			"metadata": map[string]any{
-				"on_unpaid_grace_expired":  "delete",
-				"delete_volumes_on_expiry": true,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("handle subscription.ended: %v", err)
-	}
-	got, err := dbTenantGet(db, tenant.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != StatusDeleted {
-		t.Fatalf("tenant status=%q, want deleted", got.Status)
-	}
-	var destroy *callAppCall
-	for i := range pf.callAppCalls {
-		if pf.callAppCalls[i].Tool == "containers_destroy" {
-			destroy = &pf.callAppCalls[i]
-			break
-		}
-	}
-	if destroy == nil || destroy.Input["delete_volumes"] != true {
-		t.Fatalf("expected containers_destroy with delete_volumes=true, got %+v", pf.callAppCalls)
-	}
-}
-
-func TestTenantCreateCustomDockerProduct(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	got, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "docker",
-		"plan_key":    "docker-free",
-		"product_key": "custom-docker",
-		"runtime_config": map[string]any{
-			"image":       "nginx:alpine",
-			"port":        8080,
-			"health_path": "/healthz",
-			"env": map[string]any{
-				"FOO": "bar",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := got.(map[string]any)["tenant"].(*Tenant)
-	if tenant.Image != "nginx:alpine" {
-		t.Fatalf("tenant image=%q, want nginx:alpine", tenant.Image)
-	}
-	run := pf.callAppCalls[0].Input
-	if run["blueprint_slug"] != "custom-image" {
-		t.Fatalf("blueprint_slug=%v, want custom-image", run["blueprint_slug"])
-	}
-	if run["image"] != "nginx:alpine" {
-		t.Fatalf("image=%v, want nginx:alpine", run["image"])
-	}
-	ports := run["ports"].([]map[string]any)
-	if ports[0]["container_port"] != 8080 {
-		t.Fatalf("container_port=%v, want 8080", ports[0]["container_port"])
-	}
-	if run["health_path"] != "/healthz" {
-		t.Fatalf("health_path=%v, want /healthz", run["health_path"])
-	}
-	env := run["env"].(map[string]any)
-	if env["FOO"] != "bar" {
-		t.Fatalf("env=%+v, want FOO=bar", env)
-	}
-	if !strings.Contains(string(tenant.Metadata), `"product_key":"custom-docker"`) {
-		t.Fatalf("metadata=%s", tenant.Metadata)
-	}
-}
-
-func TestTenantCreateRejectsPlanProductMismatch(t *testing.T) {
-	ctx, db := newTestCtx(t, &platformStub{})
-	defer db.Close()
-
-	app := &App{}
-	_, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "mismatch",
-		"plan_key":    "free",
-		"product_key": "custom-docker",
-		"image":       "nginx:alpine",
-	})
-	if err == nil || !strings.Contains(err.Error(), "bound to product") {
-		t.Fatalf("expected product mismatch error, got %v", err)
-	}
-}
-
-func TestTenantLifecycleToolsCallContainers(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
-
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "lifecycle",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-
-	out, err := app.toolTenantSuspend(ctx, map[string]any{"tenant_id": tenant.ID})
-	if err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
-	if got := out.(map[string]any)["tenant"].(*Tenant).Status; got != StatusSuspended {
-		t.Fatalf("suspend status=%q, want %q", got, StatusSuspended)
-	}
-
-	out, err = app.toolTenantResume(ctx, map[string]any{"tenant_id": tenant.ID})
-	if err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	if got := out.(map[string]any)["tenant"].(*Tenant).Status; got != StatusActive {
-		t.Fatalf("resume status=%q, want %q", got, StatusActive)
-	}
-
-	if _, err := app.toolTenantRestart(ctx, map[string]any{"tenant_id": tenant.ID}); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-	out, err = app.toolTenantHealth(ctx, map[string]any{"tenant_id": tenant.ID})
-	if err != nil {
-		t.Fatalf("health: %v", err)
-	}
-	if got := out.(map[string]any)["tenant"].(*Tenant).LastHealthStatus; got != "ok" {
-		t.Fatalf("health=%q, want ok", got)
-	}
-	logs, err := app.toolTenantLogs(ctx, map[string]any{"tenant_id": tenant.ID, "tail": 10})
-	if err != nil {
-		t.Fatalf("logs: %v", err)
-	}
-	if logs.(map[string]any)["logs"] != "hello" {
-		t.Fatalf("logs response=%+v", logs)
-	}
-	out, err = app.toolTenantDelete(ctx, map[string]any{"tenant_id": tenant.ID, "delete_volumes": true})
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if got := out.(map[string]any)["tenant"].(*Tenant).Status; got != StatusDeleted {
-		t.Fatalf("delete status=%q, want %q", got, StatusDeleted)
-	}
-	if len(pf.unexposeHosts) != 1 || pf.unexposeHosts[0] != "lifecycle.hosted.example.com" {
-		t.Fatalf("unexpose calls=%+v", pf.unexposeHosts)
-	}
-
-	tools := []string{}
-	for _, c := range pf.callAppCalls {
-		tools = append(tools, c.Tool)
-	}
-	for _, want := range []string{
-		"containers_run",
-		"containers_stop",
-		"containers_start",
-		"containers_restart",
-		"containers_health",
-		"containers_logs",
-		"containers_destroy",
-	} {
-		if !containsString(tools, want) {
-			t.Fatalf("expected %s in container calls, got %v", want, tools)
+		rec = httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s = %d", path, rec.Code)
 		}
 	}
 }
 
-func TestHTTPHandlersServePanelData(t *testing.T) {
-	pf := &platformStub{}
-	ctx, db := newTestCtx(t, pf)
-	defer db.Close()
+// ─── Clock ───────────────────────────────────────────────────────────────
 
-	app := &App{}
-	created, err := app.toolTenantCreate(ctx, map[string]any{
-		"owner_email": "owner@example.com",
-		"slug":        "panel",
-		"plan_key":    "free",
-	})
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	tenant := created.(map[string]any)["tenant"].(*Tenant)
-
-	req := httptest.NewRequest(http.MethodGet, "/plans", nil)
-	rec := httptest.NewRecorder()
-	app.handlePlans(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"free"`) {
-		t.Fatalf("plans response code=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/tenants", nil)
-	rec = httptest.NewRecorder()
-	app.handleTenants(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tenant.ID) {
-		t.Fatalf("tenants response code=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/usage?tenant_id="+tenant.ID, nil)
-	rec = httptest.NewRecorder()
-	app.handleUsage(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"hosting.tenants"`) {
-		t.Fatalf("usage response code=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func containsString(vals []string, want string) bool {
-	for _, v := range vals {
-		if v == want {
-			return true
-		}
-	}
-	return false
-}
-
-func containsToolCall(calls []callAppCall, app, tool string) bool {
-	for _, c := range calls {
-		if c.App == app && c.Tool == tool {
-			return true
-		}
-	}
-	return false
-}
-
-func containsToolCallAny(calls []callAppCall, tool string) bool {
-	for _, c := range calls {
-		if c.Tool == tool {
-			return true
-		}
-	}
-	return false
+func advanceClock(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := now
+	base := prev()
+	now = func() time.Time { return base.Add(d) }
+	t.Cleanup(func() { now = prev })
 }

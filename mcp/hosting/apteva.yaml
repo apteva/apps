@@ -2,22 +2,28 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.11.1
+version: 2.0.0
 description: |
-  Managed container-backed hosting control plane. Hosting provisions and
-  operates hosted Apteva tenants on top of the generic Containers app,
-  tracks plan limits and usage, exposes tenants through server-native
-  ingress, fulfills generic Orders records for paid hosting products,
-  and reacts to Billing/Subscriptions events declared in this manifest.
-  Free plans are first-class and do not require Billing, Orders, or
-  Subscriptions. v1.11.0 supports card-required trials by using
-  Billing setup sessions and provisioning after payment_method.attached.
+  Tenants on containers and machines. Hosting gives each customer a
+  container or a whole machine and runs its lifecycle: set up, grant SSH
+  access, suspend, resume, clean and release. A runtime profile says where
+  a tenant runs (container, a fixed machine pool, or a machine created on
+  demand through Instances) and what runs on it (Apteva, a Docker image,
+  WordPress, or SSH access to the bare machine).
+  Hosting sells nothing and listens to no payment events: SaaS plan actions,
+  storefronts or operators call its tools, keyed by an external_ref, and
+  every call is safe to repeat. Pool machines are reserved and assigned in
+  one transaction, run one operation at a time with leases, are wiped and
+  verified clean before reuse, and are quarantined for operator review when
+  anything fails.
+  v2.0.0 removes the 1.x checkout, Billing, Subscriptions, Orders,
+  Entitlements, Auth and LLM add-on flows; callers own selling and billing.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [hosting, tenants, containers, apteva, infrastructure]
+tags: [hosting, tenants, containers, machines, instances, infrastructure]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -28,87 +34,83 @@ requires:
     - platform.apps.call
     - platform.ingress.write
   apps:
-    - name: catalog
-      optional: false
     - name: containers
-      optional: false
-    - name: billing
       optional: true
-      events:
-        - invoice.paid
-        - payment_method.attached
-    - name: orders
+      reason: container tenants, and Docker products on machines
+    - name: instances
       optional: true
-    - name: subscriptions
-      optional: true
-      events:
-        - subscription.active
-        - subscription.trialing
-        - subscription.past_due
-        - subscription.cancelled
-        - subscription.paused
-        - subscription.ended
-    - name: entitlements
-      optional: true
-    - name: auth
-      optional: true
-    - name: llm
-      optional: true
-      events:
-        - llm.usage.recorded
+      reason: pool machines and on-demand machines
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - name: hosting_product_list
-      description: List hosting products/templates and their available plans.
-    - name: hosting_plan_list
-      description: List hosting plans, including free plans.
-    - name: hosting_customer_create
-      description: Find or create a hosting customer by email.
-    - name: hosting_checkout_create
-      description: Create a Hosting-owned sale/checkout from a Catalog price or free hosting plan. Paid plans create Billing and Subscription records; free plans provision immediately.
     - name: hosting_tenant_create
-      description: Provision a hosted tenant container and expose its default hostname. If order_id/fulfillment_id are provided, reports fulfillment status back to Orders.
-    - name: hosting_paid_invoice_provision
-      description: Hosting-owned sale flow. Given a paid Billing invoice for a hosting product, create/claim the generic Orders record and provision the tenant.
-    - name: hosting_fulfillment_provision
-      description: Provision a tenant for an Orders hosting_tenant_provision fulfillment and report the tenant id back to Orders.
+      description: "Create a tenant on a runtime profile, keyed by external_ref (repeat calls return the same tenant). Machine profiles finish in the background."
     - name: hosting_tenant_get
-      description: Fetch one hosted tenant.
+      description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details, current run and recent events."
     - name: hosting_tenant_list
-      description: List hosted tenants by customer, status, or plan.
+      description: "List tenants. Filters: status, profile_key, backend, owner_email, external_ref, include_released."
     - name: hosting_tenant_suspend
-      description: Stop a tenant container and mark it suspended.
+      description: "Suspend a tenant: stop its container, or remove SSH access to its machine. Never wipes. Repeating it is a no-op."
     - name: hosting_tenant_resume
-      description: Start a suspended or stopped tenant container.
+      description: "Resume a suspended tenant: start its container, or restore SSH access. Repeating it is a no-op."
+    - name: hosting_tenant_release
+      description: "End a tenant now: destroy its container, wipe and recycle its pool machine, or destroy its on-demand machine. Repeat calls are no-ops."
     - name: hosting_tenant_restart
-      description: Restart a hosted tenant container.
-    - name: hosting_tenant_delete
-      description: Destroy a hosted tenant container and remove its ingress route.
+      description: "Restart a tenant's container or reboot its machine."
+    - name: hosting_tenant_reinstall
+      description: "Erase and reinstall a macOS pool machine for the same tenant, then restore access. Destroys the customer's data."
+    - name: hosting_tenant_access_keys_set
+      description: "Replace a machine tenant's SSH public keys. An empty list removes access."
     - name: hosting_tenant_logs
-      description: Tail logs for a hosted tenant.
+      description: "Container logs, or a machine tenant's run log and events."
     - name: hosting_tenant_health
-      description: Probe and fetch hosted tenant health.
-    - name: hosting_usage_get
-      description: Return usage totals for a tenant or customer.
-    - name: hosting_usage_record
-      description: Record generic tenant usage and mirror it to Entitlements when installed.
-    - name: hosting_usage_sync
-      description: Sync generic runtime usage gauges from dependent apps and enforce hosting plan limits.
-    - name: hosting_subscription_sync
-      description: Apply a subscription status to a tenant lifecycle state.
-    - name: hosting_addon_enable
-      description: Enable a generic tenant add-on and orchestrate external app access when needed.
-    - name: hosting_addon_list
-      description: List tenant add-ons.
-    - name: hosting_addon_suspend
-      description: Suspend a tenant add-on and its external subject where supported.
-    - name: hosting_addon_resume
-      description: Resume a tenant add-on and its external subject where supported.
-    - name: hosting_metered_invoice_create
-      description: Aggregate metered overage and create a generic Billing invoice.
+      description: "Container health, or a machine's Instances status."
+    - name: hosting_tenant_usage
+      description: "Runtime usage for a tenant: container usage gauges, or machine metrics from Instances. Suitable as a SaaS usage source."
+    - name: hosting_availability
+      description: "Whether a profile can take a new tenant now, and how many pool machines are free."
+    - name: hosting_reservation_create
+      description: "Hold a pool machine during checkout. Repeating the call for the same profile and external_ref returns the same hold. Holds expire after reservation_ttl_minutes."
+    - name: hosting_reservation_release
+      description: "Release a held pool machine early."
+    - name: hosting_product_list
+      description: "List what can run on a tenant: Apteva, Docker images, WordPress, dedicated machines."
+    - name: hosting_profile_list
+      description: "List runtime profiles (where a tenant runs and what runs on it)."
+    - name: hosting_profile_upsert
+      description: "Create or update a runtime profile: backend (container, machine_pool, machine_on_demand), product, pool or provider settings."
+    - name: hosting_pool_list
+      description: "List machine pools with machine counts per state."
+    - name: hosting_pool_upsert
+      description: "Create or update a machine pool. platform: macos or linux. New pools start with execution switched off."
+    - name: hosting_pool_set_execution
+      description: "Switch command execution on or off for a pool. While off, no command runs on its machines and nothing from it is for sale."
+    - name: hosting_machine_add
+      description: "Add an Instances host to a pool. It starts quarantined; run inspect, then mark it validated once its reset has been tested."
+    - name: hosting_machine_list
+      description: "List pool machines with state, online status, tenant and current run."
+    - name: hosting_machine_get
+      description: "Fetch one pool machine with its recent runs."
+    - name: hosting_machine_update
+      description: "Update a machine's profile: serial, management_user, expected_os, public_host, public_port, name. Setting validated needs confirm equal to the machine id."
+    - name: hosting_machine_inspect
+      description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives."
+    - name: hosting_machine_clean
+      description: "Erase a macOS machine without a tenant, verify it is clean and put it back on sale. Needs confirm equal to the machine id."
+    - name: hosting_machine_set_maintenance
+      description: "Take an available machine off sale (maintenance=true) or put it back (false) without re-inspecting."
+    - name: hosting_machine_quarantine
+      description: "Stop assigning a machine and stop every unfinished run on it."
+    - name: hosting_machine_remove
+      description: "Remove a machine without a tenant from its pool. The Instances host is not touched. Needs confirm equal to the machine id."
+    - name: hosting_operation_get
+      description: "Fetch one run with its steps and log."
+    - name: hosting_operation_list
+      description: "List runs. Filters: tenant_id, machine_id, status."
+    - name: hosting_operation_retry
+      description: "Retry a failed run after reviewing the machine and the log. Needs reviewed=true."
   ui_panels:
     - slot: project.page
       label: Hosting
@@ -134,11 +136,16 @@ config_schema:
     type: text
     default: "hosted.apteva.local"
     label: Default base domain
-    description: Base domain used for generated tenant hostnames, e.g. tenant.hosted.example.com.
+    description: Base domain used for container tenant hostnames, e.g. tenant.hosted.example.com.
   - name: default_image
     type: text
     default: "ghcr.io/apteva/apteva:latest"
     label: Default Apteva image
-    description: Container image used when the selected plan does not override one.
+    description: Container image for the Apteva product when a profile does not set one.
+  - name: reservation_ttl_minutes
+    type: text
+    default: "30"
+    label: Reservation hold (minutes)
+    description: How long a pool machine stays held for a checkout before it goes back on sale.
 
 upgrade_policy: auto-patch
