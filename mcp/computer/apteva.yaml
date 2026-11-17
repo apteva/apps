@@ -2,9 +2,13 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.13.0
+version: 0.14.0
 description: |
-  Adds guarded Android password entry through Mobile with image-free observation, explicit confirmation and a unique secure-field selector.
+  v0.14.0 adds read-only read_element (text, value, attributes; sensitive
+  fields withheld), a selector_text wait condition, opt-in page diagnostics
+  via browser_diagnostics (origin/path/status only), masked screenshots,
+  local profile purge on context delete, and fragment-tolerant navigate.
+  v0.13.0 adds guarded Android password entry through Mobile with image-free observation, explicit confirmation and a unique secure-field selector.
   v0.12.0 exposes native iOS and Android screen guards with exact app,
   marker, account-field and unique-target checks. Supports bounded native reads,
   verified Android replacement/clearing, scoped repeated form controls and
@@ -292,7 +296,8 @@ provides:
     - name: computer_context_delete
       description: |
         Delete or unlink an app-managed browser context. Args: id,
-        delete_provider?.
+        delete_provider?, purge_profile? (local: also delete the Chrome profile
+        folder with its cookies; refused while a session uses it).
     - name: computer_proxy_profile_list
       description: |
         List enabled proxy profiles available for agent-selected browser
@@ -314,6 +319,13 @@ provides:
         include_som? (default false; returns structured SoM targets only when
         true). Returns screenshot_url, a stable app-owned URL that continues
         serving the clean final frame after the browser closes.
+    - name: browser_diagnostics
+      description: |
+        Read page problems recorded for a session opened with
+        browser_session(action=open, diagnostics=true): exception messages, a
+        console error count, and failed requests or HTTP responses >= 400
+        (method, origin, path and status only). Args: session_id, since?,
+        clear?.
     - name: browser_extract
       exposure: app_only
       description: |
@@ -584,7 +596,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.13.0
+    ref: computer/v0.14.0
     entry: mcp/computer
   port: 8080
   health_check: /health
