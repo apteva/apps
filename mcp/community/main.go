@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.17.0
+version: 0.17.1
 description: |
   Interactive lessons mix text, video and quizzes with sandboxed HTML/JS
   elements from a versioned library (simulations, code playgrounds, board
@@ -316,7 +316,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.17.0
+    ref: community/v0.17.1
     entry: mcp/community
   port: 8080
   health_check: /health

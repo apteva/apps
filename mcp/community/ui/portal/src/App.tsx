@@ -190,6 +190,10 @@ function formatMembershipPrice(plan: MembershipPlan): string {
 
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
+  // Data-loading effects follow who is signed in, not the current token. A
+  // session refresh replaces `auth` about every 48 seconds; depending on the
+  // object reloaded the whole page and remounted running lesson elements.
+  const sessionUser = auth ? String(auth.user?.id ?? "signed-in") : "";
   const [authMode, setAuthMode] = useState<AuthMode>(initialAuthMode);
   const [authForm, setAuthForm] = useState(initialAuthForm);
   const [portal, setPortal] = useState<PortalBootstrap | null>(null);
@@ -614,7 +618,7 @@ export default function App() {
       await api.members.ensure(portal.community.id, auth.user.display_name);
       await loadSession();
     }, { preserveNotice: true });
-  }, [auth, loadSession, portal, run]);
+  }, [sessionUser, loadSession, portal, run]);
 
   useEffect(() => {
     if (!auth?.refresh_token || !portal) return;
@@ -657,23 +661,23 @@ export default function App() {
       url.searchParams.delete("intent");
       window.history.replaceState({}, "", url);
     });
-  }, [auth, loadCommunity, run]);
+  }, [sessionUser, loadCommunity, run]);
 
   useEffect(() => {
     if (auth && view === "spaces") void run(loadThreads, { quiet: true });
-  }, [auth, loadThreads, run, view]);
+  }, [sessionUser, loadThreads, run, view]);
 
   useEffect(() => {
     if (auth && view === "spaces") void run(loadPosts, { quiet: true });
-  }, [auth, loadPosts, run, view]);
+  }, [sessionUser, loadPosts, run, view]);
 
   useEffect(() => {
     if (auth && view === "courses") void run(loadCourse, { preserveNotice: true });
-  }, [auth, loadCourse, run, view]);
+  }, [sessionUser, loadCourse, run, view]);
 
   useEffect(() => {
     if (auth && view === "courses") void run(loadBundle, { quiet: true });
-  }, [auth, loadBundle, run, view]);
+  }, [sessionUser, loadBundle, run, view]);
 
   useEffect(() => {
     if (!auth || !portal || !wantsCourseCheckout() || automaticCheckoutStarted.current) return;
@@ -681,7 +685,7 @@ export default function App() {
     if (coursePurchase?.status === "fulfilled" || coursePurchase?.status === "refunded") return;
     automaticCheckoutStarted.current = true;
     void purchaseCourse();
-  }, [auth, courseAccessMode, courseId, courseLocked, courseOffer, coursePurchase?.status, portal]);
+  }, [sessionUser, courseAccessMode, courseId, courseLocked, courseOffer, coursePurchase?.status, portal]);
 
   useEffect(() => {
     if (!auth || !portal || communityId !== portal.community.id || !selectedStorefrontOffer || !storefrontCheckout?.recovery_token || automaticCheckoutStarted.current) return;
@@ -689,7 +693,7 @@ export default function App() {
     void startStorefrontCheckout(selectedStorefrontOffer).then((started) => {
       if (!started) automaticCheckoutStarted.current = false;
     });
-  }, [auth, communityId, portal, selectedStorefrontOffer, storefrontCheckout?.recovery_token]);
+  }, [sessionUser, communityId, portal, selectedStorefrontOffer, storefrontCheckout?.recovery_token]);
 
   useEffect(() => {
     if (!portal || !selectedStorefrontOffer || !storefrontCheckoutRequested) return;
@@ -743,11 +747,11 @@ export default function App() {
       }).catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [auth, courseId, coursePurchase?.status, loadCourse, run]);
+  }, [sessionUser, courseId, coursePurchase?.status, loadCourse, run]);
 
   useEffect(() => {
     if (auth && view === "messages") void run(loadDM, { quiet: true });
-  }, [auth, loadDM, run, view]);
+  }, [sessionUser, loadDM, run, view]);
 
   useEffect(() => {
     if (!auth || !currentProjectId()) return;
