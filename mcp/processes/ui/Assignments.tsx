@@ -286,6 +286,58 @@ export function ParameterEditor({
     </section>
   );
 }
+// Every agent an assignment puts to work: the coordinating owner first, then
+// agents bound to roles. Unbound roles fall back to the owner, as the backend does.
+export function assignmentAgentIDs(x: { owner_agent_id?: number; roles?: Record<string, Executor> }): number[] {
+  const ids = x.owner_agent_id ? [x.owner_agent_id] : [];
+  for (const r of Object.values(x.roles || {}))
+    if (r?.kind === "agent" && r.agent_id && !ids.includes(r.agent_id)) ids.push(r.agent_id);
+  return ids;
+}
+
+// Step-by-step executor table for one assignment.
+export function StepAssignees({ steps, roles, owner, agentName }: {
+  steps: Step[];
+  roles?: Record<string, Executor>;
+  owner: number;
+  agentName: (id: number) => string;
+}) {
+  if (!steps.length) return null;
+  return (
+    <div className="step-assignees" aria-label="Who does each step">
+      <span className="small muted">Who does each step</span>
+      <ol>
+        {steps.map((step, i) => {
+          const x = roles?.[step.role];
+          const who = x?.kind === "human" ? "Human operator" : agentName(x?.agent_id || owner);
+          return (
+            <li key={step.key}>
+              <span className="step-index">{i + 1}</span>
+              <span className="step-name">{step.name || step.key}</span>
+              <span className="step-role">{step.role}</span>
+              <span className={`step-who${x?.kind === "human" ? " human" : ""}`}>
+                {who}{!x && " (default)"}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+export const stepAssigneeStyles = `
+.ap-processes .step-assignees{margin:14px 0 12px;border-top:1px solid var(--pc-line);padding-top:12px}
+.ap-processes .step-assignees ol{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
+.ap-processes .step-assignees li{display:grid;grid-template-columns:22px minmax(0,1fr) auto auto;gap:10px;align-items:center;font-size:13px}
+.ap-processes .step-assignees .step-index{width:20px;height:20px;border-radius:50%;border:1px solid var(--pc-line);display:grid;place-items:center;font-size:11px;color:var(--pc-muted)}
+.ap-processes .step-assignees .step-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ap-processes .step-assignees .step-role{font-size:11px;color:var(--pc-muted);padding:2px 8px;border:1px solid var(--pc-line);border-radius:999px}
+.ap-processes .step-assignees .step-who{font-weight:600;text-align:right}
+.ap-processes .step-assignees .step-who.human{color:#c5a1ff}
+@media(max-width:600px){.ap-processes .step-assignees li{grid-template-columns:22px minmax(0,1fr) auto}.ap-processes .step-assignees .step-role{display:none}}
+`;
+
 export default function Assignments({
   items,
   versions,
@@ -307,6 +359,7 @@ export default function Assignments({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const current = versions[0]?.version || 1;
+  const agentName = (id: number) => agents.find((a) => a.id === id)?.name || `Agent ${id}`;
   const edit = (x?: Assignment) => {
     setError("");
     setDraft(
@@ -655,9 +708,12 @@ export default function Assignments({
               <div>
                 <h2>{x.name}</h2>
                 <p className="muted">
-                  {agents.find((a) => a.id === x.owner_agent_id)?.name ||
-                    `Agent ${x.owner_agent_id}`}{" "}
-                  · Native Process execution
+                  {(() => {
+                    const ids = assignmentAgentIDs(x);
+                    return ids.length > 1
+                      ? `${agentName(x.owner_agent_id)} coordinates · ${ids.length} agents`
+                      : `${agentName(x.owner_agent_id)} · Native Process execution`;
+                  })()}
                 </p>
               </div>
               <span className={`pill ${x.status}`}>
@@ -676,6 +732,12 @@ export default function Assignments({
               · Procedure v{x.procedure_version}
               {x.follow_latest ? " · follows latest" : " · pinned"}
             </p>
+            <StepAssignees
+              steps={(versions.find((v) => v.version === (x.follow_latest ? current : x.procedure_version)) || versions[0])?.definition.steps || []}
+              roles={x.roles}
+              owner={x.owner_agent_id}
+              agentName={agentName}
+            />
             <p className="small muted">
               Next run:{" "}
               {processStatus === "active" &&

@@ -776,3 +776,10 @@ inspection gets a fresh identity. Known runtime failure holds overwritten with
 a running label are repaired only when the exact original runtime audit event,
 suspended delivery and no retained dependency all agree. Evidence stays intact
 and recovery remains explicit.
+
+In v0.19.0, the panel has a project-wide Assignments tab listing every
+assignment with its process, agents, schedule, run counts and last run; it
+refreshes from assignment and run events on the app bus. `GET /processes/assignments`
+serves it, and `GET /processes/runs` accepts `process_id` (scoped to the project)
+alongside `assignment_id`. Assignment cards and the process list name every
+agent an assignment uses, and each card shows which agent handles each step.

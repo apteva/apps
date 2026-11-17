@@ -501,9 +501,11 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 			return a.exportHistory(project, "", args)
 		}
 		if str(args, "view") == "compact" {
-			return a.historyPage(project, "", args)
+			return a.historyPage(project, str(args, "filter_process_id"), args)
 		}
 		return a.projectRuns(project)
+	case "project_assignments":
+		return a.projectAssignments(project)
 	case "run_get", "run_update":
 		return a.directRunResponse(project, actor, id, str(args, "run_id"), action, args, mcp)
 	default:
@@ -551,6 +553,11 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if path == "runs" && r.Method == "GET" {
 		action = "project_runs"
+		if v := r.URL.Query().Get("process_id"); v != "" {
+			args["filter_process_id"] = v
+		}
+	} else if path == "assignments" && r.Method == "GET" {
+		action = "project_assignments"
 	} else if path == "reviews" && r.Method == "GET" {
 		action = "review_queue"
 	} else if len(parts) == 1 {

@@ -529,7 +529,7 @@ test("main Runs tab browses executions across processes", async () => {
     Array.from(document.querySelectorAll("nav button")).map((button) =>
       button.textContent?.trim(),
     ),
-  ).toEqual(["Processes", "Runs", "Project map"]);
+  ).toEqual(["Processes", "Assignments", "Runs", "Project map"]);
   await click("Runs");
   expect(document.body.textContent).toContain("Weekly review");
   expect(document.body.textContent).toContain("Publish digest");
@@ -547,6 +547,38 @@ test("main Runs tab browses executions across processes", async () => {
   await click("← Back to runs");
   expect(document.querySelector(".run-detail-page")).toBeNull();
   expect(document.querySelector(".run-list")).toBeTruthy();
+});
+
+test("project Assignments tab lists assignments and opens their runs", async () => {
+  await mount({}, {}, {
+    runs: [
+      { id: "r1", process_id: "p", process_name: "Weekly review", version: 1, assignment_id: "a1", state: "running", current_step: "Checking evidence", created_at: "2026-09-23T10:00:00Z" },
+    ],
+    next_cursor: "older",
+  });
+  const read = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    requests.push(String(url));
+    if (String(url).split("?")[0].endsWith("/processes/assignments"))
+      return Response.json({ assignments: [
+        { id: "a1", process_id: "p", name: "Monday digest", owner_agent_id: 7, status: "active", process_name: "Weekly review", process_status: "active", run_count: 3, ongoing_count: 1, last_run_id: "r1", last_run_state: "running", last_run_at: "2026-09-23T10:00:00Z", parameters: {}, revision: 1, procedure_version: 1, follow_latest: true, sync_pending: false, sync_error: "" },
+      ] });
+    return read(url as string, init);
+  }) as typeof fetch;
+  await click("Assignments");
+  expect(document.querySelector('table[aria-label="Project assignments"]')?.textContent).toContain("Monday digest");
+  expect(document.body.textContent).toContain("1 in progress");
+  await click("Monday digest");
+  const runsQuery = requests.filter((u) => u.includes("/processes/runs?")).at(-1)!;
+  expect(runsQuery).toContain("process_id=p");
+  expect(runsQuery).toContain("assignment_id=a1");
+  expect(document.querySelector(".filter-chip")?.textContent).toContain("Monday digest");
+  // Paging sits after the run cards, inside the list.
+  const list = document.querySelector(".run-list")!;
+  expect(list.lastElementChild?.textContent).toBe("Load older runs");
+  await click("×");
+  expect(document.querySelector(".filter-chip")).toBeNull();
 });
 
 test("assignment offers step-by-step run and freezes the selected mode in start", async () => {
@@ -622,4 +654,25 @@ test("assignment provider controls default to the agent and send only what was c
   expect(changes.at(-1)).toEqual(["anthropic", {}]);
   await act(async () => view.unmount());
   container.remove();
+});
+
+test("multi-agent assignment lists every agent and who does each step", async () => {
+  const steps = [
+    { key: "read", name: "Read CRM totals", role: "crm_reader", instructions: "Read", expected_output: "Totals", depends_on: [] },
+    { key: "send", name: "Send Pushover summary", role: "notifier", instructions: "Send", expected_output: "Receipt", depends_on: ["read"] },
+    { key: "review", name: "Review", role: "reviewer", instructions: "Check", expected_output: "OK", depends_on: ["send"] },
+  ];
+  const multi = { ...assignment, roles: { crm_reader: { kind: "agent", agent_id: 7 }, notifier: { kind: "agent", agent_id: 8 } } };
+  await mount({}, { status: "active", assignments: [multi], steps });
+  const row = document.querySelector("tr.process-item")!;
+  expect(row.textContent).toContain("Owner, Cooking agent");
+  await click("Weekly review");
+  await click("Assignments");
+  expect(document.body.textContent).toContain("Owner coordinates · 2 agents");
+  const items = Array.from(document.querySelectorAll(".step-assignees li")).map((li) => li.textContent);
+  expect(items).toEqual([
+    "1Read CRM totalscrm_readerOwner",
+    "2Send Pushover summarynotifierCooking agent",
+    "3ReviewreviewerOwner (default)",
+  ]);
 });
