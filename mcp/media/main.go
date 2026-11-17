@@ -1874,7 +1874,7 @@ func (a *App) handleReindex(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Get("failed_only") == "true" {
 		res, err := globalCtx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='' WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
+			`UPDATE media SET probe_status='pending', probe_error='', index_failures=0, index_retry_at=NULL WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
 			pid,
 		)
 		if err != nil {
@@ -2019,7 +2019,7 @@ func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if v, _ := args["failed_only"].(bool); v {
 		res, err := ctx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='' WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
+			`UPDATE media SET probe_status='pending', probe_error='', index_failures=0, index_retry_at=NULL WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
 			pid,
 		)
 		if err != nil {

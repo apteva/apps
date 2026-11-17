@@ -3,6 +3,12 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Failed-file retry backoff (v0.16.1)
+
+A file whose indexing fails is retried after 1 minute, then 2, 4, and so on up
+to 6 hours between attempts, instead of on every indexer run. A successful
+index, `media_reindex`, or a new Storage revision resets the wait.
+
 ## Incremental indexing (v0.16.0)
 
 The indexer run (every `poll_interval_seconds`) does bounded work only. It reads

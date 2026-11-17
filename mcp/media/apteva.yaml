@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.16.0
+version: 0.16.1
 description: |
+  v0.16.1 backs off retries of failed files (1 min doubling to 6 h) instead of
+  retrying them on every indexer run; reindex and success reset the wait.
   v0.16.0 indexes incrementally: a durable queue fed by Storage's change feed
   replaces the full-inventory scan on every tick; a bounded sweep reconciles.
   v0.15.8 persists queue deadlines across capacity waits and restarts, and
@@ -729,7 +731,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.16.0
+    ref: media/v0.16.1
     entry: mcp/media
   port: 8080
   health_check: /health

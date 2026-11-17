@@ -319,8 +319,10 @@ func processOne(
 	// derivations in the executor component via HTTP-range-seek against a
 	// signed source URL. Saves the giant local download for large
 	// videos: the Apteva machine never touches the source bytes.
-	// Auto-falls-back to local on any error so a flaky Hetzner
-	// network degrades to "slow but works" instead of "stuck".
+	// There is deliberately no local fallback: configured offloading
+	// must never silently consume local CPU (see componentExecutionID).
+	// A failure marks the file failed, and markFailed backs off its
+	// retries.
 	//
 	// The size cap is BYPASSED in this branch because the whole
 	// point is that big files no longer require local disk space —

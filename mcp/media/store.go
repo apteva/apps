@@ -176,6 +176,8 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, fol
 			updated_at=excluded.updated_at,
 			index_claimed_at=NULL,
 			index_last_error='',
+			index_failures=0,
+			index_retry_at=NULL,
 			force_probe=0`,
 		fileID, projectID, sha, folder, name,
 		p.FormatName, p.DurationMs, p.Bitrate,
@@ -271,6 +273,43 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 			force_probe=0`,
 		fileID, projectID, sha, kind, msg, now, now,
 	)
+	if err != nil || kind != "failed" {
+		return err
+	}
+	return scheduleIndexRetry(db, projectID, fileID, time.Now())
+}
+
+const (
+	indexRetryBase = time.Minute
+	indexRetryMax  = 6 * time.Hour
+)
+
+// indexRetryDelay is the wait before retrying a file that has failed n
+// times in a row: 1 min, doubling, capped at 6 h.
+func indexRetryDelay(n int64) time.Duration {
+	if n < 1 {
+		n = 1
+	}
+	d := indexRetryBase
+	for i := int64(1); i < n && d < indexRetryMax; i++ {
+		d *= 2
+	}
+	return min(d, indexRetryMax)
+}
+
+// scheduleIndexRetry counts one more consecutive failure and sets the
+// earliest time the indexer may pick the file up again. Success
+// (upsertMedia) and an explicit media_reindex reset both.
+func scheduleIndexRetry(db *sql.DB, projectID, fileID string, now time.Time) error {
+	if _, err := db.Exec(`UPDATE media SET index_failures=index_failures+1 WHERE project_id=? AND file_id=?`, projectID, fileID); err != nil {
+		return err
+	}
+	var n int64
+	if err := db.QueryRow(`SELECT index_failures FROM media WHERE project_id=? AND file_id=?`, projectID, fileID).Scan(&n); err != nil {
+		return err
+	}
+	at := now.UTC().Add(indexRetryDelay(n)).Format(time.RFC3339)
+	_, err := db.Exec(`UPDATE media SET index_retry_at=? WHERE project_id=? AND file_id=?`, at, projectID, fileID)
 	return err
 }
 
@@ -1570,6 +1609,8 @@ func pendingIndexerFileIDs(db *sql.DB, projectID string, limit int) ([]string, e
 		FROM media
 		WHERE project_id=? AND probe_status IN ('pending', 'failed')
 		  AND (index_claimed_at IS NULL OR julianday(index_claimed_at) <= julianday('now', '-15 minutes'))
+		  AND (probe_status <> 'failed' OR force_probe = 1 OR index_retry_at IS NULL
+		       OR julianday(index_retry_at) <= julianday('now'))
 		ORDER BY force_probe DESC,
 			CASE probe_status WHEN 'pending' THEN 0 ELSE 1 END,
 			updated_at ASC,
@@ -1657,6 +1698,8 @@ func queueMediaReindex(db *sql.DB, projectID, fileID string, force bool) error {
 			probe_status='pending',
 			probe_error='',
 			force_probe=excluded.force_probe,
+			index_failures=0,
+			index_retry_at=NULL,
 			updated_at=excluded.updated_at`,
 		fileID, projectID, boolInt(force), now,
 	)

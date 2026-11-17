@@ -1,3 +1,12 @@
+## 0.16.1 — failed-file retry backoff
+
+Files whose indexing fails were retried on every indexer run (every 30 s by
+default) with no delay. Each consecutive failure now waits longer before the
+next attempt: 1 minute, doubling up to 6 hours. A successful index,
+`media_reindex` (single file or bulk) and new content reset the wait.
+Unsupported and over-size files are unaffected. Migration 034 adds
+`index_failures` and `index_retry_at`.
+
 ## 0.16.0 — incremental indexing
 
 The indexer no longer lists every Storage file and re-checks every media row
