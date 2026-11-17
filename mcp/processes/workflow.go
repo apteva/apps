@@ -277,9 +277,6 @@ func dependenciesReady(s StepRun, all []StepRun) bool {
 	}
 	return true
 }
-func stepUsesTasks(r Run, s StepRun) bool {
-	return false
-}
 
 // Every Process worker needs the native read/update and run-control surface.
 // Claims are only valid for a persistent sequential worker; independently
@@ -367,9 +364,6 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 		}()
 	}
 
-	if s.Origin != "process_step" {
-		return a.nativeTaskContext(p, r, s, all)
-	}
 	if persistentWorkerAgent(r, s, all) != 0 {
 		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
 		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
@@ -433,7 +427,7 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 	// spawnable MCP-server scopes when MCP is omitted from the request. This is
 	// the same path used by Conversations and avoids asking a model to recreate
 	// the agent's capability set manually.
-	if s.Origin == "process_step" && !stepUsesTasks(r, *s) {
+	if s.Origin == "process_step" {
 		// Pre-provisioning versions could already have submitted this identity
 		// to a main/existing thread. Do not silently replace it with a new wake.
 		if s.DeliveryEventID != "" && !strings.Contains(s.DeliveryEventID, ":assignment:") && s.ThreadID != "" {
@@ -670,105 +664,6 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	return a.deliverStepToThread(p, *r, s, all)
 }
 
-// assignStep mirrors Tasks assignment semantics: Processes stores the durable
-// work, while the assigned agent's main thread creates a worker with the exact
-// capabilities it needs. Only after that spawn succeeds does main call this
-// method, which records worker ownership and sends the authoritative wake.
-func (a *App) assignStep(project, actor, process, run, id, thread string) (any, error) {
-	thread = strings.TrimSpace(thread)
-	if !validWorkerThreadID(thread) {
-		return nil, errors.New("thread_id must identify an existing non-main worker")
-	}
-	r, err := a.getRun(project, process, run)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Workflow {
-		return nil, errors.New("run has no structured steps")
-	}
-	all, err := a.steps(run)
-	if err != nil {
-		return nil, err
-	}
-	var step *StepRun
-	for i := range all {
-		if all[i].ID == id {
-			step = &all[i]
-			break
-		}
-	}
-	if step == nil {
-		return nil, errNotFound
-	}
-	if step.Executor.Kind != "agent" || !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", step.Executor.AgentID)) {
-		return nil, errors.New("only this step's assigned agent can delegate it")
-	}
-	if persistentWorkerAgent(r, *step, all) != 0 {
-		return nil, errors.New("persistent runs bind their worker through step_claim")
-	}
-	switch step.State {
-	case "ready", "running", "waiting", "blocked":
-		// A coordinator may record a milestone before deciding to delegate.
-	default:
-		return nil, errors.New("only an actionable step can be assigned to a worker")
-	}
-	assignmentEvent := "process-step:" + step.ID + ":assignment:" + thread
-	if step.DeliverySuspended {
-		return nil, errors.New("delivery suspended; inspect the original platform event before explicit repair")
-	}
-	if step.ThreadID != thread && (step.DeliveredAt != "" || step.Attempts > 0) {
-		return nil, errors.New("step delivery may already have executed; cannot automatically reassign to another worker")
-	}
-	if strings.Contains(step.DeliveryEventID, ":assignment:") && step.ThreadID != thread {
-		return nil, errors.New("step already belongs to another worker")
-	}
-	if step.ThreadID == thread && step.DeliveryEventID == assignmentEvent && step.DeliveredAt != "" {
-		return map[string]any{"run": r, "step": *step, "worker": map[string]any{"thread_id": thread, "assigned": true}}, nil
-	}
-	if step.ThreadID == thread && step.DeliveryEventID == assignmentEvent && step.NextAttemptAt != "" {
-		return nil, errors.New("delivery retry pending; keep the existing assignment")
-	}
-	_, err = a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=?,delivered_at='',execution_id='',delivery_warning='',next_attempt_at='' WHERE id=?`, thread, assignmentEvent, step.ID)
-	if err != nil {
-		return nil, err
-	}
-	step.ThreadID = thread
-	step.DeliveryEventID = assignmentEvent
-	step.DeliveredAt = ""
-	step.ExecutionID = ""
-	step.DeliveryWarning = ""
-	step.NextAttemptAt = ""
-	p, err := a.get(project, process)
-	if err != nil {
-		return nil, err
-	}
-	if err = a.deliverStep(p, r, step, all); err != nil {
-		return nil, err
-	}
-	all, err = a.steps(run)
-	if err != nil {
-		return nil, err
-	}
-	for _, current := range all {
-		if current.ID == id {
-			return map[string]any{"run": r, "step": current, "worker": map[string]any{"thread_id": thread, "assigned": true}}, nil
-		}
-	}
-	return nil, errNotFound
-}
-
-func validWorkerThreadID(id string) bool {
-	if id == "" || id == "main" || len(id) > 128 || strings.HasPrefix(id, ".") {
-		return false
-	}
-	for _, r := range id {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
-			continue
-		}
-		return false
-	}
-	return true
-}
 func (a *App) writeStep(s StepRun, state string, progress int, output, reason, actor string) error {
 	return a.writeStepClaim(s, state, progress, output, reason, actor, false)
 }
@@ -1393,7 +1288,7 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 		return a.resumeRetiredStep(s)
 	}
 	var normalizeError error
-	args, normalizeError = normalizeHandoff(args)
+	args, normalizeError = normalizeHandoff(applyStepOutcome(args))
 	if normalizeError != nil {
 		return normalizeError
 	}

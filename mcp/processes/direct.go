@@ -158,6 +158,7 @@ func (a *App) directRunResponse(project, actor, process, id, action string, args
 		return map[string]any{"run": r, "definition": d, "steps": steps, "rating": rating}, nil
 	}
 	if action == "run_update" {
+		args = applyRunOutcome(args)
 		if actor != "operator" && !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", d.OwnerAgentID)) {
 			return nil, errors.New("only the run owner can update it")
 		}

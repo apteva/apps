@@ -260,30 +260,6 @@ func TestTimedTasksBackend(t *testing.T) {
 	}
 }
 
-func TestTimedReassignmentCannotReleaseEarly(t *testing.T) {
-	a, f, p, r := timedSetup(t, false)
-	finishStep(t, a, p, r, "research", "agent:7:t", "sent", "")
-	s := stepBy(t, a, r, "write")
-	detail, err := a.taskDetails(p.ProjectID, "agent:7:t", s.ID)
-	if err != nil || detail["can_update"] != false {
-		t.Fatal("scheduled task actionable", err)
-	}
-	_, err = a.changeTask(p.ProjectID, "operator", s.ID, "task_update", map[string]any{"expected_revision": float64(s.Revision), "executor": map[string]any{"kind": "agent", "agent_id": float64(8)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s = stepBy(t, a, r, "write")
-	if s.State != "scheduled" || s.Executor.AgentID != 8 || len(f.events) != 1 {
-		t.Fatal("reassignment bypassed timer")
-	}
-	start, _ := time.Parse(time.RFC3339Nano, s.StartAt)
-	if err := a.tickDirect(context.Background(), start); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.events) != 2 || f.events[1].AgentID != 8 {
-		t.Fatal("timer ignored new assignee")
-	}
-}
 func TestTimedRunKeepsOriginalProcedureRules(t *testing.T) {
 	a, f, p, r := timedSetup(t, false)
 	p = status(t, a, p.ID, "paused")

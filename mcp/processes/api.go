@@ -226,7 +226,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				props["wait"] = workerWaitSchema()
 				props["handoff"] = handoffSchema()
 				props["error"] = textField("Reason for waiting, block, failure or cancellation")
-				required = append(required, "state")
+				props["outcome"] = outcomeField()
+				required = append(required, "state", "outcome")
 			}
 		case "run_get", "run_update":
 			if name == "run_get" {
@@ -237,10 +238,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			if name == "run_update" {
 				props["state"] = map[string]any{"type": "string", "enum": []string{"running", "waiting", "blocked", "completed", "failed", "cancelled"}}
 				props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
-				for _, k := range []string{"current_step", "result", "error"} {
-					props[k] = textField(k)
-				}
-				required = append(required, "state")
+				props["current_step"] = textField("Current activity")
+				props["result"] = textField("Final result with evidence")
+				props["error"] = textField("Reason for waiting, block, failure or cancellation")
+				props["outcome"] = outcomeField()
+				required = append(required, "state", "outcome")
 			}
 		case "start":
 			props["control_mode"] = controlModeSchema()
@@ -748,10 +750,6 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		for k, v := range body {
 			if k == "step_id" && (action == "run_advance" || action == "run_rate") {
-				args[k] = v
-				continue
-			}
-			if k == "run_id" && action == "task_create" {
 				args[k] = v
 				continue
 			}

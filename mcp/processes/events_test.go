@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -186,36 +185,6 @@ func TestEventsMultiAgentGenericStepCompletionContract(t *testing.T) {
 	}
 	if completed != 1 || !agents[7] || !agents[8] {
 		t.Fatalf("contract complete=%d agents=%v", completed, agents)
-	}
-}
-func TestEventsNativeTaskAndDeliveryRecovery(t *testing.T) {
-	t.Skip("legacy task event namespace assertions replaced by step.* events")
-	a, f := nativeSetup(t)
-	f.lose = true
-	s := newNative(t, a, "operator", "delivery", taskConfig())
-	a.db.Exec(`UPDATE process_step_runs SET next_attempt_at='' WHERE id=?`, s.ID)
-	if e := a.tickDirect(context.Background(), time.Now()); e != nil {
-		t.Fatal(e)
-	}
-	nativeUpdate(t, a, s, "agent:7:t", map[string]any{"state": "completed", "output": "Evidence"})
-	rec := &eventPlatform{}
-	if e := publisher(t, a, rec).drainEvents(context.Background()); e != nil {
-		t.Fatal(e)
-	}
-	retry, delivered, done := false, false, false
-	for _, e := range rec.accepted {
-		if e.data["task_id"] != s.ID {
-			continue
-		}
-		if e.data["origin"] != "standalone" {
-			t.Fatal("wrong origin")
-		}
-		retry = retry || e.topic == "delivery.state_changed" && e.data["to_state"] == "retrying"
-		delivered = delivered || e.topic == "delivery.state_changed" && e.data["to_state"] == "delivered"
-		done = done || e.topic == "task.state_changed" && e.data["to_state"] == "completed"
-	}
-	if !retry || !delivered || !done {
-		t.Fatalf("missing retry/recovery/completion: %v %v %v", retry, delivered, done)
 	}
 }
 func TestEventsTriggerProcessing(t *testing.T) {

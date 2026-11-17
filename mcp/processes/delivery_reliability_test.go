@@ -338,9 +338,6 @@ func TestPermanentConflictIsSuspendedWithoutWritesOrDuplicateExecution(t *testin
 	if fresh := savedRun(t, a, p); fresh.State != "blocked" || fresh.DeliveryWarning == "" {
 		t.Fatal("suspended warning disappeared")
 	}
-	if _, err := a.assignStep(p.ProjectID, "agent:7:main", p.ID, r.ID, s.ID, "replacement-worker"); err == nil {
-		t.Fatal("unsafe reassignment allowed")
-	}
 	// Only an acknowledgement for the same executor AND target can resolve
 	// an ambiguous conflict; another thread's event must not clear suspension.
 	lifecycle := &sdk.AgentEventLifecycle{SourceEventID: s.DeliveryEventID, ExecutionID: "original-execution", ThreadID: "different-worker", Type: sdk.AgentEventActive, Sequence: 1}
