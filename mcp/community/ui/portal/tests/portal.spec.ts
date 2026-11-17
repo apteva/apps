@@ -203,3 +203,26 @@ test("session refresh never sends the community-scoped member key to Auth", asyn
   const stored = await page.evaluate(() => JSON.parse(sessionStorage.getItem("apteva-community-auth:main") || "{}"));
   expect(stored).toMatchObject({ refresh_token: "rotated-refresh", apteva_access_token: "refreshed-member-token" });
 });
+
+test("a session refresh keeps running lesson elements mounted", async ({ page }) => {
+  let refreshes = 0;
+  await page.route(/\/api\/apps\/auth\/refresh(?:\?|$)/, (route) => {
+    refreshes++;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: { id: 1, email: "alice@example.test" }, refresh_token: `rotated-${refreshes}`, apteva_access_token: `refreshed-${refreshes}`, apteva_expires_in: 60 }) });
+  });
+  // A 60-second token stored 44 seconds ago refreshes about 4 seconds in.
+  const calls = await fixture(page, { interactive: true, session: { refresh_token: "first-refresh", apteva_expires_in: 60, stored_at: Date.now() - 44_000 } });
+  await navigate(page, "Courses");
+  const frames = page.locator("iframe[sandbox]");
+  await expect(frames).toHaveCount(2);
+  await frames.first().evaluate((el) => { (el as any).__mountMarker = "original"; });
+  // The fixture's element completes its step right away; let that settle first.
+  await expect(page.getByText("1 of 1 goals")).toBeVisible();
+  expect(refreshes).toBe(0);
+  const bundleLoads = calls.filter((c) => c.name === "lesson_bundle_get").length;
+  await expect.poll(() => refreshes, { timeout: 15_000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(1_000);
+  expect(await frames.first().evaluate((el) => (el as any).__mountMarker)).toBe("original");
+  expect(calls.filter((c) => c.name === "lesson_bundle_get").length).toBe(bundleLoads);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("apteva-community-auth:main") || "{}").apteva_access_token)).toBe("refreshed-1");
+});

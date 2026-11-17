@@ -29,6 +29,8 @@ Community provides a branded member portal, discussions, direct messages, course
 
 ## Interactive lessons (0.17.0)
 
+0.17.1 keeps running elements mounted when the portal refreshes a member's session (about every 48 seconds); before, each refresh reloaded the lesson and reset simulations.
+
 A lesson can be built from ordered **blocks**: `markdown`, `lesson_body`, `video`, `resources`, `quizzes`, `assignments`, and `element`. Lessons with no blocks render the classic way, so existing courses are unchanged. `lesson_blocks_set` replaces a lesson's blocks and picks a layout: `article` (one column, in order) or `stage` (a large stage, a side panel where Markdown blocks become tabs, and blocks below). Keep a block's `id` when re-saving to preserve members' saved state.
 
 An **element** is a full HTML/JS document from the community's element library. The portal mounts it in an iframe with `sandbox="allow-scripts"` (opaque origin: no cookies, storage, or access to the portal), inserts a strict CSP (`connect-src 'none'`; scripts only inline, blob, or from jsDelivr, unpkg, and cdnjs) and the element SDK, and talks to it over a private `MessagePort`. Elements get `window.lesson`:
