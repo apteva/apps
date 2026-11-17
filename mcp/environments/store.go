@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -74,6 +75,11 @@ func (s store) getDefinition(id string) (*Definition, error) {
 	if err := json.Unmarshal([]byte(raw), &d.Spec); err != nil {
 		return nil, err
 	}
+	// Always derive the digest from the spec text just read, so it describes
+	// exactly the spec returned (and used by pinned runs) with this read.
+	if d.SpecDigest, err = specDigest([]byte(raw)); err != nil {
+		return nil, err
+	}
 	d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	d.ReconcileNextAt = parseOptionalTime(next)
@@ -87,6 +93,9 @@ func (s store) saveDefinition(d *Definition) error {
 	if err != nil {
 		return err
 	}
+	if d.SpecDigest, err = specDigest([]byte(raw)); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = now
@@ -98,8 +107,52 @@ func (s store) saveDefinition(d *Definition) error {
 	if d.DesiredState == "" {
 		d.DesiredState = "stopped"
 	}
-	_, err = s.db.Exec(`INSERT INTO environment_definitions(id,name,description,desired_state,spec_version,spec_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,desired_state=excluded.desired_state,spec_version=excluded.spec_version,spec_json=excluded.spec_json,updated_at=excluded.updated_at,reconcile_status='healthy',reconcile_failures=0,reconcile_error='',reconcile_next_at=NULL,degraded_at=NULL`, d.ID, d.Name, d.Description, d.DesiredState, d.SpecVersion, raw, d.CreatedAt.Format(time.RFC3339Nano), d.UpdatedAt.Format(time.RFC3339Nano))
+	_, err = s.db.Exec(`INSERT INTO environment_definitions(id,name,description,desired_state,spec_version,spec_json,spec_digest,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,desired_state=excluded.desired_state,spec_version=excluded.spec_version,spec_json=excluded.spec_json,spec_digest=excluded.spec_digest,updated_at=excluded.updated_at,reconcile_status='healthy',reconcile_failures=0,reconcile_error='',reconcile_next_at=NULL,degraded_at=NULL`, d.ID, d.Name, d.Description, d.DesiredState, d.SpecVersion, raw, d.SpecDigest, d.CreatedAt.Format(time.RFC3339Nano), d.UpdatedAt.Format(time.RFC3339Nano))
 	return err
+}
+
+// backfillSpecDigests fills spec_digest for definitions written before 0.11.0,
+// so summary listings can report it without reading specifications. It reads
+// one specification at a time and is a no-op once every row has a digest.
+func (s store) backfillSpecDigests() (int, error) {
+	rows, err := s.db.Query(`SELECT id FROM environment_definitions WHERE spec_digest=''`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	filled := 0
+	for _, id := range ids {
+		var raw string
+		err := s.db.QueryRow(`SELECT spec_json FROM environment_definitions WHERE id=? AND spec_digest=''`, id).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return filled, err
+		}
+		digest, err := specDigest([]byte(raw))
+		if err != nil {
+			return filled, fmt.Errorf("environment %s: %w", id, err)
+		}
+		// Guard on spec_json so a concurrent update keeps its own digest.
+		if _, err := s.db.Exec(`UPDATE environment_definitions SET spec_digest=? WHERE id=? AND spec_digest='' AND spec_json=?`, digest, id, raw); err != nil {
+			return filled, err
+		}
+		filled++
+	}
+	return filled, nil
 }
 
 func (s store) clearReconcileState(id string) error {
@@ -128,8 +181,10 @@ func (s store) setDesired(id, state string) error {
 	return err
 }
 
+const runColumns = `id,environment_id,runtime_id,kind,status,error,started_at,stopped_at,pinned_environment_id,spec_version,spec_digest`
+
 func (s store) createRun(r *Run) error {
-	_, err := s.db.Exec(`INSERT INTO environment_runs(id,environment_id,runtime_id,kind,status,error,started_at) VALUES(?,?,?,?,?,?,?)`, r.ID, r.EnvironmentID, r.RuntimeID, r.Kind, r.Status, r.Error, r.StartedAt.Format(time.RFC3339Nano))
+	_, err := s.db.Exec(`INSERT INTO environment_runs(id,environment_id,runtime_id,kind,status,error,started_at,pinned_environment_id,spec_version,spec_digest) VALUES(?,?,?,?,?,?,?,?,?,?)`, r.ID, r.EnvironmentID, r.RuntimeID, r.Kind, r.Status, r.Error, r.StartedAt.Format(time.RFC3339Nano), r.PinnedEnvironmentID, r.SpecVersion, r.SpecDigest)
 	return err
 }
 func (s store) updateRun(id, status, msg string) error {
@@ -155,12 +210,12 @@ func (s store) transitionRun(id, from, status, msg string) (bool, error) {
 }
 
 func (s store) activeRun(environmentID string) (*Run, error) {
-	row := s.db.QueryRow(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE environment_id=? AND status IN ('starting','running','stopping') ORDER BY started_at DESC LIMIT 1`, environmentID)
+	row := s.db.QueryRow(`SELECT `+runColumns+` FROM environment_runs WHERE environment_id=? AND status IN ('starting','running','stopping') ORDER BY started_at DESC LIMIT 1`, environmentID)
 	return scanRun(row)
 }
 
 func (s store) activeRuns(environmentID string) ([]Run, error) {
-	rows, err := s.db.Query(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE (? = '' OR environment_id=?) AND status IN ('starting','running','stopping') ORDER BY started_at DESC`, environmentID, environmentID)
+	rows, err := s.db.Query(`SELECT `+runColumns+` FROM environment_runs WHERE (? = '' OR environment_id=?) AND status IN ('starting','running','stopping') ORDER BY started_at DESC`, environmentID, environmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -178,10 +233,10 @@ func (s store) activeRuns(environmentID string) ([]Run, error) {
 	return out, rows.Err()
 }
 func (s store) getRun(id string) (*Run, error) {
-	return scanRun(s.db.QueryRow(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE id=? OR runtime_id=? LIMIT 1`, id, id))
+	return scanRun(s.db.QueryRow(`SELECT `+runColumns+` FROM environment_runs WHERE id=? OR runtime_id=? LIMIT 1`, id, id))
 }
 func (s store) listRuns() ([]Run, error) {
-	rows, err := s.db.Query(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs ORDER BY started_at DESC LIMIT 200`)
+	rows, err := s.db.Query(`SELECT ` + runColumns + ` FROM environment_runs ORDER BY started_at DESC LIMIT 200`)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +260,7 @@ func scanRun(row rowScanner) (*Run, error) {
 	var r Run
 	var started string
 	var stopped sql.NullString
-	err := row.Scan(&r.ID, &r.EnvironmentID, &r.RuntimeID, &r.Kind, &r.Status, &r.Error, &started, &stopped)
+	err := row.Scan(&r.ID, &r.EnvironmentID, &r.RuntimeID, &r.Kind, &r.Status, &r.Error, &started, &stopped, &r.PinnedEnvironmentID, &r.SpecVersion, &r.SpecDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

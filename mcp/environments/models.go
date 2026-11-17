@@ -309,6 +309,7 @@ type Definition struct {
 	Description       string              `json:"description,omitempty"`
 	DesiredState      string              `json:"desired_state"`
 	SpecVersion       int                 `json:"spec_version"`
+	SpecDigest        string              `json:"spec_digest,omitempty"`
 	Spec              EnvironmentSpec     `json:"spec"`
 	CreatedAt         time.Time           `json:"created_at"`
 	UpdatedAt         time.Time           `json:"updated_at"`
@@ -332,6 +333,22 @@ type Run struct {
 	StoppedAt        *time.Time                `json:"stopped_at,omitempty"`
 	WebFixtures      []WebFixtureInstance      `json:"web_fixtures,omitempty"`
 	ProtocolFixtures []ProtocolFixtureInstance `json:"protocol_fixtures,omitempty"`
+	// PinnedEnvironmentID names the definition a pinned run was created from.
+	// It is reported as environment_id but never stored in the owning
+	// environment_id column, so pinned runs do not count as the definition's
+	// active run and are invisible to definition reconciliation.
+	PinnedEnvironmentID string `json:"-"`
+	SpecVersion         int    `json:"spec_version,omitempty"`
+	SpecDigest          string `json:"spec_digest,omitempty"`
+}
+
+func (r Run) MarshalJSON() ([]byte, error) {
+	type plain Run
+	out := plain(r)
+	if out.EnvironmentID == "" {
+		out.EnvironmentID = r.PinnedEnvironmentID
+	}
+	return json.Marshal(out)
 }
 
 type Snapshot struct {

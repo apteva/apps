@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.10.0
+version: 0.11.0
 description: Isolated environments with bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
 author: Apteva
 icon: /ui/icon.svg
@@ -30,13 +30,13 @@ provides:
   http_routes: [{ prefix: /fixtures/, no_auth: true }, { prefix: / }]
   mcp_tools:
     - { name: environment_list, description: "List one bounded page of environment summaries; use environment_get for specifications." }
-    - { name: environment_get, description: "Get one environment definition and live runtime state." }
+    - { name: environment_get, description: "Get one environment definition, its canonical spec_digest, and live runtime state." }
     - { name: environment_create, description: "Create a durable environment definition." }
     - { name: environment_update, description: "Update a durable environment definition." }
     - { name: environment_delete, description: "Delete a stopped environment definition." }
     - { name: environment_start, description: "Start a defined environment and execute its seed plan." }
     - { name: environment_stop, description: "Stop an environment and destroy its runtime." }
-    - { name: environment_run_create, description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions." }
+    - { name: environment_run_create, description: "Start an isolated runtime from an inline EnvironmentSpec, or from a stored definition pinned by environment_id, spec_version and spec_digest with optional seed_vars. This does not execute Evals cases or assertions." }
     - { name: environment_run_targets, description: Resolve named application targets within a runtime. }
     - { name: environment_run_endpoint, description: "Resolve a running environment app’s HTTP endpoint." }
     - { name: environment_run_get, description: "Get a run and its live runtime state." }
@@ -78,7 +78,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.10.0, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.11.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
@@ -102,6 +102,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("platform runtime API unavailable")
 	}
 	a.svc = &service{ctx: ctx, db: store{ctx.AppDB()}}
+	// Definitions saved before 0.11.0 have no stored digest; fill them once so
+	// environment_list can report spec_digest without reading specifications.
+	if filled, err := a.svc.db.backfillSpecDigests(); err != nil {
+		ctx.Logger().Warn("environment spec digest backfill incomplete", "filled", filled, "err", err)
+	} else if filled > 0 {
+		ctx.Logger().Info("environment spec digests backfilled", "filled", filled)
+	}
 	ctx.Logger().Info("environments mounted", "project_id", ctx.CurrentProject(), "data_dir", ctx.DataDir())
 	return nil
 }

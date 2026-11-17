@@ -125,7 +125,42 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (*Run,
 	return s.startWithID(environmentID, kind, spec, "run_"+token(12))
 }
 
-func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, id string) (run *Run, err error) {
+// runPin records which stored definition revision a pinned run was created
+// from. A pinned run does not belong to that definition's lifecycle.
+type runPin struct {
+	EnvironmentID string
+	SpecVersion   int
+	SpecDigest    string
+}
+
+func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, id string) (*Run, error) {
+	return s.startRun(environmentID, kind, spec, id, nil)
+}
+
+// startPinned creates a run from a stored definition only when the caller's
+// pinned spec_version and spec_digest still describe it. seed_vars are
+// substituted into seeds[].input before the spec takes the same validation and
+// startup path as an inline spec.
+func (s *service) startPinned(kind, id, environmentID string, version int, digest string, vars map[string]string) (*Run, error) {
+	d, err := s.db.getDefinition(environmentID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, fmt.Errorf("environment %s not found", environmentID)
+	}
+	if d.SpecVersion != version || d.SpecDigest != digest {
+		return nil, fmt.Errorf("environment %s: pinned v%d/%s, found v%d/%s", environmentID, version, shortDigest(digest), d.SpecVersion, shortDigest(d.SpecDigest))
+	}
+	spec := d.Spec
+	spec.Seeds = applySeedVars(spec.Seeds, vars)
+	if id == "" {
+		id = "run_" + token(12)
+	}
+	return s.startRun("", kind, spec, id, &runPin{EnvironmentID: d.ID, SpecVersion: d.SpecVersion, SpecDigest: d.SpecDigest})
+}
+
+func (s *service) startRun(environmentID, kind string, spec EnvironmentSpec, id string, pin *runPin) (run *Run, err error) {
 	if err = validateSpec(spec); err != nil {
 		return nil, err
 	}
@@ -142,6 +177,9 @@ func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, 
 	}
 	runtimeID := "rt_env_" + token(12)
 	run = &Run{ID: id, EnvironmentID: environmentID, RuntimeID: runtimeID, Kind: kind, Status: "starting", StartedAt: time.Now().UTC()}
+	if pin != nil {
+		run.PinnedEnvironmentID, run.SpecVersion, run.SpecDigest = pin.EnvironmentID, pin.SpecVersion, pin.SpecDigest
+	}
 	if err = s.db.createRun(run); err != nil {
 		return nil, err
 	}
