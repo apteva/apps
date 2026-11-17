@@ -11,8 +11,10 @@ export function verifyRunMemory(calls:any[],runs:any[],summaries:any[],entries:a
   check(step.output===`Area: ${area}; receipt: ${ref}`,"Repeated discovery or lost exact identity");
   check(gate.updated_by==="operator"&&gate.output==="MEMORY-APPROVED"&&record.output===`Recorded ${area}; receipt: ${ref}; approval: MEMORY-APPROVED`,"Approval/result evidence changed");
   check(Date.parse(gate.completed_at)<=Date.parse(record.completed_at)&&Date.parse(step.completed_at)<=Date.parse(gate.completed_at),"Approval gate bypassed");
-  const checkpoints=summaries.filter(s=>s.run_id===run.id);check(checkpoints.length===2&&checkpoints.map(s=>s.revision).sort().join(",")==="1,2","Missing versioned progress/final checkpoints");
-  check(checkpoints.every(s=>JSON.parse(s.body_json).references.includes(ref)&&s.author===`agent:${step.executor.agent_id}:${step.target_thread_id}`),"Checkpoint author/reference drift");
+  // An idle worker is retired during the approval wait; a later generation (-gN) of
+ // the same run worker writes the final checkpoint.
+ const checkpoints=summaries.filter(s=>s.run_id===run.id);check(checkpoints.length===2&&checkpoints.map(s=>s.revision).sort().join(",")==="1,2","Missing versioned progress/final checkpoints");
+  check(checkpoints.every(s=>JSON.parse(s.body_json).references.includes(ref)&&new RegExp(`^agent:${step.executor.agent_id}:${step.target_thread_id}(-g\\d+)?$`).test(s.author)),"Checkpoint author/reference drift");
   const writes=calls.filter(c=>good(c)&&c.name==="processes_memory_upsert"&&c.args?.run_id===run.id);
   check(writes.length===2&&writes.every(c=>c.args.key===`area:${area}`&&c.args.scope==="campaign-october")&&JSON.stringify(writes[0].args)===JSON.stringify(writes[1].args),"Non-idempotent/repeated area writes");
   check(calls.some(c=>good(c)&&c.name==="processes_memory_list"&&c.thread_id===step.target_thread_id&&c.args?.assignment_id===run.assignment_id),"Worker didn't read scoped memory");

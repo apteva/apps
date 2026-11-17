@@ -275,7 +275,8 @@ export function verifyAIParallel(
             c.name === "processes_step_update" &&
             c.args.step_id === b[key].id &&
             ["running", "waiting"].includes(c.args.state) &&
-            String(c.args.output).includes(o.thread_id),
+            // outcome is the worker protocol's one result field; output is the older name.
+            String(c.args.output ?? c.args.outcome).includes(o.thread_id),
         ),
       `${key}: missing durable child checkpoint`,
     );

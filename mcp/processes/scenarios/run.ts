@@ -26,6 +26,12 @@ import {
   OPERATOR_CONFIRMATION,
 } from "./verify-outcomes";
 import { confirmWhenWaiting, type ConfirmationReport } from "./operator-confirm";
+// Cleanup deletes a stopped worker's run-worker row; its cleanup row stays, so a
+// finished run's workers are the union of both tables.
+function runWorkers(db: any, runId: string | undefined): any[] {
+  return db.query(`SELECT run_id,agent_id,thread_id FROM process_run_workers WHERE run_id=?1
+ UNION SELECT run_id,agent_id,thread_id FROM process_worker_cleanup WHERE run_id=?1`).all(runId ?? "");
+}
 const OPERATOR_SCENARIO = "processes-operator-confirmation";
 // Provider is selectable so the suite can run on a connection-backed provider
 // (opencode-go) as well as the Codex default. Each provider has its own large
@@ -51,9 +57,12 @@ const outputRoot = resolve(
   process.env.APTEVA_TEST_ARTIFACTS_DIR || "/tmp/processes-tier3",
 );
 await mkdir(outputRoot, { recursive: true });
-const outputDir = await mkdtemp(resolve(outputRoot, "run-"));
+// APTEVA_TEST_VERIFY_DIR=<report dir> skips the live run and repeats only the
+// saved-state checks against that report's results, databases and evidence files.
+const VERIFY_DIR = process.env.APTEVA_TEST_VERIFY_DIR;
+const outputDir = VERIFY_DIR ? resolve(VERIFY_DIR) : await mkdtemp(resolve(outputRoot, "run-"));
 const scenarioDir = resolve(outputDir, "scenarios");
-await mkdir(scenarioDir);
+if (!VERIFY_DIR) await mkdir(scenarioDir);
 // The default run is the core suite (top-level YAMLs). APTEVA_TEST_SUITE=extended
 // runs scenarios/extended/ and =all runs both. 19-worker-provider needs a second
 // provider and a CLI with --extra-provider, so it only runs by name.
@@ -75,6 +84,10 @@ const databases = new Map<string, string>();
 for (const file of files) {
   const scenario = YAML.parse(await Bun.file(file).text());
   const dbPath = resolve(outputDir, `${basename(file, ".yaml")}.db`);
+  if (VERIFY_DIR) {
+    databases.set(scenario.name, dbPath);
+    continue;
+  }
   scenario.setup.app.path = appDir;
   if (scenario.name === "processes-browser-continuity") {
     browserFixture = startBrowserFixture();
@@ -134,6 +147,18 @@ for (const file of files) {
     YAML.stringify(scenario),
   );
 }
+let stdout: string, exit: number;
+let cleanupEvidence: any, confirmed: any, continuityConfirmed: any, parallelConfirmed: any,
+  controlled: any, memoryConfirmed: any, compactConfirmed: any;
+if (VERIFY_DIR) {
+  stdout = await Bun.file(resolve(outputDir, "results.json")).text();
+  exit = 0;
+  const saved = await Bun.file(resolve(outputDir, "operator-evidence.json")).json().catch(() => ({}));
+  ({ operator: confirmed, continuity: continuityConfirmed, parallel: parallelConfirmed,
+    control: controlled, memory: memoryConfirmed, compact: compactConfirmed } = saved);
+  cleanupEvidence = await Bun.file(resolve(outputDir, "worker-cleanup-evidence.json")).json().catch(() => null);
+  if (cleanupEvidence?.error) cleanupEvidence = new Error(cleanupEvidence.error);
+} else {
 const child = Bun.spawn(
   [
     process.env.APTEVA_TEST_CLI || "apteva",
@@ -193,21 +218,22 @@ const memoryDb=databases.get(RUN_MEMORY);
 const memoryApprovals=memoryDb?(async()=>{const approvals:ConfirmationReport[]=[];for(let i=0;i<2;i++)approvals.push(await confirmWhenWaiting(memoryDb,{stepKey:"approve",output:"MEMORY-APPROVED",signal:operatorAbort.signal,log:message=>console.log(message)}));return approvals;})().catch((error:Error)=>error):Promise.resolve(null);
 const cleanupDb=databases.get(WORKER_CLEANUP);
 const cleanupObserved=cleanupDb?observeWorkerCleanup(cleanupDb,operatorAbort.signal,message=>console.log(message)).catch((error:Error)=>{console.error(`Worker cleanup observer failed: ${error.stack}`);return error}):Promise.resolve(null);
-const stdout = await new Response(child.stdout).text();
-const exit = await child.exited;
+stdout = await new Response(child.stdout).text();
+exit = await child.exited;
 operatorAbort.abort();
-const cleanupEvidence=await cleanupObserved;
+cleanupEvidence=await cleanupObserved;
 await Bun.write(resolve(outputDir,"worker-cleanup-evidence.json"),JSON.stringify(cleanupEvidence instanceof Error?{error:cleanupEvidence.message}:cleanupEvidence,null,2));
-const confirmed = await operatorConfirmation;
-const continuityConfirmed = await continuityConfirmation;
-const parallelConfirmed = await parallelConfirmation;
-const controlled = await controlReport;
-const memoryConfirmed=await memoryApprovals;
-const compactConfirmed=await compactApproval;
+confirmed = await operatorConfirmation;
+continuityConfirmed = await continuityConfirmation;
+parallelConfirmed = await parallelConfirmation;
+controlled = await controlReport;
+memoryConfirmed=await memoryApprovals;
+compactConfirmed=await compactApproval;
 // Keep actual HTTP/controller observations even if later artifact inspection fails.
-await Bun.write(resolve(outputDir,"operator-evidence.json"),JSON.stringify({continuity:continuityConfirmed,parallel:parallelConfirmed,control:controlled,memory:memoryConfirmed,compact:compactConfirmed},null,2));
+await Bun.write(resolve(outputDir,"operator-evidence.json"),JSON.stringify({operator:confirmed,continuity:continuityConfirmed,parallel:parallelConfirmed,control:controlled,memory:memoryConfirmed,compact:compactConfirmed},null,2));
 
 await Bun.write(resolve(outputDir, "results.json"), stdout);
+}
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
 check(report.ok === true, "Runner reported failure");
@@ -266,7 +292,7 @@ for (const scenario of report.results) {
     if (scenario.scenario === COMPACT_HANDOFFS) {
       check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Compact handoff tier 3 must observe the requested model");
       check(compactConfirmed && !(compactConfirmed instanceof Error), `Compact approval failed: ${compactConfirmed}`);
-      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
+      const workers = runWorkers(db, runs[0]?.id) as any[];
       const evidence = db.query("SELECT * FROM process_step_evidence ORDER BY created_at,id").all() as any[];
       const fixtureDb = openPostRunDatabase(resolve(outputDir,"continuity-fixture.db"));
       const fixture = {contexts:fixtureDb.query("SELECT * FROM prepared_contexts").all() as any[],operations:fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[]}; fixtureDb.close();
@@ -279,7 +305,7 @@ for (const scenario of report.results) {
     }
     if (scenario.scenario === EXECUTOR_CONTINUITY) {
       check(continuityConfirmed && !(continuityConfirmed instanceof Error), `Continuity operator confirmation failed: ${continuityConfirmed instanceof Error ? continuityConfirmed.message : "never performed"}`);
-      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
+      const workers = runWorkers(db, runs[0]?.id) as any[];
       const fixtureDb = openPostRunDatabase(resolve(outputDir, "continuity-fixture.db"));
       const fixture = { contexts: fixtureDb.query("SELECT * FROM prepared_contexts").all() as any[],
         operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[] };
@@ -296,7 +322,7 @@ for (const scenario of report.results) {
       const confirmation = scenario.scenario === STEP_BY_STEP && controlled && !(controlled instanceof Error) ? controlled.approval : parallelConfirmed;
       check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Parallel tier 3 must observe the requested model");
       check(confirmation && !(confirmation instanceof Error), `Parallel operator confirmation failed: ${parallelConfirmed instanceof Error ? parallelConfirmed.message : "never performed"}`);
-      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
+      const workers = runWorkers(db, runs[0]?.id) as any[];
       const fixtureDb = openPostRunDatabase(resolve(outputDir, "parallel-fixture.db"));
       const fixture = {contexts: fixtureDb.query("SELECT * FROM contexts").all() as any[], operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[]};
       fixtureDb.close();
@@ -369,12 +395,12 @@ for (const scenario of report.results) {
     }
     verifyHistory(scenario.scenario, history);
     if (scenario.scenario === "processes-sequential-worker") {
-      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
+      const workers = runWorkers(db, runs[0].id) as any[];
       verifySequentialWorker(scenario.tool_calls, runs[0], workers, true, db.query("SELECT * FROM process_worker_cleanup").all());
     }
     if (scenario.scenario === "processes-browser-continuity") {
       check(runs.length === 1 && history.runs.length === 0, "Expected one direct browser run");
-      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
+      const workers = runWorkers(db, runs[0].id) as any[];
       verifySequentialWorker(scenario.tool_calls, runs[0], workers, false);
       verifyBrowserContinuity(scenario.tool_calls, runs[0], workers, browserFixture!);
       await Bun.write(resolve(outputDir, "browser-evidence.json"), JSON.stringify({visits: browserFixture!.visits, receipts: browserFixture!.receipts}, null, 2));
@@ -389,7 +415,10 @@ for (const scenario of report.results) {
       verifyMultiAgentTrajectory(scenario.tool_calls, runs[0]);
     if (["processes-multi-agent-workflow", "processes-event-trigger-workflow"].includes(scenario.scenario))
       verifyStepWorkers(scenario.tool_calls, runs[0]);
-    if (scenario.scenario === OPERATOR_SCENARIO) {
+    if (scenario.scenario === OPERATOR_SCENARIO && VERIFY_DIR && confirmed === undefined) {
+      console.log(`NOTE ${scenario.scenario}: this report predates saved operator evidence; checking the step audit only`);
+      verifyOperatorConfirmation(runs[0], null);
+    } else if (scenario.scenario === OPERATOR_SCENARIO) {
       check(
         confirmed && !(confirmed instanceof Error),
         `Operator confirmation failed: ${confirmed instanceof Error ? confirmed.message : "never performed"}`,

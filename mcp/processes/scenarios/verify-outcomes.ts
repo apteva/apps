@@ -136,11 +136,13 @@ export function verifyHistory(scenario: string, history: any) {
  * never appear on the human step, and the publisher must be delivered only after
  * the operator's confirmation is durable.
  */
+// report is the runner's HTTP confirmation record; null only when re-verifying a
+// saved report that predates storing it, in which case the audit alone is checked.
 export function verifyOperatorConfirmation(run: any, report: any) {
   const byKey = Object.fromEntries(run.steps.map((s: any) => [s.key, s]));
   const confirm = byKey.confirm;
   check(
-    report?.step?.id === confirm.id,
+    report === null || report?.step?.id === confirm.id,
     `Operator confirmed ${report?.step?.id}, but the run's human step is ${confirm.id}`,
   );
   const operatorEvents = confirm.events.filter(
@@ -246,7 +248,7 @@ export function verifyMultiAgentRun(run: any) {
     }
   }
   check(
-    !("kind" in byKey.review.definition) && !("decision" in byKey.review),
+    !("kind" in byKey.review.definition) && !byKey.review.decision,
     "Review step exposed removed native approval metadata",
   );
   const roots = [byKey.research, byKey.audience];

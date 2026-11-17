@@ -42,6 +42,54 @@ bun run scenarios/run.ts scenarios/extended/12-ai-parallel-steps.yaml
 2 elsewhere). `bun run scenarios/compare.ts <before-run-dir> <after-run-dir>`
 compares two reports scenario by scenario (add `--md` for a table).
 
+## 0.19.4 vs the simplified protocol (2026-11-17)
+
+Both versions ran this core suite on `openai-codex` / `gpt-6.1-terra` with the
+same CLI, Core and server, token budgets ×3 so no run was cut short by a cap.
+Each version used its own scenario files (0.19.4's workers still had to call
+`step_get`). Both passed all ten scenarios, live asserts and saved-state checks.
+
+| scenario | before | after | iterations | tokens | tool calls | processes_* calls | failed calls | seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| assignment-parameters | pass | pass | 8 → 8 | 186822 → 179527 | 14 → 13 | 14 → 13 | 2 → 2 | 56 → 48 |
+| direct-completion | pass | pass | 9 → 9 | 207822 → 191175 | 9 → 9 | 9 → 9 | 1 → 1 | 48 → 44 |
+| event-trigger-workflow | pass | pass | 36 → 26 | 895105 → 581886 | 40 → 26 | 29 → 15 | 3 → 0 | 145 → 88 |
+| multi-agent-workflow | pass | pass | 32 → 21 | 785372 → 457149 | 36 → 20 | 27 → 12 | 5 → 1 | 131 → 67 |
+| operator-confirmation | pass | pass | 20 → 17 | 523046 → 380851 | 20 → 17 | 17 → 15 | 1 → 1 | 85 → 73 |
+| process-patch | pass | pass | 7 → 7 | 154660 → 151194 | 7 → 7 | 7 → 7 | 1 → 1 | 53 → 43 |
+| run-memory | pass | pass | 41 → 39 | 1115717 → 919285 | 44 → 41 | 39 → 40 | 2 → 2 | 210 → 195 |
+| sequential-worker | pass | pass | 15 → 15 | 368519 → 330338 | 15 → 15 | 14 → 14 | 1 → 1 | 66 → 68 |
+| step-by-step | pass | pass | 42 → 45 | 1397535 → 1366393 | 46 → 48 | 27 → 29 | 1 → 2 | 242 → 232 |
+| worker-cleanup | pass | pass | 27 → 27 | 682866 → 587892 | 31 → 29 | 23 → 20 | 4 → 4 | 106 → 110 |
+| TOTAL | 10/10 | 10/10 | 237 → 214 (-10%) | 6317464 → 5145690 (-19%) | 262 → 225 (-14%) | 206 → 174 (-16%) | 21 → 15 | 1142 → 968 (-15%) |
+
+"Before" is release 0.19.4, "after" is this branch. One sample per scenario: single
+scenarios move by ±1–3 iterations between runs. The two multi-agent workflows,
+where workers previously fetched their step and dependencies, show the large
+difference, in both full comparison runs: about 35% fewer iterations, 40% fewer
+tokens, half the Processes calls and almost no failed calls. Worker briefs carry
+the step and earlier results, so a worker acts and reports with one
+`step_update`.
+
+What changed in the app at the same time (`git diff processes/v0.19.4`):
+
+| | 0.19.4 | now |
+| --- | ---: | ---: |
+| MCP tools agents see | 49 | 43 |
+| Tools given to an isolated worker | 13 | 4 (+6 only for memory procedures) |
+| Worker protocol | claim/get → work → update (+ reads) | brief → work → one `step_update` with `outcome` |
+| Agent skill (`how-to-use-processes.md`) | 25,283 bytes | 6,894 bytes |
+| Go source (excluding tests) | 11,196 lines | 10,784 lines |
+| Tier 3 scenarios in the default run | 17 | 10 (+8 extended) |
+
+Reports: `cmp-final-old/run-8r9w3O` and `cmp-final-new/run-0yy96i` under the
+local Tier 3 artifacts root. Recheck one with
+`APTEVA_TEST_VERIFY_DIR=<report> bun run scenarios/run.ts`.
+
+Known issue, unchanged from 0.19.4: the first `run_advance` call in
+`13-step-by-step` often comes back to the agent as `context canceled` even though
+the release was saved; the scenario keeps its idempotent retry for that reason.
+
 The wrapper invokes `apteva test` with per-scenario limits and a cumulative cost
 ceiling of $7.50. `APTEVA_TEST_PROVIDER` selects the provider (default
 `openai-codex`) and the model default follows it — `gpt-5.6-terra` for

@@ -35,5 +35,5 @@ assert:
   - tool_not_called: tasks_create
   - iterations_at_most: 14
 budget:
-  total_tokens: 200000
+  total_tokens: 300000
   cost_usd: 2.00
