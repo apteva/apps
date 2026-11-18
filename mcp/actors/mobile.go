@@ -30,7 +30,7 @@ type actorCapabilities struct {
 
 func screenInputAction(action string) bool {
 	switch action {
-	case "tap", "swipe", "home", "launch_app", "stop_app", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private":
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
 		return true
 	}
 	return false
@@ -57,12 +57,15 @@ func validateScreenStep(step actorStep, templates bool) error {
 	if step.Action == "native_read" && (step.VerifiedField == "" || !operationNamePattern.MatchString(step.VerifiedField) || step.Text != "") {
 		return errors.New("native_read requires verified_field and no input text")
 	}
+	if err := validateNativeSelection(step); err != nil {
+		return err
+	}
 	if step.Action == "native_clear" && step.Text != "" {
 		return errors.New("native_clear does not accept input text")
 	}
 	keypadSecret := step.Action == "native_type_private" && step.Mode == "keypad"
 	switch step.Action {
-	case "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private":
+	case "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
 		if strings.TrimSpace(step.NativeApp) == "" || len(step.NativeRequired) == 0 || len(step.NativeRequired) > 12 {
 			return errors.New("native screen requires native_app and 1–12 native_required markers")
 		}
@@ -148,7 +151,7 @@ func validateMobileActor(def actorDefinition, templates bool) error {
 			return errors.New("Mobile session opening and capability checks cannot be optional")
 		}
 		switch s.Action {
-		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear":
+		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_select", "native_scroll_to":
 		case "native_type_secret", "native_type_private":
 			if !def.PrivateScreen || strings.TrimSpace(b.ContextID) == "" {
 				return errors.New("native secret input requires private_screen and a saved context_id")
@@ -330,11 +333,26 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			args["to_x"], args["to_y"] = x, y
 		}
 	}
-	if step.Action == "native_read" || step.Action == "native_assert" || step.Action == "native_wait" || step.Action == "native_tap" || step.Action == "native_tap_badged" || step.Action == "native_tap_if_present" || step.Action == "native_type" || step.Action == "native_replace" || step.Action == "native_clear" || nativeSecretAction(step.Action) {
+	if step.Action == "native_read" || step.Action == "native_assert" || step.Action == "native_wait" || step.Action == "native_tap" || step.Action == "native_tap_badged" || step.Action == "native_tap_if_present" || step.Action == "native_type" || step.Action == "native_replace" || step.Action == "native_clear" || step.Action == "native_select" || step.Action == "native_scroll_to" || nativeSecretAction(step.Action) {
 		args["native_app"] = step.NativeApp
 		args["native_required"] = step.NativeRequired
 		if len(step.NativeValues) > 0 {
 			args["native_values"] = step.NativeValues
+		}
+		if len(step.NativeChecked) > 0 {
+			args["native_checked"] = step.NativeChecked
+		}
+		if step.Action == "native_select" && step.NativeState != nil {
+			args["native_state"] = *step.NativeState
+		}
+		if step.Action == "native_scroll_to" {
+			args["native_container"] = step.NativeContainer
+			if step.Direction != "" {
+				args["direction"] = step.Direction
+			}
+			if step.MaxSwipes > 0 {
+				args["max_swipes"] = step.MaxSwipes
+			}
 		}
 		if step.Action == "native_wait" {
 			args["duration"] = templateInt(step.Duration)
@@ -411,6 +429,55 @@ func (e *actorExecution) enterNativeSecretOnKeypad(step actorStep) error {
 func finishScreenInteraction(out map[string]any) error {
 	if success, ok := out["success"].(bool); ok && !success {
 		return errors.New("Mobile input reported an unsuccessful outcome; inspect the screen before retrying")
+	}
+	return nil
+}
+
+// validateNativeSelection checks the Android selection fields Computer 0.15.0
+// accepts: native_checked guards on any native screen step, native_state on
+// native_select, and native_container/direction/max_swipes on native_scroll_to.
+func validateNativeSelection(step actorStep) error {
+	native := strings.HasPrefix(step.Action, "native_")
+	if len(step.NativeChecked) > 0 && !native {
+		return errors.New("native_checked is only valid on native screen steps")
+	}
+	if len(step.NativeChecked) > 12 {
+		return errors.New("at most 12 native checked guards are supported")
+	}
+	for key := range step.NativeChecked {
+		if strings.TrimSpace(key) == "" || len(key) > 500 {
+			return errors.New("native checked guard selector must contain 1–500 bytes")
+		}
+	}
+	if step.NativeState != nil && step.Action != "native_select" {
+		return errors.New("native_state is only valid for native_select")
+	}
+	if step.Action != "native_scroll_to" {
+		if step.NativeContainer != "" || step.MaxSwipes != 0 {
+			return errors.New("native_container and max_swipes are only valid for native_scroll_to")
+		}
+		if native && step.Direction != "" {
+			return errors.New("direction on a native step is only valid for native_scroll_to")
+		}
+	}
+	switch step.Action {
+	case "native_select":
+		if step.Text != "" {
+			return errors.New("native_select does not accept input text")
+		}
+	case "native_scroll_to":
+		if strings.TrimSpace(step.NativeContainer) == "" || len(step.NativeContainer) > 500 {
+			return errors.New("native_scroll_to requires a native_container of 1–500 bytes")
+		}
+		if step.Direction != "" && step.Direction != "up" && step.Direction != "down" {
+			return errors.New("native_scroll_to direction must be up or down")
+		}
+		if step.MaxSwipes < 0 || step.MaxSwipes > 20 {
+			return errors.New("native_scroll_to max_swipes must be 1–20")
+		}
+		if step.Text != "" {
+			return errors.New("native_scroll_to does not accept input text")
+		}
 	}
 	return nil
 }

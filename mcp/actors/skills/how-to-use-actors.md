@@ -200,6 +200,16 @@ exact `native_target`. Secret steps need `private_screen: true`, a saved
 report the native actions in its Mobile capabilities or the run fails before
 input.
 
+Android selection (Actors 0.9.0, Computer 0.15.0, Mobile 0.8.0):
+`native_select` sets a radio/checkbox `native_target` to `native_state`
+(default true) and only taps when needed; `native_scroll_to` swipes inside
+`native_container` (`direction` down/up, `max_swipes` 1–20) until
+`native_target` is visible; `native_checked: {"<selector>": true}` on any native
+step refuses to act unless those controls have that state. Use row-scoped
+selectors like `"{{name}} >> android.widget.RadioButton"` to pick a row by its
+label; templates render in guard keys. Guard a final submit tap with
+`native_checked` so the run cannot submit a default or stale selection.
+
 
 ### Platform variants
 
