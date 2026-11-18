@@ -1,4 +1,5 @@
 import AssemblyViewer from "./AssemblyViewer";
+import FabricationView from "./FabricationView";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface PanelProps { projectId: string }
@@ -60,7 +61,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
   const [pcbRevisionId, setPCBRevisionId] = useState("");
   const [pcbBound, setPCBBound] = useState<boolean | null>(null);
   const [note, setNote] = useState("");
-  const [mode, setMode] = useState<"model" | "source">("model");
+  const [mode, setMode] = useState<"model" | "source" | "fabrication">("model");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ report?: GeometryReport; checks?: Check[]; artifacts?: Artifact[] } | null>(null);
@@ -74,6 +75,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
   function changePlacement(axis:number,value:string,rotation=false){if(!parsed)return;const d=structuredClone(parsed),i=d.assembly?.instances.find((i:any)=>i.id===instance);if(!i)return;const n=Number(value);if(!Number.isFinite(n))return;i.transform ||= {};if(rotation){i.transform.rotate=[{angle:n,direction:[0,0,1]}]}else{i.transform.translate ||= [0,0,0];i.transform.translate[axis]=n}setDefinitionText(JSON.stringify(d,null,2));}
 
 
+  const fabricationRequest = useCallback((path: string, init?: RequestInit) => request(path, projectId, init), [projectId]);
   const loadDesigns = useCallback(async () => {
     const body = await request("/designs?status=all", projectId);
     setDesigns(body.designs || []);
@@ -242,10 +244,11 @@ export default function DesignPanel({ projectId }: PanelProps) {
         <div className="h-11 px-3 border-b border-border flex items-center gap-2 bg-bg">
           <button className={mode === "model" ? "tab-active" : "tab"} onClick={() => setMode("model")}>3D model</button>
           <button className={mode === "source" ? "tab-active" : "tab"} onClick={() => setMode("source")}>Geometry source</button>
+          <button className={mode === "fabrication" ? "tab-active" : "tab"} onClick={() => setMode("fabrication")}>Fabrication</button>
           <span className="flex-1" />
           {design && <span className="text-[10px] text-text-muted font-mono">r{design.current_revision?.revision_number} · {design.current_revision?.source_sha256?.slice(0, 10)}</span>}
         </div>
-        {mode === "model" ? <div className="design-viewport">
+        {mode === "fabrication" ? <FabricationView request={fabricationRequest} designId={design?.id} revisionId={design?.current_revision_id} /> : mode === "model" ? <div className="design-viewport">
           <AssemblyViewer projectId={projectId} artifactId={mesh?.id} designId={design?.id} revisionId={design?.current_revision_id} focus={focus} issue={issue} onSelect={setInstance} onCapture={setCapture}/>
           {!mesh && <div className="absolute inset-0 grid place-items-center pointer-events-none"><div className="text-center"><div className="text-4xl text-text-muted/30 mb-3">◇</div><p className="text-sm text-text-muted">Build a preview to inspect the model</p><p className="text-[11px] text-text-muted/60 mt-1">Drag to orbit · wheel to zoom</p></div></div>}
           {report && <div className="absolute left-3 bottom-3 flex gap-1.5">

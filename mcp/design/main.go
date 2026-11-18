@@ -88,9 +88,11 @@ func (a *App) service(ctx *sdk.AppCtx) (*Service, error) {
 	}, nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "fabrication-status", Schedule: "@every 30m", Run: a.refreshActiveOrders}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -107,6 +109,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/pcb-source", Handler: a.handlePCBSource},
 		{Pattern: "/api/pcb-enclosures", Handler: a.handlePCBEnclosures},
 		{Pattern: "/api/assemblies", Handler: a.handleAssemblies},
+		{Pattern: "/api/fabrication/", Handler: a.handleFabrication},
 	}
 }
 

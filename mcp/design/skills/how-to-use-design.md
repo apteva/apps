@@ -50,7 +50,7 @@ Add checks to make requirements executable: `bounding_box`, `volume`, `surface_a
 
 ## Direct meshes and generative geometry
 
-V1 produces direct meshes from exact parametric source. Future text-to-geometry or image-to-3D providers should enter as explicit mesh-source revisions, retain provider/model/provenance metadata, and never masquerade as editable B-rep CAD. Validate and repair those meshes before manufacturing. A manufacturing provider integration should consume the validated package, return quotes, and require human approval before placing a paid order.
+V1 produces direct meshes from exact parametric source. Future text-to-geometry or image-to-3D providers should enter as explicit mesh-source revisions, retain provider/model/provenance metadata, and never masquerade as editable B-rep CAD. Validate and repair those meshes before manufacturing. 
 
 ## Purchased assemblies (v0.5)
 
@@ -63,3 +63,9 @@ Use exact `part_clearance` and `assembly_collision` checks with named instance I
 Treat `manufacturing_rules` as declared rules. `print_geometry` samples thickness/feature spans/overhangs and reports its limits; absence of sampled defects is not certification. Export unique oriented parts for printing. Assembly STEP/GLB include reference components; assemblies no longer produce a combined print mesh.
 
 Create prototype manufacturing packages while assumptions remain. A verified package requires named passing checks, complete component evidence, resolved assumptions and assembly/service/fastening instructions plus actual physical-fit and enclosed-thermal evidence pinned to the exact revision/hash through `design_verification_record`. Never fabricate physical test records. The ZIP contains replayable resolved source/assets and evidence. The Pocket 15 mm appearance study is not a dimensional requirement; size around the complete measured assembly and the current BOM.
+
+## Print-service quotes and orders (v0.6)
+
+When print services are bound (`fabrication_providers` lists them and the policy), quote a passing revision with `fabrication_quote` (design_id, optional revision_id, part_ids, quantity or per-part quantities). Only printed parts are sent. Compare options by total, lead time and material; say which services failed and why.
+
+To order, call `fabrication_order_prepare` with quote_id, option_id and a saved address_id. Report the provider-confirmed total. If the status is `awaiting_approval`, tell the user to approve it in the Design panel's Fabrication tab and stop; never try to change the policy or approve it yourself. Call `fabrication_order_submit` only for an `approved` order the user wants placed. If an order is `submit_unknown`, do not resubmit: ask the user to check with the provider. Use `fabrication_orders` with refresh=true to report progress.
