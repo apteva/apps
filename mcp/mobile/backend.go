@@ -210,7 +210,9 @@ func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
 	switch driver {
 	case "adb":
-		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text")
+		// selection_state: UI source carries checkable/checked/selected/scrollable
+		// on both the bundled collector and the uiautomator dump fallback.
+		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text", "selection_state")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:

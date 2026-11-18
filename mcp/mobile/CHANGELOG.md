@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 — 2026-11-18
+
+- Report Android selection state in UI source: the bundled collector now writes
+  `checkable`, `checked`, `selected` and `scrollable` with the same names and
+  values as `uiautomator dump`. Previously these were missing on the fast path,
+  so callers could not tell checked from unchecked rows.
+- Advertise `selection_state` on the ADB driver only (not Appium, not iOS).
+- Rebuilt `source.dex.jar` (android-35, build-tools 36.1.0); the secure-input
+  helper in the same jar is unchanged in source.
+
 ## 0.7.0 — 2026-11-14
 
 - Add guarded Android password entry using accessibility ACTION_SET_TEXT and a
