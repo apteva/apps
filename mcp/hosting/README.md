@@ -64,6 +64,39 @@ machine (or the waiting line) is used.
 the tenant id. Changing a tenant's profile (a plan change such as M4 to M4
 Pro) is not supported in place: release the tenant and create a new one.
 
+### Waiting line and presale
+
+When no machine is free, a pool tenant waits (`waiting_for_machine`) and gets
+the next machine that comes on sale, oldest order first. A new order never
+takes a free machine while someone in the same pool is waiting or holds a
+presale place. A tenant suspended while waiting keeps its place.
+
+`presale_limit` on a machine_pool profile (`hosting_profile_upsert`) sets how
+many orders it takes ahead of hardware:
+
+- not set (null): the waiting line has no limit and availability counts free
+  machines only (the behaviour before 2.3.0).
+- `0`: only free machines are sold; `hosting_tenant_create` fails when none
+  is free.
+- `5`: up to 5 customers may wait. It counts customers waiting and open
+  presale holds for that profile, so after 5 bookings it is full, and when a
+  Mac arrives and the first waiting customer moves to it, one place opens
+  again.
+
+`hosting_availability` reports `available = machines + presale`: `machines`
+free now and not promised to anyone waiting in the pool, `presale` places
+left under the limit, plus `presale_limit` and `presale_note` (free text such
+as "ready within 10 days"; Hosting does not know when hardware arrives).
+
+`hosting_reservation_create` holds a free machine when there is one;
+otherwise it makes a presale hold (`presale: true`, no machine) while the
+limit has room, and fails when there is none. Presale holds expire like
+other holds. `hosting_tenant_create` with a presale hold puts the tenant in
+the waiting line even when the limit was lowered since. Setting the limit
+back to `0` stops new orders ahead; customers already waiting keep their
+place. `hosting.tenant.active` fires when the tenant's machine is ready;
+read `hosting_tenant_get` for the SSH command to send the customer.
+
 Container tenants are ready when `hosting_tenant_create` returns. Machine
 tenants return `provisioning` (or `waiting_for_machine` when the pool is
 empty) and become `active` in the background; read `hosting_tenant_get` for

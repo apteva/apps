@@ -315,10 +315,22 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 			return nil, err
 		}
 		t.Metadata = jsonRaw(mergeMaps(mapFromAny(t.Metadata), map[string]any{"platform": pool.Platform}))
-		if machine, err = claimMachineTx(tx, profile, t, reservationID); err != nil {
+		var presaleHold bool
+		if machine, presaleHold, err = claimMachineTx(tx, profile, t, reservationID, false); err != nil {
 			return nil, err
 		}
 		if machine == nil {
+			// Waiting is allowed with the caller's presale hold, with room
+			// under the presale limit, or when the profile sets no limit.
+			if !presaleHold && profile.PresaleLimit != nil {
+				left, err := presaleLeft(tx, profile)
+				if err != nil {
+					return nil, err
+				}
+				if left <= 0 {
+					return nil, errors.New("no machine available for this profile and its presale limit is reached")
+				}
+			}
 			t.Status = TenantWaitingForMachine
 		} else {
 			t.MachineID = machine.ID
@@ -359,63 +371,143 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 	return dbTenantGet(db, t.ID)
 }
 
-// claimMachineTx picks the machine for a new pool tenant: the caller's held
+// claimMachineTx picks the machine for a pool tenant: the caller's held
 // reservation (given, or found by profile + external_ref) when that machine
-// can still be sold, otherwise any machine for sale. nil means none is free
-// and the tenant waits.
-func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID string) (*Machine, error) {
+// can still be sold, otherwise a free machine. nil means the tenant waits.
+//
+// A newcomer (queued=false) takes a free machine only when nobody in the pool
+// is waiting for one and no presale hold is open: customers who ordered
+// earlier are served first. queued=true is the waiting line itself, oldest
+// first. presaleHold reports that the caller used a presale hold, which
+// entitles it to a place in the waiting line.
+func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID string, queued bool) (m *Machine, presaleHold bool, err error) {
 	var r *Reservation
 	if reservationID != "" {
-		var err error
 		if r, err = dbReservationGet(tx, reservationID); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if r == nil {
-			return nil, fmt.Errorf("reservation %s not found", reservationID)
+			return nil, false, fmt.Errorf("reservation %s not found", reservationID)
 		}
 		if r.ProfileKey != profile.Key || r.ExternalRef != t.ExternalRef {
-			return nil, fmt.Errorf("reservation %s belongs to another profile or external_ref", reservationID)
+			return nil, false, fmt.Errorf("reservation %s belongs to another profile or external_ref", reservationID)
 		}
 	} else if t.ExternalRef != "" {
 		found, err := scanReservation(tx.QueryRow(reservationSelect+` WHERE profile_key=? AND external_ref=? AND status='held'`, profile.Key, t.ExternalRef))
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+			return nil, false, err
 		}
 		r = found
 	}
-	if r != nil && r.Status == "held" {
+	if r != nil && r.Status == "held" && r.Presale {
+		// Compared in SQL, like the expiry sweep: the driver may return
+		// expires_at in another layout than sqlTime.
+		var live int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM hosting_reservations WHERE id=? AND expires_at>?`, r.ID, sqlTime(now())).Scan(&live); err != nil {
+			return nil, false, err
+		}
+		if live == 1 {
+			// The presale place becomes this tenant's place in line.
+			if _, err := tx.Exec(`UPDATE hosting_reservations SET status='confirmed', tenant_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='held'`, t.ID, r.ID); err != nil {
+				return nil, false, err
+			}
+			t.ReservationID = r.ID
+			presaleHold = true
+		} else if _, err := tx.Exec(`UPDATE hosting_reservations SET status='expired', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='held'`, r.ID); err != nil {
+			return nil, false, err
+		}
+	} else if r != nil && r.Status == "held" {
 		var ok int
 		err := tx.QueryRow(`SELECT 1 FROM hosting_machines m WHERE m.id=? AND m.state='reserved' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
 			AND m.public_host != '' AND m.endpoint_issue = ''
 			AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`, r.MachineID).Scan(&ok)
 		if err == nil {
 			t.ReservationID = r.ID
-			return dbMachineGet(tx, r.MachineID)
+			m, err := dbMachineGet(tx, r.MachineID)
+			return m, false, err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+			return nil, false, err
 		}
 		// The held machine went offline, lost validation or its pool stopped
 		// execution: drop the hold and fall back to another machine.
 		if _, err := tx.Exec(`UPDATE hosting_reservations SET status='released', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='held'`, r.ID); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if _, err := tx.Exec(`UPDATE hosting_machines SET state='available', state_reason='', updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='reserved' AND tenant_id IS NULL`, r.MachineID); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	// Expired, released or unusable hold: any machine for sale.
+	if !queued {
+		d, err := poolDemandOf(tx, profile.PoolKey)
+		if err != nil {
+			return nil, presaleHold, err
+		}
+		if d.machinesAhead() <= 0 {
+			return nil, presaleHold, nil
+		}
+	}
 	var id int64
-	err := tx.QueryRow(`SELECT m.id FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+`
+	err = tx.QueryRow(`SELECT m.id FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+`
 		AND NOT EXISTS (SELECT 1 FROM hosting_reservations r WHERE r.machine_id=m.id AND r.status='held')
 		ORDER BY m.id LIMIT 1`, profile.PoolKey).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, presaleHold, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, presaleHold, err
 	}
-	return dbMachineGet(tx, id)
+	m, err = dbMachineGet(tx, id)
+	return m, presaleHold, err
+}
+
+// poolDemand is what a pool's free machines are already promised to.
+type poolDemand struct {
+	Free         int // machines for sale and not held
+	Waiting      int // tenants waiting for a machine (suspended while waiting included)
+	PresaleHolds int // open presale holds (checkout in progress, no machine yet)
+}
+
+// machinesAhead is how many free machines a new order may take now.
+func (d poolDemand) machinesAhead() int {
+	return max(0, d.Free-d.Waiting-d.PresaleHolds)
+}
+
+// waitingCondition matches tenants that have a place in the waiting line: a
+// pool tenant suspended while it waited keeps its place.
+const waitingCondition = `(t.status='waiting_for_machine' OR (t.status='suspended' AND t.backend='machine_pool' AND COALESCE(t.machine_id,0)=0))`
+
+func poolDemandOf(q querier, poolKey string) (poolDemand, error) {
+	var d poolDemand
+	if err := q.QueryRow(`SELECT COUNT(*) FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+`
+		AND NOT EXISTS (SELECT 1 FROM hosting_reservations r WHERE r.machine_id=m.id AND r.status='held')`, poolKey).Scan(&d.Free); err != nil {
+		return d, err
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM hosting_tenants t JOIN hosting_profiles p ON p.key=t.profile_key WHERE p.pool_key=? AND `+waitingCondition, poolKey).Scan(&d.Waiting); err != nil {
+		return d, err
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM hosting_reservations r JOIN hosting_profiles p ON p.key=r.profile_key
+		WHERE p.pool_key=? AND r.status='held' AND r.machine_id IS NULL AND r.expires_at>?`, poolKey, sqlTime(now())).Scan(&d.PresaleHolds); err != nil {
+		return d, err
+	}
+	return d, nil
+}
+
+// presaleLeft is how many more orders a profile takes ahead of hardware:
+// its presale_limit minus its customers waiting and its open presale holds.
+// 0 when the profile sets no limit.
+func presaleLeft(q querier, profile *Profile) (int, error) {
+	if profile.PresaleLimit == nil || *profile.PresaleLimit <= 0 {
+		return 0, nil
+	}
+	var waiting, holds int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM hosting_tenants t WHERE t.profile_key=? AND `+waitingCondition, profile.Key).Scan(&waiting); err != nil {
+		return 0, err
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM hosting_reservations WHERE profile_key=? AND status='held' AND machine_id IS NULL AND expires_at>?`, profile.Key, sqlTime(now())).Scan(&holds); err != nil {
+		return 0, err
+	}
+	return max(0, int(*profile.PresaleLimit)-waiting-holds), nil
 }
 
 // assignWaitingTenants hands freed machines to paid tenants that are waiting,
@@ -463,7 +555,7 @@ func (a *App) assignWaitingTenant(ctx *sdk.AppCtx, tenantID string) (bool, error
 	if err != nil {
 		return false, err
 	}
-	m, err := claimMachineTx(tx, profile, t, "")
+	m, _, err := claimMachineTx(tx, profile, t, "", true)
 	if err != nil || m == nil {
 		return false, err
 	}
@@ -797,23 +889,40 @@ func (a *App) createReservation(ctx *sdk.AppCtx, args map[string]any) (*Reservat
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+	// A real machine when one is free and nobody ordered before this caller;
+	// otherwise a presale hold while the profile's presale limit has room.
+	d, err := poolDemandOf(tx, profile.PoolKey)
+	if err != nil {
+		return nil, err
+	}
 	var machineID int64
-	err = tx.QueryRow(`SELECT m.id FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+` ORDER BY m.id LIMIT 1`, profile.PoolKey).Scan(&machineID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("no machine available for this profile")
+	if d.machinesAhead() > 0 {
+		err = tx.QueryRow(`SELECT m.id FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+`
+			AND NOT EXISTS (SELECT 1 FROM hosting_reservations r WHERE r.machine_id=m.id AND r.status='held')
+			ORDER BY m.id LIMIT 1`, profile.PoolKey).Scan(&machineID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	res, err := tx.Exec(`UPDATE hosting_machines SET state='reserved', state_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='available' AND tenant_id IS NULL`, "held for "+ref, machineID)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, errors.New("machine was taken; retry")
+	if machineID == 0 {
+		left, err := presaleLeft(tx, profile)
+		if err != nil {
+			return nil, err
+		}
+		if left <= 0 {
+			return nil, errors.New("no machine available for this profile")
+		}
+	} else {
+		res, err := tx.Exec(`UPDATE hosting_machines SET state='reserved', state_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='available' AND tenant_id IS NULL`, "held for "+ref, machineID)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, errors.New("machine was taken; retry")
+		}
 	}
 	r := &Reservation{ID: newID("hrs"), ProfileKey: profile.Key, MachineID: machineID, ExternalRef: ref, Status: "held", ExpiresAt: sqlTime(now().Add(reservationTTL(ctx)))}
-	if _, err := tx.Exec(`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES (?, ?, ?, ?, 'held', ?)`,
+	if _, err := tx.Exec(`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES (?, ?, NULLIF(?, 0), ?, 'held', ?)`,
 		r.ID, r.ProfileKey, r.MachineID, r.ExternalRef, r.ExpiresAt); err != nil {
 		return nil, err
 	}
@@ -875,8 +984,14 @@ type Availability struct {
 	Backend   string `json:"backend"`
 	ForSale   bool   `json:"for_sale"`
 	Available *int   `json:"available,omitempty"`
-	Waiting   int    `json:"waiting,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	// Machines and Presale split Available: free machines ready now, and
+	// orders still taken ahead of hardware (machine_pool only).
+	Machines     *int   `json:"machines,omitempty"`
+	Presale      *int   `json:"presale,omitempty"`
+	PresaleLimit *int64 `json:"presale_limit,omitempty"`
+	PresaleNote  string `json:"presale_note,omitempty"`
+	Waiting      int    `json:"waiting,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 func availability(db *sql.DB, profile *Profile) (*Availability, error) {
@@ -892,19 +1007,22 @@ func availability(db *sql.DB, profile *Profile) (*Availability, error) {
 		out.ForSale = true
 		out.Reason = "created on demand; provider stock is checked at creation"
 	case BackendMachinePool:
-		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition, profile.PoolKey).Scan(&n); err != nil {
+		d, err := poolDemandOf(db, profile.PoolKey)
+		if err != nil {
 			return nil, err
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM hosting_tenants WHERE profile_key=? AND status='waiting_for_machine'`, profile.Key).Scan(&out.Waiting); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM hosting_tenants t WHERE t.profile_key=? AND `+waitingCondition, profile.Key).Scan(&out.Waiting); err != nil {
 			return nil, err
 		}
-		free := n - out.Waiting
-		if free < 0 {
-			free = 0
+		machines := d.machinesAhead()
+		presale, err := presaleLeft(db, profile)
+		if err != nil {
+			return nil, err
 		}
-		out.Available = &free
-		out.ForSale = free > 0
+		total := machines + presale
+		out.Available, out.Machines, out.Presale = &total, &machines, &presale
+		out.PresaleLimit, out.PresaleNote = profile.PresaleLimit, profile.PresaleNote
+		out.ForSale = total > 0
 		if !out.ForSale {
 			out.Reason = "no machine available"
 		}

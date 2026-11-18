@@ -21,7 +21,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "2.2.0"
+const appVersion = "2.3.0"
 
 type App struct{}
 
@@ -103,7 +103,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	machineID := map[string]any{"machine_id": intSchema(), "actor": strSchema()}
 	return []sdk.Tool{
 		// Tenants
-		{Name: "hosting_tenant_create", Description: "Create a tenant on a profile. Keyed by external_ref (the caller's id, e.g. a SaaS account id): repeating the call returns the same tenant. Container profiles are ready on return; machine profiles return status provisioning (or waiting_for_machine when a pool is empty) and finish in the background. Args: external_ref, profile, owner_email, reservation_id?, ssh_keys?, slug?, runtime_config?, metadata?.",
+		{Name: "hosting_tenant_create", Description: "Create a tenant on a profile. Keyed by external_ref (the caller's id, e.g. a SaaS account id): repeating the call returns the same tenant. Container profiles are ready on return; machine profiles return status provisioning (or waiting_for_machine when no machine is free) and finish in the background. Customers waiting are served oldest first. With presale_limit set, waiting needs the caller's presale hold or room under the limit, else the call fails. Args: external_ref, profile, owner_email, reservation_id?, ssh_keys?, slug?, runtime_config?, metadata?.",
 			InputSchema: schemaObject(map[string]any{
 				"external_ref": strSchema(), "profile": strSchema(), "owner_email": strSchema(), "reservation_id": strSchema(),
 				"ssh_keys": map[string]any{"type": "array", "items": strSchema()}, "slug": strSchema(),
@@ -124,17 +124,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_tenant_usage", Description: "Runtime usage for a tenant: container usage gauges, or machine metrics from Instances. Suitable as a SaaS usage source.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantUsage},
 
 		// Capacity
-		{Name: "hosting_availability", Description: "Whether a profile can take a new tenant now, and how many pool machines are free.", InputSchema: schemaObject(map[string]any{"profile": strSchema()}, []string{"profile"}), Handler: a.toolAvailability},
-		{Name: "hosting_reservation_create", Description: "Hold a pool machine during checkout. Repeating the call for the same profile and external_ref returns the same hold. Holds expire after reservation_ttl_minutes.", InputSchema: schemaObject(map[string]any{"profile": strSchema(), "external_ref": strSchema()}, []string{"profile", "external_ref"}), Handler: a.toolReservationCreate},
+		{Name: "hosting_availability", Description: "Whether a profile can take a new tenant now. For pool profiles: available = machines (free now, not promised to customers already waiting) + presale (orders still taken ahead of hardware under presale_limit), with presale_note.", InputSchema: schemaObject(map[string]any{"profile": strSchema()}, []string{"profile"}), Handler: a.toolAvailability},
+		{Name: "hosting_reservation_create", Description: "Hold a pool machine during checkout. Holds a free machine when one is not already promised to a waiting customer; otherwise a presale hold (presale: true, no machine) while the profile's presale_limit has room. Repeating the call for the same profile and external_ref returns the same hold. Holds expire after reservation_ttl_minutes.", InputSchema: schemaObject(map[string]any{"profile": strSchema(), "external_ref": strSchema()}, []string{"profile", "external_ref"}), Handler: a.toolReservationCreate},
 		{Name: "hosting_reservation_release", Description: "Release a held pool machine early.", InputSchema: schemaObject(map[string]any{"reservation_id": strSchema()}, []string{"reservation_id"}), Handler: a.toolReservationRelease},
 
 		// Profiles and products
 		{Name: "hosting_product_list", Description: "List what can run on a tenant: Apteva, Docker images, WordPress, dedicated machines.", InputSchema: schemaObject(nil, nil), Handler: a.toolProductList},
 		{Name: "hosting_profile_list", Description: "List runtime profiles (where a tenant runs and what runs on it).", InputSchema: schemaObject(map[string]any{"include_archived": boolSchema()}, nil), Handler: a.toolProfileList},
-		{Name: "hosting_profile_upsert", Description: "Create or update a runtime profile. backend: container, machine_pool (needs pool_key) or machine_on_demand (needs settings.provider and settings.server_type; optional region, image, platform, setup, provider_connection_id).",
+		{Name: "hosting_profile_upsert", Description: "Create or update a runtime profile. backend: container, machine_pool (needs pool_key) or machine_on_demand (needs settings.provider and settings.server_type; optional region, image, platform, setup, provider_connection_id). presale_limit (machine_pool only): how many orders to take ahead of hardware; 0 sells free machines only, null removes the limit (unbounded waiting line). presale_note: free text shown with availability, e.g. ready within 10 days.",
 			InputSchema: schemaObject(map[string]any{
 				"key": strSchema(), "name": strSchema(), "backend": strSchema(), "product_key": strSchema(), "pool_key": strSchema(), "image": strSchema(),
 				"cpu": map[string]any{"type": "number"}, "memory_mb": intSchema(), "storage_mb": intSchema(), "settings": objSchema(), "status": strSchema(), "metadata": objSchema(),
+				"presale_limit": intSchema(), "presale_note": strSchema(),
 			}, []string{"key", "backend", "product_key"}), Handler: a.toolProfileUpsert},
 
 		// Pools

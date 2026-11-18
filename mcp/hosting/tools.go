@@ -305,6 +305,22 @@ func (a *App) toolProfileUpsert(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if v := strArg(args, "status"); v != "" {
 		p.Status = v
 	}
+	if v, ok := args["presale_limit"]; ok {
+		// null removes the limit (unbounded waiting line, nothing sold ahead).
+		if v == nil || strFromAny(v) == "" {
+			p.PresaleLimit = nil
+		} else {
+			f, err := strconv.ParseFloat(strFromAny(v), 64)
+			if err != nil || f < 0 || f != float64(int64(f)) {
+				return nil, errors.New("presale_limit must be a whole number, 0 or more, or null to remove the limit")
+			}
+			n := int64(f)
+			p.PresaleLimit = &n
+		}
+	}
+	if v, ok := args["presale_note"]; ok {
+		p.PresaleNote = strings.TrimSpace(strFromAny(v))
+	}
 	if err := validateProfile(db, p); err != nil {
 		return nil, err
 	}
@@ -321,6 +337,9 @@ func (a *App) toolProfileUpsert(ctx *sdk.AppCtx, args map[string]any) (any, erro
 func validateProfile(db *sql.DB, p *Profile) error {
 	if p.Status != "active" && p.Status != "archived" {
 		return errors.New("status must be active or archived")
+	}
+	if p.PresaleLimit != nil && p.Backend != BackendMachinePool {
+		return errors.New("presale_limit is only for machine_pool profiles")
 	}
 	product, err := dbProductGet(db, p.ProductKey)
 	if err != nil {

@@ -1352,3 +1352,170 @@ func TestTunnelMacReleaseSkipsErase(t *testing.T) {
 		t.Fatal("inspect should put the hand-cleaned machine back on sale")
 	}
 }
+
+// ─── Presale (2.3.0) ─────────────────────────────────────────────────────
+
+func addReadyMac(t *testing.T, a *App, ctx *sdk.AppCtx, stub *platformStub, instID int64) int64 {
+	t.Helper()
+	stub.addInstance(instID, "macos", "ready")
+	id := int64Arg(mapFromAny(call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": instID, "serial": fmt.Sprintf("SER%d", instID), "management_user": "admin"})["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": id, "validated": true, "confirm": fmt.Sprint(id)})
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": id})
+	return id
+}
+
+func avail(t *testing.T, a *App, ctx *sdk.AppCtx) map[string]any {
+	t.Helper()
+	return mapFromAny(call(t, a.toolAvailability, ctx, map[string]any{"profile": "mac-m4"})["availability"])
+}
+
+func wantAvail(t *testing.T, av map[string]any, available, machines, presale float64) {
+	t.Helper()
+	if av["available"] != available || av["machines"] != machines || av["presale"] != presale || av["for_sale"] != (available > 0) {
+		t.Fatalf("availability = %v, want available %v machines %v presale %v", av, available, machines, presale)
+	}
+}
+
+func TestPresaleLimit(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "pool_key": "macs", "presale_limit": float64(2), "presale_note": "ready within 10 days"})
+	av := avail(t, a, ctx)
+	wantAvail(t, av, 2, 0, 2)
+	if av["presale_note"] != "ready within 10 days" || av["presale_limit"] != float64(2) {
+		t.Fatalf("presale fields = %v", av)
+	}
+
+	// Checkout without hardware: a presale hold with no machine.
+	r := mapFromAny(call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-a"})["reservation"])
+	if r["presale"] != true || r["machine_id"] != nil {
+		t.Fatalf("reservation = %v", r)
+	}
+	wantAvail(t, avail(t, a, ctx), 1, 0, 1)
+	again := mapFromAny(call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-a"})["reservation"])
+	if again["id"] != r["id"] {
+		t.Fatal("repeat reservation must return the same hold")
+	}
+
+	// Paid: the hold becomes a place in line.
+	ta := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-a", "profile": "mac-m4", "owner_email": "a@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	if tenant(t, db, ta).Status != TenantWaitingForMachine {
+		t.Fatalf("presale tenant = %s", tenant(t, db, ta).Status)
+	}
+	if res, _ := dbReservationGet(db, strArg(r, "id")); res.Status != "confirmed" || res.TenantID != ta {
+		t.Fatalf("hold after create = %+v", res)
+	}
+	wantAvail(t, avail(t, a, ctx), 1, 0, 1)
+
+	// A second customer without a hold takes the last place.
+	tb := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-b", "profile": "mac-m4", "owner_email": "b@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	wantAvail(t, avail(t, a, ctx), 0, 0, 0)
+	callErr(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-c"}, "no machine available")
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-c", "profile": "mac-m4", "owner_email": "c@example.com", "ssh_keys": testKey}, "presale limit")
+
+	// A Mac arrives: the oldest order gets it and one place opens again.
+	mid := addReadyMac(t, a, ctx, stub, 300)
+	if got := tenant(t, db, ta); got.MachineID != mid || got.Status != TenantActive {
+		t.Fatalf("first presale tenant = %s machine %d", got.Status, got.MachineID)
+	}
+	if tenant(t, db, tb).Status != TenantWaitingForMachine {
+		t.Fatal("second customer keeps waiting")
+	}
+	wantAvail(t, avail(t, a, ctx), 1, 0, 1)
+
+	// Limit back to 0: nothing more sold ahead, the waiting customer stays.
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_limit": float64(0)})
+	wantAvail(t, avail(t, a, ctx), 0, 0, 0)
+	if tenant(t, db, tb).Status != TenantWaitingForMachine {
+		t.Fatal("lowering the limit must not drop a waiting customer")
+	}
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_limit": float64(1.5)}, "whole number")
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "web", "backend": "container", "product_key": "ssh-access", "presale_limit": float64(3)}, "only for machine_pool")
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_limit": nil})
+	if p, _ := dbProfileGet(db, "mac-m4"); p.PresaleLimit != nil {
+		t.Fatal("null must remove the limit")
+	}
+}
+
+func TestPresaleHoldExpires(t *testing.T) {
+	stub := newStub()
+	a, ctx, _ := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_limit": float64(1)})
+	call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-x"})
+	wantAvail(t, avail(t, a, ctx), 0, 0, 0)
+	advanceClock(t, 31*time.Minute)
+	wantAvail(t, avail(t, a, ctx), 1, 0, 1)
+	// The expired hold no longer entitles its owner to a place, but there is room.
+	call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-y", "profile": "mac-m4", "owner_email": "y@example.com", "ssh_keys": testKey})
+	callErr(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-x", "profile": "mac-m4", "owner_email": "x@example.com", "ssh_keys": testKey}, "presale limit")
+}
+
+func TestNewOrderDoesNotJumpTheWaitingLine(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0) // no presale_limit: unbounded line, as before 2.3
+	tx := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-1", "profile": "mac-m4", "owner_email": "1@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"external_ref": "acct-1"}) // keeps its place
+	mid := addReadyMac(t, a, ctx, stub, 301)
+	if machine(t, db, mid).State != MachineAvailable {
+		t.Fatal("a suspended waiting tenant is not assigned")
+	}
+	wantAvail(t, avail(t, a, ctx), 0, 0, 0)
+	callErr(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-2"}, "no machine available")
+	ty := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-2", "profile": "mac-m4", "owner_email": "2@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	if got := tenant(t, db, ty); got.Status != TenantWaitingForMachine || got.MachineID != 0 {
+		t.Fatalf("newcomer took the machine: %s %d", got.Status, got.MachineID)
+	}
+	// The earlier customer comes back and gets the Mac first.
+	call(t, a.toolTenantResume, ctx, map[string]any{"external_ref": "acct-1"})
+	if got := tenant(t, db, tx); got.MachineID != mid {
+		t.Fatalf("first customer = %s machine %d", got.Status, got.MachineID)
+	}
+	if tenant(t, db, ty).MachineID != 0 {
+		t.Fatal("second customer waits for the next Mac")
+	}
+}
+
+func TestMigration007KeepsMachineHolds(t *testing.T) {
+	db := openTestDB(t)
+	applyMigrations(t, db, "006_machine_endpoints.sql")
+	var product string
+	if err := db.QueryRow(`SELECT key FROM hosting_products LIMIT 1`).Scan(&product); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO hosting_pools (key, name, platform) VALUES ('macs', 'Macs', 'macos')`,
+		`INSERT INTO hosting_profiles (key, name, backend, product_key, pool_key) VALUES ('mac-m4', 'M4', 'machine_pool', '` + product + `', 'macs')`,
+		`INSERT INTO hosting_machines (id, pool_key, instance_id, state) VALUES (7, 'macs', 107, 'reserved')`,
+		`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES ('hrs_1', 'mac-m4', 7, 'acct-1', 'held', '2099-01-01 00:00:00')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw, err := os.ReadFile("migrations/007_presale.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatalf("apply 007: %v", err)
+	}
+	r, err := dbReservationGet(db, "hrs_1")
+	if err != nil || r == nil || r.MachineID != 7 || r.Status != "held" || r.Presale {
+		t.Fatalf("hold after 007 = %+v, %v", r, err)
+	}
+	for i, ref := range []string{"acct-2", "acct-3"} {
+		if _, err := db.Exec(`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES (?, 'mac-m4', NULL, ?, 'held', '2099-01-01 00:00:00')`, fmt.Sprintf("hrs_p%d", i), ref); err != nil {
+			t.Fatalf("presale hold %s: %v", ref, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES ('hrs_dup', 'mac-m4', 7, 'acct-4', 'held', '2099-01-01 00:00:00')`); err == nil {
+		t.Fatal("a machine must still carry only one live hold")
+	}
+	p, err := dbProfileGet(db, "mac-m4")
+	if err != nil || p.PresaleLimit != nil {
+		t.Fatalf("profile after 007 = %+v, %v", p, err)
+	}
+}

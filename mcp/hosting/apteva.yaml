@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.2.0
+version: 2.3.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
@@ -46,7 +46,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: hosting_tenant_create
-      description: "Create a tenant on a runtime profile, keyed by external_ref (repeat calls return the same tenant). Machine profiles finish in the background."
+      description: "Create a tenant on a runtime profile, keyed by external_ref (repeat calls return the same tenant). Machine profiles finish in the background; with no free machine the tenant waits, within the profile's presale_limit when set."
     - name: hosting_tenant_get
       description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details, current run and recent events."
     - name: hosting_tenant_update
@@ -74,9 +74,9 @@ provides:
     - name: hosting_tenant_usage
       description: "Runtime usage for a tenant: container usage gauges, or machine metrics from Instances. Suitable as a SaaS usage source."
     - name: hosting_availability
-      description: "Whether a profile can take a new tenant now, and how many pool machines are free."
+      description: "Whether a profile can take a new tenant now. For pool profiles: available = machines (free now, not promised to customers already waiting) + presale (orders still taken ahead of hardware under presale_limit), with presale_note."
     - name: hosting_reservation_create
-      description: "Hold a pool machine during checkout. Repeating the call for the same profile and external_ref returns the same hold. Holds expire after reservation_ttl_minutes."
+      description: "Hold a pool machine during checkout. Holds a free machine when one is not already promised to a waiting customer; otherwise a presale hold (presale: true, no machine) while the profile's presale_limit has room. Repeating the call for the same profile and external_ref returns the same hold. Holds expire after reservation_ttl_minutes."
     - name: hosting_reservation_release
       description: "Release a held pool machine early."
     - name: hosting_product_list
@@ -84,7 +84,7 @@ provides:
     - name: hosting_profile_list
       description: "List runtime profiles (where a tenant runs and what runs on it)."
     - name: hosting_profile_upsert
-      description: "Create or update a runtime profile: backend (container, machine_pool, machine_on_demand), product, pool or provider settings."
+      description: "Create or update a runtime profile: backend (container, machine_pool, machine_on_demand), product, pool or provider settings, and presale_limit / presale_note for pool profiles."
     - name: hosting_pool_list
       description: "List machine pools with machine counts per state."
     - name: hosting_pool_upsert

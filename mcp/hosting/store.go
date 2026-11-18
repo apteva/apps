@@ -89,8 +89,12 @@ type Profile struct {
 	Settings   json.RawMessage `json:"settings"`
 	Status     string          `json:"status"`
 	Metadata   json.RawMessage `json:"metadata"`
-	CreatedAt  string          `json:"created_at"`
-	UpdatedAt  string          `json:"updated_at"`
+	// PresaleLimit is how many orders a machine_pool profile takes ahead of
+	// hardware. nil: no limit on the waiting line and nothing sold ahead.
+	PresaleLimit *int64 `json:"presale_limit,omitempty"`
+	PresaleNote  string `json:"presale_note,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 // OnDemandSettings is the machine_on_demand part of a profile's settings.
@@ -114,13 +118,18 @@ func (p *Profile) isMachine() bool {
 	return p.Backend == BackendMachinePool || p.Backend == BackendMachineOnDemand
 }
 
-const profileSelect = `SELECT key, name, backend, product_key, COALESCE(pool_key,''), image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, created_at, updated_at FROM hosting_profiles`
+const profileSelect = `SELECT key, name, backend, product_key, COALESCE(pool_key,''), image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note, created_at, updated_at FROM hosting_profiles`
 
 func scanProfile(row rowScanner) (*Profile, error) {
 	var p Profile
 	var settings, meta string
-	if err := row.Scan(&p.Key, &p.Name, &p.Backend, &p.ProductKey, &p.PoolKey, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &settings, &p.Status, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var presale sql.NullInt64
+	if err := row.Scan(&p.Key, &p.Name, &p.Backend, &p.ProductKey, &p.PoolKey, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &settings, &p.Status, &meta, &presale, &p.PresaleNote, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
+	}
+	if presale.Valid {
+		v := presale.Int64
+		p.PresaleLimit = &v
 	}
 	p.Settings = json.RawMessage(settings)
 	p.Metadata = json.RawMessage(meta)
@@ -172,15 +181,16 @@ func dbProfileList(db *sql.DB, includeArchived bool) ([]*Profile, error) {
 
 func dbProfileUpsert(db *sql.DB, p *Profile) error {
 	_, err := db.Exec(`
-		INSERT INTO hosting_profiles (key, name, backend, product_key, pool_key, image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO hosting_profiles (key, name, backend, product_key, pool_key, image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			name=excluded.name, backend=excluded.backend, product_key=excluded.product_key, pool_key=excluded.pool_key,
 			image=excluded.image, cpu=excluded.cpu, memory_mb=excluded.memory_mb, storage_mb=excluded.storage_mb,
 			settings_json=excluded.settings_json, status=excluded.status, metadata_json=excluded.metadata_json,
+			presale_limit=excluded.presale_limit, presale_note=excluded.presale_note,
 			updated_at=CURRENT_TIMESTAMP`,
 		p.Key, p.Name, p.Backend, p.ProductKey, nullStr(p.PoolKey), p.Image, p.CPU, p.MemoryMB, p.StorageMB,
-		stringOrJSON(p.Settings, "{}"), firstNonEmpty(p.Status, "active"), stringOrJSON(p.Metadata, "{}"))
+		stringOrJSON(p.Settings, "{}"), firstNonEmpty(p.Status, "active"), stringOrJSON(p.Metadata, "{}"), p.PresaleLimit, p.PresaleNote)
 	return err
 }
 
@@ -562,9 +572,12 @@ func dbTenantMergeMetadata(db querier, tenantID string, patch map[string]any) er
 // ─── Reservations ────────────────────────────────────────────────────────
 
 type Reservation struct {
-	ID          string `json:"id"`
-	ProfileKey  string `json:"profile_key"`
-	MachineID   int64  `json:"machine_id"`
+	ID         string `json:"id"`
+	ProfileKey string `json:"profile_key"`
+	MachineID  int64  `json:"machine_id,omitempty"`
+	// Presale is a hold without a machine, counted against the profile's
+	// presale_limit.
+	Presale     bool   `json:"presale,omitempty"`
 	ExternalRef string `json:"external_ref"`
 	Status      string `json:"status"`
 	ExpiresAt   string `json:"expires_at"`
@@ -573,13 +586,14 @@ type Reservation struct {
 	UpdatedAt   string `json:"updated_at"`
 }
 
-const reservationSelect = `SELECT id, profile_key, machine_id, external_ref, status, expires_at, COALESCE(tenant_id,''), created_at, updated_at FROM hosting_reservations`
+const reservationSelect = `SELECT id, profile_key, COALESCE(machine_id,0), external_ref, status, expires_at, COALESCE(tenant_id,''), created_at, updated_at FROM hosting_reservations`
 
 func scanReservation(row rowScanner) (*Reservation, error) {
 	var r Reservation
 	if err := row.Scan(&r.ID, &r.ProfileKey, &r.MachineID, &r.ExternalRef, &r.Status, &r.ExpiresAt, &r.TenantID, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
+	r.Presale = r.MachineID == 0
 	return &r, nil
 }
 
