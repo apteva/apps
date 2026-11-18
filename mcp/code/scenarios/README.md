@@ -28,6 +28,7 @@ apteva test ./scenarios/01-create-from-template.yaml -v
 | `10-native-html-preview.yaml` | Blank native repo, one-file HTML editing and live workspace preview, with no Git mutations or checkpoint; verifies saved source and preview state |
 | `11-native-undo.yaml` | Two named native revisions, then `repos_undo` moves the branch back (no revert revision); verifies file, clean status, history and the branch-move log |
 | `12-native-merge.yaml` | Two branches change the same line; `repos_merge` start → resolve → continue; verifies merged file, clean main, no merge in progress, two-parent revision |
+| `13-change-request.yaml` | Protect main, work on a separate branch, open and merge a change request; verifies the merged request, main's head and move log, and main's files via REST blame |
 
 ## Adding a scenario
 
@@ -87,3 +88,13 @@ GOWORK=off OPENCODE_GO_API_KEY=... apteva test --provider opencode-go --model ki
 
 Validated on 2026-11-18 on a clean spawned server: all 18 checks passed in 15
 iterations. The runner takes one scenario file per run.
+
+## Change request regression
+
+`13-change-request.yaml` has an agent protect `main` (no approvals), add a
+file on a separate branch, open a change request, and merge it. It verifies
+the merged request, that `main`'s head is the request merge and its last move
+is `change_request.*`, and both files on `main` through REST blame.
+
+Validated on 2026-11-18 on a clean spawned server with `opencode-go` /
+`kimi-k2.7-code`: all 15 checks passed in 11 iterations.

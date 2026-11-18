@@ -24,8 +24,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "code/v"+m.Version {
 		t.Fatalf("runtime source must point to code/v%s; installing another ref builds a different release", m.Version)
 	}
-	if len(m.Provides.MCPTools) != 76 {
-		t.Errorf("expected 76 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 77 {
+		t.Errorf("expected 77 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))

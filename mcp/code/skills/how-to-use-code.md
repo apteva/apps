@@ -191,6 +191,16 @@ Checkpoints are refused until the merge is continued or aborted. Use
 `repos_diff` with `lines=true` to see patches, and `repos_history` with
 `path` (and `lines=true` for blame) to see who changed a file.
 
+Some branches are protected (see `repos_branch action=list`): checkpoints on
+them are refused and they only change through change requests. To change a
+protected branch, call `repos_branch action=create switch=true name=<work
+branch>` (your unsaved edits come along), checkpoint there, then
+`change_requests action=create title=... source=<work branch>`. Call
+`change_requests action=get` to see blockers (approvals needed, conflicts)
+and `action=merge` once `can_merge` is true. Reviewers use `action=review`
+with `verdict=approve` or `request_changes`; approvals only count on the
+current head of the source branch.
+
 External Git remains optional. The `repos_git_*` tools connect, fetch, commit,
 pull and push provider history; they are separate from native checkpoints. Do
 not infer Git support from the word “repository”: use `repos_git_status` and

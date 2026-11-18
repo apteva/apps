@@ -54,6 +54,7 @@ const (
 var (
 	errNativeRefMoved        = errors.New("native ref moved")
 	errNativeMergeInProgress = errors.New("a native merge is in progress; resolve and continue it, or abort it, first (repos_merge)")
+	errNativeProtected       = errors.New("branch is protected")
 )
 
 type nativeVCS struct {
@@ -735,10 +736,13 @@ type nativeCommit struct {
 	Action       string
 	ExtraParents []string
 	InMerge      bool // only repos_merge may commit while a merge is in progress
+	// AllowProtected lets internal writers (Git auto-sync, change-request
+	// merges, repository creation) record revisions on a protected branch.
+	AllowProtected bool
 }
 
 func (n *nativeVCS) checkpointLocked(_ context.Context, repo *Repo, message, actor string, allowEmpty bool) (*nativeRevision, error) {
-	return n.commitLocked(repo, nativeCommit{Message: message, Actor: actor, AllowEmpty: allowEmpty, Action: "checkpoint"})
+	return n.commitLocked(repo, nativeCommit{Message: message, Actor: actor, AllowEmpty: allowEmpty, Action: "checkpoint", AllowProtected: true})
 }
 
 func (n *nativeVCS) commitLocked(repo *Repo, opts nativeCommit) (*nativeRevision, error) {
@@ -751,6 +755,11 @@ func (n *nativeVCS) commitLocked(repo *Repo, opts nativeCommit) (*nativeRevision
 	branch, err := n.currentBranch(repo)
 	if err != nil {
 		return nil, err
+	}
+	if !opts.AllowProtected {
+		if err := n.guardProtectedLocked(repo, branch); err != nil {
+			return nil, err
+		}
 	}
 	parent := n.readRef(repo, branch, false)
 	if opts.ExpectedHead != "" && opts.ExpectedHead != parent {
@@ -835,7 +844,7 @@ func (n *nativeVCS) checkpointHeld(repo *Repo, message, actor string) (*nativeRe
 	if err := n.ensureRepoLocked(repo); err != nil {
 		return nil, err
 	}
-	return n.commitLocked(repo, nativeCommit{Message: message, Actor: actor, Action: "checkpoint"})
+	return n.commitLocked(repo, nativeCommit{Message: message, Actor: actor, Action: "checkpoint", AllowProtected: true})
 }
 
 func (n *nativeVCS) status(repo *Repo) (*nativeStatus, error) {
@@ -1006,6 +1015,15 @@ func (n *nativeVCS) restore(repo *Repo, revision string, only []string, workingT
 	if !workingTreeOnly && n.mergeInProgress(repo) {
 		return nil, errNativeMergeInProgress
 	}
+	if !workingTreeOnly {
+		branch, err := n.currentBranch(repo)
+		if err != nil {
+			return nil, err
+		}
+		if err := n.guardProtectedLocked(repo, branch); err != nil {
+			return nil, err
+		}
+	}
 	if err := n.restoreRevisionLocked(repo, revision, only); err != nil {
 		return nil, err
 	}
@@ -1140,6 +1158,9 @@ func (n *nativeVCS) undo(repo *Repo, branch, revision, actor string) (string, *n
 	}
 	branch, err := n.resolveBranchLocked(repo, branch)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := n.guardProtectedLocked(repo, branch); err != nil {
 		return "", nil, err
 	}
 	log, err := n.readRefLog(repo, branch, false)

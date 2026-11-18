@@ -1,5 +1,15 @@
 # Apteva Code
 
+## v0.17.0 — change requests and protected branches
+
+`change_requests` opens a request to land a source branch on a target
+branch, takes comments and reviews (approve or request changes; approvals
+count only on the current head), and merges it without the target checked
+out. `repos_branch action=protect` makes a branch change only through merged
+requests, optionally after a number of approvals. `repos_branch action=create
+switch=true` starts a work branch that carries unsaved changes. Details in
+RELEASE-NOTES.md.
+
 ## v0.16.0 — native merging
 
 `repos_merge` merges, squashes, cherry-picks or reverts into the checked-out

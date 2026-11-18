@@ -1,0 +1,93 @@
+name: change-request
+description: |
+  A real agent protects main, does its work on a separate native branch,
+  opens a change request, and lands it by merging the request. Verifies that
+  main only moved through the request (its head is the request merge and its
+  move log says so), the file content on main, and the merged request, with
+  no Git tools and no failed change-request calls.
+
+timeout: 300s
+max_iterations: 24
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  cleanup_mcp_calls:
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-change-request
+        force: true
+
+directive: |
+  Use the Code app. Create a blank repository named "Review Test" with slug
+  "tier3-change-request". Write README.md containing exactly "# Review Test"
+  and save a native revision called "Start".
+
+  Protect the main branch so it can only change through Code change
+  requests (no approvals required).
+
+  Then add a file CHANGELOG.md containing exactly "- Added changelog" on a
+  separate native branch, save it as a revision, open a change request titled
+  "Add changelog" from that branch into main, and merge the change request.
+  Confirm that main now has CHANGELOG.md, then stop. No Git.
+
+assert:
+  - tool_called_with:
+      tool: repos_create
+      args:
+        slug: tier3-change-request
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_branch
+      args:
+        slug: tier3-change-request
+        action: protect
+        name: main
+      min_count: 1
+      success: true
+  - tool_called_with:
+      tool: change_requests
+      args:
+        slug: tier3-change-request
+        action: create
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: change_requests
+      args:
+        slug: tier3-change-request
+        action: merge
+      min_count: 1
+      success: true
+      result_contains: merged
+  - tool_not_called: repos_git_connect | repos_git_import | repos_git_commit | repos_git_push | repos_git_pull | repos_git_fetch | repos_git_sync_configure | repos_git_sync_now
+  - tool_not_called_with:
+      tool: repos_create | change_requests | repos_merge
+      success: false
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/change-requests?state=merged
+    expect_count_at: change_requests
+    expect_count: 1
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/change-requests?state=merged
+    expect_field_at: change_requests.0.title
+    expect_field_eq: Add changelog
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/history?ref=main
+    expect_field_at: revisions.0.message
+    expect_field_matches: '^Merge change request #1'
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/moves?branch=main
+    expect_field_at: moves.0.action
+    expect_field_matches: '^change_request\.'
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/blame?ref=main&path=CHANGELOG.md
+    expect_field_at: lines.0.text
+    expect_field_eq: "- Added changelog"
+  - http: GET /api/apps/code/api/repos/tier3-change-request/version/blame?ref=main&path=README.md
+    expect_field_at: lines.0.text
+    expect_field_eq: "# Review Test"
+  - iterations_at_most: 24
+
+budget:
+  total_tokens: 600000
+  cost_usd: 1.50

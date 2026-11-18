@@ -439,6 +439,9 @@ func (n *nativeVCS) mergeStart(repo *Repo, opts nativeMergeOptions) (*nativeMerg
 	if err != nil {
 		return nil, err
 	}
+	if err := n.guardProtectedLocked(repo, branch); err != nil {
+		return nil, err
+	}
 	ours := n.readRef(repo, branch, false)
 	if ours == "" {
 		return nil, fmt.Errorf("branch %s has no revisions yet; checkpoint first", branch)
@@ -1042,6 +1045,9 @@ type nativeBranchInfo struct {
 	Head    string `json:"head"`
 	Current bool   `json:"current"`
 	Stashes int    `json:"stashes,omitempty"`
+	// Protected branches only move through merged change requests.
+	Protected         bool `json:"protected,omitempty"`
+	RequiredApprovals int  `json:"required_approvals,omitempty"`
 }
 
 func (n *nativeVCS) branchList(repo *Repo) ([]nativeBranchInfo, error) {
@@ -1054,10 +1060,18 @@ func (n *nativeVCS) branchList(repo *Repo) ([]nativeBranchInfo, error) {
 		return nil, err
 	}
 	current, _ := n.currentBranch(repo)
+	prot, err := n.loadProtectionLocked(repo)
+	if err != nil {
+		return nil, err
+	}
 	out := []nativeBranchInfo{}
 	for name, head := range refs {
 		list, _ := n.loadStashLocked(repo, name)
-		out = append(out, nativeBranchInfo{Name: name, Head: head, Current: name == current, Stashes: len(list)})
+		info := nativeBranchInfo{Name: name, Head: head, Current: name == current, Stashes: len(list)}
+		if p := prot[name]; p != nil {
+			info.Protected, info.RequiredApprovals = true, p.RequiredApprovals
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -1084,6 +1098,9 @@ func (n *nativeVCS) deleteBranch(repo *Repo, name string, force bool, actor stri
 	}
 	if current == name {
 		return "", errors.New("cannot delete the checked-out branch; switch to another branch first")
+	}
+	if err := n.guardProtectedLocked(repo, name); err != nil {
+		return "", err
 	}
 	if !force {
 		anc, err := n.ancestorsLocked(repo, n.readRef(repo, current, false))

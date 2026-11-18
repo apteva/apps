@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, action string) {
@@ -54,7 +55,7 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			body.Message = "Checkpoint"
 		}
 		value, err := n.checkpointExpect(repo, body.Message, body.Actor, body.ExpectedHead)
-		if errors.Is(err, errNativeRefMoved) || errors.Is(err, errNativeMergeInProgress) {
+		if errors.Is(err, errNativeRefMoved) || errors.Is(err, errNativeMergeInProgress) || errors.Is(err, errNativeProtected) {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -175,7 +176,7 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 		default:
 			value, err = n.mergeAbort(repo)
 		}
-		if errors.Is(err, errNativeMergeInProgress) || errors.Is(err, errNativeRefMoved) {
+		if errors.Is(err, errNativeMergeInProgress) || errors.Is(err, errNativeRefMoved) || errors.Is(err, errNativeProtected) {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -314,7 +315,140 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			return
 		}
 		httpJSON(w, map[string]any{"revision": revision, "sha256": sha, "size": len(body), "zip_b64": base64.StdEncoding.EncodeToString(body)})
+	case "change-requests":
+		svc := &changeRequestService{db: globalCtx.AppDB(), n: n}
+		if r.Method == http.MethodPost {
+			var body struct {
+				Title  string `json:"title"`
+				Body   string `json:"body"`
+				Source string `json:"source"`
+				Target string `json:"target"`
+				Issues []int  `json:"issues"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil {
+				httpErr(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+			cr, err := svc.create(repo, changeRequestCreate{Title: body.Title, Body: body.Body, Source: body.Source, Target: body.Target, Issues: body.Issues, Author: httpActor(r)})
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			d, err := svc.detail(repo, cr.Number, false)
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			httpJSON(w, d)
+			return
+		}
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET, POST")
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		list, err := svc.list(repo, r.URL.Query().Get("state"), limit)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"change_requests": list, "count": len(list)})
+	case "protection":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Branch            string `json:"branch"`
+			Protected         bool   `json:"protected"`
+			RequiredApprovals int    `json:"required_approvals"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		approvals := -1
+		if body.Protected {
+			approvals = body.RequiredApprovals
+		}
+		prot, err := n.setProtection(repo, body.Branch, approvals, httpActor(r))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"branch": body.Branch, "protected": prot != nil, "protection": prot})
 	default:
+		if strings.HasPrefix(action, "change-requests/") {
+			a.httpChangeRequest(w, r, n, repo, strings.TrimPrefix(action, "change-requests/"))
+			return
+		}
 		httpErr(w, http.StatusNotFound, "no such native version-control action")
 	}
+}
+
+// httpChangeRequest serves version/change-requests/<number>[/<action>]:
+// GET for detail (?lines=1 adds patches), POST comment|review|merge|close|reopen.
+func (a *App) httpChangeRequest(w http.ResponseWriter, r *http.Request, n *nativeVCS, repo *Repo, rest string) {
+	parts := strings.SplitN(rest, "/", 2)
+	number, err := strconv.Atoi(parts[0])
+	if err != nil || number <= 0 {
+		httpErr(w, http.StatusNotFound, "no such change request")
+		return
+	}
+	svc := &changeRequestService{db: globalCtx.AppDB(), n: n}
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		d, err := svc.detail(repo, number, r.URL.Query().Get("lines") == "1")
+		if err != nil {
+			httpErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		httpJSON(w, d)
+		return
+	}
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		Body         string `json:"body"`
+		Path         string `json:"path"`
+		Line         int    `json:"line"`
+		Verdict      string `json:"verdict"`
+		Mode         string `json:"mode"`
+		Message      string `json:"message"`
+		DeleteSource bool   `json:"delete_source"`
+	}
+	if r.ContentLength != 0 && json.NewDecoder(r.Body).Decode(&body) != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	actor := httpActor(r)
+	var value any
+	switch parts[1] {
+	case "comment":
+		value, err = svc.comment(repo, number, actor, body.Body, body.Path, body.Line)
+	case "review":
+		value, err = svc.review(repo, number, actor, body.Verdict, body.Body)
+	case "merge":
+		var d *ChangeRequestDetail
+		var res *nativeRefMerge
+		d, res, err = svc.merge(repo, number, actor, body.Mode, body.Message, body.DeleteSource)
+		value = map[string]any{"change_request": d, "merge": res}
+	case "close":
+		value, err = svc.setState(repo, number, actor, "closed")
+	case "reopen":
+		value, err = svc.setState(repo, number, actor, "open")
+	default:
+		httpErr(w, http.StatusNotFound, "no such change-request action")
+		return
+	}
+	if err != nil {
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpJSON(w, value)
 }

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.16.0
+version: 0.17.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,13 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.17.0 adds native change requests and protected branches.
+  change_requests opens a request to land a source branch on a target branch,
+  takes comments and reviews (approve / request changes), and merges it
+  without the target checked out. repos_branch action=protect makes a branch
+  change only through merged requests, optionally after a number of
+  approvals; create with switch=true starts a work branch carrying unsaved
+  changes.
   v0.16.0 adds native merging. repos_merge merges, squashes, cherry-picks or
   reverts into the checked-out branch with line-level three-way merges;
   conflicts come back as data (base, ours, theirs) and are settled with
@@ -266,6 +273,8 @@ provides:
       description: Restore selected paths from a native Code revision.
     - name: repos_branch
       description: List, create, switch (with auto-stash), delete or compare native branches.
+    - name: change_requests
+      description: Open, review, comment on, merge or close native change requests that land a branch on another branch.
     - name: repos_merge
       description: Merge, squash, cherry-pick or revert native history, with structured conflicts to resolve, continue or abort.
     - name: repos_undo
@@ -393,7 +402,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.16.0
+    ref: code/v0.17.0
     entry: mcp/code
   port: 8080
   health_check: /health
