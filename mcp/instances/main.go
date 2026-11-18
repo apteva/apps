@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.18.0
+version: 0.19.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -113,7 +113,17 @@ config_schema:
     label: Reverse tunnel port range
     type: text
     default: "22000-22999"
-    description: "Loopback ports on this server assigned one per tunnel machine. They are never exposed publicly. Env override: APTEVA_INSTANCES_TUNNEL_PORTS."
+    description: "Loopback ports on this server assigned one per tunnel machine. Public SSH, when turned on, reaches them only through Instances. Env override: APTEVA_INSTANCES_TUNNEL_PORTS."
+  - name: reverse_tunnel_public_ports
+    label: Public SSH port range
+    type: text
+    default: "23000-23999"
+    description: "Public ports on this server, one per tunnel machine with public SSH turned on (instance_public_ssh_set). Instances forwards each to the machine's tunnel. Allow this range in any cloud firewall in front of the server. Env override: APTEVA_INSTANCES_TUNNEL_PUBLIC_PORTS."
+  - name: reverse_tunnel_public_host
+    label: Public SSH address
+    type: text
+    default: ""
+    description: "Hostname or IP customers use for public SSH. Defaults to reverse_tunnel_host. Env override: APTEVA_INSTANCES_TUNNEL_PUBLIC_HOST."
 
 provides:
   http_routes:
@@ -153,10 +163,11 @@ provides:
     - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
     - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
     - { name: object_storage_destroy, description: "Permanently delete an object-storage resource with explicit confirmation." }
-    - { name: instance_register,     description: "Register an existing Linux (Ubuntu/Debian) or macOS machine; optionally configure baseline utilities, Docker (Linux), and language tools. Returns one enrollment command that detects the OS. Args: name, ssh_user, ssh_host? (direct), ssh_port?, connect? (direct|vpn|reverse_tunnel), platform?, setup?, tags_json?; or id to resume enrollment." }
-    - { name: instance_get,          description: "Fetch one instance by id, including connect_mode, connected and last_seen_at." }
+    - { name: instance_register,     description: "Register an existing Linux (Ubuntu/Debian) or macOS machine; optionally configure baseline utilities, Docker (Linux), and language tools. Returns one enrollment command that detects the OS. Args: name, ssh_user, ssh_host? (direct), ssh_port?, connect? (direct|vpn|reverse_tunnel), platform?, public_ssh? (reverse_tunnel), setup?, tags_json?; or id to resume enrollment." }
+    - { name: instance_get,          description: "Fetch one instance by id, including connect_mode, connected, last_seen_at and public_ssh (tunnel machines)." }
     - { name: instance_list,         description: "List instances with online status. Args: provider?, status?, connected? (filters)." }
-    - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo); registered machines get a cleanup_command to run on them. Args: id." }
+    - { name: instance_public_ssh_set, description: "Turn public SSH on or off for a reverse-tunnel machine (key-only check, public port, server firewall, proxy to the tunnel). Args: id, enabled, allowed_cidrs?, max_connections?." }
     - { name: instance_compare_provider, description: "Read provider state and compare it with the tracked server, IP, and volume inventory without making changes." }
     - { name: instance_provider_inventory, description: "Read full provider resource inventory, including Scaleway Instances, Elastic Metal servers, Flexible IPs, and tracked storage." }
     - { name: instance_storage_benchmark, description: "Run an optional bounded 256 MiB post-provision write benchmark and save its result. Args: id, target_path?." }
@@ -241,6 +252,14 @@ provides:
         connected: boolean
         last_seen_at: string
         connect_mode: string
+    - name: instance.public_ssh_changed
+      description: Public SSH was turned on, changed or turned off for a reverse-tunnel machine.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        public_ssh: object
     - name: instance.error
       description: An instance entered an error state.
       payload:
@@ -264,7 +283,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.18.0
+    ref: instances/v0.19.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -349,6 +368,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
+	restorePublicSSH(ctx)
 	startPresence(ctx)
 	return startMonitoring(ctx)
 }

@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.18.0
+version: 0.19.0
 description: |
+  v0.19.0 adds public SSH for reverse-tunnel machines: Instances proxies a
+  public port to the tunnel (the tunnel key stays loopback-only), after making
+  the machine key-only, with source, connection and rate limits. Removing a
+  machine returns a cleanup command; host keys can be checked against the
+  fingerprints the setup command prints.
   v0.18.0 manages Macs and machines behind a router. One registration
   command sets up Linux or macOS; reverse_tunnel connects machines with no
   inbound access through a restricted SSH tunnel to this server, with no
@@ -118,7 +123,17 @@ config_schema:
     label: Reverse tunnel port range
     type: text
     default: "22000-22999"
-    description: "Loopback ports on this server assigned one per tunnel machine. They are never exposed publicly. Env override: APTEVA_INSTANCES_TUNNEL_PORTS."
+    description: "Loopback ports on this server assigned one per tunnel machine. Public SSH, when turned on, reaches them only through Instances. Env override: APTEVA_INSTANCES_TUNNEL_PORTS."
+  - name: reverse_tunnel_public_ports
+    label: Public SSH port range
+    type: text
+    default: "23000-23999"
+    description: "Public ports on this server, one per tunnel machine with public SSH turned on (instance_public_ssh_set). Instances forwards each to the machine's tunnel. Allow this range in any cloud firewall in front of the server. Env override: APTEVA_INSTANCES_TUNNEL_PUBLIC_PORTS."
+  - name: reverse_tunnel_public_host
+    label: Public SSH address
+    type: text
+    default: ""
+    description: "Hostname or IP customers use for public SSH. Defaults to reverse_tunnel_host. Env override: APTEVA_INSTANCES_TUNNEL_PUBLIC_HOST."
 
 provides:
   http_routes:
@@ -179,13 +194,15 @@ provides:
     - name: object_storage_destroy
       description: Permanently delete a managed object-storage resource with explicit confirmation.
     - name: instance_register
-      description: Register an existing Linux (Ubuntu/Debian) or macOS machine with optional baseline, Docker (Linux), and language tools setup. Returns one connection command that detects the OS. connect is direct, vpn (Linux), or reverse_tunnel for machines behind a router; id alone resumes enrollment.
+      description: Register an existing Linux (Ubuntu/Debian) or macOS machine with optional baseline, Docker (Linux), and language tools setup. Returns one connection command that detects the OS. connect is direct, vpn (Linux), or reverse_tunnel for machines behind a router (public_ssh=true also opens a public SSH port); id alone resumes enrollment.
     - name: instance_get
-      description: Fetch one instance by id (0 for local), including connect_mode, connected and last_seen_at.
+      description: Fetch one instance by id (0 for local), including connect_mode, connected, last_seen_at and public_ssh.
     - name: instance_list
       description: List instances with online status, optionally filtered by provider, status or connected.
     - name: instance_destroy
       description: Terminate a managed upstream resource and remove its row, or forget an externally registered host without modifying it. Refused for local (id 0) and Contabo.
+    - name: instance_public_ssh_set
+      description: Turn public SSH on or off for a reverse-tunnel machine. Checks the machine accepts SSH keys only, opens a port from reverse_tunnel_public_ports and forwards it to the tunnel. Args id, enabled, allowed_cidrs?, max_connections?.
     - name: instance_compare_provider
       description: Compare tracked server, IP, status, and volume state with the provider without making changes.
     - name: instance_provider_inventory
@@ -299,6 +316,14 @@ provides:
         connected: boolean
         last_seen_at: string
         connect_mode: string
+    - name: instance.public_ssh_changed
+      description: Public SSH was turned on, changed or turned off for a reverse-tunnel machine.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        public_ssh: object
     - name: instance.error
       description: An instance entered an error state.
       payload:
@@ -326,7 +351,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.18.0
+    ref: instances/v0.19.0
     entry: mcp/instances
   port: 8080
   health_check: /health

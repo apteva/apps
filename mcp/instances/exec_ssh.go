@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
@@ -111,15 +112,25 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 		port = 22
 	}
 	var observedHostKey string
+	expected := ""
+	if inst.SSHHostKey == "" && globalCtx != nil && globalCtx.AppDB() != nil {
+		_ = globalCtx.AppDB().QueryRow(`SELECT ssh_host_key_expected FROM instances WHERE id = ?`, inst.ID).Scan(&expected)
+	}
 	cfg := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// Negotiate the pinned key's type, so a server offering several key
+		// types is always checked against the one that was pinned.
+		HostKeyAlgorithms: hostKeyAlgorithms(inst.SSHHostKey),
+		User:              user,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		// Trust on first use: the first successful connection pins the
 		// server key in the instance row. Every reconnect verifies it.
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			encoded := base64.StdEncoding.EncodeToString(key.Marshal())
 			if inst.SSHHostKey != "" && inst.SSHHostKey != encoded {
 				return fmt.Errorf("SSH host key changed for instance %d (received %s)", inst.ID, ssh.FingerprintSHA256(key))
+			}
+			if expected != "" && !fingerprintListed(expected, ssh.FingerprintSHA256(key)) {
+				return fmt.Errorf("SSH host key %s for instance %d does not match expected_host_key %s", ssh.FingerprintSHA256(key), inst.ID, expected)
 			}
 			observedHostKey = encoded
 			return nil
@@ -657,3 +668,64 @@ func probeSSHReady(inst *Instance, timeout time.Duration) error {
 }
 
 var probeSSHReadyFn = probeSSHReady
+
+func hostKeyAlgorithms(pinned string) []string {
+	if pinned == "" {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(pinned)
+	if err != nil {
+		return nil
+	}
+	key, err := ssh.ParsePublicKey(raw)
+	if err != nil {
+		return nil
+	}
+	if key.Type() == ssh.KeyAlgoRSA {
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	}
+	return []string{key.Type()}
+}
+
+// Records the host key fingerprints the operator expects (the registration
+// command prints one per host key, comma-separated). A machine already pinned
+// is checked against them now; otherwise its first connection is.
+func expectHostKey(db *sql.DB, inst *Instance, raw string) error {
+	var list []string
+	for _, f := range strings.Split(raw, ",") {
+		f = strings.TrimSpace(f)
+		if !strings.HasPrefix(f, "SHA256:") || len(f) < 20 || strings.ContainsAny(f, " \t\r\n") {
+			return errors.New("expected_host_key must be the SHA256 fingerprints printed by the registration command, such as SHA256:abc...,SHA256:def...")
+		}
+		list = append(list, f)
+	}
+	if len(list) == 0 || len(list) > 8 {
+		return errors.New("expected_host_key must list 1 to 8 fingerprints")
+	}
+	expected := strings.Join(list, ",")
+	if inst.SSHHostKey != "" {
+		raw, err := base64.StdEncoding.DecodeString(inst.SSHHostKey)
+		if err != nil {
+			return err
+		}
+		key, err := ssh.ParsePublicKey(raw)
+		if err != nil {
+			return err
+		}
+		if got := ssh.FingerprintSHA256(key); !fingerprintListed(expected, got) {
+			return fmt.Errorf("the machine Instances reached has host key %s, which is not in expected_host_key: it is not the machine you set up. Destroy this registration, check the machine and register it again", got)
+		}
+		return nil
+	}
+	_, err := db.Exec(`UPDATE instances SET ssh_host_key_expected = ? WHERE id = ? AND ssh_host_key = ''`, expected, inst.ID)
+	return err
+}
+
+func fingerprintListed(list, fingerprint string) bool {
+	for _, f := range strings.Split(list, ",") {
+		if f == fingerprint {
+			return true
+		}
+	}
+	return false
+}

@@ -45,6 +45,7 @@ type Instance struct {
 	SSHCredentialRef      string               `json:"-"`
 	SSHPrivateKey         string               `json:"-"`
 	SSHPublicKey          string               `json:"ssh_public_key,omitempty"`
+	PublicSSH             *PublicSSH           `json:"public_ssh,omitempty"`
 	SSHHostKey            string               `json:"-"`
 	TagsJSON              string               `json:"tags_json,omitempty"`
 	ResourcesJSON         string               `json:"resources_json,omitempty"`
@@ -100,6 +101,9 @@ func (i *Instance) stripSecrets() *Instance {
 	c.SSHCredentialRef = ""
 	c.SSHHostKey = ""
 	c.Capabilities = instanceCapabilities(&c)
+	if c.ConnectMode == "reverse_tunnel" {
+		c.PublicSSH = publicSSHView(c.ID)
+	}
 	return withLocalPresence(&c)
 }
 

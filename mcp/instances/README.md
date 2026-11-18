@@ -2,7 +2,7 @@
 
 SSH credential storage and upgrade behavior: [encrypted SSH vault](docs/ssh-credential-storage.md).
 
-Macs, machines behind a router (reverse tunnels) and online status: [details](docs/macos-and-reverse-tunnels.md).
+Macs, machines behind a router (reverse tunnels), public SSH for those machines and online status: [details](docs/macos-and-reverse-tunnels.md).
 
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.

@@ -115,7 +115,7 @@ func TestLifecycleMigration_PreservesExistingRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"009_host_setup.sql", "010_object_storage_setup.sql", "011_native_runtime.sql", "012_ovh_orders.sql", "013_firewalls.sql", "014_ssh_credential_refs.sql", "015_connect_modes_and_presence.sql"} {
+	for _, name := range []string{"009_host_setup.sql", "010_object_storage_setup.sql", "011_native_runtime.sql", "012_ovh_orders.sql", "013_firewalls.sql", "014_ssh_credential_refs.sql", "015_connect_modes_and_presence.sql", "016_public_ssh_and_presence_baseline.sql"} {
 		body, err = os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatal(err)

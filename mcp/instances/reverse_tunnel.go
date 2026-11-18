@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -25,6 +27,7 @@ const (
 	reverseTunnelConfigMarker  = "# apteva-instances reverse tunnel"
 	defaultReverseTunnelPorts  = "22000-22999"
 	reverseTunnelSetupTimeout  = 60 * time.Second
+	reverseTunnelKeysHeader    = "# apteva-instances install "
 	reverseTunnelCommandPrefix = "restrict,port-forwarding,command=\"/bin/false\",permitlisten="
 )
 
@@ -54,6 +57,11 @@ type reverseTunnel struct {
 	ServerHost       string
 	ServerPort       int
 	ServerKnownHosts string
+	// Public SSH (0.19.0): a public port proxied to Port. 0 = off.
+	PublicPort           int
+	PublicCIDRs          string
+	PublicMaxConnections int
+	PublicFirewall       string
 }
 
 func loadReverseTunnelConfig(config sdk.Config) (reverseTunnelConfig, error) {
@@ -134,6 +142,7 @@ Match User ` + reverseTunnelUser + `
     PasswordAuthentication no
     KbdInteractiveAuthentication no
     AllowTcpForwarding remote
+    PermitOpen none
     AllowAgentForwarding no
     AllowStreamLocalForwarding no
     X11Forwarding no
@@ -151,16 +160,21 @@ if ! id "$user" >/dev/null 2>&1; then
 fi
 $SUDO install -d -m 0755 -o root -g root /etc/apteva-tunnel
 [ -e ` + reverseTunnelKeysFile + ` ] || $SUDO install -m 0644 -o root -g root /dev/null ` + reverseTunnelKeysFile + `
-if ! $SUDO grep -qF ` + quoteShellArg(reverseTunnelConfigMarker) + ` /etc/ssh/sshd_config; then
- candidate=$(mktemp)
- trap 'rm -f "$candidate"' EXIT
- $SUDO cat /etc/ssh/sshd_config > "$candidate"
- printf '\n%s' ` + quoteShellArg(block) + ` >> "$candidate"
+# The managed block sits at the end of sshd_config. Rebuild it from the
+# current release (earlier releases may have written fewer settings) and
+# install only when it changed.
+candidate=$(mktemp)
+trap 'rm -f "$candidate"' EXIT
+$SUDO cat /etc/ssh/sshd_config | awk -v m=` + quoteShellArg(reverseTunnelConfigMarker) + ` '
+ index($0, m) == 1 { skip = 1; next }
+ skip && ($0 == "Match User ` + reverseTunnelUser + `" || $0 ~ /^    /) { next }
+ { skip = 0; if ($0 == "") { blank++; next } while (blank > 0) { print ""; blank-- } print }
+' > "$candidate"
+printf '\n%s' ` + quoteShellArg(block) + ` >> "$candidate"
+if ! $SUDO cmp -s "$candidate" /etc/ssh/sshd_config; then
  $SUDO "$sshd_bin" -t -f "$candidate" || { echo 'The SSH server rejected the tunnel configuration; nothing was changed'; exit 1; }
  $SUDO cp /etc/ssh/sshd_config /etc/ssh/sshd_config.apteva-backup
  $SUDO install -m 0644 -o root -g root "$candidate" /etc/ssh/sshd_config
- rm -f "$candidate"
- trap - EXIT
  # Reload only a running daemon; an idle socket-activated sshd (Ubuntu 24.04)
  # reads the new configuration when it next starts.
  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ssh; then $SUDO systemctl reload ssh
@@ -168,8 +182,12 @@ if ! $SUDO grep -qF ` + quoteShellArg(reverseTunnelConfigMarker) + ` /etc/ssh/ss
  elif [ -r /run/sshd.pid ] && kill -0 "$(cat /run/sshd.pid)" 2>/dev/null; then $SUDO kill -HUP "$(cat /run/sshd.pid)"
  fi
 fi
+rm -f "$candidate"
+trap - EXIT
 effective=$($SUDO "$sshd_bin" -T -C "user=$user,host=apteva-tunnel-check,addr=192.0.2.1")
-printf '%s\n' "$effective" | grep -qx 'allowtcpforwarding remote' || { echo 'The SSH server does not apply the tunnel settings to the apteva-tunnel account; check its configuration for an earlier Match block'; exit 1; }
+for expected in 'allowtcpforwarding remote' 'permitopen none' 'permittty no' 'x11forwarding no' 'allowagentforwarding no' 'gatewayports no' 'forcecommand /bin/false'; do
+ printf '%s\n' "$effective" | grep -qx "$expected" || { echo "The SSH server does not apply the tunnel settings to the apteva-tunnel account ($expected); check its configuration for an earlier Match block"; exit 1; }
+done
 for directive in allowusers allowgroups denyusers denygroups; do
  values=$(printf '%s\n' "$effective" | sed -n "s/^$directive //p")
  [ -z "$values" ] || echo "WARNING $directive $values"
@@ -222,28 +240,55 @@ func reverseTunnelKeyLine(t reverseTunnel) string {
 // Rewrites the server's tunnel authorized_keys from the database, so it always
 // matches the set of registered tunnel machines exactly. A removed machine's
 // live session is closed, which frees its port immediately.
-func syncReverseTunnelKeys(db *sql.DB, closePorts ...int) error {
+//
+// The file starts with this install's identity. A file written by another
+// Instances install on the same server is never overwritten: both would
+// otherwise keep replacing each other's machines. A file from 0.18.0 (no
+// identity line) is adopted when every key in it is one of this install's.
+func syncReverseTunnelKeys(db *sql.DB, removed ...reverseTunnel) error {
 	reverseTunnelMu.Lock()
 	defer reverseTunnelMu.Unlock()
 	tunnels, err := listReverseTunnels(db)
 	if err != nil {
 		return err
 	}
+	identity, err := installIdentity(db)
+	if err != nil {
+		return err
+	}
+	header := reverseTunnelKeysHeader + identity
 	lines := make([]string, 0, len(tunnels))
 	for _, t := range tunnels {
 		lines = append(lines, reverseTunnelKeyLine(t))
 	}
-	content := strings.Join(lines, "\n")
-	if content != "" {
+	known := append([]string{}, lines...)
+	for _, t := range removed {
+		known = append(known, reverseTunnelKeyLine(t))
+	}
+	content := header + "\n" + strings.Join(lines, "\n")
+	if len(lines) > 0 {
 		content += "\n"
 	}
 	script := reverseTunnelPrivilege + `
+keys=` + reverseTunnelKeysFile + `
+header=` + quoteShellArg(header) + `
+known=` + quoteShellArg(strings.Join(known, "\n")) + `
+if $SUDO test -s "$keys"; then
+ first=$($SUDO head -n 1 "$keys")
+ if [ "$first" != "$header" ]; then
+  case "$first" in ` + quoteShellArg(reverseTunnelKeysHeader) + `*) echo 'FOREIGN'; exit 7;; esac
+  $SUDO cat "$keys" | while IFS= read -r line; do
+   [ -z "$line" ] && continue
+   printf '%s\n' "$known" | grep -qxF -- "$line" || { echo 'FOREIGN'; exit 7; }
+  done
+ fi
+fi
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 printf '%s' ` + quoteShellArg(content) + ` > "$tmp"
-$SUDO install -m 0644 -o root -g root "$tmp" ` + reverseTunnelKeysFile + `
+$SUDO install -m 0644 -o root -g root "$tmp" "$keys"
 `
-	for _, port := range closePorts {
+	for _, t := range removed {
 		// Only sshd sessions of the tunnel account are ever signalled.
 		// ps truncates long user names, so compare numeric uids.
 		script += fmt.Sprintf(`tunnel_uid=$(id -u %[1]s)
@@ -254,17 +299,39 @@ sleep 1
 # Without process details (restricted /proc), end every tunnel session: the
 # account runs nothing else, and other machines reconnect within seconds.
 if $SUDO ss -Htln 'sport = :%[2]d' 2>/dev/null | grep -q .; then $SUDO pkill -u "$tunnel_uid" 2>/dev/null || true; sleep 1; fi
-`, reverseTunnelUser, port)
+`, reverseTunnelUser, t.Port)
 	}
 	out, code, err := reverseTunnelRunLocal(script, reverseTunnelSetupTimeout)
+	if err == nil && code == 7 {
+		return fmt.Errorf("%s holds tunnel keys from another Instances install on this server; refusing to replace them. Use one Instances install per server for reverse tunnels", reverseTunnelKeysFile)
+	}
 	if err != nil || code != 0 {
 		return fmt.Errorf("update reverse tunnel keys: %s", strings.TrimSpace(truncateSetupOutput(out)))
 	}
 	return nil
 }
 
+// A random identity for this install, created once.
+func installIdentity(db *sql.DB) (string, error) {
+	var value string
+	if err := db.QueryRow(`SELECT value FROM install_identity WHERE key='id'`).Scan(&value); err == nil {
+		return value, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO install_identity(key, value) VALUES('id', ?)`, hex.EncodeToString(buf)); err != nil {
+		return "", err
+	}
+	err := db.QueryRow(`SELECT value FROM install_identity WHERE key='id'`).Scan(&value)
+	return value, err
+}
+
 func listReverseTunnels(db *sql.DB) ([]reverseTunnel, error) {
-	rows, err := db.Query(`SELECT instance_id, port, local_ssh_port, public_key, credential_ref, server_host, server_port, server_known_hosts FROM reverse_tunnels ORDER BY port`)
+	rows, err := db.Query(`SELECT instance_id, port, local_ssh_port, public_key, credential_ref, server_host, server_port, server_known_hosts, public_port, public_cidrs, public_max_connections, public_firewall FROM reverse_tunnels ORDER BY port`)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +339,7 @@ func listReverseTunnels(db *sql.DB) ([]reverseTunnel, error) {
 	var out []reverseTunnel
 	for rows.Next() {
 		var t reverseTunnel
-		if err := rows.Scan(&t.InstanceID, &t.Port, &t.LocalSSHPort, &t.PublicKey, &t.CredentialRef, &t.ServerHost, &t.ServerPort, &t.ServerKnownHosts); err != nil {
+		if err := rows.Scan(&t.InstanceID, &t.Port, &t.LocalSSHPort, &t.PublicKey, &t.CredentialRef, &t.ServerHost, &t.ServerPort, &t.ServerKnownHosts, &t.PublicPort, &t.PublicCIDRs, &t.PublicMaxConnections, &t.PublicFirewall); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -282,8 +349,8 @@ func listReverseTunnels(db *sql.DB) ([]reverseTunnel, error) {
 
 func getReverseTunnel(db *sql.DB, instanceID int64) (*reverseTunnel, error) {
 	var t reverseTunnel
-	err := db.QueryRow(`SELECT instance_id, port, local_ssh_port, public_key, credential_ref, server_host, server_port, server_known_hosts FROM reverse_tunnels WHERE instance_id=?`, instanceID).
-		Scan(&t.InstanceID, &t.Port, &t.LocalSSHPort, &t.PublicKey, &t.CredentialRef, &t.ServerHost, &t.ServerPort, &t.ServerKnownHosts)
+	err := db.QueryRow(`SELECT instance_id, port, local_ssh_port, public_key, credential_ref, server_host, server_port, server_known_hosts, public_port, public_cidrs, public_max_connections, public_firewall FROM reverse_tunnels WHERE instance_id=?`, instanceID).
+		Scan(&t.InstanceID, &t.Port, &t.LocalSSHPort, &t.PublicKey, &t.CredentialRef, &t.ServerHost, &t.ServerPort, &t.ServerKnownHosts, &t.PublicPort, &t.PublicCIDRs, &t.PublicMaxConnections, &t.PublicFirewall)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -354,24 +421,42 @@ func reverseTunnelEnrollment(db *sql.DB, t *reverseTunnel) (*tunnelEnrollment, e
 	if err != nil {
 		return nil, err
 	}
-	return &tunnelEnrollment{Port: t.Port, LocalSSHPort: t.LocalSSHPort, ServerHost: t.ServerHost, ServerPort: t.ServerPort, KnownHosts: t.ServerKnownHosts, PrivateKey: key, PublicKey: t.PublicKey}, nil
+	return &tunnelEnrollment{Port: t.Port, LocalSSHPort: t.LocalSSHPort, ServerHost: t.ServerHost, ServerPort: t.ServerPort, KnownHosts: t.ServerKnownHosts, PrivateKey: key, PublicKey: t.PublicKey, KeysOnly: t.PublicPort > 0}, nil
 }
 
-// Forgets the machine's tunnel: its key leaves the server, its live session is
-// closed and its port becomes free. The machine itself is never contacted.
+// Forgets the machine's tunnel: public SSH closes, its key leaves the server,
+// its live session is closed and its port becomes free. The machine itself is
+// never contacted. If the server cleanup fails the row is kept, so a retried
+// destroy repeats it.
 func removeReverseTunnel(db *sql.DB, inst *Instance) error {
 	t, err := getReverseTunnel(db, inst.ID)
 	if err != nil || t == nil {
 		return err
 	}
+	if err = disablePublicSSH(db, inst.ID); err != nil {
+		return err
+	}
 	if _, err = db.Exec(`DELETE FROM reverse_tunnels WHERE instance_id=?`, inst.ID); err != nil {
 		return err
 	}
-	if err = syncReverseTunnelKeys(db, t.Port); err != nil {
-		// Restore the row so a retried destroy repeats the server cleanup.
+	if err = syncReverseTunnelKeys(db, *t); err != nil {
 		_, _ = db.Exec(`INSERT OR IGNORE INTO reverse_tunnels(instance_id, port, local_ssh_port, public_key, credential_ref, server_host, server_port, server_known_hosts, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 			t.InstanceID, t.Port, t.LocalSSHPort, t.PublicKey, t.CredentialRef, t.ServerHost, t.ServerPort, t.ServerKnownHosts, nowUTC())
 		return err
 	}
 	return removeSSHCredential(db, t.CredentialRef)
+}
+
+// Undoes a registration that failed before its command was returned. The key
+// never left this server, so the row and credential are deleted outright; the
+// next successful key sync leaves the key out even if this one fails.
+func forgetReverseTunnel(db *sql.DB, instanceID int64) {
+	t, err := getReverseTunnel(db, instanceID)
+	if err != nil || t == nil {
+		return
+	}
+	_ = disablePublicSSH(db, instanceID)
+	_, _ = db.Exec(`DELETE FROM reverse_tunnels WHERE instance_id=?`, instanceID)
+	_ = removeSSHCredential(db, t.CredentialRef)
+	_ = syncReverseTunnelKeys(db, *t)
 }

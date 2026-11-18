@@ -3,7 +3,7 @@ import {Window} from "happy-dom";
 import React, {act} from "react";
 import type {Root} from "react-dom/client";
 let createRoot:typeof import("react-dom/client").createRoot;
-import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection, presenceText} from "./InstancesPanel";
+import {CleanupCommandDialog, CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection, PublicSSHDialog, presenceText, publicSSHCommand} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
 const win = new Window({url:"http://localhost"});
@@ -318,4 +318,28 @@ test("machine list shows online status", async () => {
  await render(<InstanceCard inst={{id:3,name:'Mac',provider:'external',status:'ready',connect_mode:'reverse_tunnel',ssh_host:'127.0.0.1',ssh_port:22004,connected:true,monthly_cost_cents:0} as any} withParams={params} busy={false} onUpgrade={()=>{}} onVolumes={()=>{}} onDestroy={()=>{}}/>);
  expect(container.textContent).toContain('online');
  expect(container.textContent).toContain('reverse tunnel · port 22004');
+});
+
+test("public SSH turns on with allowed sources and shows the customer command", async () => {
+ expect(publicSSHCommand({ssh_user:'apteva',public_ssh:{enabled:true,host:'tunnel.example.com',port:23001}})).toBe('ssh -p 23001 apteva@tunnel.example.com');
+ expect(publicSSHCommand({ssh_user:'apteva',public_ssh:{enabled:false}})).toBe('');
+ let sent:any, path='';
+ globalThis.fetch=(async(input:any,init:any)=>{path=new URL(String(input),'http://localhost').pathname;sent=JSON.parse(init.body);return response({public_ssh:{enabled:true,host:'tunnel.example.com',port:23001,allowed_cidrs:['203.0.113.7/32'],max_connections:5,firewall:'ufw'}});}) as unknown as typeof fetch;
+ await render(<PublicSSHDialog inst={{id:4,name:'Studio',provider:'external',status:'ready',connect_mode:'reverse_tunnel',ssh_user:'apteva',monthly_cost_cents:0} as any} withParams={params} onClose={()=>{}} onChange={()=>{}}/>);
+ const [sources,max]=Array.from(container.querySelectorAll('input')) as HTMLInputElement[];
+ const setValue=async(el:HTMLInputElement,value:string)=>{await act(async()=>{Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value')!.set!.call(el,value);el.dispatchEvent(new win.Event('input',{bubbles:true}) as any);});};
+ await setValue(sources,'203.0.113.7, 198.51.100.0/24');
+ await setValue(max,'5');
+ await act(async()=>{Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Turn on')!.click();});
+ expect(path).toBe('/api/apps/instances/api/instances/4/public-ssh');
+ expect(sent).toEqual({enabled:true,allowed_cidrs:['203.0.113.7','198.51.100.0/24'],max_connections:5});
+ expect(container.textContent).toContain('ssh -p 23001 apteva@tunnel.example.com');
+ expect(container.textContent).toContain('opened in ufw');
+ expect(container.textContent).toContain('Turn off');
+});
+
+test("removing a machine shows its cleanup command", async () => {
+ await render(<CleanupCommandDialog name="Studio" command="sudo sh cleanup" onClose={()=>{}}/>);
+ expect(container.textContent).toContain('Studio was removed');
+ expect(container.textContent).toContain('sudo sh cleanup');
 });

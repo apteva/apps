@@ -18,7 +18,7 @@ var sshUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}\$?$`)
 
 func registerHost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id := int64Arg(args, "id"); id > 0 {
-		for _, key := range []string{"name", "ssh_host", "ssh_user", "ssh_port", "setup", "vpn", "connect", "platform"} {
+		for _, key := range []string{"name", "ssh_host", "ssh_user", "ssh_port", "setup", "vpn", "connect", "platform", "public_ssh", "public_ssh_allowed_cidrs"} {
 			if _, ok := args[key]; ok {
 				return nil, errors.New("resume with id alone; use instance_wait_ready to change setup")
 			}
@@ -67,6 +67,22 @@ func registerHost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if options.Docker && platform == "macos" {
 		return nil, errors.New(macOSDockerUnsupported)
+	}
+	var publicSSH *publicSSHOptions
+	if want, _ := args["public_ssh"].(bool); want {
+		if connect != "reverse_tunnel" {
+			return nil, errors.New("public_ssh applies to connect=reverse_tunnel; machines registered directly are already reachable at their own address")
+		}
+		opts, err := parsePublicSSHOptions(args["public_ssh_allowed_cidrs"], args["public_ssh_max_connections"])
+		if err != nil {
+			return nil, err
+		}
+		if _, err = loadPublicSSHConfig(ctx.Config()); err != nil {
+			return nil, err
+		}
+		publicSSH = &opts
+	} else if _, ok := args["public_ssh_allowed_cidrs"]; ok {
+		return nil, errors.New("public_ssh_allowed_cidrs needs public_ssh=true")
 	}
 	if name == "" || user == "" || (connect == "direct" && host == "") {
 		return nil, errors.New("name, ssh_user, and ssh_host (unless connect is vpn or reverse_tunnel) are required")
@@ -136,9 +152,14 @@ func registerHost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if e == nil {
 			e = syncReverseTunnelKeys(ctx.AppDB())
 		}
+		if e == nil && publicSSH != nil {
+			// The setup command makes the machine key-only before its tunnel
+			// starts, so no check over SSH is needed here.
+			_, e = enablePublicSSH(ctx, inst, *publicSSH, false)
+		}
 		if e != nil {
 			// Nothing was handed to the machine yet: undo the registration.
-			_ = removeReverseTunnel(ctx.AppDB(), inst)
+			forgetReverseTunnel(ctx.AppDB(), inst.ID)
 			_ = dbDeleteInstance(ctx.AppDB(), inst.ID)
 			_ = removeSSHCredential(ctx.AppDB(), inst.SSHCredentialRef)
 			return nil, e
@@ -269,6 +290,10 @@ func enrollmentResponse(ctx *sdk.AppCtx, inst *Instance) (any, error) {
 		authorization["tunnel_port"] = tunnel.Port
 		authorization["tunnel_server"] = net.JoinHostPort(tunnel.ServerHost, fmt.Sprint(tunnel.ServerPort))
 	}
+	authorization["host_key_check"] = "The command prints the machine's SSH host key fingerprints; pass that value to instance_wait_ready as expected_host_key so Instances verifies it instead of trusting the first key it sees."
+	if tunnel != nil && tunnel.KeysOnly {
+		authorization["public_ssh_note"] = "Public SSH is on: the command also makes this machine's SSH server accept keys only."
+	}
 	return map[string]any{"instance": inst.stripSecrets(), "authorization": authorization}, nil
 }
 
@@ -321,16 +346,26 @@ func hostEnrollmentCommand(inst *Instance, vpnConfig string, tunnel *tunnelEnrol
 		return "", errors.New("unsupported SSH account name for enrollment command")
 	}
 	elevated := inst.Setup != nil && (inst.Setup.Requested.Baseline || inst.Setup.Requested.Docker || inst.Setup.Requested.Runtimes)
+	localSSHPort := inst.SSHPort
+	if tunnel != nil {
+		localSSHPort = tunnel.LocalSSHPort
+	}
 	linux, err := linuxEnrollmentBody(inst, elevated, vpnConfig)
 	if err != nil {
 		return "", err
 	}
 	// One command for every supported OS: it detects macOS or Linux itself.
 	script := enrollmentPrelude + "user=" + quoteShellArg(inst.SSHUser) + "\npublic_key=" + quoteShellArg(inst.SSHPublicKey) + "\n" +
-		"os_name=$(uname -s)\nif [ \"$os_name\" = Darwin ]; then\n" + macEnrollmentBody(inst, elevated, vpnConfig != "") + "else\n" + linux + "fi\n"
+		"os_name=$(uname -s)\nif [ \"$os_name\" = Darwin ]; then\n" + macEnrollmentBody(inst, elevated, vpnConfig != "", localSSHPort) + "else\n" + linux + "fi\n"
+	if tunnel != nil && tunnel.KeysOnly {
+		// Before the tunnel starts, so the public port never reaches an SSH
+		// server that accepts passwords.
+		script += "# Public SSH: this machine's SSH server must accept keys only.\nSUDO=\"\"\nsshd_bin=$(command -v sshd || echo /usr/sbin/sshd)\n" + keysOnlySSHDBody
+	}
 	if tunnel != nil {
 		script += tunnelEnrollmentBody(tunnel)
 	}
+	script += printHostKeyFingerprint
 	script += "printf '%s\\n' 'SSH authorized. Instances will verify connectivity and complete the selected setup.'\n"
 	return "sudo sh <<'APTEVA_HOST_ENROLLMENT'\n" + script + "APTEVA_HOST_ENROLLMENT", nil
 }
@@ -385,6 +420,11 @@ func waitReadyWithOptions(work context.Context, ctx *sdk.AppCtx, args map[string
 	inst, err := dbGetInstance(ctx.AppDB(), id)
 	if err != nil {
 		return nil, err
+	}
+	if expected := strArg(args, "expected_host_key"); expected != "" {
+		if err = expectHostKey(ctx.AppDB(), inst, expected); err != nil {
+			return nil, err
+		}
 	}
 	if inst.Provider == "external" && inst.Status == "provisioning" && inst.SSHHost != "" {
 		kickExternalReadiness(ctx, id)

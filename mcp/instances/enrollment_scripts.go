@@ -18,6 +18,9 @@ type tunnelEnrollment struct {
 	KnownHosts   string
 	PrivateKey   string
 	PublicKey    string
+	// KeysOnly: public SSH is on, so the machine's SSH server must refuse
+	// passwords before its port is reachable from the internet.
+	KeysOnly bool
 }
 
 // Shared by both branches: POSIX sh, BSD and GNU userland. macOS releases
@@ -53,7 +56,7 @@ trap - EXIT
 
 // macOS: turn on Remote Login, create a hidden management account if it does
 // not exist, authorize the key and keep the machine awake and reachable.
-func macEnrollmentBody(inst *Instance, elevated, vpn bool) string {
+func macEnrollmentBody(inst *Instance, elevated, vpn bool, localSSHPort int) string {
 	if vpn {
 		return "echo 'VPN enrollment supports Ubuntu/Debian. Register this Mac with connect=reverse_tunnel instead.'; exit 1\n"
 	}
@@ -72,7 +75,7 @@ home_dir=$(dscl . -read "/Users/$user" NFSHomeDirectory | sed 's/^NFSHomeDirecto
 ` + enrollmentAuthorizeKey + `
 # When Remote Login is limited to some users, macOS checks this group.
 if dscl . -read /Groups/com.apple.access_ssh >/dev/null 2>&1; then dseditgroup -o edit -a "$user" -t user com.apple.access_ssh; fi
-ssh_listening() { nc -z -G 3 127.0.0.1 22 >/dev/null 2>&1; }
+ssh_listening() { nc -z -G 3 127.0.0.1 ` + fmt.Sprint(localSSHPort) + ` >/dev/null 2>&1; }
 if ! ssh_listening; then
  systemsetup -setremotelogin on >/dev/null 2>&1 || true
  ssh_listening || launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
@@ -199,8 +202,15 @@ if [ "$os_name" = Darwin ]; then
  printf '%s' ` + quoteShellArg(plist) + ` | sed "s/USER_PLACEHOLDER/$user_xml/" > "$plist"
  chown root:wheel "$plist"
  chmod 0644 "$plist"
- launchctl bootout system "$plist" >/dev/null 2>&1 || true
- launchctl bootstrap system "$plist"
+ label=` + quoteShellArg(label) + `
+ # Re-running replaces a loaded job. bootout returns before the job is gone,
+ # and bootstrapping too early fails ("Bootstrap failed: 5").
+ if launchctl print "system/$label" >/dev/null 2>&1; then
+  launchctl bootout "system/$label" >/dev/null 2>&1 || true
+  waited=0
+  while launchctl print "system/$label" >/dev/null 2>&1 && [ "$waited" -lt 20 ]; do sleep 0.5; waited=$((waited + 1)); done
+ fi
+ launchctl bootstrap system "$plist" 2>/dev/null || { sleep 2; launchctl bootstrap system "$plist"; }
 else
  command -v ssh >/dev/null 2>&1 || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client; }
  ssh_bin=$(command -v ssh)
@@ -216,4 +226,85 @@ printf '%s\n' 'Reverse tunnel started; it reconnects automatically after network
 
 func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;").Replace(s)
+}
+
+// Makes the machine's SSH server refuse passwords and keyboard-interactive
+// logins, then confirms it from the effective configuration. Expects $SUDO
+// and $sshd_bin. A drop-in that sorts first wins over later files (sshd keeps
+// the first value it reads), so it overrides cloud-init and macOS defaults.
+const keysOnlySSHDBody = `keys_only() {
+ effective=$($SUDO "$sshd_bin" -T -C user=apteva-public-check,host=apteva-public-check,addr=203.0.113.1 2>/dev/null) || return 1
+ printf '%s\n' "$effective" | grep -qx 'passwordauthentication no' || return 1
+ printf '%s\n' "$effective" | grep -Eqx '(kbdinteractiveauthentication|challengeresponseauthentication) no' || return 1
+}
+if ! keys_only; then
+ grep -Eqi '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config || { echo 'Public SSH needs key-only logins, and this SSH server does not read /etc/ssh/sshd_config.d. Set PasswordAuthentication no and KbdInteractiveAuthentication no in /etc/ssh/sshd_config, then try again.'; exit 1; }
+ dropin=/etc/ssh/sshd_config.d/00-apteva-keys-only.conf
+ printf '%s\n' '# Added by Apteva Instances for public SSH: key-only logins.' 'PasswordAuthentication no' 'ChallengeResponseAuthentication no' | $SUDO tee "$dropin" >/dev/null
+ $SUDO chmod 0644 "$dropin"
+ if ! $SUDO "$sshd_bin" -t; then $SUDO rm -f "$dropin"; echo 'The SSH server rejected the key-only setting; nothing was changed'; exit 1; fi
+ if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ssh; then $SUDO systemctl reload ssh
+ elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sshd; then $SUDO systemctl reload sshd
+ fi
+ keys_only || { echo 'Key-only logins could not be confirmed for this SSH server'; exit 1; }
+fi
+echo 'SSH server accepts keys only.'
+`
+
+// Run on the machine over SSH when public SSH is turned on later. Exit 3:
+// the management account cannot use sudo.
+const keysOnlySSHDRemote = `set -eu
+PATH="$PATH:/usr/sbin:/sbin"
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; elif sudo -n true 2>/dev/null; then SUDO="sudo -n"; else echo 'NOSUDO'; exit 3; fi
+sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
+` + keysOnlySSHDBody
+
+// The same, for an administrator to run by hand.
+func keysOnlySSHDCommand() string {
+	return "sudo sh <<'APTEVA_KEYS_ONLY'\nset -eu\nSUDO=\"\"\nPATH=\"$PATH:/usr/sbin:/sbin\"\nsshd_bin=$(command -v sshd || echo /usr/sbin/sshd)\n" + keysOnlySSHDBody + "APTEVA_KEYS_ONLY"
+}
+
+// Printed at the end of the setup command, so the operator can pass them to
+// instance_wait_ready and Instances never has to trust the first key it sees.
+const printHostKeyFingerprint = `fingerprints=""
+for host_key in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+ if [ -r "$host_key" ]; then fingerprints="${fingerprints:+$fingerprints,}$(ssh-keygen -lf "$host_key" | awk '{print $2}')"; fi
+done
+if [ -n "$fingerprints" ]; then printf 'SSH host keys: %s\n(pass this value to instance_wait_ready as expected_host_key)\n' "$fingerprints"; fi
+`
+
+// Removes what the setup command installed for Instances: the tunnel job and
+// its key (when there is one), the management key and the sudo rule. The SSH
+// account and the key-only SSH setting stay.
+func machineCleanupCommand(inst *Instance, t *reverseTunnel) string {
+	script := "set -u\nuser=" + quoteShellArg(inst.SSHUser) + "\npublic_key=" + quoteShellArg(inst.SSHPublicKey) + "\n"
+	if t != nil {
+		name := tunnelServiceName(t.PublicKey)
+		script += "name=" + quoteShellArg(name) + `
+if [ "$(uname -s)" = Darwin ]; then
+ launchctl bootout "system/com.apteva.$name" >/dev/null 2>&1 || true
+ rm -f "/Library/LaunchDaemons/com.apteva.$name.plist"
+else
+ systemctl disable --now "$name.service" >/dev/null 2>&1 || true
+ rm -f "/etc/systemd/system/$name.service"
+ systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+rm -f "/etc/apteva-tunnel/$name.key" "/etc/apteva-tunnel/$name.known_hosts"
+rmdir /etc/apteva-tunnel 2>/dev/null || true
+echo 'Reverse tunnel removed.'
+`
+	}
+	script += `if [ "$(uname -s)" = Darwin ]; then home_dir=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: *//'); else home_dir=$(getent passwd "$user" | cut -d: -f6); fi
+keys="$home_dir/.ssh/authorized_keys"
+if [ -n "$home_dir" ] && [ -f "$keys" ] && [ ! -L "$keys" ]; then
+ kept=$(mktemp)
+ grep -vxF -- "$public_key" "$keys" > "$kept" || true
+ cat "$kept" > "$keys"
+ rm -f "$kept"
+ echo 'Management key removed.'
+fi
+rm -f /etc/sudoers.d/apteva-instance-` + fmt.Sprint(inst.ID) + `
+echo 'Apteva Instances setup removed from this machine.'
+`
+	return "sudo sh <<'APTEVA_MACHINE_CLEANUP'\n" + script + "APTEVA_MACHINE_CLEANUP"
 }

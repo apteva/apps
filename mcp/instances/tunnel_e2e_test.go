@@ -73,12 +73,35 @@ case "$1" in
   user=$(sed -n 's/^User=//p' "$unit"); cmd=$(sed -n 's/^ExecStart=//p' "$unit")
   pkill -f "apteva-tunnel@" 2>/dev/null || true
   su -s /bin/sh "$user" -c "nohup $cmd >/tmp/tunnel.log 2>&1 &" ;;
+ disable) pkill -f "apteva-tunnel@" 2>/dev/null || true ;;
  *) exit 0 ;;
 esac
 EOF
 chmod +x /usr/local/bin/systemctl
 `
 	if out, code := execIn(machine, shim); code != 0 {
+		t.Fatal(out)
+	}
+
+	// The server already has the 0.18.0 block: setup must upgrade it in place.
+	legacy := "useradd --system --create-home --home-dir /var/lib/apteva-tunnel --shell /usr/sbin/nologin apteva-tunnel\n" +
+		"printf '\\n%s' " + quoteShellArg(reverseTunnelConfigMarker+` (managed by Instances; remove this block to disable)
+Match User apteva-tunnel
+    AuthorizedKeysFile /etc/apteva-tunnel/authorized_keys
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AllowTcpForwarding remote
+    AllowAgentForwarding no
+    AllowStreamLocalForwarding no
+    X11Forwarding no
+    PermitTTY no
+    GatewayPorts no
+    ForceCommand /bin/false
+    ClientAliveInterval 30
+    ClientAliveCountMax 3
+`) + " >> /etc/ssh/sshd_config\n"
+	if out, code := execIn(server, legacy); code != 0 {
 		t.Fatal(out)
 	}
 
@@ -109,6 +132,22 @@ chmod +x /usr/local/bin/systemctl
 	command := result.(map[string]any)["authorization"].(map[string]any)["command"].(string)
 	if out, code := execIn(machine, command); code != 0 || !strings.Contains(out, "SSH authorized.") {
 		t.Fatalf("enrollment command failed (%d):\n%s", code, out)
+	}
+
+	// The block was upgraded once, and setup is idempotent afterwards.
+	config := func() string {
+		out, _ := execIn(server, "md5sum /etc/ssh/sshd_config; grep -c 'apteva-instances reverse tunnel' /etc/ssh/sshd_config; grep -c 'PermitOpen none' /etc/ssh/sshd_config")
+		return out
+	}
+	upgraded := config()
+	if !strings.HasSuffix(strings.TrimSpace(upgraded), "1\n1") {
+		t.Fatalf("sshd block not upgraded exactly once: %s", upgraded)
+	}
+	if _, err = ensureReverseTunnelServer(); err != nil {
+		t.Fatal(err)
+	}
+	if again := config(); again != upgraded {
+		t.Fatalf("second setup changed sshd_config:\n%s\n%s", upgraded, again)
 	}
 
 	// Instances' view: the machine's sshd answers on the server's loopback port.
@@ -149,7 +188,29 @@ chmod +x /usr/local/bin/systemctl
 		}
 	}
 
+	// Public SSH: the machine's sshd is made key-only even when a later
+	// drop-in (cloud-init style) turns passwords on, and the check repeats
+	// cleanly.
+	execIn(machine, "printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/50-cloud-init.conf")
+	for i := 0; i < 2; i++ {
+		if out, code := execIn(machine, keysOnlySSHDRemote); code != 0 || !strings.Contains(out, "SSH server accepts keys only.") {
+			t.Fatalf("key-only setup (%d): %s", code, out)
+		}
+	}
+	if out, _ := execIn(machine, "sshd -T -C user=someone,host=x,addr=203.0.113.9 | grep -E '^(passwordauthentication|kbdinteractiveauthentication) '"); strings.Count(out, " no") != 2 {
+		t.Fatalf("machine still accepts passwords: %s", out)
+	}
+
+	// Another install's keys file is never replaced.
+	original, _ := execIn(server, "cat "+reverseTunnelKeysFile)
+	execIn(server, "printf '%s\\n%s\\n' '"+reverseTunnelKeysHeader+"someone-else' 'ssh-ed25519 AAAA other' > "+reverseTunnelKeysFile)
+	if err = syncReverseTunnelKeys(ctx.AppDB()); err == nil || !strings.Contains(err.Error(), "another Instances install") {
+		t.Fatalf("foreign keys file: %v", err)
+	}
+	execIn(server, "printf '%s' "+quoteShellArg(original)+" > "+reverseTunnelKeysFile)
+
 	// Destroy: the key leaves the server, the live session closes, the port frees.
+	cleanup := machineCleanupFor(ctx.AppDB(), stored)
 	if err = destroyProviderInstance(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +225,14 @@ chmod +x /usr/local/bin/systemctl
 	time.Sleep(12 * time.Second) // the machine's job retries; it must stay locked out
 	if out, _ = execIn(server, fmt.Sprintf("ss -Htln 'sport = :%d'", stored.SSHPort)); strings.TrimSpace(out) != "" {
 		t.Fatalf("machine reconnected after destroy: %q", out)
+	}
+
+	// The cleanup command stops the retrying job and removes what setup installed.
+	if out, code := execIn(machine, cleanup); code != 0 || !strings.Contains(out, "Reverse tunnel removed.") {
+		t.Fatalf("cleanup (%d): %s", code, out)
+	}
+	if out, _ := execIn(machine, "ls /etc/systemd/system/ | grep -c apteva-tunnel; ls /etc/apteva-tunnel 2>/dev/null | wc -l; grep -c "+quoteShellArg(stored.SSHPublicKey)+" /home/apteva/.ssh/authorized_keys; pgrep -fc 'apteva-tunnel@'"); strings.Join(strings.Fields(out), ",") != "0,0,0,0" {
+		t.Fatalf("after cleanup (units, tunnel files, management key, tunnel processes): %q", out)
 	}
 }
 

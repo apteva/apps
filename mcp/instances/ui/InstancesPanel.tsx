@@ -19,11 +19,13 @@ interface NativePanelProps {
 }
 
 interface SetupOptions { baseline: boolean; docker: boolean; runtimes: boolean; }
+interface PublicSSH { enabled: boolean; host?: string; port?: number; allowed_cidrs?: string[]; max_connections?: number; firewall?: string; error?: string; }
 interface Instance {
   enrollment_peer?: string;
   connect_mode?: "direct" | "vpn" | "reverse_tunnel" | "local";
   connected?: boolean;
   last_seen_at?: string;
+  public_ssh?: PublicSSH;
   setup?: { requested: SetupOptions; status: string; stage: string; completed: string[]; error?: string; facts?: { platform: string; architecture: string; os: string }; verified?: { docker: boolean; runtimes: boolean; metrics: boolean } };
   provider_connection_id?: number;
   id: number;
@@ -157,6 +159,13 @@ export function presenceText(inst: Pick<Instance, "connected" | "last_seen_at">,
   const seconds = Math.max(0, Math.floor((now - Date.parse(inst.last_seen_at)) / 1000));
   const age = seconds < 120 ? `${seconds}s` : seconds < 7200 ? `${Math.floor(seconds / 60)}m` : seconds < 172800 ? `${Math.floor(seconds / 3600)}h` : `${Math.floor(seconds / 86400)}d`;
   return `offline · seen ${age} ago`;
+}
+
+// The command a customer uses to reach a tunnel machine from the internet.
+export function publicSSHCommand(inst: Pick<Instance, "public_ssh" | "ssh_user">): string {
+  const p = inst.public_ssh;
+  if (!p?.enabled || !p.host || !p.port) return "";
+  return `ssh -p ${p.port} ${inst.ssh_user || "USER"}@${p.host}`;
 }
 
 function PresenceLabel({ inst }: { inst: Instance }) {
@@ -325,6 +334,8 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   const [showCreate, setShowCreate] = useState(false);
   const [onboarding, setOnboarding] = useState<Instance | "new" | null>(null);
   const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
+  const [cleanup, setCleanup] = useState<{ name: string; command: string; note?: string } | null>(null);
+  const [publicSSHInstance, setPublicSSHInstance] = useState<Instance | null>(null);
   const [pendingUpgrade, setPendingUpgrade] = useState<Instance | null>(null);
   const [volumeInstance, setVolumeInstance] = useState<Instance | null>(null);
 
@@ -368,7 +379,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
         credentials: "same-origin",
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+      const result = await r.json().catch(() => ({}));
       setPendingDestroy(null);
+      if (result.cleanup_command) setCleanup({ name: inst.name, command: result.cleanup_command, note: result.cleanup_note });
       await load();
     } catch (e) {
       setError("Destroy failed: " + (e as Error).message);
@@ -471,6 +484,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               onVolumes={() => setVolumeInstance(inst)}
               onDestroy={() => setPendingDestroy(inst)}
               onSetup={() => setOnboarding(inst)}
+              onPublicSSH={() => setPublicSSHInstance(inst)}
             />
           ))
         )}
@@ -485,6 +499,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
 		  onConfirm={(options) => destroy(pendingDestroy, options)}
         />
       )}
+
+      {cleanup && <CleanupCommandDialog name={cleanup.name} command={cleanup.command} note={cleanup.note} onClose={() => setCleanup(null)} />}
+      {publicSSHInstance && <PublicSSHDialog inst={publicSSHInstance} withParams={withParams} onClose={() => setPublicSSHInstance(null)} onChange={load} />}
 
       {volumeInstance && (
         <VolumesDialog
@@ -1150,7 +1167,7 @@ function UpgradeDialog({
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 export function InstanceCard({
-  inst, withParams, busy, onUpgrade, onVolumes, onDestroy, onSetup,
+  inst, withParams, busy, onUpgrade, onVolumes, onDestroy, onSetup, onPublicSSH,
 }: {
   inst: Instance;
   withParams: () => string;
@@ -1159,6 +1176,7 @@ export function InstanceCard({
   onVolumes: () => void;
   onDestroy: () => void;
   onSetup?: () => void;
+  onPublicSSH?: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
   const [metricsError, setMetricsError] = useState("");
@@ -1211,7 +1229,7 @@ export function InstanceCard({
 
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
   const sshHost = inst.ssh_host || ip;
-  const endpoint = inst.connect_mode === "reverse_tunnel" ? `reverse tunnel · port ${inst.ssh_port}` : inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
+  const endpoint = inst.connect_mode === "reverse_tunnel" ? (inst.public_ssh?.enabled && inst.public_ssh.host ? `${inst.public_ssh.host}:${inst.public_ssh.port} · via tunnel` : `reverse tunnel · port ${inst.ssh_port}`) : inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
   const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "clouding", "upcloud", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
@@ -1285,6 +1303,7 @@ export function InstanceCard({
 			</button>
 		)}
         {!isLocal && onSetup && <button type="button" onClick={onSetup} className="px-2 py-0.5 text-[10px] border border-border rounded">Setup</button>}
+        {inst.connect_mode === "reverse_tunnel" && onPublicSSH && <button type="button" onClick={onPublicSSH} disabled={busy} className={"px-2 py-0.5 text-[10px] border rounded disabled:opacity-50 " + (inst.public_ssh?.enabled ? "border-blue/60 text-blue" : "border-border text-text-muted hover:text-text")}>{inst.public_ssh?.enabled ? "Public SSH on" : "Public SSH"}</button>}
         {canDestroy && (
           <button type="button" onClick={onDestroy} disabled={busy}
             className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50">
@@ -2247,6 +2266,8 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
   const [port, setPort] = useState(22);
   const [platform, setPlatform] = useState<"linux" | "macos">("linux");
   const [connect, setConnect] = useState<ConnectMode>("direct");
+  const [publicSSH, setPublicSSH] = useState(false);
+  const [hostKeys, setHostKeys] = useState("");
   const [setup, setSetup] = useState<SetupOptions>(initial?.setup?.requested || { baseline: true, docker: true, runtimes: false });
   const [command, setCommand] = useState("");
   const [publicKey, setPublicKey] = useState(initial?.ssh_public_key || "");
@@ -2278,7 +2299,7 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
     setBusy(true); setError("");
     try {
       const requested = platform === "macos" ? { ...setup, docker: false } : setup;
-      const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: connect === "direct" ? host : undefined, ssh_user: user, ssh_port: port, connect, platform, setup: requested });
+      const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: connect === "direct" ? host : undefined, ssh_user: user, ssh_port: port, connect, platform, setup: requested, ...(connect === "reverse_tunnel" && publicSSH ? { public_ssh: true } : {}) });
       setInstance(result.instance); setCommand(result.authorization.command); setPublicKey(result.authorization.public_key); setCopied(false); onChange();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -2287,7 +2308,7 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
     setBusy(true); setError("");
     try {
       const retry = instance.status === "ready" || instance.status === "error";
-      const result = await post(`instances/${instance.id}/wait-ready`, { async: true, ...(retry ? { retry: true, setup } : {}) });
+      const result = await post(`instances/${instance.id}/wait-ready`, { async: true, ...(retry ? { retry: true, setup } : {}), ...(hostKeys.trim() ? { expected_host_key: hostKeys.trim() } : {}) });
       setInstance(result.instance); onChange();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -2308,12 +2329,13 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
           </select></label>
         </div>
         <p className="text-xs text-text-dim">{CONNECT_HELP[connect]}</p>
+        {connect === "reverse_tunnel" && <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={publicSSH} onChange={e => setPublicSSH(e.target.checked)} /><span>Public SSH port<span className="block text-xs text-text-dim">People can then SSH to this machine through a port on this server. The command makes the machine's SSH server accept keys only.</span></span></label>}
         {connect === "direct" && <label className="block text-sm">SSH address<input className="block w-full bg-bg-input border border-border rounded p-2" value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.20 or server.example.com" /></label>}
         <div className="flex gap-3"><label className="text-sm flex-1">SSH user<input className="block w-full bg-bg-input border border-border rounded p-2" value={user} onChange={e => setUser(e.target.value)} /></label><label className="text-sm" style={{ width: 140 }}>{connect === "reverse_tunnel" ? "Machine SSH port" : "Port"}<input type="number" min="1" max="65535" disabled={connect === "vpn"} className="block w-full bg-bg-input border border-border rounded p-2" value={port} onChange={e => setPort(Number(e.target.value))} /></label></div>
       </div>}
       <HostSetupOptions value={setup} onChange={setSetup} platform={(instance?.platform === "macos" || (!instance && platform === "macos")) ? "macos" : "linux"} disabled={busy || instance?.status === "provisioning"} />
       {instance && <div className="text-sm space-y-1" aria-live="polite"><p>{instance.setup?.stage || instance.status} · {instance.setup?.status || instance.status}</p>{instance.setup?.completed?.map(stage => <p key={stage} className="text-green">✓ {stage}</p>)}{instance.setup?.error && <p className="text-red">{instance.setup.error}</p>}</div>}
-      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.platform === "macos" && <p className="text-xs text-text-dim">On a Mac, run it in Terminal. If macOS refuses to turn on Remote Login, turn it on once in System Settings, General, Sharing (or give Terminal Full Disk Access), then run the command again.</p>}{(instance?.enrollment_peer || instance?.connect_mode === "reverse_tunnel") && <p className="text-xs text-amber">This command contains a {instance?.connect_mode === "reverse_tunnel" ? "tunnel key" : "VPN peer credential"}. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button></div>}
+      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.platform === "macos" && <p className="text-xs text-text-dim">On a Mac, run it in Terminal. If macOS refuses to turn on Remote Login, turn it on once in System Settings, General, Sharing (or give Terminal Full Disk Access), then run the command again.</p>}{(instance?.enrollment_peer || instance?.connect_mode === "reverse_tunnel") && <p className="text-xs text-amber">This command contains a {instance?.connect_mode === "reverse_tunnel" ? "tunnel key" : "VPN peer credential"}. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button><label className="block text-sm">SSH host keys (optional)<input className="block w-full bg-bg-input border border-border rounded p-2 font-mono text-xs" value={hostKeys} onChange={e => setHostKeys(e.target.value)} placeholder="SHA256:…,SHA256:…" /><span className="block text-xs text-text-dim">Paste the "SSH host keys" line the command prints. Instances then accepts only those keys instead of trusting the first one it sees.</span></label></div>}
       {instance?.provider === 'external' && publicKey && <details className="text-xs"><summary>Authorize an existing SSH account manually</summary><p className="mt-2">Add this public key to the account’s ~/.ssh/authorized_keys. Configure VPN separately if selected. Package setup needs passwordless sudo; discovery-only registration supports macOS too.</p><pre className="whitespace-pre-wrap break-all mt-2">{publicKey}</pre></details>}
       {error && <p role="alert" className="text-sm text-red">{error}</p>}
       <div className="flex justify-end gap-3">
@@ -2354,5 +2376,65 @@ function OVHQuoteDetails({quote}:{quote:OVHQuoteWire}) {
     <p>Total due now: <strong>{money(quote.quote?.prices?.withTax)}</strong> · Before tax: {money(quote.quote?.prices?.withoutTax)} · Tax: {money(quote.quote?.prices?.tax)}</p>
     <ul>{quote.quote?.details?.map((line,index)=><li key={index}>{line.description}{line.quantity ? ` ×${line.quantity}` : ""}{line.totalPrice ? ` — ${money(line.totalPrice)}` : ""}</li>)}</ul>
     {quote.quote?.contracts?.map((contract,index)=><details key={index}><summary>{contract.name}</summary>{contract.url?.startsWith("https://") && <a href={contract.url} target="_blank" rel="noopener noreferrer" className="underline">Read OVH contract</a>}{contract.content && <p className="whitespace-pre-wrap max-h-40 overflow-auto">{contract.content}</p>}</details>)}
+  </div>;
+}
+
+function CopyableCommand({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="space-y-1">
+    <pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre>
+    <button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { /* select and copy by hand */ } }}>{copied ? "Copied" : "Copy command"}</button>
+  </div>;
+}
+
+export function CleanupCommandDialog({ name, command, note, onClose }: { name: string; command: string; note?: string; onClose: () => void }) {
+  return <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="cleanup-title">
+    <div className="bg-bg border border-border rounded-lg p-5 space-y-3 w-full overflow-y-auto" style={{ width: "min(640px, 100%)", maxHeight: "90vh" }}>
+      <h2 id="cleanup-title" className="font-semibold text-text">{name} was removed</h2>
+      <p className="text-sm">{note || "Run this command on the machine as an administrator to remove what Instances set up there."}</p>
+      <CopyableCommand command={command} />
+      <div className="flex justify-end"><button type="button" onClick={onClose} className="px-3 py-1 text-sm border border-border rounded">Done</button></div>
+    </div>
+  </div>;
+}
+
+export function PublicSSHDialog({ inst, withParams, onClose, onChange }: { inst: Instance; withParams: () => string; onClose: () => void; onChange: () => void }) {
+  const [state, setState] = useState<PublicSSH>(inst.public_ssh || { enabled: false });
+  const [sources, setSources] = useState((inst.public_ssh?.allowed_cidrs || []).join(", "));
+  const [maxConnections, setMaxConnections] = useState(inst.public_ssh?.max_connections || 10);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const save = async (enabled: boolean) => {
+    setBusy(true); setError("");
+    try {
+      const allowed = sources.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+      const body = enabled ? { enabled, allowed_cidrs: allowed, max_connections: maxConnections } : { enabled };
+      const response = await fetch(`${API}/instances/${inst.id}/public-ssh?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+      setState(result.public_ssh || { enabled: false });
+      onChange();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  const command = publicSSHCommand({ public_ssh: state, ssh_user: inst.ssh_user });
+  return <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="public-ssh-title">
+    <div className="bg-bg border border-border rounded-lg p-5 space-y-3 w-full overflow-y-auto" style={{ width: "min(560px, 100%)", maxHeight: "90vh" }}>
+      <h2 id="public-ssh-title" className="font-semibold text-text">Public SSH for {inst.name}</h2>
+      <p className="text-sm text-text-muted">A port on this server forwards to the machine's tunnel, so people can SSH to it from the internet. The machine's SSH server must accept keys only; Instances checks this and sets it when the management account has sudo.</p>
+      {state.enabled && <div className="space-y-1 text-sm">
+        <p>On: <span className="font-mono">{state.host}:{state.port}</span>{state.firewall && state.firewall !== "none" ? ` · opened in ${state.firewall}` : ""}</p>
+        {command && <CopyableCommand command={command} />}
+        <p className="text-xs text-text-dim">If a cloud firewall sits in front of this server, allow TCP {state.port} there.</p>
+      </div>}
+      {state.error && <p className="text-sm text-red">{state.error}</p>}
+      <label className="block text-sm">Allowed sources<input className="block w-full bg-bg-input border border-border rounded p-2 font-mono text-xs" value={sources} onChange={e => setSources(e.target.value)} placeholder="203.0.113.7, 198.51.100.0/24 (empty: anyone)" /></label>
+      <label className="block text-sm" style={{ width: 200 }}>Connections at once<input type="number" min="1" max="100" className="block w-full bg-bg-input border border-border rounded p-2" value={maxConnections} onChange={e => setMaxConnections(Number(e.target.value))} /></label>
+      {error && <p className="text-sm text-red whitespace-pre-wrap break-all">{error}</p>}
+      <div className="flex justify-end gap-2">
+        {state.enabled && <button type="button" disabled={busy} onClick={() => save(false)} className="px-3 py-1 text-sm border border-red/60 text-red rounded disabled:opacity-50">Turn off</button>}
+        <button type="button" disabled={busy} onClick={() => save(true)} className="px-3 py-1 text-sm border border-blue/60 text-blue rounded disabled:opacity-50">{busy ? "Working…" : state.enabled ? "Save" : "Turn on"}</button>
+        <button type="button" onClick={onClose} className="px-3 py-1 text-sm border border-border rounded">Close</button>
+      </div>
+    </div>
   </div>;
 }

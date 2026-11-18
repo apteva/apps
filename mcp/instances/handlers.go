@@ -22,6 +22,7 @@ import (
 //   POST   /api/instances/<id>/upload        {path, content_b64}
 //   POST   /api/instances/<id>/download      {path}
 //   POST   /api/instances/<id>/wait-ready    {timeout_s?}
+//   POST   /api/instances/<id>/public-ssh    {enabled, allowed_cidrs?, max_connections?}
 //   GET    /api/instances/<id>/metrics       last vitals snapshot
 
 func (a *App) handleInstancesCollection(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +155,8 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		}
 	case "firewall":
 		a.httpFirewall(w, r, id)
+	case "public-ssh":
+		a.httpPublicSSH(w, r, id)
 	case "run":
 		a.httpRun(w, r, id)
 	case "upload":
@@ -316,15 +319,12 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 		}
 		options.RetainVolumes = &retain
 	}
+	cleanup := machineCleanupFor(ctx.AppDB(), inst)
 	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		httpProviderErr(w, err)
 		return
 	}
-	if pending, err := dbGetInstance(ctx.AppDB(), id); err == nil {
-		httpJSON(w, map[string]any{"destroyed": false, "id": id, "status": pending.Status})
-		return
-	}
-	httpJSON(w, map[string]any{"destroyed": true, "id": id})
+	httpJSON(w, destroyResult(ctx.AppDB(), id, cleanup))
 }
 
 func (a *App) httpUpgrade(w http.ResponseWriter, r *http.Request, id int64) {
@@ -522,4 +522,24 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 
 func (a *App) httpMetrics(w http.ResponseWriter, r *http.Request, id int64) {
 	a.httpMonitoring(w, r, id, "metrics")
+}
+
+func (a *App) httpPublicSSH(w http.ResponseWriter, r *http.Request, id int64) {
+	ctx := appCtxForRequest(r)
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&args); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	args["id"] = id
+	result, err := setPublicSSH(ctx, args)
+	if err != nil {
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpJSON(w, result)
 }

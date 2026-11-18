@@ -137,18 +137,21 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "object_storage_destroy", Description: "Delete a managed object-storage resource. Requires confirm=true. Scaleway buckets must be empty.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolObjectStorageDestroy},
 		{
 			Name:        "instance_register",
-			Description: "Register an existing Linux (Ubuntu/Debian) or macOS machine. Returns one authorization command that detects the OS. connect: direct (default; needs ssh_host), vpn (bound WireGuard VPN app; Linux only), or reverse_tunnel (machine behind a router keeps an SSH tunnel open to this server; needs reverse_tunnel_host configured, no ssh_host; ssh_port is the machine's own SSH port). Optional setup prepares baseline utilities, Docker (Linux), and language tools before ready. Resume with id alone to recover the same enrollment. Args: name, ssh_user, ssh_host?, ssh_port?, connect?, platform? (linux|macos, adjusts instructions), setup?, tags_json?; or id.",
+			Description: "Register an existing Linux (Ubuntu/Debian) or macOS machine. Returns one authorization command that detects the OS. connect: direct (default; needs ssh_host), vpn (bound WireGuard VPN app; Linux only), or reverse_tunnel (machine behind a router keeps an SSH tunnel open to this server; needs reverse_tunnel_host configured, no ssh_host; ssh_port is the machine's own SSH port). Optional setup prepares baseline utilities, Docker (Linux), and language tools before ready. Resume with id alone to recover the same enrollment. Args: name, ssh_user, ssh_host?, ssh_port?, connect?, platform? (linux|macos, adjusts instructions), public_ssh? (reverse_tunnel), setup?, tags_json?; or id. The command prints the machine's SSH host key fingerprints: pass them to instance_wait_ready as expected_host_key.",
 			InputSchema: schemaObject(map[string]any{
-				"id":        map[string]any{"type": "integer", "description": "Resume enrollment for an existing external registration; returns its existing authorization command without generating a new key."},
-				"setup":     setupSchema(),
-				"vpn":       map[string]any{"type": "boolean", "description": "Same as connect=vpn."},
-				"connect":   map[string]any{"type": "string", "enum": []string{"direct", "vpn", "reverse_tunnel"}, "description": "How Instances reaches the machine. direct: ssh_host is reachable from this server. vpn: WireGuard peer from the bound VPN app (Ubuntu/Debian). reverse_tunnel: the machine opens an outbound SSH tunnel to this server, for machines behind a router; Linux or macOS."},
-				"platform":  map[string]any{"type": "string", "enum": []string{"linux", "macos"}, "description": "Optional hint for instructions and early checks; the command detects the OS itself."},
-				"name":      map[string]any{"type": "string"},
-				"ssh_host":  map[string]any{"type": "string"},
-				"ssh_user":  map[string]any{"type": "string"},
-				"ssh_port":  map[string]any{"type": "integer"},
-				"tags_json": map[string]any{"type": "string"},
+				"id":                         map[string]any{"type": "integer", "description": "Resume enrollment for an existing external registration; returns its existing authorization command without generating a new key."},
+				"setup":                      setupSchema(),
+				"vpn":                        map[string]any{"type": "boolean", "description": "Same as connect=vpn."},
+				"connect":                    map[string]any{"type": "string", "enum": []string{"direct", "vpn", "reverse_tunnel"}, "description": "How Instances reaches the machine. direct: ssh_host is reachable from this server. vpn: WireGuard peer from the bound VPN app (Ubuntu/Debian). reverse_tunnel: the machine opens an outbound SSH tunnel to this server, for machines behind a router; Linux or macOS."},
+				"platform":                   map[string]any{"type": "string", "enum": []string{"linux", "macos"}, "description": "Optional hint for instructions and early checks; the command detects the OS itself."},
+				"public_ssh":                 map[string]any{"type": "boolean", "description": "reverse_tunnel only: also give the machine a public SSH port on this server (see instance_public_ssh_set). The command then makes the machine's SSH server accept keys only."},
+				"public_ssh_allowed_cidrs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "With public_ssh: source addresses or CIDRs allowed to connect. Empty: any source."},
+				"public_ssh_max_connections": map[string]any{"type": "integer", "description": "With public_ssh: concurrent connections (1-100, default 10)."},
+				"name":                       map[string]any{"type": "string"},
+				"ssh_host":                   map[string]any{"type": "string"},
+				"ssh_user":                   map[string]any{"type": "string"},
+				"ssh_port":                   map[string]any{"type": "integer"},
+				"tags_json":                  map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolRegister,
 		},
@@ -169,8 +172,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolList,
 		},
 		{
+			Name: "instance_public_ssh_set",
+			Description: "Turn public SSH on or off for a reverse-tunnel machine. On: checks that the machine's SSH server accepts keys only (and sets it when the management account has sudo), picks a port from reverse_tunnel_public_ports, opens it in the server's own firewall (ufw/firewalld when active) and forwards it to the tunnel. " +
+				"The tunnel key stays limited to its loopback port. Calling it again while on updates allowed_cidrs and max_connections. Off: closes the port and its live sessions. Emits instance.public_ssh_changed.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "integer"},
+				"enabled":         map[string]any{"type": "boolean"},
+				"allowed_cidrs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Source addresses or CIDRs allowed to connect (up to 16). Empty: any source."},
+				"max_connections": map[string]any{"type": "integer", "description": "Concurrent connections allowed through the port (1-100, default 10). New connections are also limited to 20 per minute per source."},
+			}, []string{"id", "enabled"}),
+			Handler: a.toolPublicSSHSet,
+		},
+		{
 			Name:        "instance_destroy",
-			Description: "Terminate the upstream resource and remove the row. Provider deletion does not depend on SSH. Set force=true to continue provider-side volume cleanup when a guest unmount cannot run. Refused for local (id 0).",
+			Description: "Terminate the upstream resource and remove the row. Provider deletion does not depend on SSH. For registered machines it returns cleanup_command: run it on the machine to remove the tunnel job, the management key and the sudo rule (otherwise a tunnel job keeps retrying with its revoked key). Set force=true to continue provider-side volume cleanup when a guest unmount cannot run. Refused for local (id 0).",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "force": map[string]any{"type": "boolean"}, "retain_volumes": map[string]any{"type": "boolean", "description": "Override all managed volume policies: true retains, false deletes"}, "retain_flexible_ips": map[string]any{"type": "boolean", "description": "Keep Elastic Metal Flexible IPs; defaults to false"}}, []string{"id"}),
 			Handler:     a.toolDestroy,
 		},
@@ -240,13 +255,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "instance_wait_ready",
 			Description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Already 'ready' instances return immediately. " +
-				"Args: id, timeout_s? (default 300), retry? (recheck/repair host setup), setup? (desired capabilities), async? (return progress immediately).",
+				"Args: id, timeout_s? (default 300), retry? (recheck/repair host setup), setup? (desired capabilities), async? (return progress immediately), expected_host_key? (fingerprint printed by the registration command).",
 			InputSchema: schemaObject(map[string]any{
-				"retry":     map[string]any{"type": "boolean", "description": "Retry failed setup or recheck a configured host. Does not recreate provider resources."},
-				"setup":     setupSchema(),
-				"async":     map[string]any{"type": "boolean", "description": "Return current setup progress immediately."},
-				"id":        map[string]any{"type": "integer"},
-				"timeout_s": map[string]any{"type": "integer"},
+				"retry":             map[string]any{"type": "boolean", "description": "Retry failed setup or recheck a configured host. Does not recreate provider resources."},
+				"setup":             setupSchema(),
+				"async":             map[string]any{"type": "boolean", "description": "Return current setup progress immediately."},
+				"expected_host_key": map[string]any{"type": "string", "description": "SHA256 fingerprints of the machine's SSH host keys, comma-separated, as printed by the instance_register command. Instances accepts only those keys instead of trusting the first key it sees, and refuses a machine whose pinned key differs."},
+				"id":                map[string]any{"type": "integer"},
+				"timeout_s":         map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolWaitReady,
 		},
@@ -413,13 +429,11 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		options.RetainVolumes = &parsed
 	}
+	cleanup := machineCleanupFor(ctx.AppDB(), inst)
 	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		return nil, err
 	}
-	if pending, err := dbGetInstance(ctx.AppDB(), id); err == nil {
-		return map[string]any{"destroyed": false, "id": id, "status": pending.Status}, nil
-	}
-	return map[string]any{"destroyed": true, "id": id}, nil
+	return destroyResult(ctx.AppDB(), id, cleanup), nil
 }
 
 func (a *App) toolUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error) {

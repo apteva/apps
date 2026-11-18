@@ -121,11 +121,20 @@ func recordPresence(ctx *sdk.AppCtx, inst *Instance, connected bool, now time.Ti
 	if connected {
 		seen = now.UTC().Format(time.RFC3339)
 	}
-	result, err := ctx.AppDB().Exec(`UPDATE instances SET connected=?, last_seen_at=? WHERE id=? AND status NOT IN ('destroying','rolling_back','destroyed')`, connected, seen, inst.ID)
+	// A row never checked before (existing rows after an upgrade) records its
+	// first state silently; new registrations start as known.
+	known := true
+	var knownFlag int
+	if err := ctx.AppDB().QueryRow(`SELECT presence_known FROM instances WHERE id=?`, inst.ID).Scan(&knownFlag); err == nil {
+		known = knownFlag == 1
+	}
+	result, err := ctx.AppDB().Exec(`UPDATE instances SET connected=?, last_seen_at=?, presence_known=1 WHERE id=? AND status NOT IN ('destroying','rolling_back','destroyed')`, connected, seen, inst.ID)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 1 && connected != inst.Connected {
+	if n, _ := result.RowsAffected(); n == 1 && !known {
+		inst.Connected, inst.LastSeenAt = connected, seen
+	} else if n == 1 && connected != inst.Connected {
 		inst.Connected, inst.LastSeenAt = connected, seen
 		topic := instanceDisconnectedTopic
 		if connected {
