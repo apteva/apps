@@ -176,8 +176,10 @@ func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeo
 		if !containerUserRE.MatchString(in.User) || len(in.User) > 64 {
 			return in, errors.New("user must be a user, uid, or user:group without whitespace")
 		}
-		if name, _, _ := strings.Cut(in.User, ":"); workload.Hardened && (name == "root" || name == "0") {
-			return in, errors.New("commands in hardened workloads cannot run as root")
+		if workload.Hardened {
+			if err := requireNumericNonRootUser(in.User); err != nil {
+				return in, fmt.Errorf("commands in hardened workloads: %w", err)
+			}
 		}
 	}
 	in.Umask = strings.TrimSpace(in.Umask)
