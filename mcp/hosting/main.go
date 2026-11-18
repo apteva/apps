@@ -21,7 +21,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "2.0.0"
+const appVersion = "2.1.0"
 
 type App struct{}
 
@@ -110,12 +110,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"runtime_config": objSchema(), "metadata": objSchema(), "apteva_version": strSchema(),
 			}, []string{"external_ref", "profile", "owner_email"}), Handler: a.toolTenantCreate},
 		{Name: "hosting_tenant_get", Description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details, current run and recent events.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantGet},
+		{Name: "hosting_tenant_update", Description: "Update a tenant's external_ref, owner_email or metadata (merged). Use it to link a tenant migrated from 1.x to the caller's account id. Changing an external_ref that is already set needs confirm equal to the tenant id.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "external_ref": strSchema(), "owner_email": strSchema(), "metadata": objSchema(), "confirm": strSchema(), "actor": strSchema()}, []string{"tenant_id"}), Handler: a.toolTenantUpdate},
+		{Name: "hosting_tenant_resolve", Description: "Settle a machine tenant left by a failure (quarantined machine, or stuck suspending/resuming/releasing/failed). action: resume, release, or force_clean (erase a validated macOS machine without revoking first). Needs reviewed=true and confirm equal to the tenant id.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "action": strSchema(), "reviewed": boolSchema(), "confirm": strSchema(), "actor": strSchema()}, []string{"tenant_id", "action", "reviewed", "confirm"}), Handler: a.toolTenantResolve},
 		{Name: "hosting_tenant_list", Description: "List tenants. Filters: status, profile_key, backend, owner_email, external_ref, include_released.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "profile_key": strSchema(), "backend": strSchema(), "owner_email": strSchema(), "external_ref": strSchema(), "include_released": boolSchema(), "limit": intSchema()}, nil), Handler: a.toolTenantList},
 		{Name: "hosting_tenant_suspend", Description: "Suspend a tenant: stop its container, or remove SSH access to its machine. Never wipes. Repeating it is a no-op.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantSuspend},
 		{Name: "hosting_tenant_resume", Description: "Resume a suspended tenant: start its container, or restore SSH access. Repeating it is a no-op.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantResume},
-		{Name: "hosting_tenant_release", Description: "End a tenant now. Container: destroy it and its hostname. Pool machine: remove access, wipe, verify clean, back on sale. On-demand machine: destroy the instance (waits for a provider minimum allocation such as Scaleway Macs' 24 hours). Repeating it is a no-op.", InputSchema: schemaObject(withRef(map[string]any{"delete_volumes": boolSchema()}), nil), Handler: a.toolTenantRelease},
+		{Name: "hosting_tenant_release", Description: "End a tenant now. Container: destroy it and its hostname. Pool machine: remove access, wipe, verify clean, back on sale. On-demand machine: destroy the instance (waits for a provider minimum allocation such as Scaleway Macs' 24 hours). Needs confirm equal to the tenant id. Repeating it is a no-op.", InputSchema: schemaObject(withRef(map[string]any{"delete_volumes": boolSchema(), "confirm": strSchema(), "actor": strSchema()}), []string{"confirm"}), Handler: a.toolTenantRelease},
 		{Name: "hosting_tenant_restart", Description: "Restart a tenant's container or reboot its machine.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantRestart},
-		{Name: "hosting_tenant_reinstall", Description: "Erase and reinstall a macOS pool machine for the same tenant, then restore access. Destroys the customer's data.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantReinstall},
+		{Name: "hosting_tenant_reinstall", Description: "Erase and reinstall a macOS pool machine for the same tenant, then restore access. Destroys the customer's data. Needs confirm equal to the tenant id.", InputSchema: schemaObject(withRef(map[string]any{"confirm": strSchema(), "actor": strSchema()}), []string{"confirm"}), Handler: a.toolTenantReinstall},
 		{Name: "hosting_tenant_access_keys_set", Description: "Replace a machine tenant's SSH public keys. An empty list removes access.", InputSchema: schemaObject(withRef(map[string]any{"ssh_keys": map[string]any{"type": "array", "items": strSchema()}}), []string{"ssh_keys"}), Handler: a.toolTenantAccessKeysSet},
 		{Name: "hosting_tenant_logs", Description: "Container logs, or a machine tenant's run log and events.", InputSchema: schemaObject(withRef(map[string]any{"tail": intSchema()}), nil), Handler: a.toolTenantLogs},
 		{Name: "hosting_tenant_health", Description: "Container health, or a machine's Instances status.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantHealth},

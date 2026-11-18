@@ -25,7 +25,10 @@ Hosting subscribes to no events and calls no billing app.
   `maintenance`. A machine is for sale only when it is available, online,
   validated and its pool allows execution.
 - **Tenant**: keyed by the caller's `external_ref`. Creating it twice returns
-  the same tenant; once released, the reference can be used again.
+  the same tenant, and resumes it if it was suspended (so a SaaS
+  `account_active` after a late payment brings it back). While it is being
+  released, create fails until the release finishes. Once released, the
+  reference can be used again.
 - **Run** (operation): the ordered steps of a machine change (provision,
   suspend, resume, release, reinstall, inspect, clean). Runs are leased,
   ordered per tenant and machine, and a failed step quarantines the machine.
@@ -38,9 +41,28 @@ hosting_availability            profile → for_sale, free machines
 hosting_reservation_create      hold a pool machine during checkout
 hosting_tenant_create           external_ref, profile, owner_email, ssh_keys?
 hosting_tenant_suspend/resume   on non-payment and recovery
-hosting_tenant_release          on cancellation
+hosting_tenant_release          on cancellation; confirm = tenant id
 hosting_tenant_usage            usage source for metered billing
 ```
+
+Mapping for SaaS fulfillment actions (`external_ref` = `{{account.id}}`):
+
+| SaaS event | Hosting call |
+|---|---|
+| `account_active` | `hosting_tenant_create` (store the returned tenant id) |
+| `account_resumed` | `hosting_tenant_resume` |
+| `account_past_due`, `account_suspended` | `hosting_tenant_suspend` |
+| `account_cancelled` | `hosting_tenant_release` with `confirm` = the stored tenant id |
+
+A hold made with `hosting_reservation_create` is used by
+`hosting_tenant_create` for the same profile and `external_ref` even without
+`reservation_id`. A held machine that went offline, lost validation or whose
+pool stopped execution is not assigned: the hold is dropped and another
+machine (or the waiting line) is used.
+
+`hosting_tenant_release` and `hosting_tenant_reinstall` need `confirm` equal to
+the tenant id. Changing a tenant's profile (a plan change such as M4 to M4
+Pro) is not supported in place: release the tenant and create a new one.
 
 Container tenants are ready when `hosting_tenant_create` returns. Machine
 tenants return `provisioning` (or `waiting_for_machine` when the pool is
@@ -60,18 +82,57 @@ a released Linux machine is quarantined for manual cleaning.
 
 Erase is refused on machines not marked `validated` (needs `confirm` equal to
 the machine id). Validate a machine only after testing its erase and recovery
-by hand.
+by hand. A machine with `expected_os` set (a version prefix such as `15` or
+`15.3`, or `ubuntu 24.04` on Linux) is checked at inspect, provision and
+reinstall.
+
+A machine is online when Instances reports it `ready` and, on Instances
+versions that report it, `connected`. Hosting refreshes this every minute.
+
+Runs hold a 3-minute lease that a running step renews every minute, so a slow
+step (creating an instance, pulling an image, erasing a Mac) is never run
+twice. Starting a workload on a machine is adopted by name if an earlier
+attempt started it without saving its id.
+
+When a failure leaves a machine tenant stuck (machine quarantined, or the
+tenant in suspending, resuming, releasing or failed), an operator settles it
+with `hosting_tenant_resolve`: `resume`, `release`, or `force_clean` (erase a
+validated macOS machine without revoking first). It needs `reviewed: true`
+and `confirm` equal to the tenant id.
 
 ## Operator
 
 The panel has three views: tenants (create, suspend, resume, restart,
 reinstall, release, run log), machines (pools, execution switch, add,
-inspect, validate, maintenance, quarantine, clean, remove, reviewed retry)
+inspect, validate, maintenance, quarantine, clean, remove, reviewed retry,
+resolve a stuck tenant)
 and profiles (with availability).
 
 ## Upgrading from 1.x
 
 Migration 004 turns plans into container profiles, maps `deleted` tenants to
 `released` and `stopped` to `suspended`, and keeps container tenants running.
-Customers, checkout, invoices, add-ons and metering tools are removed; the
-old tables stay in the database untouched.
+A plan whose product row is missing gets an archived placeholder product, and
+a tenant whose plan row is missing gets an archived placeholder profile, so
+the migration never fails on them. Released tenants give their hostname back
+(migration 005 does this for databases that already ran 004), so their slugs
+can be used again.
+
+Breaking changes:
+
+- **Nothing enforces payment on existing tenants any more.** 1.x suspended
+  paid container and WordPress tenants from Subscriptions events; 2.x
+  subscribes to no events. Their Auth and LLM add-ons stay live too. Migrated
+  tenants have an empty `external_ref`: link each one to its SaaS account with
+  `hosting_tenant_update` (`external_ref` = the account id) and add SaaS
+  fulfillment actions for those plans, or review them by hand.
+- **Orders fulfillments are no longer completed.** 1.x created orders for
+  paid invoices and completed them through `hosting_fulfillment_provision`.
+  An Orders fulfillment of type `hosting_tenant_provision` created by an old
+  flow now stays open; close it in Orders.
+- **Renamed and removed tools.** `hosting_tenant_delete` is now
+  `hosting_tenant_release` (and needs `confirm`), `hosting_plan_list` is
+  `hosting_profile_list`, and `hosting_usage_get` is `hosting_tenant_usage`.
+  Customer, checkout, invoice,
+  add-on, metering and fulfillment tools are removed; the old tables stay in
+  the database untouched.

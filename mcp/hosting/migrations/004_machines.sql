@@ -26,14 +26,34 @@ CREATE TABLE IF NOT EXISTS hosting_profiles (
   updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- A plan can point at a product row that no longer exists. Give it an
+-- archived placeholder so the plan still becomes a profile and the tenants
+-- on it keep a valid profile (built-in products are re-seeded on mount).
+INSERT OR IGNORE INTO hosting_products (key, name, status, metadata_json)
+SELECT DISTINCT COALESCE(b.product_key, 'apteva'), COALESCE(b.product_key, 'apteva') || ' (missing in 1.x)', 'archived',
+       json_object('placeholder', 1)
+FROM hosting_plans p
+LEFT JOIN hosting_plan_bindings b ON b.plan_key = p.key
+WHERE NOT EXISTS (SELECT 1 FROM hosting_products pr WHERE pr.key = COALESCE(b.product_key, 'apteva'));
+
+INSERT OR IGNORE INTO hosting_products (key, name, status, metadata_json)
+SELECT 'apteva', 'apteva (missing in 1.x)', 'archived', json_object('placeholder', 1)
+WHERE NOT EXISTS (SELECT 1 FROM hosting_products WHERE key = 'apteva');
+
 -- Every 1.x plan becomes a container profile with the same key, so existing
 -- tenants keep pointing at a valid profile.
 INSERT OR IGNORE INTO hosting_profiles (key, name, backend, product_key, image, cpu, memory_mb, storage_mb, metadata_json)
 SELECT p.key, p.name, 'container', COALESCE(b.product_key, 'apteva'), p.image, p.cpu, p.memory_mb, p.storage_mb,
        json_object('migrated_from_plan', p.key)
 FROM hosting_plans p
-LEFT JOIN hosting_plan_bindings b ON b.plan_key = p.key
-WHERE EXISTS (SELECT 1 FROM hosting_products pr WHERE pr.key = COALESCE(b.product_key, 'apteva'));
+LEFT JOIN hosting_plan_bindings b ON b.plan_key = p.key;
+
+-- A tenant whose plan row is gone (1.x ran without foreign keys enforced)
+-- gets an archived placeholder profile instead of failing the migration.
+INSERT OR IGNORE INTO hosting_profiles (key, name, backend, product_key, status, metadata_json)
+SELECT DISTINCT t.plan_key, t.plan_key || ' (missing in 1.x)', 'container', 'apteva', 'archived', json_object('placeholder', 1)
+FROM hosting_tenants t
+WHERE NOT EXISTS (SELECT 1 FROM hosting_profiles pr WHERE pr.key = t.plan_key);
 
 CREATE TABLE IF NOT EXISTS hosting_pools (
   key                 TEXT PRIMARY KEY,
@@ -112,7 +132,7 @@ INSERT INTO hosting_tenants_v2 (
   slug, default_hostname, owner_email, status, apteva_version, image, api_key_enc,
   last_health_status, last_error, metadata_json, released_at, created_at, updated_at)
 SELECT id, '', plan_key, 'container', customer_id, subscription_id, workload_id,
-       slug, NULLIF(default_hostname, ''), owner_email,
+       slug, CASE WHEN status = 'deleted' THEN NULL ELSE NULLIF(default_hostname, '') END, owner_email,
        CASE status WHEN 'deleted' THEN 'released' WHEN 'stopped' THEN 'suspended' ELSE status END,
        apteva_version, image, api_key_enc, last_health_status, last_error, metadata_json,
        CASE status WHEN 'deleted' THEN updated_at END, created_at, updated_at

@@ -167,7 +167,7 @@ func (a *App) toolTenantHealth(ctx *sdk.AppCtx, args map[string]any) (any, error
 	inst, err := instanceGet(ctx, ctx.CurrentProject(), instanceID)
 	health := "unknown"
 	if err == nil {
-		health = map[bool]string{true: "ok", false: inst.Status}[inst.Status == "ready"]
+		health = map[bool]string{true: "ok", false: firstNonEmpty(map[bool]string{true: "disconnected"}[inst.Status == "ready"], inst.Status)}[inst.online()]
 	} else {
 		health = "error"
 	}
@@ -505,7 +505,7 @@ func (a *App) toolMachineAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	res, err := db.Exec(`INSERT INTO hosting_machines (pool_key, instance_id, name, state, state_reason, online, last_seen_at, public_host, public_port, serial, expected_os, management_user)
 		VALUES (?, ?, ?, 'quarantined', 'added; run inspect', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?, ?, ?, ?, ?)`,
 		pool.Key, instanceID, firstNonEmpty(strArg(args, "name"), inst.Name, fmt.Sprintf("instance-%d", instanceID)),
-		boolToInt(inst.Status == "ready"), inst.Status == "ready", firstNonEmpty(strArg(args, "public_host"), inst.host()), port,
+		boolToInt(inst.online()), inst.online(), firstNonEmpty(strArg(args, "public_host"), inst.host()), port,
 		strArg(args, "serial"), strArg(args, "expected_os"), strArg(args, "management_user"))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -664,9 +664,9 @@ func (a *App) toolMachineInspect(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	steps := []string{"prepare_ssh", "preflight", "check_clean"}
+	steps := []string{"prepare_ssh", "preflight", "check_os", "check_clean"}
 	if pool.Platform == "macos" {
-		steps = []string{"prepare_ssh", "preflight", "install_reset_scripts", "check_clean"}
+		steps = []string{"prepare_ssh", "preflight", "check_os", "install_reset_scripts", "check_clean"}
 	}
 	if m.State != MachineQuarantined {
 		_ = dbMachineSetState(db, m.ID, MachineQuarantined, "inspecting")
@@ -812,7 +812,7 @@ func (a *App) refreshMachines(ctx *sdk.AppCtx) {
 	}
 	for _, m := range machines {
 		inst, err := instanceGet(ctx, ctx.CurrentProject(), m.InstanceID)
-		online := err == nil && inst.Status == "ready"
+		online := err == nil && inst.online()
 		if online {
 			_, _ = db.Exec(`UPDATE hosting_machines SET online=1, last_seen_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID)
 		} else if m.Online {
@@ -848,4 +848,64 @@ func (a *App) toolOperationRetry(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"operation": op}, nil
+}
+
+func (a *App) toolTenantUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := ctx.AppDB()
+	t, err := dbTenantGet(db, strArg(args, "tenant_id"))
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("tenant %s not found", strArg(args, "tenant_id"))
+	}
+	if t.Status == TenantReleased {
+		return nil, fmt.Errorf("tenant %s is released", t.ID)
+	}
+	changes := map[string]any{}
+	if _, ok := args["external_ref"]; ok {
+		ref := strings.TrimSpace(strArg(args, "external_ref"))
+		if ref != t.ExternalRef {
+			if t.ExternalRef != "" {
+				if err := confirmTenant(t, args); err != nil {
+					return nil, fmt.Errorf("tenant already has external_ref %q; %w", t.ExternalRef, err)
+				}
+			}
+			if _, err := db.Exec(`UPDATE hosting_tenants SET external_ref=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, ref, t.ID); err != nil {
+				if strings.Contains(err.Error(), "UNIQUE") {
+					return nil, fmt.Errorf("external_ref %q already has a live tenant", ref)
+				}
+				return nil, err
+			}
+			changes["external_ref"] = map[string]any{"from": t.ExternalRef, "to": ref}
+		}
+	}
+	if email := strings.ToLower(strings.TrimSpace(strArg(args, "owner_email"))); email != "" && email != t.OwnerEmail {
+		if !strings.Contains(email, "@") {
+			return nil, errors.New("valid owner_email required")
+		}
+		if _, err := db.Exec(`UPDATE hosting_tenants SET owner_email=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, email, t.ID); err != nil {
+			return nil, err
+		}
+		changes["owner_email"] = email
+	}
+	if meta := mapArg(args, "metadata"); len(meta) > 0 {
+		if err := dbTenantMergeMetadata(db, t.ID, meta); err != nil {
+			return nil, err
+		}
+		changes["metadata"] = true
+	}
+	if len(changes) > 0 {
+		_ = recordEvent(db, t.ID, "tenant.updated", firstNonEmpty(actor(args), "tool"), changes)
+	}
+	t, err = dbTenantGet(db, t.ID)
+	return map[string]any{"tenant": t, "changed": len(changes) > 0}, err
+}
+
+func (a *App) toolTenantResolve(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	t, op, err := a.resolveStuckTenant(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return tenantResult(ctx.AppDB(), t, op), nil
 }

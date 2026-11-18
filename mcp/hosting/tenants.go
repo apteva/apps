@@ -46,7 +46,7 @@ func planSteps(kind string, profile *Profile, product *Product, pool *Pool, t *T
 		if onDemand {
 			return join([]string{"create_instance", "wait_ready", "prepare_ssh", "preflight"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
 		}
-		return join([]string{"prepare_ssh", "preflight"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
+		return join([]string{"prepare_ssh", "preflight", "check_os"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
 	case OpSuspend:
 		return join(workloadSteps(product, "stop_workload"), []string{"revoke", "verify_revoked"}), nil
 	case OpResume:
@@ -75,7 +75,7 @@ func planSteps(kind string, profile *Profile, product *Product, pool *Pool, t *T
 			return nil, errors.New("reinstall is only available for macOS pool machines")
 		}
 		return join([]string{"revoke", "verify_revoked"}, workloadSteps(product, "destroy_workload"), []string{"reinstall"}, afterResetSteps,
-			[]string{"preflight"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
+			[]string{"preflight", "check_os"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
 	}
 	return nil, fmt.Errorf("unknown operation %s", kind)
 }
@@ -163,7 +163,16 @@ func (a *App) createTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, error
 		return nil, err
 	} else if existing != nil {
 		if req.ProfileKey != "" && existing.ProfileKey != req.ProfileKey {
-			return nil, fmt.Errorf("external_ref %q already has tenant %s on profile %q", req.ExternalRef, existing.ID, existing.ProfileKey)
+			return nil, fmt.Errorf("external_ref %q already has tenant %s on profile %q; changing profile is a release followed by a new create", req.ExternalRef, existing.ID, existing.ProfileKey)
+		}
+		switch existing.Status {
+		case TenantSuspended, TenantSuspending:
+			// account_active fires again when a past-due account pays: bring
+			// the tenant back instead of reporting the suspended one as done.
+			t, _, err := a.tenantLifecycle(ctx, OpResume, map[string]any{"tenant_id": existing.ID, "actor": firstNonEmpty(actor(args), "create")})
+			return t, err
+		case TenantReleasing:
+			return nil, fmt.Errorf("tenant %s for external_ref %q is being released; create again once it is released", existing.ID, req.ExternalRef)
 		}
 		return existing, nil // repeat call: same tenant, nothing new started
 	}
@@ -338,12 +347,14 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 }
 
 // claimMachineTx picks the machine for a new pool tenant: the caller's held
-// reservation when given, otherwise any machine for sale. nil means none is
-// free and the tenant waits.
+// reservation (given, or found by profile + external_ref) when that machine
+// can still be sold, otherwise any machine for sale. nil means none is free
+// and the tenant waits.
 func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID string) (*Machine, error) {
+	var r *Reservation
 	if reservationID != "" {
-		r, err := dbReservationGet(tx, reservationID)
-		if err != nil {
+		var err error
+		if r, err = dbReservationGet(tx, reservationID); err != nil {
 			return nil, err
 		}
 		if r == nil {
@@ -352,18 +363,34 @@ func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID strin
 		if r.ProfileKey != profile.Key || r.ExternalRef != t.ExternalRef {
 			return nil, fmt.Errorf("reservation %s belongs to another profile or external_ref", reservationID)
 		}
-		if r.Status == "held" {
-			m, err := dbMachineGet(tx, r.MachineID)
-			if err != nil {
-				return nil, err
-			}
-			if m != nil && m.State == MachineReserved && m.TenantID == "" {
-				t.ReservationID = r.ID
-				return m, nil
-			}
+	} else if t.ExternalRef != "" {
+		found, err := scanReservation(tx.QueryRow(reservationSelect+` WHERE profile_key=? AND external_ref=? AND status='held'`, profile.Key, t.ExternalRef))
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
 		}
-		// Expired or released hold: fall back to any machine for sale.
+		r = found
 	}
+	if r != nil && r.Status == "held" {
+		var ok int
+		err := tx.QueryRow(`SELECT 1 FROM hosting_machines m WHERE m.id=? AND m.state='reserved' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
+			AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`, r.MachineID).Scan(&ok)
+		if err == nil {
+			t.ReservationID = r.ID
+			return dbMachineGet(tx, r.MachineID)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		// The held machine went offline, lost validation or its pool stopped
+		// execution: drop the hold and fall back to another machine.
+		if _, err := tx.Exec(`UPDATE hosting_reservations SET status='released', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='held'`, r.ID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE hosting_machines SET state='available', state_reason='', updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='reserved' AND tenant_id IS NULL`, r.MachineID); err != nil {
+			return nil, err
+		}
+	}
+	// Expired, released or unusable hold: any machine for sale.
 	var id int64
 	err := tx.QueryRow(`SELECT m.id FROM hosting_machines m WHERE m.pool_key=? AND `+forSaleCondition+`
 		AND NOT EXISTS (SELECT 1 FROM hosting_reservations r WHERE r.machine_id=m.id AND r.status='held')
@@ -427,14 +454,14 @@ func (a *App) assignWaitingTenant(ctx *sdk.AppCtx, tenantID string) (bool, error
 		return false, err
 	}
 	res, err := tx.Exec(`UPDATE hosting_machines SET state='preparing', state_reason='', tenant_id=?, updated_at=CURRENT_TIMESTAMP
-		WHERE id=? AND tenant_id IS NULL AND state='available'`, t.ID, m.ID)
+		WHERE id=? AND tenant_id IS NULL AND state IN ('available','reserved')`, t.ID, m.ID)
 	if err != nil {
 		return false, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return false, nil
 	}
-	if _, err := tx.Exec(`UPDATE hosting_tenants SET machine_id=?, status='provisioning', updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID, t.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE hosting_tenants SET machine_id=?, reservation_id=NULLIF(?, ''), status='provisioning', updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID, t.ReservationID, t.ID); err != nil {
 		return false, err
 	}
 	if err := dbTenantMergeMetadata(tx, t.ID, map[string]any{"access_host": m.PublicHost, "access_port": m.PublicPort}); err != nil {
@@ -602,6 +629,9 @@ func (a *App) releaseTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, *Ope
 	if t.Status == TenantReleasing || t.Status == TenantReleased {
 		return t, nil, nil
 	}
+	if err := confirmTenant(t, args); err != nil {
+		return nil, nil, err
+	}
 	if t.ReservationID != "" {
 		_, _ = db.Exec(`UPDATE hosting_reservations SET status='released', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='held'`, t.ReservationID)
 	}
@@ -643,6 +673,15 @@ func (a *App) releaseTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, *Ope
 	return t, op, err
 }
 
+// confirmTenant guards tools that destroy customer data: the caller must pass
+// confirm equal to the tenant id (SaaS keeps it from tenant creation).
+func confirmTenant(t *Tenant, args map[string]any) error {
+	if got := strings.TrimSpace(strArg(args, "confirm")); got != t.ID {
+		return fmt.Errorf("this destroys the tenant's data; confirm must be the tenant id %s", t.ID)
+	}
+	return nil
+}
+
 func releaseHeldReservations(db querier, ref string) error {
 	_, err := db.Exec(`UPDATE hosting_reservations SET status='released', updated_at=CURRENT_TIMESTAMP WHERE external_ref=? AND status='held'`, ref)
 	return err
@@ -667,6 +706,11 @@ func (a *App) machineTenantOp(ctx *sdk.AppCtx, kind string, args map[string]any)
 			return t, nil, err
 		}
 		return nil, nil, fmt.Errorf("%s is only available for machine tenants", kind)
+	}
+	if kind == OpReinstall {
+		if err := confirmTenant(t, args); err != nil {
+			return nil, nil, err
+		}
 	}
 	switch t.Status {
 	case TenantActive:
@@ -855,4 +899,111 @@ func availability(db *sql.DB, profile *Profile) (*Availability, error) {
 		}
 	}
 	return out, nil
+}
+
+// resolveTenant settles a tenant left behind by a failure: its machine is
+// quarantined, or its last run failed, so it sits in suspending, resuming,
+// releasing or failed. The operator picks the outcome after checking the
+// machine:
+//
+//	resume       restore access and run the tenant again
+//	release      remove access, then reset the machine as a normal release
+//	force_clean  erase the macOS machine without contacting the customer
+//	             account first (when revoke itself keeps failing)
+func (a *App) resolveStuckTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, *Operation, error) {
+	db := ctx.AppDB()
+	t, err := dbTenantGet(db, strArg(args, "tenant_id"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if t == nil {
+		return nil, nil, fmt.Errorf("tenant %s not found", strArg(args, "tenant_id"))
+	}
+	if !boolArg(args, "reviewed") {
+		return nil, nil, errors.New("resolve needs reviewed=true: check the machine and the run log first")
+	}
+	if err := confirmTenant(t, args); err != nil {
+		return nil, nil, err
+	}
+	if t.Backend == BackendContainer {
+		return nil, nil, errors.New("container tenants have no runs to resolve; use suspend, resume or release")
+	}
+	if t.Status == TenantReleased {
+		return nil, nil, fmt.Errorf("tenant %s is already released", t.ID)
+	}
+	var m *Machine
+	if t.MachineID > 0 {
+		if m, err = requireMachine(db, t.MachineID); err != nil {
+			return nil, nil, err
+		}
+	}
+	stuck := t.Status == TenantFailed || t.Status == TenantSuspending || t.Status == TenantResuming || t.Status == TenantReleasing ||
+		(m != nil && m.State == MachineQuarantined)
+	if !stuck {
+		return nil, nil, fmt.Errorf("tenant %s is %s and its machine is not quarantined; nothing to resolve", t.ID, t.Status)
+	}
+	if op, _ := activeOperationFor(db, t.ID, 0); op != nil {
+		return nil, nil, fmt.Errorf("run %s is still %s for this tenant; quarantine the machine to stop it first", op.ID, op.Status)
+	}
+	action := strArg(args, "action")
+	var kind, transient string
+	var steps []string
+	switch action {
+	case "resume":
+		kind, transient = OpResume, TenantResuming
+	case "release":
+		kind, transient = OpRelease, TenantReleasing
+	case "force_clean":
+		if m == nil {
+			return nil, nil, errors.New("force_clean needs a pool machine")
+		}
+		pool, err := requirePool(db, m.PoolKey)
+		if err != nil {
+			return nil, nil, err
+		}
+		if pool.Platform != "macos" {
+			return nil, nil, errors.New("force_clean is only available for macOS pool machines")
+		}
+		if !m.Validated {
+			return nil, nil, fmt.Errorf("machine %d is not validated; erase is refused", m.ID)
+		}
+		kind, transient = OpRelease, TenantReleasing
+		steps = join([]string{"wipe"}, afterResetSteps)
+	default:
+		return nil, nil, errors.New("action must be resume, release or force_clean")
+	}
+	who := firstNonEmpty(actor(args), "operator")
+	if m != nil {
+		// Lift the quarantine so the run may touch the machine again.
+		if err := dbMachineSetState(db, m.ID, MachineAssigned, "resolved by "+who+": "+action); err != nil {
+			return nil, nil, err
+		}
+	}
+	_ = recordEvent(db, t.ID, "resolved", who, map[string]any{"action": action, "previous_status": t.Status})
+	if steps == nil {
+		op, err := a.enqueueTenantOp(ctx, t, kind, transient, who)
+		if err != nil {
+			return nil, nil, err
+		}
+		t, err = dbTenantGet(db, t.ID)
+		return t, op, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	op, err := enqueueOperation(tx, kind, t.ID, t.MachineID, t.InstanceID, steps, who)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := dbTenantSetStatus(tx, t.ID, transient, ""); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	kickOperation(a, ctx, op.ID)
+	t, err = dbTenantGet(db, t.ID)
+	return t, op, err
 }

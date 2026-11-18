@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -154,7 +155,9 @@ func (a *App) drive(ctx *sdk.AppCtx, id string) {
 			return
 		}
 		step := op.Steps[op.Step]
+		stop := keepLease(db, op.ID, token)
 		runErr := a.runStep(ctx, op, step)
+		stop()
 		var p *errPending
 		switch {
 		case runErr == nil:
@@ -182,6 +185,35 @@ func (a *App) drive(ctx *sdk.AppCtx, id string) {
 			a.failOperation(ctx, op, token, step, runErr)
 			return
 		}
+	}
+}
+
+// leaseRenewEvery is how often a running step extends its lease, so a step
+// slower than leaseDuration (creating an instance, pulling an image, erasing
+// a Mac) is never claimed and run a second time by the worker.
+var leaseRenewEvery = leaseDuration / 3
+
+func keepLease(db *sql.DB, id, token string) (stop func()) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(leaseRenewEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_, _ = db.Exec(`UPDATE hosting_operations SET lease_until=? WHERE id=? AND lease_token=? AND status='running'`,
+					sqlTime(now().Add(leaseDuration)), id, token)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		wg.Wait()
 	}
 }
 

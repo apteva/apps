@@ -100,6 +100,8 @@ func (a *App) runStep(ctx *sdk.AppCtx, op *Operation, step string) error {
 		return a.stepDestroyInstance(ctx, env)
 	case "prepare_ssh", "preflight", "grant", "verify_access", "revoke", "verify_revoked", "check_clean":
 		return a.runAccessStep(ctx, env, step)
+	case "check_os":
+		return a.stepCheckOS(ctx, env)
 	case "revoke_quiet":
 		// Releasing an on-demand machine: cut access if the host still
 		// answers, but never block destroying it.
@@ -139,6 +141,18 @@ type instanceInfo struct {
 	SSHPort     int    `json:"ssh_port"`
 	DeletableAt string `json:"deletable_at"`
 	Error       string `json:"error"`
+	// Connected is reported by Instances versions that track whether the
+	// host's agent is connected (a switched-off Mac stays "ready").
+	Connected  *bool  `json:"connected,omitempty"`
+	LastSeenAt string `json:"last_seen_at,omitempty"`
+}
+
+// online uses Instances' connected flag when it has one, else status ready.
+func (i *instanceInfo) online() bool {
+	if i.Connected != nil {
+		return *i.Connected && i.Status == "ready"
+	}
+	return i.Status == "ready"
 }
 
 func (i *instanceInfo) host() string { return firstNonEmpty(i.SSHHost, i.PublicIPv4) }
@@ -472,9 +486,26 @@ func (a *App) stepRunWorkload(ctx *sdk.AppCtx, env *stepEnv) error {
 		return nil
 	}
 	input := containerRunInput(t, env.profile, env.product, mapFromAny(mapFromAny(t.Metadata)["runtime_config"]), env.instance)
+	name := strFromAny(input["name"])
 	var out workloadResp
-	if err := ctx.PlatformAPI().CallAppResult("containers", "containers_run", input, &out); err != nil {
-		return fmt.Errorf("containers_run: %w", err)
+	if boolFromAny(mapFromAny(t.Metadata)["workload_run_started"], false) {
+		// An earlier attempt may have started the container before it could
+		// save the id: adopt it by name instead of starting a second one.
+		if w := findWorkloadByName(ctx, name); w != nil {
+			out.Workload = *w
+		}
+	}
+	if out.Workload.ID == "" {
+		if err := dbTenantMergeMetadata(ctx.AppDB(), t.ID, map[string]any{"workload_run_started": true}); err != nil {
+			return err
+		}
+		if err := ctx.PlatformAPI().CallAppResult("containers", "containers_run", input, &out); err != nil {
+			if w := findWorkloadByName(ctx, name); w != nil {
+				out.Workload = *w
+			} else {
+				return fmt.Errorf("containers_run: %w", err)
+			}
+		}
 	}
 	if out.Workload.ID == "" {
 		return errors.New("containers_run returned no workload id")
@@ -506,4 +537,54 @@ func (a *App) stepWorkload(ctx *sdk.AppCtx, env *stepEnv, step string) error {
 		_, _ = ctx.AppDB().Exec(`UPDATE hosting_tenants SET workload_id='', updated_at=CURRENT_TIMESTAMP WHERE id=?`, env.tenant.ID)
 	}
 	return nil
+}
+
+// findWorkloadByName returns Hosting's live workload with this name, if any.
+func findWorkloadByName(ctx *sdk.AppCtx, name string) *containerWorkload {
+	if name == "" {
+		return nil
+	}
+	var list struct {
+		Workloads []containerWorkload `json:"workloads"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("containers", "containers_list", map[string]any{"limit": 500}, &list); err != nil {
+		return nil
+	}
+	for i := range list.Workloads {
+		w := list.Workloads[i]
+		if w.Name == name && w.Status != "destroyed" && w.Status != "deleted" {
+			return &w
+		}
+	}
+	return nil
+}
+
+// stepCheckOS compares the machine's OS version with its expected_os (a
+// prefix such as "15" or "15.3" on macOS, "ubuntu 24.04" on Linux). Machines
+// without expected_os skip it.
+func (a *App) stepCheckOS(ctx *sdk.AppCtx, env *stepEnv) error {
+	if env.machine == nil || strings.TrimSpace(env.machine.ExpectedOS) == "" {
+		return nil
+	}
+	cmd := `/usr/bin/sw_vers -productVersion`
+	if env.platform != "macos" {
+		cmd = `. /etc/os-release && printf '%s %s\n' "$ID" "$VERSION_ID"`
+	}
+	res, err := runCommand(ctx, env, cmd, 30)
+	if err != nil {
+		return err
+	}
+	got := strings.TrimSpace(res.Output)
+	if res.ExitCode != 0 || got == "" {
+		return fmt.Errorf("could not read the OS version (exit %d): %s", res.ExitCode, tail(firstNonEmpty(res.Output, res.Error), 200))
+	}
+	if !osMatches(got, env.machine.ExpectedOS) {
+		return fmt.Errorf("machine runs %q, expected %q", got, env.machine.ExpectedOS)
+	}
+	return nil
+}
+
+func osMatches(got, expected string) bool {
+	got, expected = strings.ToLower(strings.TrimSpace(got)), strings.ToLower(strings.TrimSpace(expected))
+	return got == expected || strings.HasPrefix(got, expected+".")
 }
