@@ -28,6 +28,10 @@ interface Limits {
   monthly_provider_cost_limit_microunits?: number;
   provider_cost_currency?: string;
   unpriced_model_behavior?: "allow" | "deny";
+  requests_per_minute?: number;
+  tokens_per_minute?: number;
+  token_requests_per_minute?: number;
+  token_tokens_per_minute?: number;
 }
 
 interface FallbackRoute {
@@ -79,6 +83,10 @@ interface UsageEvent {
   status: string;
   request_id: string;
   created_at: string;
+  endpoint?: string;
+  requested_model?: string;
+  latency_ms?: number;
+  time_to_first_token_ms?: number;
 }
 
 interface TokenRecord {
@@ -86,6 +94,9 @@ interface TokenRecord {
   subject_type: string;
   subject_id: string;
   scopes: string[];
+  label?: string;
+  last4?: string;
+  last_used_at?: string;
   expires_at?: string;
   created_at: string;
   revoked_at?: string;
@@ -201,6 +212,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const [issuedToken, setIssuedToken] = useState("");
   const [tokenSubjectType, setTokenSubjectType] = useState("agent");
   const [tokenSubjectId, setTokenSubjectId] = useState("");
+  const [tokenLabel, setTokenLabel] = useState("");
   const [tokenScopes, setTokenScopes] = useState(["chat", "embeddings", "models", "usage"]);
   const [tokenLifetimeDays, setTokenLifetimeDays] = useState(30);
   const [includeRevoked, setIncludeRevoked] = useState(false);
@@ -450,7 +462,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       : undefined;
     const data = await api<{ token: string }>("/tokens", {
       method: "POST",
-      body: JSON.stringify({ subject_type: tokenSubjectType, subject_id: tokenSubjectId, scopes: tokenScopes, expires_at: expiresAt }),
+      body: JSON.stringify({ subject_type: tokenSubjectType, subject_id: tokenSubjectId, label: tokenLabel, scopes: tokenScopes, expires_at: expiresAt }),
     });
     setIssuedToken(data.token);
     await loadTokens();
@@ -623,6 +635,12 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
             <NumberField label="Output tokens per month" value={policy.limits?.monthly_output_token_limit || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "monthly_output_token_limit", value)} />
             <NumberField label="Maximum output per request" value={policy.limits?.max_tokens_per_request || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "max_tokens_per_request", value)} />
           </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <NumberField label={policyScope === "subject" ? "Subject requests per minute" : "Project requests per minute"} value={policy.limits?.requests_per_minute || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "requests_per_minute", value)} />
+            <NumberField label={policyScope === "subject" ? "Subject tokens per minute" : "Project tokens per minute"} value={policy.limits?.tokens_per_minute || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "tokens_per_minute", value)} />
+            <NumberField label="Requests per minute, each token" value={policy.limits?.token_requests_per_minute || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "token_requests_per_minute", value)} />
+            <NumberField label="Tokens per minute, each token" value={policy.limits?.token_tokens_per_minute || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "token_tokens_per_minute", value)} />
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-3xl">
             <MoneyField label="Monthly provider cost limit" microunits={policy.limits?.monthly_provider_cost_limit_microunits || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "monthly_provider_cost_limit_microunits", value)} />
             <Field label="Cost currency"><input value={policy.limits?.provider_cost_currency || "USD"} maxLength={3} onChange={(event) => setPolicy({ ...policy, limits: { ...(policy.limits || {}), provider_cost_currency: event.target.value.toUpperCase() } })} className={`${controlClass} font-mono`} /></Field>
@@ -639,16 +657,17 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
 
       {tab === "tokens" && (
         <div className="flex-1 overflow-auto p-4 space-y-5">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 max-w-5xl">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 max-w-6xl">
             <Field label="Subject type"><input value={tokenSubjectType} onChange={(event) => setTokenSubjectType(event.target.value)} className={controlClass} /></Field>
             <Field label="Subject ID"><input value={tokenSubjectId} onChange={(event) => setTokenSubjectId(event.target.value)} className={`${controlClass} font-mono`} /></Field>
+            <Field label="Label"><input value={tokenLabel} placeholder="Production server" onChange={(event) => setTokenLabel(event.target.value)} className={controlClass} /></Field>
             <NumberField label="Lifetime in days (0 = none)" value={tokenLifetimeDays} onChange={setTokenLifetimeDays} />
             <div className="flex items-end"><button type="button" disabled={!!busy || !tokenSubjectId || tokenScopes.length === 0} onClick={issueToken} className={primaryButton}>{busy === "token-create" ? "Creating..." : "Create token"}</button></div>
           </div>
-          <div className="flex flex-wrap gap-4">{["chat", "embeddings", "models", "usage", "usage:project"].map((scope) => <label key={scope} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={tokenScopes.includes(scope)} onChange={() => setTokenScopes(toggleValue(tokenScopes, scope))} />{scope}</label>)}</div>
+          <div className="flex flex-wrap gap-4">{["chat", "embeddings", "models", "usage", "usage:project", "audio", "images"].map((scope) => <label key={scope} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={tokenScopes.includes(scope)} onChange={() => setTokenScopes(toggleValue(tokenScopes, scope))} />{scope}</label>)}</div>
           {issuedToken && <div className="max-w-5xl border border-warn/40 bg-warn/10 rounded p-3"><div className="flex items-center gap-2 mb-2"><span className="text-xs text-warn">Shown once</span><button type="button" onClick={() => void navigator.clipboard.writeText(issuedToken)} className={`${secondaryButton} ml-auto`}>Copy</button></div><div className="font-mono text-xs break-all select-all">{issuedToken}</div></div>}
           <div className="flex items-center gap-3 border-t border-border pt-4"><h2 className="text-sm font-medium">Issued tokens</h2><label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={includeRevoked} onChange={(event) => setIncludeRevoked(event.target.checked)} />Include revoked</label><button type="button" onClick={() => void loadTokens()} className={`${secondaryButton} ml-auto`}>Refresh</button></div>
-          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>ID</Th><Th>Subject</Th><Th>Scopes</Th><Th>Expires</Th><Th>Status</Th><Th></Th></tr></thead><tbody>{tokens.map((token) => <tr key={token.id} className="border-t border-border"><Td mono>{token.id}</Td><Td>{token.subject_type}<div className="font-mono text-text-dim">{token.subject_id}</div></Td><Td>{token.scopes.join(", ")}</Td><Td>{formatDate(token.expires_at)}</Td><Td>{token.revoked_at ? "revoked" : "active"}</Td><Td>{!token.revoked_at && <button type="button" disabled={!!busy} onClick={() => revokeToken(token.id)} className={dangerButton}>{busy === `token-${token.id}` ? "Revoking..." : "Revoke"}</button>}</Td></tr>)}</tbody></table></div>
+          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>Token</Th><Th>Subject</Th><Th>Scopes</Th><Th>Last used</Th><Th>Expires</Th><Th>Status</Th><Th></Th></tr></thead><tbody>{tokens.map((token) => <tr key={token.id} className="border-t border-border"><Td>{token.label || <span className="text-text-dim">Unnamed</span>}<div className="font-mono text-text-dim">#{token.id}{token.last4 ? ` · …${token.last4}` : ""}</div></Td><Td>{token.subject_type}<div className="font-mono text-text-dim">{token.subject_id}</div></Td><Td>{token.scopes.join(", ")}</Td><Td>{token.last_used_at ? formatDate(token.last_used_at) : <span className="text-text-dim">Never</span>}</Td><Td>{formatDate(token.expires_at)}</Td><Td>{token.revoked_at ? "revoked" : "active"}</Td><Td>{!token.revoked_at && <button type="button" disabled={!!busy} onClick={() => revokeToken(token.id)} className={dangerButton}>{busy === `token-${token.id}` ? "Revoking..." : "Revoke"}</button>}</Td></tr>)}</tbody></table></div>
         </div>
       )}
 
@@ -656,7 +675,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
         <div className="flex-1 overflow-auto p-4 space-y-4">
           <div className="flex flex-wrap items-end gap-3"><Field label="Subject type"><input value={usageSubjectType} onChange={(event) => setUsageSubjectType(event.target.value)} className={`${controlClass} w-40`} /></Field><Field label="Subject ID"><input value={usageSubjectId} onChange={(event) => setUsageSubjectId(event.target.value)} className={`${controlClass} w-56 font-mono`} /></Field><Field label="Model"><input value={usageModel} onChange={(event) => setUsageModel(event.target.value)} className={`${controlClass} w-72 font-mono`} /></Field><button type="button" onClick={() => void perform("usage", loadUsage)} className={secondaryButton}>{busy === "usage" ? "Loading..." : "Apply filters"}</button></div>
           {usage && <><div className="grid grid-cols-2 lg:grid-cols-5 gap-3"><Metric label="Requests" value={usage.requests} /><Metric label="Input tokens" value={usage.request_tokens} /><Metric label="Output tokens" value={usage.response_tokens} /><Metric label="Total tokens" value={usage.total_tokens} /><Metric label="Provider cost" value={formatMicrounits(usage.provider_cost_microunits, usage.provider_cost_currency)} /></div><div className="text-xs text-text-muted">{usage.reported_cost_requests || 0} reported · {usage.calculated_cost_requests || 0} calculated · {usage.partial_cost_requests || 0} partial · {usage.unpriced_requests || 0} unpriced</div></>}
-          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>Time</Th><Th>Subject</Th><Th>Route</Th><Th>Tokens</Th><Th>Provider cost</Th><Th>Status</Th><Th>Request ID</Th></tr></thead><tbody>{usageEvents.map((event) => <tr key={event.id} className="border-t border-border"><Td>{formatDate(event.created_at)}</Td><Td>{event.subject_type}<div className="font-mono text-text-dim">{event.subject_id}</div></Td><Td>{event.provider}<div className="font-mono text-text-dim max-w-72 truncate" title={event.model}>{event.model}</div></Td><Td mono>{event.request_tokens} + {event.response_tokens}</Td><Td><span className="font-mono tabular-nums">{formatMicrounits(event.provider_cost_microunits, event.provider_cost_currency)}</span><div className="text-text-dim">{event.provider_cost_status}{event.provider_cost_source ? ` · ${event.provider_cost_source}` : ""}</div></Td><Td>{event.status}</Td><Td mono><span className="block max-w-56 truncate" title={event.request_id}>{event.request_id}</span></Td></tr>)}</tbody></table></div>
+          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>Time</Th><Th>Subject</Th><Th>Route</Th><Th>Tokens</Th><Th>Latency</Th><Th>Provider cost</Th><Th>Status</Th><Th>Request ID</Th></tr></thead><tbody>{usageEvents.map((event) => <tr key={event.id} className="border-t border-border"><Td>{formatDate(event.created_at)}</Td><Td>{event.subject_type}<div className="font-mono text-text-dim">{event.subject_id}</div></Td><Td>{event.provider}{event.endpoint && event.endpoint !== "chat.completions" ? ` · ${event.endpoint}` : ""}<div className="font-mono text-text-dim max-w-72 truncate" title={event.model}>{event.requested_model && event.requested_model !== event.model ? `${event.requested_model} → ` : ""}{event.model}</div></Td><Td mono>{event.request_tokens} + {event.response_tokens}</Td><Td mono>{event.latency_ms ? `${event.latency_ms} ms` : "-"}{event.time_to_first_token_ms && event.time_to_first_token_ms !== event.latency_ms ? <div className="text-text-dim">first {event.time_to_first_token_ms} ms</div> : null}</Td><Td><span className="font-mono tabular-nums">{formatMicrounits(event.provider_cost_microunits, event.provider_cost_currency)}</span><div className="text-text-dim">{event.provider_cost_status}{event.provider_cost_source ? ` · ${event.provider_cost_source}` : ""}</div></Td><Td>{event.status}</Td><Td mono><span className="block max-w-56 truncate" title={event.request_id}>{event.request_id}</span></Td></tr>)}</tbody></table></div>
         </div>
       )}
 

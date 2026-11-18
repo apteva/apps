@@ -2,18 +2,20 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.5.6
+version: 0.6.0
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
-  OpenAI-compatible tenant-safe gateway that routes text and image requests to configured
-  model providers, enforces project and subject policy, and records raw token,
-  request, and upstream provider-cost usage for orchestration apps.
+  OpenAI-compatible tenant-safe gateway that routes text, image, audio, and
+  embedding requests to configured model providers, streams responses, enforces
+  project, subject, and per-minute limits, and records raw token, request, and
+  upstream provider-cost usage. Optional admission hooks let a billing app
+  approve each request and receive a guaranteed settlement afterwards.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [llm, ai, gateway, openai-compatible, multimodal, vision, usage]
+tags: [llm, ai, gateway, openai-compatible, multimodal, vision, audio, streaming, usage]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -24,6 +26,7 @@ requires:
     - platform.connections.read
     - platform.connections.read_credentials
     - platform.connections.execute
+    - platform.apps.call
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -113,6 +116,16 @@ provides:
       description: Disable LLM access for a generic subject within a project.
     - name: llm_subject_resume
       description: Re-enable LLM access for a generic subject within a project.
+    - name: llm_tokens_update
+      description: Change a token's label, metadata, or admission hook.
+    - name: llm_public_models_list
+      description: List public model names and the provider routes behind them.
+    - name: llm_public_models_upsert
+      description: Create or update a public model name that routes to provider models in order.
+    - name: llm_public_models_delete
+      description: Delete a public model name.
+    - name: llm_settlements_list
+      description: List settlement deliveries to admission hooks, including pending retries.
   ui_panels:
     - slot: project.page
       label: LLM Gateway
@@ -129,6 +142,8 @@ provides:
       description: A request was denied because a project or subject usage limit was exceeded.
     - name: llm.provider.failed
       description: A provider route returned a retryable or terminal failure.
+    - name: llm.request.denied
+      description: The admission hook denied a request, or could not be reached and the hook fails closed.
 
 runtime:
   kind: source

@@ -28,8 +28,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.6
-description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
+version: 0.6.0
+description: Generic OpenAI-compatible text, image, audio, and embedding access with streaming, per-minute limits, admission hooks, and provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -40,6 +40,7 @@ requires:
     - platform.connections.read
     - platform.connections.read_credentials
     - platform.connections.execute
+    - platform.apps.call
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -119,6 +120,16 @@ provides:
       description: Disable LLM access for a generic subject within a project.
     - name: llm_subject_resume
       description: Re-enable LLM access for a generic subject within a project.
+    - name: llm_tokens_update
+      description: Change a token's label, metadata, or admission hook.
+    - name: llm_public_models_list
+      description: List public model names and the provider routes behind them.
+    - name: llm_public_models_upsert
+      description: Create or update a public model name that routes to provider models in order.
+    - name: llm_public_models_delete
+      description: Delete a public model name.
+    - name: llm_settlements_list
+      description: List settlement deliveries to admission hooks, including pending retries.
   ui_panels:
     - slot: project.page
       label: LLM Gateway
@@ -135,6 +146,8 @@ provides:
       description: A request was denied because a project or subject usage limit was exceeded.
     - name: llm.provider.failed
       description: A provider route failed and may have triggered failover.
+    - name: llm.request.denied
+      description: The admission hook denied a request, or could not be reached and the hook fails closed.
 runtime:
   kind: source
   source:
@@ -178,8 +191,11 @@ const (
 	imageTokenEstimate   = 1024
 )
 
+const appVersion = "0.6.0"
+
 type App struct {
 	httpClient *http.Client
+	limiter    *rateLimiter
 }
 
 var globalCtx *sdk.AppCtx
@@ -217,8 +233,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			},
 		}
 	}
+	if a.limiter == nil {
+		a.limiter = newRateLimiter()
+	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.5.5", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", appVersion, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -304,23 +323,42 @@ func ensureGatewaySchema(db *sql.DB) error {
 	}
 
 	for _, col := range []struct {
-		name string
-		decl string
+		table string
+		name  string
+		decl  string
 	}{
-		{"provider_request_id", `TEXT NOT NULL DEFAULT ''`},
-		{"token_id", `INTEGER NOT NULL DEFAULT 0`},
+		{"usage_events", "provider_request_id", `TEXT NOT NULL DEFAULT ''`},
+		{"usage_events", "token_id", `INTEGER NOT NULL DEFAULT 0`},
+		// v0.6.0: request-log fields and admission hook bookkeeping.
+		{"usage_events", "endpoint", `TEXT NOT NULL DEFAULT ''`},
+		{"usage_events", "requested_model", `TEXT NOT NULL DEFAULT ''`},
+		{"usage_events", "latency_ms", `INTEGER NOT NULL DEFAULT 0`},
+		{"usage_events", "ttft_ms", `INTEGER NOT NULL DEFAULT 0`},
+		{"usage_events", "token_metadata_json", `TEXT NOT NULL DEFAULT '{}'`},
+		{"usage_events", "admission_ref", `TEXT NOT NULL DEFAULT ''`},
+		{"usage_events", "admission_json", `TEXT NOT NULL DEFAULT '{}'`},
+		// v0.6.0: token labels, opaque metadata, and per-token admission hooks.
+		{"api_tokens", "label", `TEXT NOT NULL DEFAULT ''`},
+		{"api_tokens", "last4", `TEXT NOT NULL DEFAULT ''`},
+		{"api_tokens", "metadata_json", `TEXT NOT NULL DEFAULT '{}'`},
+		{"api_tokens", "admission_json", `TEXT NOT NULL DEFAULT '{}'`},
+		{"api_tokens", "last_used_at", `TIMESTAMP`},
+		{"policies", "admission_json", `TEXT NOT NULL DEFAULT '{}'`},
 	} {
-		has, err := txTableHasColumn(tx, "usage_events", col.name)
+		has, err := txTableHasColumn(tx, col.table, col.name)
 		if err != nil {
 			return err
 		}
 		if !has {
-			if _, err := tx.Exec(`ALTER TABLE usage_events ADD COLUMN ` + col.name + ` ` + col.decl); err != nil {
+			if _, err := tx.Exec(`ALTER TABLE ` + col.table + ` ADD COLUMN ` + col.name + ` ` + col.decl); err != nil {
 				return err
 			}
 		}
 	}
 	if err := ensureProviderCostSchema(tx); err != nil {
+		return err
+	}
+	if err := ensureGatewayV06Schema(tx); err != nil {
 		return err
 	}
 
@@ -408,12 +446,21 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "gateway-maintenance", Schedule: "@every 24h", Run: func(_ context.Context, app *sdk.AppCtx) error {
 			return maintainGatewayDB(app.AppDB())
 		}},
+		{Name: "settlement-outbox", Schedule: "@every 15s", Run: func(_ context.Context, app *sdk.AppCtx) error {
+			if _, err := sweepStaleReservations(app.AppDB()); err != nil {
+				return err
+			}
+			_, err := deliverOutbox(app, 0)
+			return err
+		}},
 	}
 }
 
 func maintainGatewayDB(db *sql.DB) error {
-	if _, err := db.Exec(`UPDATE usage_events SET status='failed', response_tokens=0, total_tokens=request_tokens
-		WHERE status='reserved' AND created_at < datetime('now','-1 hour')`); err != nil {
+	if _, err := sweepStaleReservations(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM admission_outbox WHERE status='delivered' AND delivered_at < datetime('now','-30 days')`); err != nil {
 		return err
 	}
 	_, err := db.Exec(`DELETE FROM audit_logs WHERE created_at < datetime('now','-180 days')`)
@@ -425,6 +472,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/v1/", Handler: a.handleV1, NoAuth: true},
 		{Pattern: "/tokens/revoke_subject", Handler: a.handleTokensRevokeSubject},
+		{Pattern: "/tokens/update", Handler: a.handleTokensUpdate},
+		{Pattern: "/public-models", Handler: a.handlePublicModels},
+		{Pattern: "/settlements", Handler: a.handleOutbox},
 		{Pattern: "/tokens/revoke", Handler: a.handleTokensRevoke},
 		{Pattern: "/tokens", Handler: a.handleTokens},
 		{Pattern: "/subjects/suspend", Handler: a.handleSubjectSuspend},
@@ -460,6 +510,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"type": "number",
 			},
 			"max_tokens": map[string]any{"type": "integer"},
+			"metadata":   map[string]any{"type": "object", "description": "Opaque labels passed through to the admission hook and usage records."},
 		}, []string{"model", "messages"}), HandlerCtx: a.toolChatCompleteCtx},
 		{Name: "llm_models_list", Description: "List models allowed by the effective project and subject policy.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"},
@@ -519,17 +570,42 @@ func (a *App) MCPTools() []sdk.Tool {
 			"limits":            map[string]any{"type": "object"},
 			"disabled":          map[string]any{"type": "boolean"},
 			"fallback_policy":   map[string]any{"type": "object"},
+			"admission":         map[string]any{"type": "object", "description": "Admission hook: {app, authorize_tool, settle_tool, fail_mode: closed|open, timeout_ms}. Omit or null to clear. A token's own admission overrides the policy's."},
 		}, nil), Handler: a.toolPolicySet},
 		{Name: "llm_tokens_create", Description: "Issue an OpenAI-compatible bearer token.", InputSchema: schemaObject(map[string]any{
 			"project_id":   map[string]any{"type": "string"},
 			"subject_type": map[string]any{"type": "string"},
 			"subject_id":   map[string]any{"type": "string"},
-			"scopes":       map[string]any{"type": "array"},
+			"scopes":       map[string]any{"type": "array", "description": "chat, embeddings, models, usage, usage:project, audio, images, or *."},
 			"expires_at":   map[string]any{"type": "string"},
+			"label":        map[string]any{"type": "string", "description": "Human-readable name, for example Production server."},
+			"metadata":     map[string]any{"type": "object", "description": "Opaque labels such as {account, project}; passed through, never interpreted."},
+			"admission":    map[string]any{"type": "object", "description": "Admission hook for this token: {app, authorize_tool, settle_tool, fail_mode, timeout_ms}."},
+			"prefix":       map[string]any{"type": "string", "description": "Token prefix ending in '_', for example rl_live_. Defaults to llm_."},
 		}, nil), Handler: a.toolTokenCreate},
 		{Name: "llm_tokens_list", Description: "List issued LLM tokens without exposing token secrets.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"}, "include_revoked": map[string]any{"type": "boolean"},
+			"token_id": map[string]any{"type": "integer"}, "label": map[string]any{"type": "string", "description": "Substring match on label."},
+			"metadata": map[string]any{"type": "object", "description": "Exact match on each given metadata key."}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolTokensList},
+		{Name: "llm_tokens_update", Description: "Change a token's label, metadata, or admission hook.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "token_id": map[string]any{"type": "integer"}, "label": map[string]any{"type": "string"},
+			"metadata": map[string]any{"type": "object"}, "admission": map[string]any{"type": "object", "description": "null clears the token's hook."},
+		}, []string{"token_id"}), Handler: a.toolTokenUpdate},
+		{Name: "llm_public_models_list", Description: "List public model names and the provider routes behind them.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"},
+		}, nil), Handler: a.toolPublicModelsList},
+		{Name: "llm_public_models_upsert", Description: "Create or update a public model name, such as text-fast, that routes to provider models in order.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+			"routes":  map[string]any{"type": "array", "description": "Ordered [{provider, model}] routes; later routes are fallbacks."},
+			"enabled": map[string]any{"type": "boolean"},
+		}, []string{"name", "routes"}), Handler: a.toolPublicModelUpsert},
+		{Name: "llm_public_models_delete", Description: "Delete a public model name.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
+		}, []string{"name"}), Handler: a.toolPublicModelDelete},
+		{Name: "llm_settlements_list", Description: "List settlement deliveries to admission hooks, including pending retries.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string", "description": "pending, delivering, or delivered."}, "limit": map[string]any{"type": "integer"},
+		}, nil), Handler: a.toolOutboxList},
 		{Name: "llm_tokens_revoke", Description: "Revoke an LLM token by id/token, or revoke all tokens for a subject.", InputSchema: schemaObject(map[string]any{
 			"project_id":   map[string]any{"type": "string"},
 			"token_id":     map[string]any{"type": "integer"},
@@ -569,16 +645,17 @@ type ProviderConfig struct {
 }
 
 type Policy struct {
-	ID               int64           `json:"id,omitempty"`
-	ProjectID        string          `json:"project_id"`
-	SubjectType      string          `json:"subject_type,omitempty"`
-	SubjectID        string          `json:"subject_id,omitempty"`
-	AllowedModels    []string        `json:"allowed_models"`
-	BlockedModels    []string        `json:"blocked_models"`
-	AllowedProviders []string        `json:"allowed_providers"`
-	Limits           Limits          `json:"limits"`
-	Disabled         bool            `json:"disabled,omitempty"`
-	FallbackPolicy   json.RawMessage `json:"fallback_policy,omitempty"`
+	ID               int64            `json:"id,omitempty"`
+	ProjectID        string           `json:"project_id"`
+	SubjectType      string           `json:"subject_type,omitempty"`
+	SubjectID        string           `json:"subject_id,omitempty"`
+	AllowedModels    []string         `json:"allowed_models"`
+	BlockedModels    []string         `json:"blocked_models"`
+	AllowedProviders []string         `json:"allowed_providers"`
+	Limits           Limits           `json:"limits"`
+	Disabled         bool             `json:"disabled,omitempty"`
+	FallbackPolicy   json.RawMessage  `json:"fallback_policy,omitempty"`
+	Admission        *AdmissionConfig `json:"admission,omitempty"`
 }
 
 type Limits struct {
@@ -589,14 +666,24 @@ type Limits struct {
 	MonthlyProviderCostLimitMicrounits int64  `json:"monthly_provider_cost_limit_microunits,omitempty"`
 	ProviderCostCurrency               string `json:"provider_cost_currency,omitempty"`
 	UnpricedModelBehavior              string `json:"unpriced_model_behavior,omitempty"`
+	// Per-minute limits for the policy's own scope: the whole project for the
+	// project policy, the subject for a subject policy.
+	RequestsPerMinute int64 `json:"requests_per_minute,omitempty"`
+	TokensPerMinute   int64 `json:"tokens_per_minute,omitempty"`
+	// Per-minute limits applied to each token governed by this policy.
+	TokenRequestsPerMinute int64 `json:"token_requests_per_minute,omitempty"`
+	TokenTokensPerMinute   int64 `json:"token_tokens_per_minute,omitempty"`
 }
 
 type TokenIdentity struct {
-	ID          int64    `json:"id"`
-	ProjectID   string   `json:"project_id"`
-	SubjectType string   `json:"subject_type"`
-	SubjectID   string   `json:"subject_id"`
-	Scopes      []string `json:"scopes"`
+	ID          int64            `json:"id"`
+	ProjectID   string           `json:"project_id"`
+	SubjectType string           `json:"subject_type"`
+	SubjectID   string           `json:"subject_id"`
+	Scopes      []string         `json:"scopes"`
+	Label       string           `json:"label,omitempty"`
+	Metadata    json.RawMessage  `json:"metadata,omitempty"`
+	Admission   *AdmissionConfig `json:"admission,omitempty"`
 }
 
 type UsageSummary struct {
@@ -640,19 +727,31 @@ type UsageEvent struct {
 	RequestID              string          `json:"request_id"`
 	ProviderRequestID      string          `json:"provider_request_id"`
 	TokenID                int64           `json:"token_id,omitempty"`
+	Endpoint               string          `json:"endpoint,omitempty"`
+	RequestedModel         string          `json:"requested_model,omitempty"`
+	LatencyMS              int64           `json:"latency_ms"`
+	TTFTMS                 int64           `json:"time_to_first_token_ms"`
+	TokenMetadata          json.RawMessage `json:"token_metadata,omitempty"`
+	AdmissionRef           string          `json:"admission_ref,omitempty"`
+	AdmissionJSON          string          `json:"-"`
 	CreatedAt              string          `json:"created_at"`
 	Duplicate              bool            `json:"duplicate,omitempty"`
 }
 
 type TokenRecord struct {
-	ID          int64    `json:"id"`
-	ProjectID   string   `json:"project_id"`
-	SubjectType string   `json:"subject_type"`
-	SubjectID   string   `json:"subject_id"`
-	Scopes      []string `json:"scopes"`
-	ExpiresAt   string   `json:"expires_at,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	RevokedAt   string   `json:"revoked_at,omitempty"`
+	ID          int64            `json:"id"`
+	ProjectID   string           `json:"project_id"`
+	SubjectType string           `json:"subject_type"`
+	SubjectID   string           `json:"subject_id"`
+	Scopes      []string         `json:"scopes"`
+	Label       string           `json:"label"`
+	Last4       string           `json:"last4"`
+	Metadata    json.RawMessage  `json:"metadata"`
+	Admission   *AdmissionConfig `json:"admission,omitempty"`
+	ExpiresAt   string           `json:"expires_at,omitempty"`
+	CreatedAt   string           `json:"created_at"`
+	LastUsedAt  string           `json:"last_used_at,omitempty"`
+	RevokedAt   string           `json:"revoked_at,omitempty"`
 }
 
 type FallbackRoute struct {
@@ -702,6 +801,14 @@ type chatResult struct {
 	ProviderCostReported   bool
 	UsageDetails           json.RawMessage
 	UsageEvent             *UsageEvent
+	// UsageEstimated is set when the provider never reported usage and the
+	// counts come from llm's own estimate (for example a cut-off stream).
+	UsageEstimated     bool
+	ClientDisconnected bool
+	// Units carries non-token quantities such as audio seconds or images.
+	Units       map[string]any
+	ContentType string
+	admission   *gatewayAdmission
 }
 
 func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
@@ -728,6 +835,28 @@ func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleV1Usage(ctx, ident, w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/usage/events":
+		if !tokenHasScope(ident, "usage") {
+			writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token does not grant usage access")
+			return
+		}
+		a.handleV1UsageEvents(ctx, ident, w, r)
+	case r.Method == http.MethodPost && (r.URL.Path == "/v1/audio/transcriptions" || r.URL.Path == "/v1/audio/speech"):
+		if !tokenHasScope(ident, "audio") {
+			writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token does not grant audio access")
+			return
+		}
+		if r.URL.Path == "/v1/audio/speech" {
+			a.handleV1Speech(ctx, ident, w, r)
+		} else {
+			a.handleV1Transcriptions(ctx, ident, w, r)
+		}
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/generations":
+		if !tokenHasScope(ident, "images") {
+			writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token does not grant images access")
+			return
+		}
+		a.handleV1Images(ctx, ident, w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		if !tokenHasScope(ident, "chat") {
 			writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token does not grant chat access")
@@ -759,6 +888,18 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 	}
 	data := []map[string]any{}
 	seen := map[string]bool{}
+	public, err := dbPublicModelsList(ctx.AppDB(), ident.ProjectID, true)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	for _, pm := range public {
+		if _, _, err := resolveAttempts(ctx.AppDB(), ident.ProjectID, pm.Name, policies, 0); err != nil {
+			continue
+		}
+		seen[pm.Name] = true
+		data = append(data, map[string]any{"id": pm.Name, "object": "model", "owned_by": "gateway", "description": pm.Description})
+	}
 	cached, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: ident.ProjectID, Status: "active"})
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -783,7 +924,7 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 	}
 	for _, pol := range policies {
 		for _, model := range pol.AllowedModels {
-			if model == "" || strings.Contains(model, "*") || seen[model] {
+			if model == "" || strings.Contains(model, "*") || seen[model] || providerFromModel(model) == "" {
 				continue
 			}
 			provider := providerFromModel(model)
@@ -797,7 +938,9 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 	writeJSON(w, map[string]any{"object": "list", "data": data})
 }
 
-func (a *App) handleV1Usage(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, r *http.Request) {
+// v1UsageFilter limits a token to its own subject unless it holds
+// usage:project, which may read any subject in the project.
+func v1UsageFilter(ident *TokenIdentity, r *http.Request) (usageFilter, bool) {
 	q := r.URL.Query()
 	subjectType := ident.SubjectType
 	subjectID := ident.SubjectID
@@ -805,15 +948,42 @@ func (a *App) handleV1Usage(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respon
 		subjectType = q.Get("subject_type")
 		subjectID = q.Get("subject_id")
 	} else if (q.Get("subject_type") != "" && q.Get("subject_type") != ident.SubjectType) || (q.Get("subject_id") != "" && q.Get("subject_id") != ident.SubjectID) {
-		writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token can only read usage for its own subject")
-		return
+		return usageFilter{}, false
 	}
-	filter := usageFilter{
+	return usageFilter{
 		ProjectID:   ident.ProjectID,
 		Period:      firstNonEmpty(q.Get("period"), currentPeriod()),
 		SubjectType: subjectType,
 		SubjectID:   subjectID,
 		Model:       q.Get("model"),
+		TokenID:     int64(intArgQuery(r, "token_id", 0)),
+		Endpoint:    q.Get("endpoint"),
+	}, true
+}
+
+func (a *App) handleV1UsageEvents(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, r *http.Request) {
+	filter, ok := v1UsageFilter(ident, r)
+	if !ok {
+		writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token can only read usage for its own subject")
+		return
+	}
+	rows, err := dbUsageEventsList(ctx.AppDB(), filter, intArgQuery(r, "limit", 100))
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	data := make([]map[string]any, 0, len(rows))
+	for i := range rows {
+		data = append(data, usageEventPayload(&rows[i], nil))
+	}
+	writeJSON(w, map[string]any{"object": "list", "data": data})
+}
+
+func (a *App) handleV1Usage(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, r *http.Request) {
+	filter, ok := v1UsageFilter(ident, r)
+	if !ok {
+		writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token can only read usage for its own subject")
+		return
 	}
 	usage, err := dbUsageGet(ctx.AppDB(), filter)
 	if err != nil {
@@ -829,22 +999,16 @@ func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respons
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON")
 		return
 	}
-	stream := boolArg(body, "stream")
-	if stream {
-		// Providers are called non-streaming so usage is committed atomically
-		// before a compatible SSE response is emitted.
-		body["stream"] = false
-		delete(body, "stream_options")
-	}
 	body["_llm_request_id"] = requestIDFor(r, body)
-	res, err := a.executeChatContext(r.Context(), ctx, ident, body)
-	if err != nil {
-		status, typ := errorStatus(err)
-		writeOpenAIError(w, status, typ, err.Error())
+	if boolArg(body, "stream") {
+		a.streamChat(w, r, ctx, ident, body)
 		return
 	}
-	if stream {
-		writeBufferedChatStream(w, res.Body)
+	delete(body, "stream")
+	delete(body, "stream_options")
+	res, err := a.executeChatContext(r.Context(), ctx, ident, body)
+	if err != nil {
+		writeGatewayError(w, err)
 		return
 	}
 	copyProviderHeaders(w, res)
@@ -899,12 +1063,18 @@ func (a *App) handleV1Responses(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Re
 		chatReq["tools"] = responsesToolsToChat(tools)
 	}
 	chatReq["_llm_request_id"] = requestIDFor(r, req)
-	res, err := a.executeChatContext(r.Context(), ctx, ident, chatReq)
-	if err != nil {
-		status, typ := errorStatus(err)
-		writeOpenAIError(w, status, typ, err.Error())
+	chatReq["_llm_endpoint"] = "responses"
+	if stream {
+		a.streamResponses(w, r, ctx, ident, chatReq)
 		return
 	}
+	res, err := a.executeChatContext(r.Context(), ctx, ident, chatReq)
+	if err != nil {
+		writeGatewayError(w, err)
+		return
+	}
+	costHeaders(w, res.UsageEvent)
+	writeAdmissionHeaders(w, res.admission)
 	var chat struct {
 		ID      string `json:"id"`
 		Model   string `json:"model"`
@@ -946,70 +1116,7 @@ func (a *App) handleV1Responses(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Re
 		"output":     output,
 		"usage":      chat.Usage,
 	}
-	if stream {
-		writeBufferedResponsesStream(w, response, text)
-		return
-	}
 	writeJSON(w, response)
-}
-
-func writeBufferedChatStream(w http.ResponseWriter, raw []byte) {
-	var response map[string]any
-	if err := json.Unmarshal(raw, &response); err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "provider_error", "provider returned an invalid chat response")
-		return
-	}
-	id := firstNonEmpty(strAny(response["id"]), "chatcmpl_"+randomSuffix(12))
-	model := strAny(response["model"])
-	created := int64FromAny(response["created"])
-	if created == 0 {
-		created = time.Now().Unix()
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	choices, _ := response["choices"].([]any)
-	if len(choices) > 0 {
-		choice, _ := choices[0].(map[string]any)
-		message, _ := choice["message"].(map[string]any)
-		delta := map[string]any{"role": "assistant"}
-		if content, exists := message["content"]; exists {
-			delta["content"] = content
-		}
-		if calls, exists := message["tool_calls"]; exists {
-			delta["tool_calls"] = calls
-		}
-		writeSSEData(w, map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}})
-		writeSSEData(w, map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": choice["finish_reason"]}}, "usage": response["usage"]})
-	}
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func writeBufferedResponsesStream(w http.ResponseWriter, response map[string]any, text string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	writeSSEEvent(w, "response.created", map[string]any{"type": "response.created", "response": response})
-	if text != "" {
-		writeSSEEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": text, "output_index": 0, "content_index": 0})
-	}
-	writeSSEEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": response})
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func writeSSEData(w io.Writer, value any) {
-	b, _ := json.Marshal(value)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-}
-
-func writeSSEEvent(w io.Writer, event string, value any) {
-	b, _ := json.Marshal(value)
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 }
 
 func responsesInputToMessages(input []any) []any {
@@ -1060,8 +1167,7 @@ func (a *App) handleV1Embeddings(ctx *sdk.AppCtx, ident *TokenIdentity, w http.R
 	body["_llm_request_id"] = requestIDFor(r, body)
 	res, err := a.executeEmbeddingsContext(r.Context(), ctx, ident, body)
 	if err != nil {
-		status, typ := errorStatus(err)
-		writeOpenAIError(w, status, typ, err.Error())
+		writeGatewayError(w, err)
 		return
 	}
 	copyProviderHeaders(w, res)
@@ -1070,90 +1176,25 @@ func (a *App) handleV1Embeddings(ctx *sdk.AppCtx, ident *TokenIdentity, w http.R
 }
 
 func (a *App) executeEmbeddingsContext(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any) (*chatResult, error) {
-	model := strArg(body, "model")
-	provider := providerFromModel(model)
-	if model == "" || provider == "" {
-		return nil, userError("model must include a provider prefix")
-	}
 	if _, exists := body["input"]; !exists {
 		return nil, userError("input is required")
 	}
-	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
+	adm, err := a.admit(reqCtx, ctx, ident, gatewayRequest{
+		Endpoint:       "embeddings",
+		Model:          strArg(body, "model"),
+		EstimatedInput: estimateTokens(body["input"]),
+		RequestID:      strArg(body, "_llm_request_id"),
+	})
 	if err != nil {
 		return nil, err
 	}
-	if err := policiesAllow(policies, provider, model, 0); err != nil {
-		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"operation": "embeddings"})
+	result, used, callErr := adm.run(body, func(attempt providerAttempt, cfg *ProviderConfig, key string, attemptBody map[string]any) (*chatResult, error) {
+		return a.callEmbeddings(reqCtx, cfg, key, attemptBody)
+	})
+	if _, err := adm.complete(used, result, callErr); err != nil {
 		return nil, err
 	}
-	requestID := firstNonEmpty(strArg(body, "_llm_request_id"), "llm_req_"+randomSuffix(16))
-	estimatedInput := estimateTokens(body["input"])
-	reservation, _, err := reserveUsage(ctx.AppDB(), ident, provider, model, estimatedInput, 0, requestID, policies, false)
-	if err != nil {
-		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"request_id": requestID, "operation": "embeddings"})
-		return nil, err
-	}
-	attempts := fallbackAttempts(policies, provider, model)
-	var result *chatResult
-	var lastErr error
-	used := attempts[0]
-	for i, attempt := range attempts {
-		if policiesAllow(policies, attempt.Provider, attempt.Model, 0) != nil {
-			continue
-		}
-		used = attempt
-		cfg, callErr := providerConfigFor(ctx, ident.ProjectID, attempt.Provider)
-		if callErr == nil {
-			var key string
-			key, callErr = resolveProviderKey(ctx, cfg)
-			if callErr == nil {
-				attemptBody := cloneMap(body)
-				attemptBody["model"] = attempt.Model
-				result, callErr = a.callEmbeddings(reqCtx, cfg, key, attemptBody)
-			}
-		}
-		if callErr == nil {
-			break
-		}
-		result = nil
-		lastErr = callErr
-		retryable := isRetryableProviderError(callErr)
-		ctx.EmitWithProject("llm.provider.failed", ident.ProjectID, map[string]any{
-			"request_id": requestID, "provider": attempt.Provider, "model": attempt.Model, "error": callErr.Error(),
-			"retryable": retryable, "failover": retryable && i+1 < len(attempts), "operation": "embeddings",
-		})
-		_ = dbAudit(ctx.AppDB(), ident, "provider.failed", attempt.Provider, attempt.Model, "error", callErr.Error(), map[string]any{"request_id": requestID, "retryable": retryable, "operation": "embeddings"})
-		if !retryable {
-			break
-		}
-	}
-	if result == nil {
-		if lastErr == nil {
-			lastErr = errors.New("no allowed embedding provider route is available")
-		}
-		event, finishErr := finishUsageReservation(ctx.AppDB(), reservation.ID, used.Provider, used.Model, estimatedInput, 0, "failed", "")
-		if finishErr != nil {
-			return nil, fmt.Errorf("provider failed: %v; record usage: %w", lastErr, finishErr)
-		}
-		payload := usageEventPayload(event, map[string]any{"error": lastErr.Error(), "operation": "embeddings"})
-		_ = dbAudit(ctx.AppDB(), ident, "request.failed", used.Provider, used.Model, "error", lastErr.Error(), map[string]any{"request_id": requestID, "usage_event_id": event.ID, "operation": "embeddings"})
-		ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, payload)
-		ctx.EmitWithProject("llm.request.failed", ident.ProjectID, payload)
-		return nil, lastErr
-	}
-	if result.RequestTokens == 0 {
-		result.RequestTokens = estimatedInput
-	}
-	event, err := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, 0, "completed", result.RequestID,
-		result.ProviderCostMicrounits, result.ProviderCostCurrency, result.ProviderCostReported, result.UsageDetails)
-	if err != nil {
-		return nil, err
-	}
-	payload := usageEventPayload(event, map[string]any{"operation": "embeddings"})
-	_ = dbAudit(ctx.AppDB(), ident, "request.completed", used.Provider, used.Model, "completed", "", map[string]any{"request_id": requestID, "provider_request_id": result.RequestID, "usage_event_id": event.ID, "operation": "embeddings"})
-	ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, payload)
-	ctx.EmitWithProject("llm.request.completed", ident.ProjectID, payload)
-	result.UsageEvent = event
+	result.admission = adm
 	return result, nil
 }
 
@@ -1223,134 +1264,46 @@ type providerAttempt struct {
 }
 
 func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any) (*chatResult, error) {
+	adm, err := a.admitChat(reqCtx, ctx, ident, body, false)
+	if err != nil {
+		return nil, err
+	}
+	result, used, callErr := adm.run(body, func(attempt providerAttempt, cfg *ProviderConfig, key string, attemptBody map[string]any) (*chatResult, error) {
+		var res *chatResult
+		var err error
+		if cfg.Provider == "openai-codex" {
+			res, err = a.callOpenAICodexIntegration(reqCtx, ctx, cfg, attemptBody)
+		} else {
+			res, err = a.callProvider(reqCtx, cfg, key, attemptBody)
+		}
+		if err == nil {
+			err = validateChatCompletion(res.Body)
+		}
+		return res, err
+	})
+	if _, err := adm.complete(used, result, callErr); err != nil {
+		return nil, err
+	}
+	result.admission = adm
+	return result, nil
+}
+
+func (a *App) admitChat(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any, stream bool) (*gatewayAdmission, error) {
 	if err := normalizeChatImageInputs(body); err != nil {
 		return nil, err
 	}
-	model := strArg(body, "model")
-	if model == "" {
-		return nil, userError("model is required")
-	}
-	provider := providerFromModel(model)
-	if provider == "" {
-		return nil, userError("model must include provider prefix, for example openai/gpt-4.1 or openrouter/anthropic/claude-sonnet-4")
-	}
-	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
-	if err != nil {
-		return nil, err
-	}
-	if err := policiesAllow(policies, provider, model, int64Arg(body, "max_tokens")); err != nil {
-		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
-		return nil, err
-	}
-	if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, provider, model, body); err != nil {
-		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"input_modality": "image"})
-		return nil, err
-	}
-	attempts := fallbackAttempts(policies, provider, model)
-	estimatedInput := estimateChatTokens(body)
-	requestID := firstNonEmpty(strArg(body, "_llm_request_id"), "llm_req_"+randomSuffix(16))
-	reservation, grantedMax, err := reserveUsage(ctx.AppDB(), ident, provider, model, estimatedInput, int64Arg(body, "max_tokens"), requestID, policies, true)
-	if err != nil {
-		if isPolicyError(err) {
-			ctx.EmitWithProject("llm.policy.limit_exceeded", ident.ProjectID, map[string]any{
-				"request_id": requestID, "model": model, "subject_type": ident.SubjectType, "subject_id": ident.SubjectID, "error": err.Error(),
-			})
-		}
-		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"request_id": requestID})
-		return nil, err
-	}
-	if int64Arg(body, "max_tokens") == 0 && grantedMax > 0 {
-		body["max_tokens"] = grantedMax
-	}
-
-	var lastErr error
-	var result *chatResult
-	used := attempts[0]
-	attemptDetails := []any{}
-	failedAttempts := 0
-	for i, attempt := range attempts {
-		if err := policiesAllow(policies, attempt.Provider, attempt.Model, int64Arg(body, "max_tokens")); err != nil {
-			continue
-		}
-		used = attempt
-		if i > 0 {
-			if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, attempt.Provider, attempt.Model, body); err != nil {
-				lastErr = err
-				failedAttempts++
-				attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "skipped", "error": err.Error()})
-				continue
-			}
-		}
-		cfg, err := providerConfigFor(ctx, ident.ProjectID, attempt.Provider)
-		if err == nil {
-			attemptBody := cloneMap(body)
-			attemptBody["model"] = attempt.Model
-			var callResult *chatResult
-			if cfg.Provider == "openai-codex" {
-				callResult, err = a.callOpenAICodexIntegration(reqCtx, ctx, cfg, attemptBody)
-			} else {
-				var key string
-				key, err = resolveProviderKey(ctx, cfg)
-				if err == nil {
-					callResult, err = a.callProvider(reqCtx, cfg, key, attemptBody)
-				}
-			}
-			if err == nil {
-				err = validateChatCompletion(callResult.Body)
-			}
-			if err == nil {
-				result = callResult
-			}
-		}
-		if err == nil {
-			attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "completed"})
-			break
-		}
-		lastErr = err
-		failedAttempts++
-		attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "failed", "error": err.Error()})
-		retryable := isRetryableProviderError(err)
-		ctx.EmitWithProject("llm.provider.failed", ident.ProjectID, map[string]any{
-			"request_id": requestID, "provider": attempt.Provider, "model": attempt.Model,
-			"subject_type": ident.SubjectType, "subject_id": ident.SubjectID,
-			"error": err.Error(), "retryable": retryable, "failover": retryable && i+1 < len(attempts),
-		})
-		_ = dbAudit(ctx.AppDB(), ident, "provider.failed", attempt.Provider, attempt.Model, "error", err.Error(), map[string]any{"request_id": requestID, "retryable": retryable})
-		if !retryable {
-			break
-		}
-	}
-
-	if result == nil {
-		if lastErr == nil {
-			lastErr = errors.New("no allowed provider route is available")
-		}
-		usageDetails := mergeUsageDetails(nil, attemptDetails, failedAttempts)
-		usageEvent, finishErr := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, estimatedInput, 0, "failed", "", 0, "", false, usageDetails)
-		if finishErr != nil {
-			return nil, fmt.Errorf("provider failed: %v; record usage: %w", lastErr, finishErr)
-		}
-		_ = dbAudit(ctx.AppDB(), ident, "request.failed", used.Provider, used.Model, "error", lastErr.Error(), map[string]any{"request_id": requestID, "usage_event_id": usageEvent.ID})
-		event := usageEventPayload(usageEvent, map[string]any{"error": lastErr.Error()})
-		ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
-		ctx.EmitWithProject("llm.request.failed", ident.ProjectID, event)
-		return nil, lastErr
-	}
-	if result.RequestTokens == 0 {
-		result.RequestTokens = estimatedInput
-	}
-	result.UsageDetails = mergeUsageDetails(result.UsageDetails, attemptDetails, failedAttempts)
-	usageEvent, err := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, result.ResponseTokens, "completed", result.RequestID,
-		result.ProviderCostMicrounits, result.ProviderCostCurrency, result.ProviderCostReported, result.UsageDetails)
-	if err != nil {
-		return nil, err
-	}
-	_ = dbAudit(ctx.AppDB(), ident, "request.completed", used.Provider, used.Model, "completed", "", map[string]any{"request_id": requestID, "provider_request_id": result.RequestID, "usage_event_id": usageEvent.ID})
-	event := usageEventPayload(usageEvent, nil)
-	ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
-	ctx.EmitWithProject("llm.request.completed", ident.ProjectID, event)
-	result.UsageEvent = usageEvent
-	return result, nil
+	endpoint := firstNonEmpty(strArg(body, "_llm_endpoint"), endpointChat)
+	delete(body, "_llm_endpoint")
+	return a.admit(reqCtx, ctx, ident, gatewayRequest{
+		Endpoint:       endpoint,
+		Model:          strArg(body, "model"),
+		Body:           body,
+		EstimatedInput: estimateChatTokens(body),
+		EnforceOutput:  true,
+		CheckModality:  true,
+		RequestID:      strArg(body, "_llm_request_id"),
+		Stream:         stream,
+	})
 }
 
 func validateChatCompletion(raw []byte) error {
@@ -1539,7 +1492,9 @@ func (a *App) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		q := r.URL.Query()
-		rows, err := dbTokensList(globalCtx.AppDB(), projectFromRequest(r), q.Get("subject_type"), q.Get("subject_id"), q.Get("include_revoked") == "true")
+		f := tokenFilter{ProjectID: projectFromRequest(r), SubjectType: q.Get("subject_type"), SubjectID: q.Get("subject_id"),
+			Label: q.Get("label"), IncludeRevoked: q.Get("include_revoked") == "true", Limit: intArgQuery(r, "limit", 500)}
+		rows, err := dbTokensQuery(globalCtx.AppDB(), f)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1711,8 +1666,7 @@ func (a *App) handleTestChat(w http.ResponseWriter, r *http.Request) {
 	args["_llm_request_id"] = "llm_test_" + randomSuffix(16)
 	res, err := a.executeChatContext(r.Context(), globalCtx, ident, args)
 	if err != nil {
-		status, typ := errorStatus(err)
-		writeOpenAIError(w, status, typ, err.Error())
+		writeGatewayError(w, err)
 		return
 	}
 	copyProviderHeaders(w, res)
@@ -1776,6 +1730,7 @@ func (a *App) handleUsageEvents(w http.ResponseWriter, r *http.Request) {
 	rows, err := dbUsageEventsList(globalCtx.AppDB(), usageFilter{
 		ProjectID: projectFromRequest(r), Period: firstNonEmpty(q.Get("period"), currentPeriod()),
 		SubjectType: q.Get("subject_type"), SubjectID: q.Get("subject_id"), Model: q.Get("model"),
+		TokenID: int64(intArgQuery(r, "token_id", 0)), Endpoint: q.Get("endpoint"),
 	}, intArgQuery(r, "limit", 100))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1798,8 +1753,10 @@ func (a *App) handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) toolChatCompleteCtx(reqCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectFromArgs(args)
-	ident := &TokenIdentity{ProjectID: pid, SubjectType: firstNonEmpty(strArg(args, "subject_type"), "app"), SubjectID: firstNonEmpty(strArg(args, "subject_id"), "mcp")}
+	ident, err := identityFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
 	args["_llm_request_id"] = firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
 	res, err := a.executeChatContext(reqCtx, ctx, ident, args)
 	if err != nil {
@@ -1835,7 +1792,17 @@ func (a *App) toolModelsList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			filtered = append(filtered, model)
 		}
 	}
-	return map[string]any{"models": filtered, "policies": policies}, nil
+	public, err := dbPublicModelsList(ctx.AppDB(), ident.ProjectID, true)
+	if err != nil {
+		return nil, err
+	}
+	allowedPublic := []PublicModel{}
+	for _, pm := range public {
+		if _, _, err := resolveAttempts(ctx.AppDB(), ident.ProjectID, pm.Name, policies, 0); err == nil {
+			allowedPublic = append(allowedPublic, pm)
+		}
+	}
+	return map[string]any{"models": filtered, "public_models": allowedPublic, "policies": policies}, nil
 }
 
 func (a *App) toolModelsSyncCtx(reqCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1843,7 +1810,10 @@ func (a *App) toolModelsSyncCtx(reqCtx context.Context, ctx *sdk.AppCtx, args ma
 }
 
 func (a *App) toolEmbeddingsCtx(reqCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	ident := &TokenIdentity{ProjectID: projectFromArgs(args), SubjectType: firstNonEmpty(strArg(args, "subject_type"), "app"), SubjectID: firstNonEmpty(strArg(args, "subject_id"), "mcp")}
+	ident, err := identityFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
 	args["_llm_request_id"] = firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
 	res, err := a.executeEmbeddingsContext(reqCtx, ctx, ident, args)
 	if err != nil {
@@ -1907,7 +1877,11 @@ func (a *App) toolTokenCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolTokensList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := dbTokensList(ctx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"), boolArg(args, "include_revoked"))
+	f, err := tokenFilterFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbTokensQuery(ctx.AppDB(), f)
 	if err != nil {
 		return nil, err
 	}
@@ -2616,14 +2590,15 @@ func dbPolicyGet(db *sql.DB, projectID, subjectType, subjectID string) (*Policy,
 		allowedProvider string
 		limits          string
 		fallback        string
+		admission       string
 		disabled        int
 	)
 	err := db.QueryRow(`
 		SELECT id, project_id, subject_type, subject_id, allowed_models_json, blocked_models_json,
-		       allowed_providers_json, limits_json, disabled, fallback_policy_json
+		       allowed_providers_json, limits_json, disabled, fallback_policy_json, admission_json
 		  FROM policies WHERE project_id = ? AND subject_type = ? AND subject_id = ?`,
 		projectID, strings.TrimSpace(subjectType), strings.TrimSpace(subjectID)).
-		Scan(&pol.ID, &pol.ProjectID, &pol.SubjectType, &pol.SubjectID, &allowedModels, &blockedModels, &allowedProvider, &limits, &disabled, &fallback)
+		Scan(&pol.ID, &pol.ProjectID, &pol.SubjectType, &pol.SubjectID, &allowedModels, &blockedModels, &allowedProvider, &limits, &disabled, &fallback, &admission)
 	if err == sql.ErrNoRows {
 		return &Policy{ProjectID: projectID, SubjectType: strings.TrimSpace(subjectType), SubjectID: strings.TrimSpace(subjectID), FallbackPolicy: json.RawMessage(`{}`)}, nil
 	}
@@ -2651,6 +2626,7 @@ func dbPolicyGet(db *sql.DB, projectID, subjectType, subjectID string) (*Policy,
 	}
 	pol.Disabled = disabled != 0
 	pol.FallbackPolicy = json.RawMessage(firstNonEmpty(fallback, "{}"))
+	pol.Admission = parseAdmissionJSON(admission)
 	return &pol, nil
 }
 
@@ -2674,6 +2650,18 @@ func dbPolicySet(db *sql.DB, projectID string, args map[string]any) (*Policy, er
 		FallbackPolicy:   jsonFromAny(args["fallback_policy"]),
 	}
 	pol.Limits = limitsFromAny(args["limits"])
+	// Policy writes replace the policy, except the admission hook: a caller
+	// that omits it keeps the existing hook, so updating limits can never
+	// silently stop billing. Pass admission: null to remove it.
+	if raw, present := args["admission"]; present {
+		admission, err := admissionFromAny(raw)
+		if err != nil {
+			return nil, err
+		}
+		pol.Admission = admission
+	} else if existing, err := dbPolicyGet(db, projectID, subjectType, subjectID); err == nil {
+		pol.Admission = existing.Admission
+	}
 	if len(pol.FallbackPolicy) == 0 {
 		pol.FallbackPolicy = json.RawMessage(`{}`)
 	}
@@ -2695,8 +2683,8 @@ func dbPolicySet(db *sql.DB, projectID string, args map[string]any) (*Policy, er
 	lim, _ := json.Marshal(pol.Limits)
 	_, err := db.Exec(`
 		INSERT INTO policies
-			(project_id, subject_type, subject_id, allowed_models_json, blocked_models_json, allowed_providers_json, limits_json, disabled, fallback_policy_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			(project_id, subject_type, subject_id, allowed_models_json, blocked_models_json, allowed_providers_json, limits_json, disabled, fallback_policy_json, admission_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(project_id, subject_type, subject_id) DO UPDATE SET
 			allowed_models_json=excluded.allowed_models_json,
 			blocked_models_json=excluded.blocked_models_json,
@@ -2704,8 +2692,9 @@ func dbPolicySet(db *sql.DB, projectID string, args map[string]any) (*Policy, er
 			limits_json=excluded.limits_json,
 			disabled=excluded.disabled,
 			fallback_policy_json=excluded.fallback_policy_json,
+			admission_json=excluded.admission_json,
 			updated_at=CURRENT_TIMESTAMP`,
-		projectID, subjectType, subjectID, string(am), string(bm), string(ap), string(lim), boolToInt(pol.Disabled), string(pol.FallbackPolicy))
+		projectID, subjectType, subjectID, string(am), string(bm), string(ap), string(lim), boolToInt(pol.Disabled), string(pol.FallbackPolicy), admissionJSON(pol.Admission))
 	if err != nil {
 		return nil, err
 	}
@@ -2735,6 +2724,9 @@ func dbPolicySetDisabled(db *sql.DB, projectID, subjectType, subjectID string, d
 		"disabled":          disabled,
 		"fallback_policy":   fallback,
 	}
+	if existing.Admission.enabled() {
+		args["admission"] = existing.Admission
+	}
 	return dbPolicySet(db, projectID, args)
 }
 
@@ -2758,86 +2750,7 @@ func dbEffectivePolicies(db *sql.DB, ident *TokenIdentity) ([]*Policy, error) {
 }
 
 func hasPolicyRules(pol *Policy) bool {
-	return len(pol.AllowedModels) > 0 || len(pol.BlockedModels) > 0 || len(pol.AllowedProviders) > 0 || pol.Limits != (Limits{})
-}
-
-func createToken(db *sql.DB, args map[string]any) (map[string]any, error) {
-	projectID := projectFromArgs(args)
-	if projectID == "" {
-		return nil, errors.New("project_id is required")
-	}
-	subjectType := firstNonEmpty(strArg(args, "subject_type"), "project")
-	subjectID := firstNonEmpty(strArg(args, "subject_id"), projectID)
-	scopes := stringSlice(args["scopes"])
-	if len(scopes) == 0 {
-		scopes = []string{"chat", "embeddings", "models", "usage"}
-	}
-	for _, scope := range scopes {
-		switch scope {
-		case "chat", "embeddings", "models", "usage", "usage:project", "*":
-		default:
-			return nil, fmt.Errorf("unsupported token scope %q", scope)
-		}
-	}
-	token := "llm_" + randomSuffix(32)
-	hash := hashToken(token)
-	var expires any
-	if exp := strArg(args, "expires_at"); exp != "" {
-		if _, err := time.Parse(time.RFC3339, exp); err != nil {
-			return nil, fmt.Errorf("expires_at must be RFC3339")
-		}
-		expires = exp
-	}
-	scopesJSON, _ := json.Marshal(scopes)
-	res, err := db.Exec(`INSERT INTO api_tokens (project_id, subject_type, subject_id, token_hash, scopes_json, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		projectID, subjectType, subjectID, hash, string(scopesJSON), expires)
-	if err != nil {
-		return nil, err
-	}
-	id, _ := res.LastInsertId()
-	return map[string]any{
-		"id":           id,
-		"token":        token,
-		"project_id":   projectID,
-		"subject_type": subjectType,
-		"subject_id":   subjectID,
-		"scopes":       scopes,
-		"base_url":     "/api/apps/llm/v1",
-	}, nil
-}
-
-func dbTokensList(db *sql.DB, projectID, subjectType, subjectID string, includeRevoked bool) ([]TokenRecord, error) {
-	conds := []string{"project_id = ?"}
-	args := []any{projectID}
-	if subjectType != "" {
-		conds = append(conds, "subject_type = ?")
-		args = append(args, subjectType)
-	}
-	if subjectID != "" {
-		conds = append(conds, "subject_id = ?")
-		args = append(args, subjectID)
-	}
-	if !includeRevoked {
-		conds = append(conds, "revoked_at IS NULL")
-	}
-	rows, err := db.Query(`SELECT id, project_id, subject_type, subject_id, scopes_json,
-		COALESCE(expires_at,''), COALESCE(created_at,''), COALESCE(revoked_at,'')
-		FROM api_tokens WHERE `+strings.Join(conds, " AND ")+` ORDER BY id DESC LIMIT 500`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []TokenRecord{}
-	for rows.Next() {
-		var token TokenRecord
-		var scopesJSON string
-		if err := rows.Scan(&token.ID, &token.ProjectID, &token.SubjectType, &token.SubjectID, &scopesJSON, &token.ExpiresAt, &token.CreatedAt, &token.RevokedAt); err != nil {
-			return nil, err
-		}
-		_ = json.Unmarshal([]byte(scopesJSON), &token.Scopes)
-		out = append(out, token)
-	}
-	return out, rows.Err()
+	return len(pol.AllowedModels) > 0 || len(pol.BlockedModels) > 0 || len(pol.AllowedProviders) > 0 || pol.Limits != (Limits{}) || pol.Admission.enabled()
 }
 
 func revokeToken(db *sql.DB, args map[string]any) (map[string]any, error) {
@@ -2887,57 +2800,21 @@ func revokeSubjectTokens(db *sql.DB, args map[string]any) (map[string]any, error
 	return map[string]any{"revoked": n, "project_id": projectID, "subject_type": subjectType, "subject_id": subjectID}, nil
 }
 
-func authenticateLLMToken(db *sql.DB, r *http.Request) (*TokenIdentity, error) {
-	token := bearerToken(r.Header.Get("X-Apteva-Original-Authorization"))
-	if token == "" {
-		token = bearerToken(r.Header.Get("Authorization"))
-	}
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-LLM-API-Key"))
-	}
-	if token == "" {
-		return nil, errors.New("missing LLM bearer token")
-	}
-	var (
-		ident      TokenIdentity
-		scopesJSON string
-		expires    sql.NullString
-		revoked    sql.NullString
-	)
-	err := db.QueryRow(`SELECT id, project_id, subject_type, subject_id, scopes_json, COALESCE(expires_at,''), COALESCE(revoked_at,'') FROM api_tokens WHERE token_hash = ?`,
-		hashToken(token)).Scan(&ident.ID, &ident.ProjectID, &ident.SubjectType, &ident.SubjectID, &scopesJSON, &expires, &revoked)
-	if err != nil {
-		return nil, errors.New("unknown token")
-	}
-	if revoked.Valid && revoked.String != "" {
-		return nil, errors.New("token revoked")
-	}
-	if expires.Valid && expires.String != "" {
-		t, err := time.Parse(time.RFC3339, expires.String)
-		if err != nil {
-			return nil, errors.New("token has invalid expiration")
-		}
-		if time.Now().After(t) {
-			return nil, errors.New("token expired")
-		}
-	}
-	_ = json.Unmarshal([]byte(scopesJSON), &ident.Scopes)
-	return &ident, nil
-}
-
 type usageFilter struct {
 	ProjectID   string
 	Period      string
 	SubjectType string
 	SubjectID   string
 	Model       string
+	TokenID     int64
+	Endpoint    string
 }
 
 func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 	if f.Period == "" {
 		f.Period = currentPeriod()
 	}
-	conds := []string{"project_id = ?", "period = ?", "status != 'reserved'"}
+	conds := []string{"project_id = ?", "period = ?", "status NOT IN ('reserved','denied')"}
 	args := []any{f.ProjectID, f.Period}
 	if f.SubjectType != "" {
 		conds = append(conds, "subject_type = ?")
@@ -2950,6 +2827,14 @@ func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 	if f.Model != "" {
 		conds = append(conds, "model = ?")
 		args = append(args, f.Model)
+	}
+	if f.TokenID > 0 {
+		conds = append(conds, "token_id = ?")
+		args = append(args, f.TokenID)
+	}
+	if f.Endpoint != "" {
+		conds = append(conds, "endpoint = ?")
+		args = append(args, f.Endpoint)
 	}
 	var out UsageSummary
 	out.ProjectID = f.ProjectID
@@ -2974,6 +2859,10 @@ func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 }
 
 func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, input, requestedOutput int64, requestID string, policies []*Policy, enforceOutput bool) (*UsageEvent, int64, error) {
+	return reserveUsageMeta(db, ident, provider, model, input, requestedOutput, requestID, policies, enforceOutput, reservationMeta{})
+}
+
+func reserveUsageMeta(db *sql.DB, ident *TokenIdentity, provider, model string, input, requestedOutput int64, requestID string, policies []*Policy, enforceOutput bool, meta reservationMeta) (*UsageEvent, int64, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, 0, err
@@ -3005,11 +2894,13 @@ func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, inpu
 	res, err := tx.Exec(`INSERT INTO usage_events
 		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens,
 		 estimated_cost_cents, provider_cost_microunits, provider_cost_currency, provider_cost_status,
-		 provider_cost_source, provider_rate_id, usage_details_json, status, period, request_id, provider_request_id, token_id)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, '{}', 'reserved', ?, ?, '', ?)`,
+		 provider_cost_source, provider_rate_id, usage_details_json, status, period, request_id, provider_request_id, token_id,
+		 endpoint, requested_model, token_metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, '{}', 'reserved', ?, ?, '', ?, ?, ?, ?)`,
 		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, input,
 		(costMicrounits+5000)/10000, costMicrounits, costCurrency, costStatus, costSource, rateID,
-		period, requestID, ident.ID)
+		period, requestID, ident.ID, firstNonEmpty(meta.Endpoint, endpointChat), firstNonEmpty(meta.RequestedModel, model),
+		string(firstNonEmptyRaw(meta.TokenMetadata, `{}`)))
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
 			return nil, 0, conflictError("duplicate request id for this subject")
@@ -3107,57 +2998,10 @@ func finishUsageReservation(db *sql.DB, id int64, provider, model string, input,
 
 func finishUsageReservationCost(db *sql.DB, id int64, provider, model string, input, output int64, status, providerRequestID string,
 	reportedCost int64, reportedCurrency string, costReported bool, usageDetails json.RawMessage) (*UsageEvent, error) {
-	current, err := dbUsageEventByID(db, id)
-	if err != nil {
-		return nil, err
-	}
-	costMicrounits := int64(0)
-	costCurrency := "USD"
-	costStatus := "unpriced"
-	costSource := ""
-	rateID := int64(0)
-	if costReported {
-		costMicrounits = reportedCost
-		costCurrency = firstNonEmpty(strings.ToUpper(reportedCurrency), "USD")
-		costStatus = "reported"
-		costSource = "provider_response"
-	} else if rate, resolveErr := resolveProviderRate(db, current.ProjectID, provider, model); resolveErr != nil {
-		return nil, resolveErr
-	} else if rate != nil && rate.hasMeteredRate() && status == "completed" {
-		var details struct {
-			CachedInputTokens  int64 `json:"cached_input_tokens"`
-			CacheWriteTokens   int64 `json:"cache_write_tokens"`
-			CacheWrite1hTokens int64 `json:"cache_write_1h_tokens"`
-		}
-		_ = json.Unmarshal(usageDetails, &details)
-		costMicrounits = calculateProviderCostDetailed(rate, input, output, details.CachedInputTokens, details.CacheWriteTokens, details.CacheWrite1hTokens)
-		costCurrency = rate.Currency
-		costStatus = "calculated"
-		if providerCostCalculationPartial(rate, input, details.CacheWrite1hTokens) {
-			costStatus = "partial"
-		}
-		costSource = rate.Source
-		rateID = rate.ID
-	}
-	if len(usageDetails) == 0 {
-		usageDetails = json.RawMessage(`{}`)
-	}
-	if usageHasUnknownAttemptCost(usageDetails) {
-		costStatus = "partial"
-	}
-	res, err := db.Exec(`UPDATE usage_events SET provider=?, model=?, request_tokens=?, response_tokens=?, total_tokens=?,
-		estimated_cost_cents=?, provider_cost_microunits=?, provider_cost_currency=?, provider_cost_status=?,
-		provider_cost_source=?, provider_rate_id=?, usage_details_json=?, status=?, provider_request_id=?
-		WHERE id=? AND status='reserved'`,
-		provider, model, input, output, input+output, (costMicrounits+5000)/10000, costMicrounits, costCurrency,
-		costStatus, costSource, rateID, string(usageDetails), status, providerRequestID, id)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, errors.New("usage reservation is no longer active")
-	}
-	return dbUsageEventByID(db, id)
+	return finishUsageReservationFull(db, id, finishArgs{
+		Provider: provider, Model: model, Input: input, Output: output, Status: status, ProviderRequestID: providerRequestID,
+		ReportedCost: reportedCost, ReportedCurrency: reportedCurrency, CostReported: costReported, UsageDetails: usageDetails,
+	})
 }
 
 type queryRower interface {
@@ -3168,7 +3012,9 @@ func dbUsageGetQuerier(db queryRower, f usageFilter, includeReserved bool) (*Usa
 	if f.Period == "" {
 		f.Period = currentPeriod()
 	}
-	conds := []string{"project_id = ?", "period = ?"}
+	// Requests the admission hook denied never reached a provider, so they do
+	// not count toward usage totals or monthly limits.
+	conds := []string{"project_id = ?", "period = ?", "status != 'denied'"}
 	if !includeReserved {
 		conds = append(conds, "status != 'reserved'")
 	}
@@ -3228,10 +3074,7 @@ func dbUsageRecord(db *sql.DB, ident *TokenIdentity, provider, model string, inp
 
 func dbUsageEventByRequestID(db *sql.DB, projectID, subjectType, subjectID, requestID string) (*UsageEvent, error) {
 	row := db.QueryRow(`
-		SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		       total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
-		       provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		       status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		SELECT `+usageEventColumns+`
 		  FROM usage_events
 		 WHERE project_id = ? AND subject_type = ? AND subject_id = ? AND request_id = ?
 		 LIMIT 1`, projectID, subjectType, subjectID, requestID)
@@ -3239,10 +3082,7 @@ func dbUsageEventByRequestID(db *sql.DB, projectID, subjectType, subjectID, requ
 }
 
 func dbUsageEventByID(db *sql.DB, id int64) (*UsageEvent, error) {
-	row := db.QueryRow(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
-		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+	row := db.QueryRow(`SELECT `+usageEventColumns+`
 		FROM usage_events WHERE id=?`, id)
 	return scanUsageEvent(row)
 }
@@ -3265,14 +3105,19 @@ func dbUsageEventsList(db *sql.DB, f usageFilter, limit int) ([]UsageEvent, erro
 		args = append(args, f.SubjectID)
 	}
 	if f.Model != "" {
-		conds = append(conds, "model=?")
-		args = append(args, f.Model)
+		conds = append(conds, "(model=? OR requested_model=?)")
+		args = append(args, f.Model, f.Model)
+	}
+	if f.TokenID > 0 {
+		conds = append(conds, "token_id=?")
+		args = append(args, f.TokenID)
+	}
+	if f.Endpoint != "" {
+		conds = append(conds, "endpoint=?")
+		args = append(args, f.Endpoint)
 	}
 	args = append(args, limit)
-	rows, err := db.Query(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
-		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+	rows, err := db.Query(`SELECT `+usageEventColumns+`
 		FROM usage_events WHERE `+strings.Join(conds, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -3289,21 +3134,29 @@ func dbUsageEventsList(db *sql.DB, f usageFilter, limit int) ([]UsageEvent, erro
 	return out, rows.Err()
 }
 
+const usageEventColumns = `id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
+	total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
+	provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
+	status, period, request_id, provider_request_id, token_id, endpoint, requested_model,
+	latency_ms, ttft_ms, token_metadata_json, admission_ref, admission_json, COALESCE(created_at,'')`
+
 type usageEventScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanUsageEvent(row usageEventScanner) (*UsageEvent, error) {
 	var ev UsageEvent
-	var usageDetails string
+	var usageDetails, tokenMetadata string
 	if err := row.Scan(&ev.ID, &ev.ProjectID, &ev.SubjectType, &ev.SubjectID, &ev.Provider, &ev.Model,
 		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents,
 		&ev.ProviderCostMicrounits, &ev.ProviderCostCurrency, &ev.ProviderCostStatus, &ev.ProviderCostSource,
 		&ev.ProviderRateID, &usageDetails, &ev.Status, &ev.Period,
-		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.CreatedAt); err != nil {
+		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.Endpoint, &ev.RequestedModel,
+		&ev.LatencyMS, &ev.TTFTMS, &tokenMetadata, &ev.AdmissionRef, &ev.AdmissionJSON, &ev.CreatedAt); err != nil {
 		return nil, err
 	}
 	ev.UsageDetails = json.RawMessage(firstNonEmpty(usageDetails, "{}"))
+	ev.TokenMetadata = json.RawMessage(firstNonEmpty(tokenMetadata, "{}"))
 	return &ev, nil
 }
 
@@ -3421,13 +3274,20 @@ func providerConnectionCompatible(provider, slug string) bool {
 }
 
 func policyAllows(pol *Policy, provider, model string, maxTokens int64) error {
+	return policyAllowsRoute(pol, provider, model, maxTokens, false)
+}
+
+// policyAllowsRoute checks one provider route. viaPublic routes come from a
+// public model whose name already passed allowed_models, so that list is not
+// applied to the underlying provider model; provider and block lists are.
+func policyAllowsRoute(pol *Policy, provider, model string, maxTokens int64, viaPublic bool) error {
 	if pol.Disabled {
 		return forbiddenError("access disabled by policy")
 	}
 	if len(pol.AllowedProviders) > 0 && !matchesAny(pol.AllowedProviders, provider) {
 		return forbiddenError("provider not allowed by policy")
 	}
-	if len(pol.AllowedModels) > 0 && !matchesAny(pol.AllowedModels, model) {
+	if !viaPublic && len(pol.AllowedModels) > 0 && !matchesAny(pol.AllowedModels, model) {
 		return forbiddenError("model not allowed by policy")
 	}
 	if matchesAny(pol.BlockedModels, model) {
@@ -3440,11 +3300,15 @@ func policyAllows(pol *Policy, provider, model string, maxTokens int64) error {
 }
 
 func policiesAllow(policies []*Policy, provider, model string, maxTokens int64) error {
+	return policiesAllowRoute(policies, provider, model, maxTokens, false)
+}
+
+func policiesAllowRoute(policies []*Policy, provider, model string, maxTokens int64, viaPublic bool) error {
 	for _, pol := range policies {
 		if pol == nil {
 			continue
 		}
-		if err := policyAllows(pol, provider, model, maxTokens); err != nil {
+		if err := policyAllowsRoute(pol, provider, model, maxTokens, viaPublic); err != nil {
 			return err
 		}
 	}
@@ -3803,6 +3667,7 @@ func copyProviderHeaders(w http.ResponseWriter, res *chatResult) {
 		w.Header().Set("X-Request-Id", res.RequestID)
 	}
 	costHeaders(w, res.UsageEvent)
+	writeAdmissionHeaders(w, res.admission)
 }
 
 func requestIDFor(r *http.Request, body map[string]any) string {
@@ -3824,7 +3689,7 @@ func requestIDFor(r *http.Request, body map[string]any) string {
 
 func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 	out := map[string]any{
-		"schema_version":           "2026-07-llm-usage-v3",
+		"schema_version":           "2026-11-llm-usage-v4",
 		"usage_event_id":           int64(0),
 		"request_id":               "",
 		"provider_request_id":      "",
@@ -3846,6 +3711,12 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		"usage_details":            map[string]any{},
 		"status":                   "",
 		"created_at":               "",
+		"endpoint":                 "",
+		"requested_model":          "",
+		"latency_ms":               int64(0),
+		"time_to_first_token_ms":   int64(0),
+		"token_metadata":           map[string]any{},
+		"admission_ref":            "",
 	}
 	if ev != nil {
 		out["usage_event_id"] = ev.ID
@@ -3869,6 +3740,12 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		out["usage_details"] = rawJSON(string(ev.UsageDetails))
 		out["status"] = ev.Status
 		out["created_at"] = ev.CreatedAt
+		out["endpoint"] = ev.Endpoint
+		out["requested_model"] = firstNonEmpty(ev.RequestedModel, ev.Model)
+		out["latency_ms"] = ev.LatencyMS
+		out["time_to_first_token_ms"] = ev.TTFTMS
+		out["token_metadata"] = rawJSON(string(firstNonEmptyRaw(ev.TokenMetadata, `{}`)))
+		out["admission_ref"] = ev.AdmissionRef
 	}
 	for k, v := range extra {
 		out[k] = v
@@ -3877,9 +3754,23 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 }
 
 type typedErr struct {
-	status int
-	typ    string
-	msg    string
+	status  int
+	typ     string
+	msg     string
+	headers map[string]string
+}
+
+// writeGatewayError writes an OpenAI-style error, including any response
+// headers the error carries (Retry-After and x-ratelimit-* for 429s).
+func writeGatewayError(w http.ResponseWriter, err error) {
+	var te typedErr
+	if errors.As(err, &te) {
+		for k, v := range te.headers {
+			w.Header().Set(k, v)
+		}
+	}
+	status, typ := errorStatus(err)
+	writeOpenAIError(w, status, typ, err.Error())
 }
 
 func (e typedErr) Error() string { return e.msg }
@@ -4094,6 +3985,10 @@ func limitsFromAny(v any) Limits {
 		MonthlyProviderCostLimitMicrounits: int64Arg(m, "monthly_provider_cost_limit_microunits"),
 		ProviderCostCurrency:               strings.ToUpper(firstNonEmpty(strArg(m, "provider_cost_currency"), "USD")),
 		UnpricedModelBehavior:              firstNonEmpty(strArg(m, "unpriced_model_behavior"), "deny"),
+		RequestsPerMinute:                  int64Arg(m, "requests_per_minute"),
+		TokensPerMinute:                    int64Arg(m, "tokens_per_minute"),
+		TokenRequestsPerMinute:             int64Arg(m, "token_requests_per_minute"),
+		TokenTokensPerMinute:               int64Arg(m, "token_tokens_per_minute"),
 	}
 }
 

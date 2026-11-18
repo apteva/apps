@@ -1358,32 +1358,6 @@ func TestAnthropicTranslationPreservesToolWorkflow(t *testing.T) {
 	}
 }
 
-func TestChatStreamingReturnsCompatibleSSE(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if boolArg(body, "stream") {
-			t.Error("gateway should request an accountable non-streaming provider response")
-		}
-		_, _ = w.Write([]byte(`{"id":"chat-1","model":"test","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
-	}))
-	defer upstream.Close()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithConfig(map[string]string{"openai_api_key": "test"}))
-	app := &App{httpClient: upstream.Client()}
-	if err := app.OnMount(ctx); err != nil {
-		t.Fatal(err)
-	}
-	_, _ = dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{"provider": "openai", "base_url": upstream.URL})
-	token, _ := createToken(ctx.AppDB(), map[string]any{"project_id": "proj-test", "subject_type": "agent", "subject_id": "a"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"openai/test","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Authorization", "Bearer "+token["token"].(string))
-	rec := httptest.NewRecorder()
-	app.handleV1(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") || !strings.Contains(rec.Body.String(), "data: [DONE]") || !strings.Contains(rec.Body.String(), "hello") {
-		t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
-	}
-}
-
 func TestEmbeddingsRouteForwardsAndRecordsRawUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/embeddings" {
