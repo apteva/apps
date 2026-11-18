@@ -125,6 +125,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"port_hint":                 map[string]any{"type": "integer"},
 					"env_json":                  map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
+					"tests_gate_change_reason":  map[string]any{"type": "string", "description": "Required to remove a required tests_gate, turn required off or change its suite (at least 10 characters)."},
 				},
 				"required": []string{"environment"},
 			},
@@ -162,7 +163,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_candidate_digest", Handler: a.toolCandidateDigest,
-			Description: "Resolve a succeeded build and read its verified artifact SHA-256 for release tests. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?). Returns {build_id, candidate_digest}.",
+			Description: "Resolve a succeeded build and read its verified artifact SHA-256 for release tests. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?). Returns {build_id, candidate_digest, source_digest?, source?}.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -178,6 +179,23 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "deploy_build_export", Handler: a.toolBuildExport,
 			Description: "Read-only export of a sealed build: file list with SHA-256 hashes, env template (keys and placeholders, never values), optional backend/release.json descriptor and a signed archive_url another Deploy install can import. Refuses if a secret env value appears in the artifact. Pins the build until the URL expires. Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?), ttl_seconds? (default 3600, max 86400), public_base_url?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id":         map[string]any{"type": "integer"},
+					"candidate_digest": map[string]any{"type": "string", "description": "64-character hex artifact digest"},
+					"build":            map[string]any{"type": "string", "description": "build id, or latest_succeeded with name OR id and environment"},
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"environment":      map[string]any{"type": "string"},
+					"ttl_seconds":      map[string]any{"type": "integer"},
+					"public_base_url":  map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name: "deploy_build_source", Handler: a.toolBuildSource,
+			Description: "Read-only: where a build's source can be retrieved and how it was identified. Returns source_digest (workspaces-tree-v1, the same method Workspaces uses), lockfile hashes per package folder, and either the Code snapshot/revision it came from or a signed link to the tar.gz copy Deploy kept for local sources (pinned until the link expires; the copy otherwise follows the build's retention). Args: build_id OR candidate_digest OR build:\"latest_succeeded\" (with name OR id, environment?), ttl_seconds? (default 3600, max 86400), public_base_url?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -407,17 +425,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_release", Handler: a.toolRelease,
-			Description: "Release a build. Services start a process; mobile builds publish to a store channel. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?",
+			Description: "Release a build. Services start a process; mobile builds publish to a store channel. A target tests_gate must have a passing verdict for this exact build (and its source digest); tests_override_reason releases anyway in an emergency and is recorded on the release. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?, tests_override_reason?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"build_id":          map[string]any{"type": "integer"},
-					"environment":       map[string]any{"type": "string"},
-					"channel":           map[string]any{"type": "string"},
-					"rollout_fraction":  map[string]any{"type": "number"},
-					"release_notes":     map[string]any{"type": "object"},
-					"submit_for_review": map[string]any{"type": "boolean"},
-					"beta_group_id":     map[string]any{"type": "string"},
+					"build_id":              map[string]any{"type": "integer"},
+					"environment":           map[string]any{"type": "string"},
+					"channel":               map[string]any{"type": "string"},
+					"rollout_fraction":      map[string]any{"type": "number"},
+					"release_notes":         map[string]any{"type": "object"},
+					"submit_for_review":     map[string]any{"type": "boolean"},
+					"beta_group_id":         map[string]any{"type": "string"},
+					"tests_override_reason": map[string]any{"type": "string", "description": "Emergency only: release even though the environment's Tests gate blocks. At least 10 characters; recorded on the release and emitted as deploy.tests_gate.overridden."},
 				},
 				"required": []string{"build_id"},
 			},
@@ -428,18 +447,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":               map[string]any{"type": "string"},
-					"id":                 map[string]any{"type": "integer"},
-					"source_environment": map[string]any{"type": "string"},
-					"target_environment": map[string]any{"type": "string"},
-					"build_id":           map[string]any{"type": "integer"},
-					"release_id":         map[string]any{"type": "integer"},
-					"target_channel":     map[string]any{"type": "string"},
-					"rollout_fraction":   map[string]any{"type": "number"},
-					"release_notes":      map[string]any{"type": "object"},
-					"submit_for_review":  map[string]any{"type": "boolean"},
-					"beta_group_id":      map[string]any{"type": "string"},
-					"validate_only":      map[string]any{"type": "boolean"},
+					"name":                  map[string]any{"type": "string"},
+					"id":                    map[string]any{"type": "integer"},
+					"source_environment":    map[string]any{"type": "string"},
+					"target_environment":    map[string]any{"type": "string"},
+					"build_id":              map[string]any{"type": "integer"},
+					"release_id":            map[string]any{"type": "integer"},
+					"target_channel":        map[string]any{"type": "string"},
+					"rollout_fraction":      map[string]any{"type": "number"},
+					"release_notes":         map[string]any{"type": "object"},
+					"submit_for_review":     map[string]any{"type": "boolean"},
+					"beta_group_id":         map[string]any{"type": "string"},
+					"validate_only":         map[string]any{"type": "boolean"},
+					"tests_override_reason": map[string]any{"type": "string", "description": "Emergency only: release even though the environment's Tests gate blocks. At least 10 characters; recorded on the release and emitted as deploy.tests_gate.overridden."},
 				},
 			},
 		},
@@ -568,6 +588,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"env_json":                  map[string]any{"type": "string"},
 					"source_extra_json":         map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
+					"tests_gate_change_reason":  map[string]any{"type": "string", "description": "Required to remove a required tests_gate, turn required off or change its suite (at least 10 characters)."},
 				},
 			},
 		},
@@ -1228,7 +1249,7 @@ func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("no succeeded source build found to promote")
 	}
 	target := effectiveDeploymentForEnvironment(base, targetEnv)
-	rel, err := a.runRelease(target, build)
+	rel, err := a.runReleaseWithOptions(target, build, releaseOptions{TestsOverrideReason: strArg(args, "tests_override_reason")})
 	if err != nil {
 		return nil, err
 	}
@@ -1852,7 +1873,7 @@ func environmentFieldsFromArgs(args map[string]any) map[string]any {
 	for _, k := range []string{
 		"description", "source_ref", "source_extra_json",
 		"framework", "build_cmd", "build_backend", "build_backend_config_json",
-		"start_cmd", "env_json", "target_config_json",
+		"start_cmd", "env_json", "target_config_json", "tests_gate_change_reason",
 	} {
 		if v, ok := args[k].(string); ok {
 			fields[k] = v

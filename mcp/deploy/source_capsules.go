@@ -88,6 +88,10 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 		}
 	}
 
+	if _, err := captureBuildSource(globalCtx.AppDB(), d, build.ID, buildDir, appSrcDir); err != nil {
+		return nil, err
+	}
+
 	capsulePath := filepath.Join(buildDir, sourceCapsuleFilename)
 	tmpPath := capsulePath + ".tmp"
 	_ = os.Remove(tmpPath)

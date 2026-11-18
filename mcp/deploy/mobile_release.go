@@ -30,6 +30,9 @@ type releaseOptions struct {
 	SubmitForReview bool              `json:"submit_for_review,omitempty"`
 	BetaGroupID     string            `json:"beta_group_id,omitempty"`
 	ValidateOnly    bool              `json:"validate_only,omitempty"`
+	// TestsOverrideReason releases past a blocking Tests gate. It is kept out
+	// of JSON so it never changes a release approval digest or persists.
+	TestsOverrideReason string `json:"-"`
 }
 
 type mobilePromotionValidation struct {
@@ -1763,6 +1766,7 @@ func releaseOptionsFromArgs(args map[string]any) releaseOptions {
 	opts := releaseOptions{
 		Channel: strArg(args, "channel"), SubmitForReview: boolArg(args, "submit_for_review"),
 		BetaGroupID: strArg(args, "beta_group_id"), ValidateOnly: boolArg(args, "validate_only"),
+		TestsOverrideReason: strArg(args, "tests_override_reason"),
 	}
 	if v, ok := args["rollout_fraction"].(float64); ok {
 		opts.RolloutFraction = v

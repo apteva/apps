@@ -444,6 +444,9 @@ func dbUpdateEnvironment(db *sql.DB, id int64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
 	}
+	if err := guardTestsGateChange(db, id, fields); err != nil {
+		return err
+	}
 	cols := []string{}
 	args := []any{}
 	for _, k := range []string{

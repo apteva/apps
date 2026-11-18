@@ -863,8 +863,9 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 		"build_cmd": true, "start_cmd": true,
 		"build_backend": true, "build_backend_config_json": true,
 		"port_hint": true, "env_json": true, "source_ref": true,
-		"source_extra_json":  true,
-		"target_config_json": true,
+		"source_extra_json":        true,
+		"target_config_json":       true,
+		"tests_gate_change_reason": true,
 	}
 	out := map[string]any{}
 	for k, v := range raw {

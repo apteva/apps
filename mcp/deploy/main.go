@@ -402,6 +402,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/source-capsules/", Handler: a.handleSourceCapsule, NoAuth: true},
 		{Method: http.MethodGet, Pattern: buildExportRoutePrefix, Handler: a.handleBuildExport, NoAuth: true},
+		{Method: http.MethodGet, Pattern: sourceArchiveRoutePath, Handler: a.handleSourceArchive, NoAuth: true},
 		{Pattern: "/api/deployments", Handler: a.handleDeploymentsCollection},
 		{Pattern: "/api/deployments/", Handler: a.handleDeploymentItem},
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
@@ -687,6 +688,12 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 			return a.failBuild(build, "mobile source preflight: "+err.Error()), nil
 		}
 	}
+	// Record what this build is made from before any build command runs.
+	src, err := captureBuildSource(globalCtx.AppDB(), d, build.ID, buildDir, appSrcDir)
+	if err != nil {
+		return a.failBuild(build, err.Error()), nil
+	}
+	logSourceCapture(build.ID, src, logF)
 	sha, err := hashTree(srcDir)
 	if appSrcDir == srcDir {
 		if receipt, readErr := os.ReadFile(filepath.Join(buildDir, "source-receipt.json")); readErr == nil {
@@ -801,7 +808,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 }
 
 func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
-	digest, err := checkReleasePolicy(d, b, opts, false)
+	digest, override, err := checkReleasePolicyDetailed(d, b, opts, false)
 	if err != nil {
 		return nil, err
 	}
@@ -811,7 +818,12 @@ func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions
 	} else if isMobileDeployment(d, b) {
 		rel, err = a.runMobileRelease(d, b, opts)
 	} else {
-		rel, err = a.runServiceRelease(d, b)
+		rel, err = a.runServiceReleaseWith(d, b, override)
+	}
+	if err == nil && rel != nil && override != nil {
+		if recordErr := recordTestsOverride(rel.ID, override); recordErr != nil {
+			return nil, recordErr
+		}
 	}
 	if err == nil && rel != nil && rel.Provider == "" {
 		if channelErr := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"channel": releaseChannel(d, opts)}); channelErr != nil {
@@ -828,6 +840,12 @@ func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions
 // runServiceRelease starts a supervised process for the build and
 // keeps the previous service until the candidate is ready and routed.
 func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
+	return a.runServiceReleaseWith(d, b, nil)
+}
+
+// runServiceReleaseWith takes the Tests gate override already granted to this
+// release, if any.
+func (a *App) runServiceReleaseWith(d *Deployment, b *Build, override *testsOverride) (*Release, error) {
 	if b.Status != "succeeded" {
 		return nil, fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
 	}
@@ -852,8 +870,12 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = checkTestsGate(fresh, b, target.TestsGate, true); err != nil {
-		return nil, err
+	granted, err := checkTestsGateOrOverride(fresh, b, target.TestsGate, true, "")
+	if err != nil {
+		if override == nil {
+			return nil, err
+		}
+		granted = override
 	}
 	if err = a.stopSupersededCandidates(d); err != nil {
 		return nil, err
@@ -868,6 +890,12 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 		return rel, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	// Record the override before the process starts: promoteToLive re-checks
+	// the gate once the candidate is healthy and finds it on this release.
+	if err = recordTestsOverride(rel.ID, granted); err != nil {
+		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "error": err.Error()})
 		return nil, err
 	}
 
@@ -1244,7 +1272,7 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 		if err != nil {
 			return
 		}
-		if err := checkTestsGate(d, build, target.TestsGate, false); err != nil {
+		if _, err := checkTestsGateOrOverride(d, build, target.TestsGate, false, ""); err != nil {
 			globalCtx.Logger().Warn("service promotion blocked by release test gate", "release_id", rel.ID, "error", err)
 			return
 		}
