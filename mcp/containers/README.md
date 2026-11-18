@@ -1,5 +1,22 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.7.1
+
+Two fixes found in review of 0.7.0.
+
+- **Hardened workloads never run as root.** 0.7.0 refused only the strings
+  `root` and `0`, but Docker also reads `00` or `000:1000` as uid 0, and an
+  image can give any account name uid 0. Hardened workloads, and commands run
+  in them, now accept only a numeric `uid` or `uid:gid` with a nonzero uid.
+  User names are refused there; non-hardened workloads are unchanged.
+- **Imports leave existing folders alone.** Archives often list files without
+  their folders; tar creates those folders while unpacking, and 0.7.0 copied
+  their owner and mode onto matching existing folders (for example a
+  `1000:1000` `src` became root-owned). Imports now create only missing
+  folders, with the archived mode and owner (or `owner` when given), and copy
+  files and symlinks into place. Existing folders keep their mode and owner
+  at every level, not only the target.
+
 ## v0.7.0
 
 Users, file ownership and shared volumes for multi-user sandboxes. Local

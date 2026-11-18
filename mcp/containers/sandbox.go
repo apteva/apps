@@ -189,11 +189,43 @@ func requireNonRootUser(user string) error {
 	if user == "" {
 		return errors.New("hardened workloads require a non-root user (for example \"1000:1000\")")
 	}
-	name, _, _ := strings.Cut(user, ":")
-	if name == "root" || name == "0" {
+	return requireNumericNonRootUser(user)
+}
+
+// requireNumericNonRootUser accepts only uid or uid:gid with a nonzero uid.
+// Names are refused because an image can give any account name uid 0, and
+// Docker reads numeric forms such as "00" or "000:1000" as uid 0 too, so a
+// string comparison cannot keep a hardened workload off root.
+func requireNumericNonRootUser(user string) error {
+	uid, gid, hasGID := strings.Cut(user, ":")
+	if !isDecimal(uid) || (hasGID && !isDecimal(gid)) {
+		return errors.New("hardened workloads need a numeric uid or uid:gid (for example \"1000:1000\"); user names are not accepted")
+	}
+	n, err := strconv.ParseUint(uid, 10, 32)
+	if err != nil || n >= 1<<32-1 {
+		return errors.New("uid is out of range")
+	}
+	if n == 0 {
 		return errors.New("hardened workloads cannot run as root")
 	}
+	if hasGID {
+		if _, err := strconv.ParseUint(gid, 10, 32); err != nil {
+			return errors.New("gid is out of range")
+		}
+	}
 	return nil
+}
+
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // platformToken is the sidecar's own credential. It must never be copied into

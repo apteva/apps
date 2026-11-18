@@ -66,13 +66,27 @@ for part in "$@"; do
  mkdir "$cur"
  [ -z "$owner" ] || chown "$owner" "$cur"
 done
-# Copy the archive's entries rather than the staging folder itself, so the
-# staging folder's attributes are never applied to the target.
-set +f
-for entry in /tmp/stage/* /tmp/stage/.[!.]* /tmp/stage/..?*; do
- [ -e "$entry" ] || [ -L "$entry" ] || continue
- cp -a --remove-destination "$entry" "$dest/"
-done`
+# Folders first, parents before children. Existing folders keep their own
+# mode and owner; tar creates folders the archive never lists, and copying
+# those over existing ones would change who may write there. Missing folders
+# take the staged mode and owner (owner when given, else the archive's).
+cd /tmp/stage
+find . -mindepth 1 -type d -exec sh -c '
+  dest="$1"; shift
+  for entry in "$@"; do
+    target="$dest/${entry#./}"
+    if [ -d "$target" ] && [ ! -L "$target" ]; then continue; fi
+    rm -f "$target"
+    mkdir "$target"
+    chown "$(stat -c %u:%g "$entry")" "$target"
+    chmod "$(stat -c %a "$entry")" "$target"
+  done
+' sh "$dest" {} +
+# Then files and symlinks, which replace what is there.
+find . -mindepth 1 ! -type d -exec sh -c '
+  dest="$1"; shift
+  for entry in "$@"; do cp -a --remove-destination "$entry" "$dest/${entry#./}"; done
+' sh "$dest" {} +`
 	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath, owner)
 	return err
 }

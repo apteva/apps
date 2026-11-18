@@ -39,9 +39,22 @@ func TestExecutionUserAndUmaskValidation(t *testing.T) {
 	}
 	bad(plain, "a b", "", "user must be")
 	bad(plain, "x;rm", "", "user must be")
-	bad(hardened, "root", "", "cannot run as root")
+	bad(hardened, "root", "", "numeric uid")
 	bad(hardened, "0:0", "", "cannot run as root")
+	// Docker reads these as uid 0; a name may map to uid 0 in the image.
+	bad(hardened, "00", "", "cannot run as root")
+	bad(hardened, "000:1000", "", "cannot run as root")
+	bad(hardened, "node", "", "numeric uid")
+	bad(hardened, "1000:root", "", "numeric uid")
+	bad(hardened, "4294967295", "", "out of range")
+	bad(hardened, "99999999999", "", "out of range")
 	ok(hardened, "2000:2000", "")
+	ok(hardened, "2000", "")
+	for _, user := range []string{"00", "000:1000", "node"} {
+		if _, err := normalizeRunSpec(RunSpec{Name: "x", Image: "alpine", Hardened: true, User: user}); err == nil {
+			t.Fatalf("hardened workload accepted user %q", user)
+		}
+	}
 	bad(plain, "", "0888", "umask")
 	bad(plain, "", "u=rwx", "umask")
 	bad(plain, "", "-022", "umask")

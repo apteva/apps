@@ -225,3 +225,65 @@ func TestDockerStandaloneVolumeSharedByWorkloads(t *testing.T) {
 		t.Fatalf("docker volume still present: %v", err)
 	}
 }
+
+// Archives often list files without their folders. Importing them must not
+// change the owner or mode of folders that already exist along the path.
+func TestDockerImportLeavesExistingSubfoldersAlone(t *testing.T) {
+	_, _, ctx := sandboxApp(t)
+	vol := "containers-test-import-" + strings.ToLower(newExecutionID()[4:12])
+	if _, err := docker(ctx, "volume", "create", vol); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = docker(context.Background(), "volume", "rm", "-f", vol) })
+	if _, err := docker(ctx, "run", "--rm", "-v", vol+":/volume", "alpine:3.20", "sh", "-c",
+		"mkdir -p /volume/src/lib /volume/src/old && chown -R 1000:1000 /volume/src && chmod 750 /volume/src /volume/src/lib && echo stale > /volume/src/lib/b.go && echo keep > /volume/src/old/k"); err != nil {
+		t.Fatal(err)
+	}
+	fileOnly := testTarGzip(t, []*tar.Header{
+		{Name: "src/lib/b.go", Typeflag: tar.TypeReg, Mode: 0o644, Size: 6, Uid: 501, Gid: 20},
+		{Name: "src/fresh/c.go", Typeflag: tar.TypeReg, Mode: 0o644, Size: 6, Uid: 501, Gid: 20},
+	}, [][]byte{[]byte("new b\n"), []byte("new c\n")})
+	withDirs := testTarGzip(t, []*tar.Header{
+		{Name: "src/", Typeflag: tar.TypeDir, Mode: 0o777, Uid: 0, Gid: 0},
+		{Name: "src/made/", Typeflag: tar.TypeDir, Mode: 0o700, Uid: 501, Gid: 20},
+		{Name: "src/made/d.go", Typeflag: tar.TypeReg, Mode: 0o600, Size: 2, Uid: 501, Gid: 20},
+	}, [][]byte{nil, nil, []byte("d\n")})
+	d := LocalDocker{}
+	if err := d.ImportVolumeArchive(ctx, vol, ".", fileOnly, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ImportVolumeArchive(ctx, vol, ".", fileOnly, "1000:1000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ImportVolumeArchive(ctx, vol, ".", withDirs, ""); err != nil {
+		t.Fatal(err)
+	}
+	out, err := docker(ctx, "run", "--rm", "-v", vol+":/volume", "alpine:3.20", "sh", "-c",
+		`cd /volume && for p in src src/lib src/lib/b.go src/fresh src/fresh/c.go src/old/k src/made src/made/d.go; do printf '%s %s\n' "$p" "$(stat -c '%a %u:%g' "$p")"; done; cat src/lib/b.go`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines[:len(lines)-1] {
+		p, attrs, _ := strings.Cut(line, " ")
+		got[p] = attrs
+	}
+	for p, want := range map[string]string{
+		"src":            "750 1000:1000", // listed as 0777 root in the last archive: still untouched
+		"src/lib":        "750 1000:1000",
+		"src/lib/b.go":   "644 1000:1000", // replaced by the owner import
+		"src/fresh":      "755 0:0",       // created by the first import (no owner), not rewritten later
+		"src/fresh/c.go": "644 1000:1000",
+		"src/old/k":      "644 0:0",    // unrelated files remain
+		"src/made":       "700 501:20", // new folder takes its archived mode and owner
+		"src/made/d.go":  "600 501:20",
+	} {
+		if got[p] != want {
+			t.Fatalf("%s = %q, want %q\n%s", p, got[p], want, out)
+		}
+	}
+	if lines[len(lines)-1] != "new b" {
+		t.Fatalf("file not replaced: %q", lines[len(lines)-1])
+	}
+}

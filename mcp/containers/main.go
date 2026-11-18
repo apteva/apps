@@ -1407,7 +1407,7 @@ func runSchema() map[string]any {
 		"network_mode":      map[string]any{"type": "string", "enum": []string{NetworkDefault, NetworkNone, NetworkRegistryOnly}, "description": "default: internet access. none: no network. registry_only: outbound HTTP(S) only to egress_allow hosts via a filtering proxy."},
 		"egress_allow":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": maxEgressAllow, "description": "Hosts reachable in registry_only mode: host, *.domain, or host:port. Defaults to registry.npmjs.org."},
 		"tmpfs":             map[string]any{"type": "array", "maxItems": maxTmpfsMounts, "items": schemaObject(map[string]any{"mount_path": map[string]any{"type": "string"}, "size_mb": map[string]any{"type": "integer", "minimum": 1, "maximum": maxTmpfsMB}}, []string{"mount_path"})},
-		"hardened":          map[string]any{"type": "boolean", "description": "Drop all Linux capabilities, set no-new-privileges, read-only root filesystem, process cap 256, and require a non-root user."},
+		"hardened":          map[string]any{"type": "boolean", "description": "Drop all Linux capabilities, set no-new-privileges, read-only root filesystem, process cap 256, and require a numeric non-root uid (uid or uid:gid)."},
 		"read_only_rootfs":  map[string]any{"type": "boolean"},
 		"pids_limit":        map[string]any{"type": "integer", "minimum": minPidsLimit, "maximum": maxPidsLimit},
 	}, []string{"name"})
