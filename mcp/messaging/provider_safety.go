@@ -225,7 +225,60 @@ func redactCallbackCredentials(value any) any {
 	return value
 }
 
-type setupDNSRecord struct{ ID, Name, Type, Value string }
+type setupDNSRecord struct {
+	ID, Name, Type, Value string
+	// Prio is the MX priority when the provider stores it apart from the
+	// value (Spaceship via Domains: value "host", prio 10). Raw so a
+	// missing field stays distinguishable from priority 0.
+	Prio json.RawMessage `json:"prio,omitempty"`
+}
+
+// parseMX splits an MX value into priority and normalised host. The
+// priority comes from the value ("10 host") or, when the value is a bare
+// host, from the record's separate prio field.
+func parseMX(value string, prio json.RawMessage) (int, string, bool) {
+	fields := strings.Fields(strings.Trim(strings.TrimSpace(value), "\""))
+	host := ""
+	p := -1
+	switch len(fields) {
+	case 1:
+		host = fields[0]
+		if n, ok := parseMXPrio(prio); ok {
+			p = n
+		}
+	case 2:
+		n, err := strconv.Atoi(fields[0])
+		if err != nil || n < 0 {
+			return 0, "", false
+		}
+		p, host = n, fields[1]
+	default:
+		return 0, "", false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if p < 0 || host == "" {
+		return 0, "", false
+	}
+	return p, host, true
+}
+
+func parseMXPrio(raw json.RawMessage) (int, bool) {
+	s := strings.Trim(strings.TrimSpace(string(raw)), "\"")
+	if s == "" || s == "null" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil && n >= 0
+}
+
+func sameMX(row setupDNSRecord, proposed string) bool {
+	wantPrio, wantHost, ok := parseMX(proposed, nil)
+	if !ok {
+		return false
+	}
+	gotPrio, gotHost, ok := parseMX(row.Value, row.Prio)
+	return ok && gotPrio == wantPrio && gotHost == wantHost
+}
 
 func planDNSRecord(existing []setupDNSRecord, domain, name, kind, value string) (next, recordID string, unchanged bool, err error) {
 	matching := []setupDNSRecord{}
@@ -254,6 +307,9 @@ func planDNSRecord(existing []setupDNSRecord, domain, name, kind, value string) 
 	}
 	for _, row := range matching {
 		if strings.EqualFold(strings.Trim(row.Value, "\""), value) {
+			return value, row.ID, true, nil
+		}
+		if strings.EqualFold(kind, "MX") && sameMX(row, value) {
 			return value, row.ID, true, nil
 		}
 	}
