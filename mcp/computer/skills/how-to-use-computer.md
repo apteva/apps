@@ -95,6 +95,17 @@ are distinct. Never request or enter the device passcode for the operator.
 Transport failures and input actions are never automatically replayed.
 Close the Computer session when finished to release the Mobile device lease.
 
+Android selection (Mobile 0.8.0+, listed in `capabilities.actions` only when
+supported). Scope a selector to one list row with `ROW >> PART`, e.g.
+`"Page name >> android.widget.RadioButton"`: PART is matched inside the single
+clickable row that ROW belongs to. `native_checked` guards the required
+checked state before any action (`{"Other page >> android.widget.RadioButton":
+false}` catches a default selection). `native_select` taps a checkable target
+only when needed and confirms the new state: `native_value` is `changed` or
+`unchanged`, so it is safe to repeat. `native_scroll_to` swipes inside one
+scrollable `native_container` until `native_target` is visible; it never taps
+and fails at the end of the list or after `max_swipes` (default 8).
+
 ## Browser downloads are a three-step lifecycle
 
 A click only dispatches the page action. When it starts a download,

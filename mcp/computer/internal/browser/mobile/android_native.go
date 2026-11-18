@@ -11,12 +11,42 @@ import (
 	"time"
 )
 
+// NativeOptions carries the Android selection guards and list-scroll
+// settings. The zero value preserves the original NativeGuarded behaviour.
+type NativeOptions struct {
+	// Checked maps a selector to the checked state it must have before any
+	// action. Supports row-scoped selectors ("Row text >> RadioButton").
+	Checked map[string]bool
+	// State is native_select's desired end state (default true).
+	State *bool
+	// Container names the one scrollable list native_scroll_to swipes inside.
+	Container string
+	// Direction is native_scroll_to's direction: "down" (default) or "up".
+	Direction string
+	// MaxSwipes bounds native_scroll_to (1-20, default 8).
+	MaxSwipes int
+}
+
+func (o NativeOptions) selectionUsed(action string) bool {
+	return len(o.Checked) > 0 || action == "native_select" || action == "native_scroll_to"
+}
+
+// ErrNativeTargetAbsent reports that no visible element matched the target.
+// A visible but disabled target is a different error.
+var ErrNativeTargetAbsent = errors.New("native target is not visible")
+
 // NativeGuarded returns only a selected field, never the full private UI tree.
 func (c *Computer) NativeGuarded(action, app string, required []string, target, text string, values map[string]string, duration int) (string, error) {
+	return c.NativeGuardedWithOptions(action, app, required, target, text, values, duration, NativeOptions{})
+}
+
+// NativeGuardedWithOptions is NativeGuarded plus Android selection guards
+// (native_checked), native_select and native_scroll_to.
+func (c *Computer) NativeGuardedWithOptions(action, app string, required []string, target, text string, values map[string]string, duration int, opts NativeOptions) (string, error) {
 	if !c.supportsNativeScreen() {
 		return "", errors.New("native guards require an Android ADB or native iOS session with UI source")
 	}
-	if app == "" || len(app) > 255 || len(required) < 1 || len(required) > 12 || len(values) > 12 || len(target) > 500 {
+	if app == "" || len(app) > 255 || len(required) < 1 || len(required) > 12 || len(values) > 12 || len(opts.Checked) > 12 || len(target) > 500 || len(opts.Container) > 500 {
 		return "", errors.New("native guards require an app and 1-12 screen markers")
 	}
 	for _, marker := range required {
@@ -32,7 +62,7 @@ func (c *Computer) NativeGuarded(action, app string, required []string, target, 
 		defer cancel()
 		defer c.BindRequest(ctx)()
 		for {
-			_, err := c.NativeGuarded("native_assert", app, required, "", "", values, 0)
+			_, err := c.NativeGuardedWithOptions("native_assert", app, required, "", "", values, 0, NativeOptions{Checked: opts.Checked})
 			if !errors.Is(err, ErrNativeScreenMarkerAbsent) {
 				return "", err
 			}
@@ -46,10 +76,19 @@ func (c *Computer) NativeGuarded(action, app string, required []string, target, 
 		}
 	}
 	if c.lease.Device.Platform == "android" {
+		if opts.selectionUsed(action) && !c.supportsSelectionState() {
+			return "", errors.New("Android selection guards require Mobile 0.8.0 or later (selection_state)")
+		}
 		if action == "native_type_secure" {
+			if len(opts.Checked) > 0 {
+				return "", errors.New("native_checked is not supported with secure input")
+			}
 			return "", c.androidSecure(app, required, target, text, values)
 		}
-		return c.androidNative(action, app, required, target, text, values)
+		return c.androidNative(action, app, required, target, text, values, opts)
+	}
+	if opts.selectionUsed(action) {
+		return "", errors.New("selection guards are Android-only for now")
 	}
 	for field, expected := range values {
 		source, err := c.nativeSource()
@@ -85,7 +124,11 @@ type androidNode struct {
 	id, kind, value, desc, pkg                     string
 	x, y, w, h                                     int
 	enabled, visible, password, focused, clickable bool
-	parent                                         int
+	checkable, checked, selected, scrollable       bool
+	// stateKnown is false when the UI source predates selection state
+	// (Mobile < 0.8.0); a missing checked attribute must never read as false.
+	stateKnown bool
+	parent     int
 }
 
 func (n androidNode) matches(target string, badged bool) bool {
@@ -139,6 +182,8 @@ func androidTree(source, app string, width, height int) ([]androidNode, error) {
 				return nil, errors.New("unexpected foreground Android app")
 			}
 			n := androidNode{id: a["resource-id"], kind: a["class"], value: a["text"], desc: a["content-desc"], pkg: a["package"], enabled: a["enabled"] == "true", visible: a["visible-to-user"] != "false", password: a["password"] == "true", focused: a["focused"] == "true", clickable: a["clickable"] == "true", parent: -1}
+			_, n.stateKnown = a["checkable"]
+			n.checkable, n.checked, n.selected, n.scrollable = a["checkable"] == "true", a["checked"] == "true", a["selected"] == "true", a["scrollable"] == "true"
 			x2, y2 := 0, 0
 			if count, e := fmt.Sscanf(a["bounds"], "[%d,%d][%d,%d]", &n.x, &n.y, &x2, &y2); e != nil || count != 4 {
 				n.visible = false
@@ -162,6 +207,35 @@ func androidTree(source, app string, width, height int) ([]androidNode, error) {
 }
 
 func matchAndroid(nodes []androidNode, required []string, target string, badged, tap bool, values map[string]string) (androidNode, error) {
+	return matchAndroidChecked(nodes, required, target, badged, tap, values, nil)
+}
+
+// rowOf returns the nearest clickable ancestor-or-self, the element a tap
+// on the node would activate, or -1 when there is none.
+func rowOf(nodes []androidNode, i int) int {
+	for ; i >= 0; i = nodes[i].parent {
+		if nodes[i].clickable {
+			return i
+		}
+	}
+	return -1
+}
+
+// withinRow reports whether node i is the row itself or inside it.
+func withinRow(nodes []androidNode, i, row int) bool {
+	for ; i >= 0; i = nodes[i].parent {
+		if i == row {
+			return true
+		}
+	}
+	return false
+}
+
+// matchAndroidChecked resolves markers, value guards, checked guards and the
+// target. Selectors may be exact text/id/description, a " > " direct-child
+// path, or "ROW >> PART": PART (text/id/description or class) inside the one
+// clickable row that ROW belongs to.
+func matchAndroidChecked(nodes []androidNode, required []string, target string, badged, tap bool, values map[string]string, checked map[string]bool) (androidNode, error) {
 	// A direct-child path scopes repeated form controls to their owning field.
 	// Every segment must match exactly; ambiguous paths still fail closed.
 	matchesAt := func(index int, selector string, badge bool) bool {
@@ -180,19 +254,72 @@ func matchAndroid(nodes []androidNode, required []string, target string, badged,
 		}
 		return true
 	}
-	for _, marker := range required {
-		found := false
-		for i, n := range nodes {
-			found = found || (n.visible && matchesAt(i, marker, false))
+	// resolve returns the visible nodes a selector names.
+	resolve := func(selector string, badge bool) ([]int, error) {
+		left, right, scoped := strings.Cut(selector, " >> ")
+		if !scoped {
+			var out []int
+			for i, n := range nodes {
+				if n.visible && matchesAt(i, selector, badge) {
+					out = append(out, i)
+				}
+			}
+			return out, nil
 		}
-		if !found {
+		left, right = strings.TrimSpace(left), strings.TrimSpace(right)
+		if left == "" || right == "" || strings.Contains(right, " >> ") {
+			return nil, errors.New("native row selector must be ROW >> PART")
+		}
+		rows := map[int]bool{}
+		for i, n := range nodes {
+			if n.visible && matchesAt(i, left, false) {
+				row := rowOf(nodes, i)
+				if row < 0 {
+					// Without a clickable row the scope would be the whole
+					// screen; fail closed instead of widening it.
+					return nil, errors.New("native row selector: ROW is not inside a clickable row")
+				}
+				rows[row] = true
+			}
+		}
+		if len(rows) == 0 {
+			return nil, nil
+		}
+		if len(rows) > 1 {
+			return nil, errors.New("native row selector must match one row")
+		}
+		var row int
+		for r := range rows {
+			row = r
+		}
+		var out []int
+		for i, n := range nodes {
+			if n.visible && withinRow(nodes, i, row) && (n.matches(right, badge) || n.kind == right) {
+				out = append(out, i)
+			}
+		}
+		return out, nil
+	}
+	for _, marker := range required {
+		found, err := resolve(marker, false)
+		if err != nil {
+			return androidNode{}, err
+		}
+		if len(found) == 0 {
 			return androidNode{}, ErrNativeScreenMarkerAbsent
 		}
 	}
 	find := func(selector string, forTap, badge bool) (androidNode, error) {
+		candidates, err := resolve(selector, badge)
+		if err != nil {
+			return androidNode{}, err
+		}
+		if len(candidates) == 0 {
+			return androidNode{}, fmt.Errorf("native target must match one visible enabled element: %w", ErrNativeTargetAbsent)
+		}
 		matches := map[int]bool{}
-		for i, n := range nodes {
-			if !n.visible || !n.enabled || !matchesAt(i, selector, badge) {
+		for _, i := range candidates {
+			if !nodes[i].enabled {
 				continue
 			}
 			if forTap {
@@ -232,16 +359,43 @@ func matchAndroid(nodes []androidNode, required []string, target string, badged,
 			return androidNode{}, errors.New("native field value guard did not match")
 		}
 	}
+	for selector, want := range checked {
+		idx, err := resolve(selector, false)
+		if err != nil || len(idx) != 1 {
+			return androidNode{}, errors.New("native checked guard must match one visible element")
+		}
+		n := nodes[idx[0]]
+		if !n.stateKnown {
+			return androidNode{}, errors.New("Android UI source lacks selection state; update Mobile to 0.8.0 or later")
+		}
+		if !n.checkable || n.checked != want {
+			return androidNode{}, errors.New("native checked guard did not match")
+		}
+	}
 	if target == "" {
 		return androidNode{}, nil
 	}
 	return find(target, tap, badged)
 }
 
-func (c *Computer) androidNative(action, app string, required []string, target, text string, values map[string]string) (string, error) {
+// supportsSelectionState reports Mobile >= 0.8.0 on ADB: the UI source
+// carries checkable/checked/selected/scrollable.
+func (c *Computer) supportsSelectionState() bool {
+	return c.supportsNativeScreen() && c.lease.Device.Platform == "android" && slices.Contains(c.lease.Device.Capabilities, "selection_state")
+}
+
+const (
+	selectionConfirmWindow = 2 * time.Second
+	selectionPollInterval  = 200 * time.Millisecond
+	scrollSettle           = 500 * time.Millisecond
+)
+
+func (c *Computer) androidNative(action, app string, required []string, target, text string, values map[string]string, opts NativeOptions) (string, error) {
 	if !c.supportsNativeScreen() {
 		return "", errors.New("Android UI source is unavailable")
 	}
+	selecting := action == "native_select"
+	scrolling := action == "native_scroll_to"
 	clearing := action == "native_clear"
 	typing := action == "native_type" || action == "native_replace" || clearing
 	if clearing && text != "" {
@@ -252,7 +406,7 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 		if target != "" || text != "" {
 			return "", errors.New("native_assert accepts screen markers only")
 		}
-	} else if !tap && !typing && action != "native_read" {
+	} else if !tap && !typing && !selecting && !scrolling && action != "native_read" {
 		return "", errors.New("unsupported Android native action")
 	}
 	if action != "native_assert" && target == "" {
@@ -271,9 +425,15 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 			return "", errors.New("Mobile does not support verified text replacement")
 		}
 	} else if text != "" {
-		return "", errors.New("native read/tap does not accept input text")
+		return "", errors.New("native read/tap/select/scroll does not accept input text")
 	}
-	observe := func() (androidNode, error) {
+	if opts.State != nil && !selecting {
+		return "", errors.New("native_state is only valid for native_select")
+	}
+	if !scrolling && (opts.Container != "" || opts.Direction != "" || opts.MaxSwipes != 0) {
+		return "", errors.New("native_container, direction and max_swipes are only valid for native_scroll_to")
+	}
+	observeWith := func(checked map[string]bool) (androidNode, error) {
 		source, err := c.nativeSource()
 		if err != nil {
 			return androidNode{}, err
@@ -282,7 +442,11 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 		if err != nil {
 			return androidNode{}, err
 		}
-		return matchAndroid(nodes, required, target, action == "native_tap_badged", tap, values)
+		return matchAndroidChecked(nodes, required, target, action == "native_tap_badged", tap, values, checked)
+	}
+	observe := func() (androidNode, error) { return observeWith(opts.Checked) }
+	if scrolling {
+		return c.androidScrollTo(app, required, target, values, opts)
 	}
 	node, err := observe()
 	if err != nil {
@@ -299,6 +463,42 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 			return "", errors.New("native field exceeds the read limit")
 		}
 		return node.value, nil
+	}
+	if selecting {
+		want := true
+		if opts.State != nil {
+			want = *opts.State
+		}
+		if !node.stateKnown {
+			return "", errors.New("Android UI source lacks selection state; update Mobile to 0.8.0 or later")
+		}
+		if !node.checkable || !node.enabled {
+			return "", errors.New("native_select target is not an enabled checkable element; scope it with ROW >> class")
+		}
+		if node.checked == want {
+			return "unchanged", nil
+		}
+		var out any
+		if err = c.invoke(c.ctx(), "mobile_action", map[string]any{"session_id": c.lease.ID, "action": "tap", "x": (float64(node.x) + float64(node.w)/2) / float64(c.display.Width), "y": (float64(node.y) + float64(node.h)/2) / float64(c.display.Height)}, &out); err != nil {
+			return "", err
+		}
+		// The state often lands a frame or two after the tap. Re-read within a
+		// bounded window; never tap again.
+		deadline := time.Now().Add(selectionConfirmWindow)
+		for {
+			// Checked guards are preconditions: selecting one radio unchecks
+			// another, so re-check only markers and value guards here.
+			after, err := observeWith(nil)
+			if err == nil && after.checked == want {
+				return "changed", nil
+			}
+			if time.Now().After(deadline) {
+				return "", errors.New("native selection tap was sent but the new state was not confirmed; inspect before retrying, no input replayed")
+			}
+			if err := c.sleep(selectionPollInterval); err != nil {
+				return "", err
+			}
+		}
 	}
 	if typing && (!strings.HasSuffix(node.kind, "EditText") || (action == "native_type" && node.value != "")) {
 		return "", errors.New("native input requires a regular editable field; use replacement for nonempty text")
@@ -341,4 +541,115 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 		return "", errors.New("native field value was not confirmed after input")
 	}
 	return "", nil
+}
+
+// androidScrollTo swipes inside one scrollable container until the target is
+// visible. It never taps. It stops at the end of the list (no visible change
+// after a swipe) or after MaxSwipes, returning ErrNativeTargetAbsent.
+func (c *Computer) androidScrollTo(app string, required []string, target string, values map[string]string, opts NativeOptions) (string, error) {
+	maxSwipes := opts.MaxSwipes
+	if maxSwipes == 0 {
+		maxSwipes = 8
+	}
+	if maxSwipes < 1 || maxSwipes > 20 || strings.TrimSpace(opts.Container) == "" {
+		return "", errors.New("native_scroll_to needs native_container and 1-20 swipes")
+	}
+	direction := opts.Direction
+	if direction == "" {
+		direction = "down"
+	}
+	if direction != "down" && direction != "up" {
+		return "", errors.New("native_scroll_to direction must be down or up")
+	}
+	last := ""
+	for swipes := 0; ; swipes++ {
+		source, err := c.nativeSource()
+		if err != nil {
+			return "", err
+		}
+		nodes, err := androidTree(source, app, c.display.Width, c.display.Height)
+		if err != nil {
+			return "", err
+		}
+		_, err = matchAndroidChecked(nodes, required, target, false, false, values, opts.Checked)
+		if err == nil {
+			return "visible", nil
+		}
+		if !errors.Is(err, ErrNativeTargetAbsent) {
+			return "", err
+		}
+		box, signature, err := scrollContainer(nodes, opts.Container)
+		if err != nil {
+			return "", err
+		}
+		if signature == last {
+			return "", fmt.Errorf("native target not found before the end of the list: %w", ErrNativeTargetAbsent)
+		}
+		if swipes == maxSwipes {
+			return "", fmt.Errorf("native target not found after %d swipes: %w", maxSwipes, ErrNativeTargetAbsent)
+		}
+		last = signature
+		// A 40% swipe keeps consecutive views overlapping, so no row can pass
+		// between two reads.
+		from, to := box.y+box.h*7/10, box.y+box.h*3/10
+		if direction == "up" {
+			from, to = to, from
+		}
+		cx := (float64(box.x) + float64(box.w)/2) / float64(c.display.Width)
+		var out any
+		if err := c.invoke(c.ctx(), "mobile_action", map[string]any{
+			"session_id": c.lease.ID, "action": "swipe",
+			"x": cx, "y": float64(from) / float64(c.display.Height),
+			"to_x": cx, "to_y": float64(to) / float64(c.display.Height),
+		}, &out); err != nil {
+			return "", err
+		}
+		if err := c.sleep(scrollSettle); err != nil {
+			return "", err
+		}
+	}
+}
+
+// scrollContainer resolves the one visible scrollable element named by
+// selector and a signature of what is currently visible inside it.
+func scrollContainer(nodes []androidNode, selector string) (androidNode, string, error) {
+	match := -1
+	for i, n := range nodes {
+		if !n.visible || !(n.matches(selector, false) || n.kind == selector) {
+			continue
+		}
+		if match >= 0 {
+			return androidNode{}, "", errors.New("native_container must match one visible element")
+		}
+		match = i
+	}
+	if match < 0 {
+		return androidNode{}, "", errors.New("native_container is not visible")
+	}
+	box := nodes[match]
+	if !box.stateKnown {
+		return androidNode{}, "", errors.New("Android UI source lacks selection state; update Mobile to 0.8.0 or later")
+	}
+	if !box.scrollable {
+		return androidNode{}, "", errors.New("native_container is not scrollable")
+	}
+	var parts []string
+	for i, n := range nodes {
+		if i != match && n.visible && withinRow(nodes, i, match) {
+			parts = append(parts, fmt.Sprintf("%s|%s|%s|%d", n.id, n.value, n.desc, n.y-box.y))
+		}
+	}
+	return box, strings.Join(parts, "\n"), nil
+}
+
+// sleep waits without outliving the request context.
+func (c *Computer) sleep(d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-c.ctx().Done():
+		return c.ctx().Err()
+	case <-timer.C:
+		return nil
+	}
 }
