@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: entitlements
 display_name: Entitlements
-version: 0.2.2
+version: 0.3.0
 description: |
   Shared access-control and usage layer. Entitlements grants, revokes,
   checks, and meters access for SaaS plans, courses, memberships,
@@ -14,7 +14,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/entitlements
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [entitlements, access, usage, saas, courses, memberships]
+tags: [entitlements, access, usage, credits, saas, courses, memberships]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -43,6 +43,18 @@ provides:
       description: Record counter or gauge usage against a subject and feature.
     - name: usage_get
       description: Return usage and limits for a subject and feature.
+    - name: credits_grant
+      description: Append a retry-safe prepaid credit grant or compensating transaction.
+    - name: credits_reserve
+      description: Atomically reserve available prepaid credits without allowing overspend.
+    - name: credits_commit
+      description: Commit an active reservation into one append-only debit transaction.
+    - name: credits_release
+      description: Release an active credit reservation.
+    - name: credits_balance
+      description: Return spendable, reserved, and lifetime credit totals.
+    - name: credits_transactions
+      description: List append-only credit ledger transactions.
   skills:
     - name: how-to-use-entitlements
       command: /entitlements

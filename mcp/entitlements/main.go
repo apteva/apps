@@ -17,8 +17,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: entitlements
 display_name: Entitlements
-version: 0.2.0
-description: Shared access-control and usage layer.
+version: 0.3.0
+description: Shared access-control, usage, and generic prepaid credit ledger.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -59,7 +59,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("entitlements requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("entitlements mounted", "version", "0.2.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("entitlements mounted", "version", "0.3.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -79,7 +79,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{Name: "entitlement_grants_create", Description: "Grant a feature/key to a subject.", InputSchema: subjectSchema(map[string]any{"source_type": map[string]any{"type": "string"}, "source_id": map[string]any{"type": "string"}, "starts_at": map[string]any{"type": "string"}, "expires_at": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolGrantCreate},
 		{Name: "entitlement_grants_upsert", Description: "Idempotently create or refresh an active source-scoped grant.", InputSchema: subjectSchema(map[string]any{"source_type": map[string]any{"type": "string"}, "source_id": map[string]any{"type": "string"}, "starts_at": map[string]any{"type": "string"}, "expires_at": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolGrantUpsert},
 		{Name: "entitlement_grants_revoke", Description: "Revoke a grant.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolGrantRevoke},
@@ -89,6 +89,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "usage_record", Description: "Record usage. Counters are summed; gauges represent current measured values.", InputSchema: subjectSchema(map[string]any{"quantity": map[string]any{"type": "integer"}, "usage_kind": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "unit": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolUsageRecord},
 		{Name: "usage_get", Description: "Get usage and limits.", InputSchema: subjectSchema(map[string]any{"usage_kind": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}}), Handler: a.toolUsageGet},
 	}
+	return append(tools, creditTools(a)...)
 }
 
 func main() { sdk.Run(&App{}) }

@@ -229,3 +229,58 @@ func TestGaugeUsageUsesLatestMeasurement(t *testing.T) {
 		t.Fatalf("counter usage=%d, want 5", counter)
 	}
 }
+
+func TestCreditsGrantReserveCommitAndRefund(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-credits"))
+	grantArgs := map[string]any{"subject_type": "saas_account", "subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(1000), "idempotency_key": "invoice:1:credit_grant", "source_type": "billing_invoice", "source_id": "1"}
+	first, deduped, err := dbCreditsGrant(ctx.AppDB(), "proj-credits", grantArgs)
+	if err != nil || deduped || first.Amount != 1000 {
+		t.Fatalf("grant: tx=%+v deduped=%v err=%v", first, deduped, err)
+	}
+	second, deduped, err := dbCreditsGrant(ctx.AppDB(), "proj-credits", grantArgs)
+	if err != nil || !deduped || second.ID != first.ID {
+		t.Fatalf("grant retry: tx=%+v deduped=%v err=%v", second, deduped, err)
+	}
+	reservation, deduped, err := dbCreditsReserve(ctx.AppDB(), "proj-credits", map[string]any{"subject_type": "saas_account", "subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(300), "idempotency_key": "request:1"})
+	if err != nil || deduped || reservation.Amount != 300 {
+		t.Fatalf("reserve: reservation=%+v deduped=%v err=%v", reservation, deduped, err)
+	}
+	if _, _, err := dbCreditsReserve(ctx.AppDB(), "proj-credits", map[string]any{"subject_type": "saas_account", "subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(701), "idempotency_key": "request:2"}); err == nil {
+		t.Fatal("expected insufficient credits")
+	}
+	committed, debit, deduped, err := dbCreditsCommit(ctx.AppDB(), "proj-credits", reservation.ID, 0, nil)
+	if err != nil || deduped || committed.Status != "committed" || debit.Amount != -300 {
+		t.Fatalf("commit: reservation=%+v debit=%+v deduped=%v err=%v", committed, debit, deduped, err)
+	}
+	_, debitRetry, deduped, err := dbCreditsCommit(ctx.AppDB(), "proj-credits", reservation.ID, 0, nil)
+	if err != nil || !deduped || debitRetry.ID != debit.ID {
+		t.Fatalf("commit retry: debit=%+v deduped=%v err=%v", debitRetry, deduped, err)
+	}
+	refund, deduped, err := dbCreditsGrant(ctx.AppDB(), "proj-credits", map[string]any{"subject_type": "saas_account", "subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(-100), "kind": "refund", "idempotency_key": "invoice:1:refund:2"})
+	if err != nil || deduped || refund.Amount != -100 {
+		t.Fatalf("refund: tx=%+v deduped=%v err=%v", refund, deduped, err)
+	}
+	balance, err := dbCreditsBalance(ctx.AppDB(), "proj-credits", "saas_account", "acct_1", "api:credits")
+	if err != nil || balance.Available != 600 || balance.Reserved != 0 || balance.Debited != 300 || balance.Refunded != 100 {
+		t.Fatalf("balance=%+v err=%v, want available=600", balance, err)
+	}
+}
+
+func TestCreditsReleaseDoesNotDebit(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-credits-release"))
+	if _, _, err := dbCreditsGrant(ctx.AppDB(), "proj-credits-release", map[string]any{"subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(50), "idempotency_key": "grant-1"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := dbCreditsReserve(ctx.AppDB(), "proj-credits-release", map[string]any{"subject_id": "acct_1", "feature_key": "api:credits", "amount": int64(25), "idempotency_key": "reserve-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, deduped, err := dbCreditsRelease(ctx.AppDB(), "proj-credits-release", r.ID)
+	if err != nil || deduped || r.Status != "released" {
+		t.Fatalf("release=%+v deduped=%v err=%v", r, deduped, err)
+	}
+	b, err := dbCreditsBalance(ctx.AppDB(), "proj-credits-release", "customer", "acct_1", "api:credits")
+	if err != nil || b.Available != 50 || b.Debited != 0 {
+		t.Fatalf("balance=%+v err=%v", b, err)
+	}
+}
