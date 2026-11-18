@@ -154,6 +154,14 @@ func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeo
 	if totalBytes > maxEnvironmentBytes {
 		return in, errors.New("execution input exceeds total byte limit")
 	}
+	if err := checkNoPlatformSecrets(in.Env, workload.Hardened); err != nil {
+		return in, err
+	}
+	for i, arg := range in.Argv {
+		if containsPlatformToken(arg) {
+			return in, fmt.Errorf("argv[%d] contains the platform app token", i)
+		}
+	}
 	in.IdempotencyKey = strings.TrimSpace(in.IdempotencyKey)
 	if len(in.IdempotencyKey) > 256 {
 		return in, errors.New("idempotency_key exceeds 256 bytes")
@@ -262,6 +270,13 @@ func (a *App) launchExecution(app *sdk.AppCtx, execution *Execution, workload *W
 	env := make(map[string]string, len(execution.Env))
 	for key, value := range execution.Env {
 		env[key] = value
+	}
+	if fresh.NetworkMode == NetworkRegistryOnly {
+		for key, value := range proxyEnv() {
+			if _, set := env[key]; !set {
+				env[key] = value
+			}
+		}
 	}
 	startCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	runtimeID, err := execBackend.StartExecution(startCtx, executionRuntimeSpec{

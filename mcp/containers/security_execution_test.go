@@ -24,6 +24,7 @@ func TestSensitiveToolsAreAppOnly(t *testing.T) {
 		"containers_exec_cancel":   true,
 		"containers_volume_import": true,
 		"containers_volume_export": true,
+		"containers_network_set":   true,
 	}
 	for _, tool := range (&App{}).MCPTools() {
 		if !want[tool.Name] {

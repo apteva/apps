@@ -284,9 +284,11 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 		}
 		args = append(args, "-e", k+"="+v)
 	}
-	for _, v := range spec.Volumes {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", v.DockerVolumeName, v.MountPath))
+	sandboxArgs, err := sandboxRunArgs(spec)
+	if err != nil {
+		return nil, err
 	}
+	args = append(args, sandboxArgs...)
 	if spec.Resources.MemoryMB > 0 {
 		args = append(args, "--memory", strconv.Itoa(spec.Resources.MemoryMB)+"m")
 	}
@@ -302,7 +304,7 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 	if strings.HasPrefix(spec.Image, "-") {
 		return nil, errors.New("invalid Docker image")
 	}
-	args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=3", "--pids-limit", "512", "--", spec.Image)
+	args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=3", "--", spec.Image)
 	args = append(args, spec.Command...)
 	return args, nil
 }

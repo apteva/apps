@@ -41,11 +41,14 @@ mkfifo "$state_dir/pipe"
  rm -f "$state_dir/chunk"
 ) < "$state_dir/pipe" &
 capture=$!
+# Every process the command starts inherits this marker, so cancellation can
+# find descendants that left the process group and were re-parented.
+mark="${state_dir##*/}"
 if command -v setsid >/dev/null 2>&1; then
- setsid "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ APTEVA_PROCESS_TREE="$mark" setsid "$@" </dev/null > "$state_dir/pipe" 2>&1 &
  child=$!; : > "$state_dir/process_group"
 else
- "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ APTEVA_PROCESS_TREE="$mark" "$@" </dev/null > "$state_dir/pipe" 2>&1 &
  child=$!
 fi
 printf '%s\n' "$child" > "$state_dir/pid"
@@ -72,24 +75,45 @@ done
 pid=$(cat "$state_dir/pid")
 case "$pid" in ''|*[!0-9]*|0|1) exit 1;; esac
 group=false; [ ! -f "$state_dir/process_group" ] || group=true
-# Snapshot descendants before terminating the leader, including children which
-# created a new process group. Escalate the original group even if its leader exits.
+mark="${state_dir##*/}"
 pids="$pid"
-while :; do
- old="$pids"
- for f in /proc/[0-9]*/status; do
-  child=; parent=
-  while read -r k v rest; do case "$k" in Pid:) child="$v";; PPid:) parent="$v";; esac; done < "$f" 2>/dev/null || continue
-  case " $pids " in *" $parent "*) case " $pids " in *" $child "*) ;; *) pids="$pids $child";; esac;; esac
- done
- [ "$pids" = "$old" ] && break
-done
+` + processTreeCollectScript + `
+# Snapshot before terminating the leader. Escalate the original group even if
+# its leader exits, and re-collect so late forks and orphans are caught too.
+collect
 if $group; then kill -TERM -"$pid" 2>/dev/null || true; fi
 for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
 sleep 1
+collect
 if $group; then kill -KILL -"$pid" 2>/dev/null || true; fi
 for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
+collect
+for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
 `
+
+// processTreeCollectScript defines collect(), which adds to $pids every
+// descendant of a pid already in $pids plus every process whose initial
+// environment carries APTEVA_PROCESS_TREE=$mark. The marker catches processes
+// that called setsid and were re-parented after their parent exited.
+const processTreeCollectScript = `collect() {
+ while :; do
+  old="$pids"
+  for f in /proc/[0-9]*/status; do
+   child=; parent=
+   while read -r k v rest; do case "$k" in Pid:) child="$v";; PPid:) parent="$v";; esac; done < "$f" 2>/dev/null || continue
+   case " $pids " in *" $parent "*) case " $pids " in *" $child "*) ;; *) pids="$pids $child";; esac;; esac
+  done
+  if [ -n "$mark" ]; then
+   for d in /proc/[0-9]*; do
+    p="${d#/proc/}"
+    case " $pids " in *" $p "*) continue;; esac
+    [ "$p" != "$$" ] || continue
+    if tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "APTEVA_PROCESS_TREE=$mark"; then pids="$pids $p"; fi
+   done
+  fi
+  [ "$pids" = "$old" ] && break
+ done
+}`
 
 type dockerEngineConnection struct {
 	client  *http.Client

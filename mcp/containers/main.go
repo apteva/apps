@@ -154,6 +154,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
 		{Name: "containers_sessions_list", Description: "List owned persistent shell sessions.", InputSchema: idSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSessions},
 		{Name: "containers_session_close", Description: "Close an idle owned shell session.", InputSchema: workloadIDSchema(map[string]any{"session_key": map[string]any{"type": "string"}}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSessionClose},
+		{Name: "containers_network_set", Description: "Switch an owned workload's network mode: default (internet), none (no network), or registry_only (outbound HTTP(S) only to egress_allow hosts through a filtering proxy). Use between commands, e.g. registry_only to install, none to test.", InputSchema: networkSetSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolNetworkSet},
 		{Name: "containers_exec_start", Description: "Start an asynchronous command inside an owned workload container. Set session_key to reuse a stateful PTY shell across commands.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
 		{Name: "containers_exec_get", Description: "Fetch one owned execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionGet},
 		{Name: "containers_exec_logs", Description: "Tail bounded logs for one owned execution.", InputSchema: executionLogsSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionLogs},
@@ -248,7 +249,13 @@ func (a *App) prepareOwnedWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec, o
 	containerName := "containers-" + dockerSafeName(spec.Name) + "-" + runtimeSuffix
 	networkName := containerName
 	for i := range spec.Volumes {
-		if spec.Volumes[i].RetainedFrom != "" {
+		if spec.Volumes[i].SharedFrom != "" {
+			name, err := sharedVolume(db, spec.Volumes[i].SharedFrom, spec.Volumes[i].Name, owner, runSpecTargetID(spec))
+			if err != nil {
+				return nil, spec, err
+			}
+			spec.Volumes[i].DockerVolumeName = name
+		} else if spec.Volumes[i].RetainedFrom != "" {
 			name, err := retainedVolume(db, spec.Volumes[i].RetainedFrom, spec.Volumes[i].Name, owner, runSpecTargetID(spec))
 			if err != nil {
 				return nil, spec, err
@@ -267,6 +274,8 @@ func (a *App) prepareOwnedWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec, o
 		EnvJSON: encodeJSON(redactEnvironment(spec.Env)), Resources: spec.Resources, ResourcesJSON: encodeJSON(spec.Resources),
 		RestartPolicy: spec.RestartPolicy, Command: spec.Command,
 		WorkingDirectory: spec.WorkingDirectory, User: spec.User,
+		NetworkMode: spec.NetworkMode, EgressAllow: spec.EgressAllow, Tmpfs: spec.Tmpfs,
+		Hardened: spec.Hardened, ReadOnlyRootfs: spec.ReadOnlyRootfs, PidsLimit: spec.PidsLimit,
 		OwnerAppInstallID: owner.InstallID, OwnerAppName: owner.AppName, ProjectID: owner.ProjectID,
 	}
 	if len(spec.Ports) > 0 && spec.Ports[0].HostPort > 0 && spec.Ports[0].Protocol == "tcp" {
@@ -345,6 +354,10 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 		if err != nil {
 			return cleanupRuntime(err)
 		}
+		if created && v.SharedFrom != "" {
+			createdVolumes = append(createdVolumes, v.DockerVolumeName)
+			return cleanupRuntime(fmt.Errorf("shared volume %q no longer exists on workload %s", v.Name, v.SharedFrom))
+		}
 		if created {
 			createdVolumes = append(createdVolumes, v.DockerVolumeName)
 		}
@@ -384,7 +397,12 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	}
 	log.Printf("[containers] runtime docker_run workload_id=%s container=%q image=%q", id, containerName, spec.Image)
 	runAttempted = true
-	cid, err := backend.Run(ctx, spec, containerName, networkName)
+	var cid string
+	if spec.NetworkMode == "" || spec.NetworkMode == NetworkDefault {
+		cid, err = backend.Run(ctx, spec, containerName, networkName)
+	} else {
+		cid, err = runSandboxed(ctx, backend, spec, containerName, networkName)
+	}
 	if err != nil {
 		return cleanupRuntime(err)
 	}
@@ -431,6 +449,9 @@ func cleanupFailedRuntime(db *sql.DB, id string, backend DockerBackend, containe
 		if err := backend.RemoveVolume(ctx, volumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
 			errs = append(errs, fmt.Errorf("remove volume %s: %w", volumeName, err))
 		}
+	}
+	if err := removeSandboxRuntime(ctx, backend, id, containerName, networkName); err != nil {
+		errs = append(errs, err)
 	}
 	if removeNetwork && strings.TrimSpace(networkName) != "" {
 		if err := backend.RemoveNetwork(ctx, networkName); err != nil && !isDockerMissingResourceError(err, "network") {
@@ -519,6 +540,24 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	}
 	if in.User != "" {
 		base.User = in.User
+	}
+	if in.NetworkMode != "" {
+		base.NetworkMode = in.NetworkMode
+	}
+	if in.EgressAllow != nil {
+		base.EgressAllow = in.EgressAllow
+	}
+	if in.Tmpfs != nil {
+		base.Tmpfs = in.Tmpfs
+	}
+	if in.Hardened {
+		base.Hardened = true
+	}
+	if in.ReadOnlyRootfs {
+		base.ReadOnlyRootfs = true
+	}
+	if in.PidsLimit != 0 {
+		base.PidsLimit = in.PidsLimit
 	}
 	return base, nil
 }
@@ -647,11 +686,25 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 		cleanupErrs = append(cleanupErrs, err)
 	}
 	cleanupErrs = append(cleanupErrs, removeWorkloadExecutionRuntime(ctx, db, backend, w.ID)...)
+	if err := removeSandboxRuntime(ctx, backend, w.ID, w.ContainerName, w.NetworkName); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
 	if err := backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
+	for _, v := range w.Volumes {
+		// A shared mount belongs to its source workload: drop the row, keep the volume.
+		if v.SharedFrom != "" {
+			if _, err := db.Exec(`DELETE FROM containers_volumes WHERE workload_id=? AND name=?`, id, v.Name); err != nil {
+				cleanupErrs = append(cleanupErrs, err)
+			}
+		}
+	}
 	if deleteVolumes {
 		for _, v := range w.Volumes {
+			if v.SharedFrom != "" {
+				continue
+			}
 			if err := backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
 				cleanupErrs = append(cleanupErrs, err)
 			} else {
@@ -791,6 +844,9 @@ func (a *App) workloadUsage(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB,
 	for _, volume := range w.Volumes {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if volume.SharedFrom != "" {
+			continue
 		}
 		size, err := backend.VolumeUsage(ctx, volume.DockerVolumeName)
 		if err != nil {
@@ -1318,7 +1374,7 @@ func runSchema() map[string]any {
 		"use_local":      map[string]any{"type": "boolean"},
 		"ports":          map[string]any{"type": "array"},
 		"env":            map[string]any{"type": "object"},
-		"volumes":        map[string]any{"type": "array", "items": schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "mount_path": map[string]any{"type": "string"}, "retained_from": map[string]any{"type": "string"}}, []string{"name", "mount_path"})},
+		"volumes":        map[string]any{"type": "array", "items": schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "mount_path": map[string]any{"type": "string"}, "retained_from": map[string]any{"type": "string"}, "read_only": map[string]any{"type": "boolean"}, "shared_from": map[string]any{"type": "string", "description": "Mount the same-named volume of another live workload you own on the same host. Requires read_only."}}, []string{"name", "mount_path"})},
 		"files":          map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "owner": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
 		"pull_policy":    map[string]any{"type": "string", "enum": []string{"missing", "always", "never"}},
 		"health_path":    map[string]any{"type": "string"},
@@ -1328,6 +1384,12 @@ func runSchema() map[string]any {
 		"command":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"working_directory": map[string]any{"type": "string"},
 		"user":              map[string]any{"type": "string"},
+		"network_mode":      map[string]any{"type": "string", "enum": []string{NetworkDefault, NetworkNone, NetworkRegistryOnly}, "description": "default: internet access. none: no network. registry_only: outbound HTTP(S) only to egress_allow hosts via a filtering proxy."},
+		"egress_allow":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": maxEgressAllow, "description": "Hosts reachable in registry_only mode: host, *.domain, or host:port. Defaults to registry.npmjs.org."},
+		"tmpfs":             map[string]any{"type": "array", "maxItems": maxTmpfsMounts, "items": schemaObject(map[string]any{"mount_path": map[string]any{"type": "string"}, "size_mb": map[string]any{"type": "integer", "minimum": 1, "maximum": maxTmpfsMB}}, []string{"mount_path"})},
+		"hardened":          map[string]any{"type": "boolean", "description": "Drop all Linux capabilities, set no-new-privileges, read-only root filesystem, process cap 256, and require a non-root user."},
+		"read_only_rootfs":  map[string]any{"type": "boolean"},
+		"pids_limit":        map[string]any{"type": "integer", "minimum": minPidsLimit, "maximum": maxPidsLimit},
 	}, []string{"name"})
 }
 

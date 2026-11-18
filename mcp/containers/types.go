@@ -63,6 +63,12 @@ type Workload struct {
 	Command           []string          `json:"command,omitempty"`
 	WorkingDirectory  string            `json:"working_directory,omitempty"`
 	User              string            `json:"user,omitempty"`
+	NetworkMode       string            `json:"network_mode"`
+	EgressAllow       []string          `json:"egress_allow,omitempty"`
+	Tmpfs             []TmpfsSpec       `json:"tmpfs,omitempty"`
+	Hardened          bool              `json:"hardened,omitempty"`
+	ReadOnlyRootfs    bool              `json:"read_only_rootfs,omitempty"`
+	PidsLimit         int               `json:"pids_limit"`
 	OwnerAppInstallID int64             `json:"owner_app_install_id,omitempty"`
 	OwnerAppName      string            `json:"owner_app_name,omitempty"`
 	ProjectID         string            `json:"project_id,omitempty"`
@@ -87,6 +93,12 @@ type VolumeSpec struct {
 	MountPath        string `json:"mount_path"`
 	SizeBytes        int64  `json:"size_bytes,omitempty"`
 	RetainedFrom     string `json:"retained_from,omitempty"`
+	// ReadOnly mounts the volume with :ro. Writes from inside the container fail.
+	ReadOnly bool `json:"read_only,omitempty"`
+	// SharedFrom mounts a volume that belongs to another live workload owned by
+	// the same caller on the same host. Shared mounts must be read-only and are
+	// never deleted, retained, or measured by the borrowing workload.
+	SharedFrom string `json:"shared_from,omitempty"`
 }
 
 type FileSpec struct {
@@ -140,6 +152,12 @@ type RunSpec struct {
 	Command            []string          `json:"command,omitempty"`
 	WorkingDirectory   string            `json:"working_directory,omitempty"`
 	User               string            `json:"user,omitempty"`
+	NetworkMode        string            `json:"network_mode,omitempty"`
+	EgressAllow        []string          `json:"egress_allow,omitempty"`
+	Tmpfs              []TmpfsSpec       `json:"tmpfs,omitempty"`
+	Hardened           bool              `json:"hardened,omitempty"`
+	ReadOnlyRootfs     bool              `json:"read_only_rootfs,omitempty"`
+	PidsLimit          int               `json:"pids_limit,omitempty"`
 	runtimeWorkloadID  string            `json:"-"`
 }
 
@@ -344,6 +362,9 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 		if totalFileBytes > maxInjectedTotalBytes {
 			return in, fmt.Errorf("files content exceeds %d bytes total", maxInjectedTotalBytes)
 		}
+	}
+	if err := normalizeSandboxSpec(&in); err != nil {
+		return in, err
 	}
 	return in, nil
 }

@@ -176,15 +176,11 @@ func containerTreeKill(ctx context.Context, container, dir string) error {
 	script := `root=$(cat "$1/pid" 2>/dev/null) || exit 0
 case "$root" in ''|*[!0-9]*|0|1) exit 1;; esac
 pids="$root"
-while :; do
- old="$pids"
- for f in /proc/[0-9]*/status; do
-  pid=; parent=
-  while read -r k v rest; do case "$k" in Pid:) pid="$v";; PPid:) parent="$v";; esac; done < "$f" 2>/dev/null || continue
-  case " $pids " in *" $parent "*) case " $pids " in *" $pid "*) ;; *) pids="$pids $pid";; esac;; esac
- done
- [ "$pids" = "$old" ] && break
-done
+mark="${1##*/}"
+` + processTreeCollectScript + `
+collect
+for pid in $pids; do kill -KILL "$pid" 2>/dev/null || true; done
+collect
 for pid in $pids; do kill -KILL "$pid" 2>/dev/null || true; done`
 	_, err := docker(ctx, "exec", container, "/bin/sh", "-c", script, "sh", dir)
 	return err
