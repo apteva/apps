@@ -21,9 +21,10 @@ const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,fai
 
 // suiteConfig holds the 0.5.0 suite fields in one JSON column.
 type suiteConfig struct {
-	Target      *TargetConfig            `json:"target,omitempty"`
-	Credentials map[string]CredentialRef `json:"credentials,omitempty"`
-	Session     *SessionConfig           `json:"session,omitempty"`
+	Target          *TargetConfig            `json:"target,omitempty"`
+	Credentials     map[string]CredentialRef `json:"credentials,omitempty"`
+	Session         *SessionConfig           `json:"session,omitempty"`
+	ReleaseBlocking bool                     `json:"release_blocking,omitempty"`
 }
 
 func scanSuite(row scanner) (s Suite, err error) {
@@ -35,7 +36,7 @@ func scanSuite(row scanner) (s Suite, err error) {
 	if err == nil {
 		var cfg suiteConfig
 		if err = json.Unmarshal([]byte(extra), &cfg); err == nil {
-			s.Target, s.Credentials, s.Session = cfg.Target, cfg.Credentials, cfg.Session
+			s.Target, s.Credentials, s.Session, s.ReleaseBlocking = cfg.Target, cfg.Credentials, cfg.Session, cfg.ReleaseBlocking
 		}
 	}
 	return
@@ -103,7 +104,7 @@ func (s store) saveSuite(v Suite) (Suite, error) {
 	if err := validateSuiteExtensions(&v); err != nil {
 		return v, err
 	}
-	config := encode(suiteConfig{v.Target, v.Credentials, v.Session})
+	config := encode(suiteConfig{v.Target, v.Credentials, v.Session, v.ReleaseBlocking})
 	v.Name = strings.TrimSpace(v.Name)
 	if v.Name == "" || len(v.Name) > 200 || len(v.Description) > 5000 || len(v.Environment) > 200 {
 		return v, errors.New("name (1–200 characters), description (up to 5000), and environment (up to 200) required")
@@ -328,7 +329,7 @@ func (s store) queueRelease(suite int64, trigger, key string, options QueueOptio
 			r.Release = &ReleaseRecord{Mode: "isolated", CandidateDigest: options.CandidateDigest, BuildID: prep.BuildID,
 				SuiteRevision: suiteRevision(v, checks), FixtureRevision: canonicalDigest(prep.Fixture.Spec)}
 		} else if options.CandidateDigest != "" {
-			r.Release = &ReleaseRecord{Mode: "existing", CandidateDigest: options.CandidateDigest, BuildID: prep.BuildID,
+			r.Release = &ReleaseRecord{Mode: v.Target.Mode, CandidateDigest: options.CandidateDigest, BuildID: prep.BuildID,
 				SuiteRevision: suiteRevision(v, checks), FixtureRevision: targetRevision(v.Target)}
 		} else if options.SuiteRevision != "" || options.FixtureRevision != "" {
 			return r, errors.New("revision pins need a candidate; set target.candidate or pass candidate_digest")

@@ -79,7 +79,20 @@ func (a *App) queue(ctx context.Context, app *sdk.AppCtx, suite int64, trigger, 
 			}
 			ref = opt.Candidate
 		}
-		if ref != nil {
+		if v.Target.Mode == "source" && opt.Candidate == nil && opt.CandidateDigest != "" {
+			// The Deploy gate passes the digest of the build it releases.
+			if !digestPattern.MatchString(opt.CandidateDigest) {
+				return Run{}, errors.New("candidate_digest must be a lowercase SHA-256 digest")
+			}
+			candidate, err := candidateByDigest(ctx, app, opt.CandidateDigest)
+			if err != nil {
+				return Run{}, err
+			}
+			if opt.SourceDigest != "" && candidate.SourceDigest != "" && opt.SourceDigest != candidate.SourceDigest {
+				return Run{}, fmt.Errorf("source_digest %s does not match Deploy build %d (%s)", opt.SourceDigest, candidate.BuildID, candidate.SourceDigest)
+			}
+			prep.BuildID, prep.Candidate = candidate.BuildID, ref
+		} else if ref != nil {
 			candidate, err := resolveCandidate(ctx, app, ref)
 			if err != nil {
 				return Run{}, err
@@ -87,11 +100,17 @@ func (a *App) queue(ctx context.Context, app *sdk.AppCtx, suite int64, trigger, 
 			if opt.CandidateDigest != "" && opt.CandidateDigest != candidate.Digest {
 				return Run{}, fmt.Errorf("candidate_digest %s does not match Deploy build %d (%s)", short(opt.CandidateDigest), candidate.BuildID, short(candidate.Digest))
 			}
+			if opt.SourceDigest != "" && candidate.SourceDigest != "" && opt.SourceDigest != candidate.SourceDigest {
+				return Run{}, fmt.Errorf("source_digest %s does not match Deploy build %d (%s)", opt.SourceDigest, candidate.BuildID, candidate.SourceDigest)
+			}
 			opt.CandidateDigest, prep.BuildID, prep.Candidate = candidate.Digest, candidate.BuildID, ref
 		} else if opt.CandidateDigest != "" && v.Target.Mode == "existing" {
 			return Run{}, errors.New("existing-mode verdicts need target.candidate so Tests can confirm what is deployed")
 		} else if opt.CandidateDigest != "" && !digestPattern.MatchString(opt.CandidateDigest) {
 			return Run{}, errors.New("candidate_digest must be a lowercase SHA-256 digest")
+		}
+		if v.Target.Mode == "source" && prep.BuildID == 0 {
+			return Run{}, errors.New("source-mode runs need a Deploy build: set target.candidate, or pass candidate or candidate_digest")
 		}
 		if v.Target.Mode == "isolated" {
 			if !digestPattern.MatchString(opt.CandidateDigest) {
@@ -126,8 +145,8 @@ func (a *App) releaseSpec(ctx context.Context, app *sdk.AppCtx, suite int64) (ma
 	}
 	out := map[string]any{"suite_id": suite, "suite_revision": suiteRevision(v, enabled)}
 	switch {
-	case v.Target != nil && v.Target.Mode == "existing":
-		out["mode"], out["fixture_revision"] = "existing", targetRevision(v.Target)
+	case v.Target != nil && (v.Target.Mode == "existing" || v.Target.Mode == "source"):
+		out["mode"], out["fixture_revision"] = v.Target.Mode, targetRevision(v.Target)
 	case v.Target != nil:
 		definition, err := loadPinnedEnvironment(ctx, app, v.Target.Environment.Pinned)
 		if err != nil {

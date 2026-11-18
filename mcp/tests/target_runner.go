@@ -74,6 +74,32 @@ func (a *App) observeExistingCandidate(ctx context.Context, run *appRunContext, 
 	return ""
 }
 
+// observeSourceCandidate re-reads the build after its source was tested. A
+// source-mode verdict needs a code check that tested the candidate's source.
+func (a *App) observeSourceCandidate(ctx context.Context, run *appRunContext, record *ReleaseRecord) string {
+	if record.SourceDigest == "" {
+		record.Inconclusive = true
+		return "inconclusive: no code check tested the candidate's source"
+	}
+	var out deployCandidate
+	err := sdk.CallAppResultContext(ctx, run.ctx.PlatformAPI(), "deploy", "deploy_candidate_digest",
+		map[string]any{"build_id": record.BuildID, "_project_id": run.ctx.CurrentProject()}, &out)
+	if err != nil {
+		record.Inconclusive = true
+		return "inconclusive: Deploy could not confirm build " + fmt.Sprint(record.BuildID) + ": " + deployReason(err)
+	}
+	record.ObservedDigest = out.Digest
+	if out.Digest != record.CandidateDigest {
+		record.Inconclusive = true
+		return fmt.Sprintf("inconclusive: build %d now has digest %s, the run was queued for %s", record.BuildID, short(out.Digest), short(record.CandidateDigest))
+	}
+	if out.SourceDigest != "" && out.SourceDigest != record.SourceDigest {
+		record.Inconclusive = true
+		return fmt.Sprintf("inconclusive: Deploy records source %s for build %d, the run tested %s", out.SourceDigest, record.BuildID, record.SourceDigest)
+	}
+	return ""
+}
+
 // orderChecks runs the session's setup check first.
 func orderChecks(checks []Check, session *SessionConfig) []Check {
 	if session == nil {

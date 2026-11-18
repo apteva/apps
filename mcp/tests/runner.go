@@ -283,6 +283,13 @@ type appRunContext struct {
 	setupCheck     bool
 	captures       map[string]any
 	features       computerFeatures
+	// Code checks: the suite, the run's release record, fetched sources,
+	// the verified candidate source and cleanup warnings.
+	suiteID         int64
+	record          *ReleaseRecord
+	sources         map[string]*codeSource
+	candidateSource *codeProvenance
+	warnings        []string
 }
 
 func (r *appRunContext) addSecret(value string) {
@@ -311,17 +318,18 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	if snapshot.Target != nil {
 		deadline = 15 * time.Minute
 	}
+	deadline += time.Duration(codeTimeout(r.Checks)) * time.Second
 	runCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	go watchCancellation(runCtx, cancel, s, r.ID)
 	env := environmentClient{app.PlatformAPI()}
-	services := &appRunContext{ctx: app, runID: r.ID, snapshot: snapshot}
+	services := &appRunContext{ctx: app, runID: r.ID, snapshot: snapshot, suiteID: r.SuiteID, record: r.Release}
 	defer a.releaseWebContext(ctx, services)
 	message := ""
 	if err = a.prepareTarget(runCtx, services, &r); err != nil {
 		message = err.Error()
 	}
-	isolated := r.Release != nil && r.Release.Mode != "existing"
+	isolated := r.Release != nil && r.Release.Mode != "existing" && r.Release.Mode != "source"
 	if isolated && message == "" {
 		services.release, err = a.prepareRelease(runCtx, s, &r, env)
 		if err != nil {
@@ -354,6 +362,8 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 		switch {
 		case !isSetup && !services.sessionOff && sessionFailed != "":
 			result = Result{CheckID: c.ID, Name: c.Name, Kind: c.Kind, Status: "blocked", Assertions: []AssertionResult{}, Error: sessionFailed}
+		case c.Kind == "code":
+			result = a.runCode(runCtx, c, services)
 		case c.Kind == "scenario" || c.Kind == "browser":
 			result = a.runScenario(runCtx, c, services, covered)
 		default:
@@ -370,6 +380,17 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	}
 	if runCtx.Err() != nil && message == "" {
 		message = runCtx.Err().Error()
+	}
+	if r.Release != nil && services.candidateSource != nil {
+		r.Release.SourceDigest, r.Release.Source = services.candidateSource.SourceDigest, services.candidateSource
+	}
+	if r.Release != nil && r.Release.Mode == "source" {
+		if message == "" {
+			message = a.observeSourceCandidate(runCtx, services, r.Release)
+		}
+		if err = s.saveReleaseRecord(r.ID, r.Release, false); err != nil && message == "" {
+			message = "could not persist release evidence"
+		}
 	}
 	if r.Release != nil && r.Release.Mode == "existing" {
 		if message == "" {
@@ -398,7 +419,7 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 			message = "could not persist release evidence"
 		}
 	}
-	var warnings []string
+	warnings := services.warnings
 	if warning := a.releaseWebContext(ctx, services); warning != "" {
 		warnings = append(warnings, warning)
 	}

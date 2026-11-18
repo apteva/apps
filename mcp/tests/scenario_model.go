@@ -186,6 +186,12 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 
 func validateScenarioBinding(c Check, suite Suite) error {
 	release, target := suite.Release, suite.Target
+	if c.Kind == "code" {
+		return validateCodeBinding(c, suite)
+	}
+	if target != nil && target.Mode == "source" {
+		return errors.New("source-mode suites run only code checks")
+	}
 	if c.Definition.Session != "" && c.Definition.Session != "none" {
 		return errors.New(`check session may only be "none"`)
 	}

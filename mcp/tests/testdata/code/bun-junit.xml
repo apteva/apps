@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="bun test" tests="6" assertions="4" failures="2" skipped="1" time="0.110876">
+  <testsuite name="src/math.test.ts" file="src/math.test.ts" tests="5" assertions="3" failures="2" skipped="1" time="0" hostname="host">
+    <testsuite name="add" file="src/math.test.ts" line="3" tests="2" assertions="2" failures="1" skipped="0" time="0.002" hostname="host">
+      <testcase name="adds" classname="add" time="0.000678" file="src/math.test.ts" line="4" assertions="1" />
+      <testcase name="fails on purpose" classname="add" time="0.00283" file="src/math.test.ts" line="5" assertions="1">
+        <failure type="AssertionError" />
+      </testcase>
+    </testsuite>
+    <testsuite name="div" file="src/math.test.ts" line="7" tests="3" assertions="1" failures="1" skipped="1" time="0" hostname="host">
+      <testcase name="divides" classname="div" time="0.000209" file="src/math.test.ts" line="8" assertions="1" />
+      <testcase name="skipped one" classname="div" time="0" file="src/math.test.ts" line="9" assertions="0">
+        <skipped />
+      </testcase>
+      <testcase name="throws" classname="div" time="0.000183" file="src/math.test.ts" line="10" assertions="0">
+        <failure type="AssertionError" />
+      </testcase>
+    </testsuite>
+  </testsuite>
+  <testsuite name="src/other.test.ts" file="src/other.test.ts" tests="1" assertions="1" failures="0" skipped="0" time="0" hostname="host">
+    <testcase name="top level passes" classname="" time="0" file="src/other.test.ts" line="2" assertions="1" />
+  </testsuite>
+</testsuites>

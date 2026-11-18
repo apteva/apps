@@ -99,6 +99,9 @@ func (a *App) Workers() []sdk.Worker {
 			if err := pruneBrowserArtifacts(app); err != nil {
 				return err
 			}
+			if err := pruneCases(app); err != nil {
+				return err
+			}
 		}
 		return nil
 	}}}

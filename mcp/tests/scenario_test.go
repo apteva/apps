@@ -228,7 +228,7 @@ func TestScenarioMigrationPreservesHistoryAndCheckIDs(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"002_scenarios.sql", "003_browser.sql", "004_dashboard.sql", "005_targets.sql", "006_warnings.sql"} {
+	for _, name := range []string{"002_scenarios.sql", "003_browser.sql", "004_dashboard.sql", "005_targets.sql", "006_warnings.sql", "007_code.sql"} {
 		apply(name)
 	}
 	s := store{db, "p"}

@@ -22,9 +22,12 @@ type Suite struct {
 	Target      *TargetConfig            `json:"target,omitempty"`
 	Credentials map[string]CredentialRef `json:"credentials,omitempty"`
 	Session     *SessionConfig           `json:"session,omitempty"`
-	Archived    bool                     `json:"archived"`
-	CreatedAt   string                   `json:"created_at"`
-	UpdatedAt   string                   `json:"updated_at"`
+	// ReleaseBlocking puts the suite in tests_release_verdicts: a candidate
+	// passes only when every release-blocking suite passed for it.
+	ReleaseBlocking bool   `json:"release_blocking,omitempty"`
+	Archived        bool   `json:"archived"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // Definition is versioned by copying the whole check into the queued run.
@@ -47,6 +50,8 @@ type Definition struct {
 	TimeoutMS   int                `json:"timeout_ms"`
 	Assertions  []Assertion        `json:"assertions,omitempty"`
 	Steps       []Step             `json:"steps,omitempty"`
+	// Code runs the project's own tests in a Workspaces test workspace.
+	Code *CodeCheck `json:"code,omitempty"`
 }
 type Assertion struct {
 	Path   string `json:"path"`
@@ -122,6 +127,12 @@ func validateCheck(c *Check) error {
 		return errors.New("suite_id and name (1–200 characters) required")
 	}
 	d := &c.Definition
+	if c.Kind == "code" {
+		return validateCode(c)
+	}
+	if d.Code != nil {
+		return errors.New("definition.code is only for code checks")
+	}
 	if c.Kind == "scenario" || c.Kind == "browser" {
 		if d.TimeoutMS == 0 {
 			d.TimeoutMS = 60000
@@ -187,7 +198,7 @@ func validateCheck(c *Check) error {
 			}
 		}
 	default:
-		return errors.New("kind must be function, http, or scenario")
+		return errors.New("kind must be function, http, scenario, browser or code")
 	}
 	if d.BudgetMS < 0 || d.BudgetMS > d.TimeoutMS {
 		return errors.New("budget_ms must be between 0 and timeout_ms")

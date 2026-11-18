@@ -1,13 +1,13 @@
 schema: apteva-app/v1
 name: tests
 display_name: Tests
-version: 0.7.0
-description: Browser and backend scenarios against deployed endpoints or isolated runtimes, one sign-in per run, encrypted test credentials, owned failure evidence, and candidate-specific release verdicts.
+version: 0.8.0
+description: Browser and backend scenarios against deployed endpoints or isolated runtimes, project test suites run on a candidate's exact source in locked-down workspaces, per-case history and quarantine, encrypted test credentials, owned failure evidence, and candidate-specific release verdicts.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tests
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [tests, checks, quality, browser, functions]
+tags: [tests, checks, quality, browser, functions, junit, coverage]
 scopes: [project, global]
 min_apteva_version: "0.27.6"
 requires:
@@ -15,8 +15,10 @@ requires:
   apps:
     - { name: functions, optional: true, reason: "Select Functions to enable function checks; omit for HTTP-only suites." }
     - { name: environments, version: ">=0.9.0", optional: true, reason: "Bind Environments v0.9.0 or newer for hand-written isolated release suites; v0.11.0 or newer for isolated suite targets." }
-    - { name: deploy, optional: true, reason: "Bind Deploy to resolve target.candidate builds and their digests." }
+    - { name: deploy, optional: true, reason: "Bind Deploy to resolve target.candidate builds and their digests; Deploy v0.33.0 or newer also provides the candidate's source for code checks." }
     - { name: computer, version: ">=0.9.3", optional: true, reason: "Bind Computer v0.9.3 or newer for browser steps: the isolated test browser in isolated runs, regular browser sessions against deployed targets. Computer v0.14.0 or newer adds element text/value assertions, page diagnostics, masked screenshots and sign-in profile cleanup for deployed targets." }
+    - { name: workspaces, version: ">=0.8.0", optional: true, reason: "Bind Workspaces v0.8.0 or newer for code checks: each runs in a locked-down test workspace (builder prepares, runner tests without network)." }
+    - { name: code, optional: true, reason: "Bind Code to fetch the source of Code-built candidates and to test a repository directly (code.source.from \"code\")." }
 provides:
   http_routes:
     - prefix: /
@@ -26,7 +28,7 @@ provides:
     - { name: tests_suite_save, description: Create or update a suite. }
     - { name: tests_suite_archive, description: Archive a suite while retaining its history. }
     - { name: tests_checks_list, description: List a suite's checks. }
-    - { name: tests_check_save, description: "Create or replace an HTTP, Function, scenario or browser check." }
+    - { name: tests_check_save, description: "Create or replace an HTTP, Function, scenario, browser or code check." }
     - { name: tests_check_delete, description: Delete a check while retaining historical run snapshots. }
     - { name: tests_run, description: Queue a suite run and return its id immediately. }
     - { name: tests_runs_list, description: List recent suite runs. }
@@ -34,6 +36,11 @@ provides:
     - { name: tests_release_spec, description: Resolve pinned suite and fixture digests. }
     - { name: tests_release_verdict, description: Verify a verdict for an exact release candidate. }
     - { name: tests_run_get, description: Get a run and its per-check results and assertions. }
+    - { name: tests_release_verdicts, description: Verdict for a candidate across every release-blocking suite. }
+    - { name: tests_cases_list, description: List test cases reported by code checks. }
+    - { name: tests_case_history, description: Per-case history and flakiness in a suite. }
+    - { name: tests_quarantine_set, description: Quarantine or release a test case with a reason and an expiry. }
+    - { name: tests_quarantine_list, description: List quarantined test cases. }
   ui_panels:
     - { slot: project.page, label: Tests, icon: circle-check, entry: /ui/TestsPanel.mjs }
   ui_components:
@@ -84,7 +91,7 @@ provides:
     - { name: tests.run.completed, description: A run finished with passed or failed status and result counts. }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: tests/v0.7.0, entry: mcp/tests }
+  source: { repo: github.com/apteva/apps, ref: tests/v0.8.0, entry: mcp/tests }
   port: 8080
   health_check: /health
 db:
