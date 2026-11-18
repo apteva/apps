@@ -537,7 +537,7 @@ func (shapewaysProvider) Quote(ctx context.Context, call ToolCaller, req QuoteRe
 				return nil, fmt.Errorf("model %s: %w", part.PartID, err)
 			}
 			model = decodeAny(raw)
-			if mats, ok := pick(model, "materials").(map[string]any); ok && len(mats) > 0 {
+			if shapewaysModelReady(model) {
 				break
 			}
 			if err := sleepCtx(ctx, pollInterval); err != nil {
@@ -554,6 +554,12 @@ func (shapewaysProvider) Quote(ctx context.Context, call ToolCaller, req QuoteRe
 					mats[id] = mm
 				}
 			}
+		}
+		if !shapewaysModelReady(model) {
+			return nil, fmt.Errorf("Shapeways is still processing %s (model %s); quote again in a minute", part.PartID, modelID)
+		}
+		if len(mats) == 0 {
+			return nil, fmt.Errorf("Shapeways cannot print %s in any material (model %s)", part.PartID, modelID)
 		}
 		all = append(all, priced{part, modelID, mats})
 	}
@@ -590,6 +596,21 @@ func (shapewaysProvider) Quote(ctx context.Context, call ToolCaller, req QuoteRe
 		options = append(options, opt)
 	}
 	return options, nil
+}
+
+// shapewaysModelReady reports whether Shapeways finished analysing an
+// uploaded model. Until then the material list can already be present with
+// every material marked not printable, which would look like "no options".
+func shapewaysModelReady(model any) bool {
+	mats, _ := pick(model, "materials").(map[string]any)
+	if len(mats) == 0 {
+		return false
+	}
+	switch strings.ToLower(pickString(model, "printable")) {
+	case "", "processing", "pending", "unknown":
+		return false
+	}
+	return true
 }
 
 func (shapewaysProvider) PrepareOrder(_ context.Context, _ ToolCaller, opt QuoteOption, _ Address, _ map[string]any) (Draft, error) {
