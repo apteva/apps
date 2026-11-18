@@ -340,6 +340,9 @@ func (c *Computer) Capabilities() api.Capabilities {
 	if c.supportsAndroidSecure() {
 		actions = append(actions, "native_type_secure")
 	}
+	if c.supportsSelectionState() {
+		actions = append(actions, "native_select", "native_scroll_to")
+	}
 	keys := []string{"home", "enter"}
 	if c.lease.Device.Platform == "android" {
 		keys = append(keys, "back")

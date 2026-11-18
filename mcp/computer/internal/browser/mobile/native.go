@@ -47,7 +47,7 @@ func (c *Computer) NativeWait(app string, required []string, timeoutMS int) erro
 // element action. Keep the tree inside Computer because it can contain private text.
 func (c *Computer) NativeScreen(action, app string, required []string, target, text string) error {
 	if c.lease.Device.Platform == "android" {
-		_, err := c.androidNative(action, app, required, target, text, nil)
+		_, err := c.androidNative(action, app, required, target, text, nil, NativeOptions{})
 		return err
 	}
 	if !c.supportsNativeScreen() {

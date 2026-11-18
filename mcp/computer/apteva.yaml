@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.14.0
+version: 0.15.0
 description: |
+  v0.15.0 adds Android selection with Mobile 0.8.0: row-scoped selectors
+  (ROW >> PART), native_checked guards, native_select (taps only when needed,
+  confirms the state) and native_scroll_to (swipes a list, never taps).
   v0.14.0 adds read-only read_element (text, value, attributes; sensitive
   fields withheld), a selector_text wait condition, opt-in page diagnostics
   via browser_diagnostics (origin/path/status only), masked screenshots,
@@ -66,7 +69,7 @@ requires:
     - platform.connections.execute
     - platform.apps.call
   apps:
-    - { name: mobile, version: ">=0.7.0", optional: true, reason: Physical device sessions through the Mobile app. }
+    - { name: mobile, version: ">=0.8.0", optional: true, reason: Physical device sessions through the Mobile app. }
   integrations:
     - role: browserbase
       kind: integration
@@ -596,7 +599,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.14.0
+    ref: computer/v0.15.0
     entry: mcp/computer
   port: 8080
   health_check: /health
