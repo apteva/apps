@@ -252,3 +252,22 @@ func TestCallerReportsProviderStatus(t *testing.T) {
 		t.Fatalf("got status %d err %v", status, err)
 	}
 }
+
+func TestCraftcloudUploadFailureExplainsPartnerAccess(t *testing.T) {
+	req := QuoteRequest{Currency: "EUR", Country: "FR", Parts: []PartFile{{PartID: "dock", Filename: "dock.stl", Quantity: 1, Body: []byte("solid")}}}
+	for _, tc := range []struct {
+		status  int
+		partner bool
+	}{{0, true}, {403, true}, {404, true}, {500, false}} {
+		call := func(context.Context, string, map[string]any) (json.RawMessage, int, error) {
+			return nil, tc.status, errors.New("upload_model failed")
+		}
+		_, err := craftcloudProvider{}.Quote(context.Background(), call, req)
+		if err == nil {
+			t.Fatalf("status %d: expected an error", tc.status)
+		}
+		if got := errors.Is(err, errCraftcloudPartnerAccess); got != tc.partner {
+			t.Errorf("status %d: partner-access error = %v, want %v (%v)", tc.status, got, tc.partner, err)
+		}
+	}
+}

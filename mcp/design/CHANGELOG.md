@@ -1,5 +1,10 @@
 # Design Studio changes
 
+## 0.6.1
+
+- Explain Craftcloud's partner-access requirement instead of passing on a raw HTTP error. Craftcloud's public API has no model upload, so when the upload has no partner API URL, is refused (401/403) or hits a host without upload (404), the quote reports that Craftcloud needs partner model API access and where to set it on the connection. Other upload errors are reported as before.
+- Works with the updated Craftcloud connector, which sends upload_model and get_model to the connection's optional partner model API URL and key.
+
 ## 0.6.0
 
 - Add an optional `fabrication_provider` integration role (multiple connections). Bind any of Craftcloud, Slant 3D, Shapeways, Treatstock and Sculpteo; each has an adapter behind one `FabricationProvider` interface (quote, prepare, submit, status, cancel).
