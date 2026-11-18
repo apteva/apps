@@ -1,0 +1,90 @@
+name: native-undo
+description: |
+  A real agent saves two named native revisions, realises the second was a
+  mistake, and moves the branch itself back with repos_undo instead of
+  writing a revert revision. Verifies the working tree, the branch head, the
+  first-parent history, and the branch-move log (storage format 2) through the
+  running sidecar, with no Git tools and no failed calls.
+
+timeout: 180s
+max_iterations: 14
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  cleanup_mcp_calls:
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-native-undo
+        force: true
+
+directive: |
+  Use the Code app. Create a blank repository named "Undo Test" with slug
+  "tier3-native-undo". Write config.json containing exactly {"version": 1}
+  and save a named native revision called "Version 1". Then change the file
+  to exactly {"version": 2} and save a named native revision called
+  "Version 2".
+
+  Version 2 was a mistake. Take the branch itself back to "Version 1": I do
+  not want an extra revert revision in the history, I want the branch moved
+  back so both the history and the file are exactly as they were after
+  "Version 1". Read config.json afterwards to confirm, then stop. No Git.
+
+assert:
+  - tool_called_with:
+      tool: repos_create
+      args:
+        slug: tier3-native-undo
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_checkpoint
+      args:
+        slug: tier3-native-undo
+      count: 2
+      success: true
+      before: repos_undo
+  - tool_called_with:
+      tool: repos_undo
+      args:
+        slug: tier3-native-undo
+      min_count: 1
+      success: true
+      result_contains: moved
+  - tool_called_with:
+      tool: code_read_file
+      args:
+        slug: tier3-native-undo
+        path: config.json
+      success: true
+  - tool_not_called: repos_restore | repos_git_connect | repos_git_import | repos_git_commit | repos_git_push | repos_git_pull | repos_git_fetch | repos_git_sync_configure | repos_git_sync_now
+  - tool_not_called_with:
+      tool: repos_create | code_write_file | code_edit_file | code_multi_edit | code_apply_patch | repos_checkpoint | repos_undo | code_read_file
+      success: false
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/files/config.json?annotated=1
+    expect_field_at: content
+    expect_field_matches: '"version":\s*1\b'
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/version/status
+    expect_field_at: dirty
+    expect_field_eq: false
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/version/history
+    expect_count_at: revisions
+    expect_count: 2
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/version/history
+    expect_field_at: revisions.0.message
+    expect_field_eq: Version 1
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/version/moves
+    expect_field_at: moves.0.action
+    expect_field_eq: undo
+  - http: GET /api/apps/code/api/repos/tier3-native-undo/version/moves
+    expect_field_at: moves.1.message
+    expect_field_eq: Version 2
+  - iterations_at_most: 14
+
+budget:
+  # Includes cumulative prompt tokens for the full app catalog + exported skill.
+  total_tokens: 300000
+  cost_usd: 0.80

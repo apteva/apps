@@ -170,6 +170,12 @@ remote. Native Code revisions are independent of Git. Use
 `repos_history`, native branches, tags, and `repos_export_ref` operate on that
 history. `repos_restore` normally makes a new revert revision; use its
 `working_tree_only` option only when an uncommitted restore is intended.
+Every branch move is logged: `repos_undo` without `revision` lists the moves,
+and with a `revision` from that list moves the branch back (the checked-out
+branch must have no changes outside a revision; checkpoint them first). When
+several agents share a repository, pass the head you last saw as
+`expected_head` to `repos_checkpoint`; a "native ref moved" error means someone
+else checkpointed first, so review their change before checkpointing again.
 
 External Git remains optional. The `repos_git_*` tools connect, fetch, commit,
 pull and push provider history; they are separate from native checkpoints. Do

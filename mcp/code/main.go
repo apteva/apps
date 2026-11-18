@@ -95,6 +95,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.native.backfill(ctx.AppDB()); err != nil {
 		ctx.Logger().Warn("native version-control backfill incomplete", "err", err)
 	}
+	go a.native.gcAll(ctx.AppDB(), ctx.Logger().Warn)
 	gitService, err := newGitService(dataDir, localStore, a.locks)
 	if err != nil {
 		// Native Code version control does not require Git. Git remains an

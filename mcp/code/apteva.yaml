@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.10
+version: 0.15.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,12 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.15.0 moves native version control to storage format 2: checkpoints only
+  reread files whose size or timestamp changed, revisions share unchanged
+  folder trees, every branch move is logged, and repos_undo lists those moves
+  or moves a branch back. repos_checkpoint accepts expected_head to refuse a
+  checkpoint after someone else moved the branch. Unreachable objects are
+  collected after 14 days. Existing history keeps its revision IDs.
   v0.14.10 distinguishes preview readiness and workspace source transfer
   from optional external Git auto-sync in MCP descriptions and the /code skill.
   A live-agent regression verifies native HTML editing and a workspace preview
@@ -250,6 +256,8 @@ provides:
       description: List native Code tags.
     - name: repos_restore
       description: Restore selected paths from a native Code revision.
+    - name: repos_undo
+      description: List a native branch's recent moves, or move the branch back to a revision from that list.
     - name: repos_export_ref
       description: Export the exact source tree at a native Code revision.
     - name: repos_dev_start
@@ -373,7 +381,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.10
+    ref: code/v0.15.0
     entry: mcp/code
   port: 8080
   health_check: /health

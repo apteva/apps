@@ -12,7 +12,7 @@ import (
 func (a *App) nativeMCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "repos_version_status", Description: "Get native Code version-control status. Editing remains available when the working tree is dirty; revisions are managed in the background. Args: slug.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}), HandlerCtx: a.toolNativeStatus},
-		{Name: "repos_checkpoint", Description: "Optionally create an immutable native Code revision from the current working tree. No external Git provider is required, and ordinary file edits do not require a checkpoint. Use only when the user asks to save a named revision or the workflow calls for one; this is not an external Git commit. Args: slug, message?, actor?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"slug"}), HandlerCtx: a.toolNativeCheckpoint},
+		{Name: "repos_checkpoint", Description: "Optionally create an immutable native Code revision from the current working tree. No external Git provider is required, and ordinary file edits do not require a checkpoint. Use only when the user asks to save a named revision or the workflow calls for one; this is not an external Git commit. Pass expected_head (the head revision you last saw) to refuse the checkpoint if someone else moved the branch meanwhile. Args: slug, message?, actor?, expected_head?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}, "expected_head": map[string]any{"type": "string"}}, []string{"slug"}), HandlerCtx: a.toolNativeCheckpoint},
 		{Name: "repos_history", Description: "List immutable native Code revisions on the current branch. Args: slug, limit?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"slug"}), HandlerCtx: a.toolNativeHistory},
 		{Name: "repos_diff", Description: "Compare the current working tree or two native revisions and return changed paths. Args: slug, from_revision?, to_revision?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "from_revision": map[string]any{"type": "string"}, "to_revision": map[string]any{"type": "string"}}, []string{"slug"}), HandlerCtx: a.toolNativeDiff},
 		{Name: "repos_branch_create", Description: "Create a native Code branch at a revision (defaults to current head). Args: slug, name, start_revision?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "start_revision": map[string]any{"type": "string"}}, []string{"slug", "name"}), HandlerCtx: a.toolNativeBranchCreate},
@@ -20,6 +20,7 @@ func (a *App) nativeMCPTools() []sdk.Tool {
 		{Name: "repos_tag_create", Description: "Create an immutable native tag at a revision (defaults to current head). Args: slug, name, revision?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "string"}}, []string{"slug", "name"}), HandlerCtx: a.toolNativeTagCreate},
 		{Name: "repos_tags_list", Description: "List native Code tags and their immutable revisions. Args: slug.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}), HandlerCtx: a.toolNativeTagsList},
 		{Name: "repos_restore", Description: "Restore selected paths from a native revision. Defaults to a new revert revision; pass working_tree_only=true only for an uncommitted working-tree restore. Args: slug, revision, paths?, working_tree_only?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "revision": map[string]any{"type": "string"}, "paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "working_tree_only": map[string]any{"type": "boolean"}}, []string{"slug", "revision"}), HandlerCtx: a.toolNativeRestore},
+		{Name: "repos_undo", Description: "Undo native branch moves. Without revision, lists the branch's recent moves (checkpoints, restores, branch creation, undos) newest first. With revision, moves the branch back to a revision from that list; for the checked-out branch the working tree is restored too, which requires no changes outside a revision. The previous head stays in the list, so an undo can itself be undone. Args: slug, branch? (default: checked-out branch), revision?, limit?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "branch": map[string]any{"type": "string"}, "revision": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"slug"}), HandlerCtx: a.toolNativeUndo},
 		{Name: "repos_export_ref", Description: "Export the exact source tree at a native revision as a bounded base64 ZIP. Args: slug, revision.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "revision": map[string]any{"type": "string"}}, []string{"slug", "revision"}), HandlerCtx: a.toolNativeExportRef},
 	}
 }
@@ -56,7 +57,7 @@ func (a *App) toolNativeCheckpoint(_ context.Context, ctx *sdk.AppCtx, args map[
 	if message == "" {
 		message = "Checkpoint"
 	}
-	rev, err := n.checkpoint(repo, message, strArg(args, "actor"))
+	rev, err := n.checkpointExpect(repo, message, strArg(args, "actor"), strArg(args, "expected_head"))
 	if err != nil {
 		return nil, err
 	}
@@ -83,61 +84,11 @@ func (a *App) toolNativeDiff(_ context.Context, ctx *sdk.AppCtx, args map[string
 	if err != nil {
 		return nil, err
 	}
-	if err := n.ensureRepo(repo); err != nil {
-		return nil, err
-	}
-	from, to := strArg(args, "from_revision"), strArg(args, "to_revision")
-	if from == "" {
-		branch, _ := n.currentBranch(repo)
-		from = n.readRef(repo, branch, false)
-	}
-	fromRev, err := n.loadRevision(repo, from)
+	from, to, paths, err := n.changedPaths(repo, strArg(args, "from_revision"), strArg(args, "to_revision"))
 	if err != nil {
 		return nil, err
 	}
-	aTree, err := n.loadTree(repo, fromRev.Tree)
-	if err != nil {
-		return nil, err
-	}
-	var bTree map[string]nativeEntry
-	if to == "" {
-		bTree, _, err = n.snapshot(repo)
-		to = "working-tree"
-	} else {
-		toRev, loadErr := n.loadRevision(repo, to)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		bTree, err = n.loadTree(repo, toRev.Tree)
-	}
-	if err != nil {
-		return nil, err
-	}
-	changed := map[string]bool{}
-	for path, entry := range aTree {
-		if other, ok := bTree[path]; !ok || other != entry {
-			changed[path] = true
-		}
-	}
-	for path, entry := range bTree {
-		if other, ok := aTree[path]; !ok || other != entry {
-			changed[path] = true
-		}
-	}
-	paths := make([]string, 0, len(changed))
-	for path := range changed {
-		paths = append(paths, path)
-	}
-	sortStringsNative(paths)
 	return map[string]any{"from_revision": from, "to_revision": to, "changed_paths": paths, "count": len(paths)}, nil
-}
-
-func sortStringsNative(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
 }
 
 func (a *App) toolNativeBranchCreate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -187,25 +138,48 @@ func (a *App) toolNativeRestore(_ context.Context, ctx *sdk.AppCtx, args map[str
 	if err != nil {
 		return nil, err
 	}
-	if err := n.ensureRepo(repo); err != nil {
-		return nil, err
-	}
-	revision := strArg(args, "revision")
-	paths := stringSliceArg(args, "paths")
-	if err := n.restoreRevision(repo, revision, paths); err != nil {
-		return nil, err
-	}
-	if boolArg(args, "working_tree_only") {
-		return n.status(repo)
-	}
-	rev, err := n.checkpoint(repo, "Restore "+revision, strArg(args, "actor"))
+	workingTreeOnly := boolArg(args, "working_tree_only")
+	rev, err := n.restore(repo, strArg(args, "revision"), stringSliceArg(args, "paths"), workingTreeOnly, strArg(args, "actor"))
 	if err != nil {
 		return nil, err
+	}
+	if workingTreeOnly {
+		return n.status(repo)
 	}
 	if ctx != nil {
 		ctx.Emit("repo.revision.created", map[string]any{"id": repo.ID, "slug": repo.Slug, "revision": rev.ID, "message": rev.Message})
 	}
 	return map[string]any{"revision": rev}, nil
+}
+
+func (a *App) toolNativeUndo(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	n, repo, err := a.nativeRepo(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	revision := strings.TrimSpace(strArg(args, "revision"))
+	if revision == "" {
+		branch, moves, err := n.refMoves(repo, strArg(args, "branch"), intArg(args, "limit", 20))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"branch": branch, "moves": moves, "count": len(moves)}, nil
+	}
+	branch, move, err := n.undo(repo, strArg(args, "branch"), revision, strArg(args, "actor"))
+	if err != nil {
+		return nil, err
+	}
+	status, err := n.status(repo)
+	if err != nil {
+		return nil, err
+	}
+	if move == nil {
+		return map[string]any{"branch": branch, "moved": false, "status": status}, nil
+	}
+	if ctx != nil {
+		ctx.Emit("repo.ref.moved", map[string]any{"id": repo.ID, "slug": repo.Slug, "branch": branch, "from": move.From, "to": move.To, "action": "undo"})
+	}
+	return map[string]any{"branch": branch, "moved": true, "move": move, "status": status}, nil
 }
 
 func (a *App) toolNativeExportRef(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -1,3 +1,66 @@
+# Apteva Code 0.15.0
+
+Moves native version control to storage format 2. Every existing tool keeps
+its arguments and output, and existing history keeps its revision IDs.
+
+## Changes
+
+- **Change index.** A checkpoint or status check only rereads files whose
+  size, timestamp or mode changed. Files modified within 2 seconds of the
+  previous index write are always rehashed, so fast same-size edits are never
+  missed. A missing or damaged index only costs a full rehash.
+- **Folder trees.** Each revision also records a tree object per folder.
+  Unchanged folders are shared between revisions, and `repos_diff` between
+  two new revisions skips them without reading their contents.
+- **Branch-move log and `repos_undo`.** Every checkpoint, restore, branch or
+  tag creation and undo is appended to a log per ref. `repos_undo` lists a
+  branch's moves or moves it back to a revision from that list; for the
+  checked-out branch the working tree is restored too, which requires no
+  changes outside a revision. REST: `GET /api/repos/<slug>/version/moves`.
+- **Safe concurrent checkpoints.** `repos_checkpoint` accepts
+  `expected_head` and refuses with "native ref moved" (HTTP 409 on REST) if
+  the branch moved since the caller looked. All native mutations now hold the
+  repository lock for their whole operation; restore and its revision are
+  recorded under one lock.
+- **Garbage collection.** On mount, and at most once a day per repository,
+  objects no branch, tag or logged move can reach are removed once older than
+  14 days. Any unreadable reachable object aborts collection without deleting
+  anything.
+- **Fix: auto-sync deadlock.** Git auto-sync held the repository lock and then
+  called the native checkpoint, which took the same lock again, hanging the
+  repository whenever auto-sync had changes to save.
+
+## Upgrade and rollback
+
+The first start upgrades each repository in place: nothing is rewritten, a
+`format` marker is written, and each branch and tag gets a first log entry
+("migrate"). Format-1 revisions stay readable. New revisions still carry the
+format-1 flat tree, so a rollback to 0.14.10 can read history written by
+0.15.0. Moves made before the upgrade, or while rolled back to 0.14.10, are
+not in the log, so `repos_undo` cannot target them; `repos_restore` still
+can. A real-binary round trip (0.15.0 writes, 0.14.10 reads, diffs, exports
+and checkpoints, 0.15.0 reads and undoes again) passed all checks.
+
+## Validation
+
+- Tier 1: 21 new tests covering migration from a hand-built 0.14 layout,
+  rollback readability, index reuse and racily-clean rehashing, folder-tree
+  sharing and integrity, file/folder swaps, `expected_head` under 12 concurrent
+  writers, a linear log under concurrent edits and checkpoints, undo and its
+  refusals, torn log lines, GC reachability and aborts, and the auto-sync lock
+  regression. Full suite passes with `-race`.
+- Tier 2: the real sidecar over MCP and REST (expected_head, 409, undo, redo,
+  moves, folder-tree diff), and an in-place upgrade: a repository written by
+  the binary is rewritten to the 0.14 layout, the sidecar restarted on the
+  same database, and history, tags, export, restore and undo verified.
+- Tier 3: `scenarios/11-native-undo.yaml`, a live agent that saves two
+  revisions and moves the branch back with `repos_undo`. Passed all 15
+  assertions with `opencode-go` / `kimi-k2.7-code` in 9 iterations on a
+  clean spawned server: two checkpoints, one undo, no restore, no Git, no
+  failed calls; file, clean status, history and move log verified over REST.
+
+---
+
 # Apteva Code 0.14.10
 
 Clarifies the live MCP tool descriptions, published manifest, and `/code`

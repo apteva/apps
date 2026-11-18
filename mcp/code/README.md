@@ -1,5 +1,15 @@
 # Apteva Code
 
+## v0.15.0 — native storage format 2
+
+Checkpoints only reread files whose size or timestamp changed, revisions share
+unchanged folder trees, every branch move is logged, and `repos_undo` lists
+those moves or moves a branch back. `repos_checkpoint` accepts `expected_head`
+to refuse a checkpoint after someone else moved the branch. Unreachable objects
+are collected after 14 days. Existing history keeps its revision IDs, and a
+rollback to 0.14.10 can still read revisions written by 0.15.0. Also fixes a
+deadlock when Git auto-sync saved changes. Details in RELEASE-NOTES.md.
+
 ## v0.14.10 — preview and Git tool routing
 
 The live MCP descriptions, marketplace manifest, and `/code` skill now

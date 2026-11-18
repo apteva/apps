@@ -300,7 +300,7 @@ func (s *autoSyncSupervisor) tick(ctx *sdk.AppCtx, repo *Repo, now time.Time, fo
 			return s.attention(ctx, repo, state, err)
 		}
 		if s.native != nil {
-			if _, nativeErr := s.native.checkpoint(repo, message, "auto-sync"); nativeErr != nil {
+			if _, nativeErr := s.native.checkpointHeld(repo, message, "auto-sync"); nativeErr != nil {
 				return s.attention(ctx, repo, state, nativeErr)
 			}
 		}
@@ -352,7 +352,7 @@ func (s *autoSyncSupervisor) tick(ctx *sdk.AppCtx, repo *Repo, now time.Time, fo
 			return s.attention(ctx, repo, state, err)
 		}
 		if s.native != nil {
-			if _, nativeErr := s.native.checkpoint(repo, "Sync remote changes", "auto-sync"); nativeErr != nil {
+			if _, nativeErr := s.native.checkpointHeld(repo, "Sync remote changes", "auto-sync"); nativeErr != nil {
 				return s.attention(ctx, repo, state, nativeErr)
 			}
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 )
@@ -41,8 +42,9 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			return
 		}
 		var body struct {
-			Message string `json:"message"`
-			Actor   string `json:"actor"`
+			Message      string `json:"message"`
+			Actor        string `json:"actor"`
+			ExpectedHead string `json:"expected_head"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
@@ -51,7 +53,11 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 		if body.Message == "" {
 			body.Message = "Checkpoint"
 		}
-		value, err := n.checkpoint(repo, body.Message, body.Actor)
+		value, err := n.checkpointExpect(repo, body.Message, body.Actor, body.ExpectedHead)
+		if errors.Is(err, errNativeRefMoved) {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -159,21 +165,29 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		if err := n.restoreRevision(repo, body.Revision, body.Paths); err != nil {
-			httpErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if body.WorkingTreeOnly {
-			value, _ := n.status(repo)
-			httpJSON(w, value)
-			return
-		}
-		value, err := n.checkpoint(repo, "Restore "+body.Revision, httpActor(r))
+		value, err := n.restore(repo, body.Revision, body.Paths, body.WorkingTreeOnly, httpActor(r))
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if body.WorkingTreeOnly {
+			status, _ := n.status(repo)
+			httpJSON(w, status)
+			return
+		}
 		httpJSON(w, map[string]any{"revision": value})
+	case "moves":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		branch, moves, err := n.refMoves(repo, r.URL.Query().Get("branch"), limit)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"branch": branch, "moves": moves, "count": len(moves)})
 	case "export":
 		if r.Method != http.MethodGet {
 			httpErr(w, http.StatusMethodNotAllowed, "GET")
