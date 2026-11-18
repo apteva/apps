@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.5.0
+version: 0.6.0
 description: |
+  Optional print-service fabrication: quote printed parts across bound
+  Craftcloud, Slant 3D, Shapeways, Treatstock and Sculpteo connections, then
+  prepare, approve and track orders under an operator-set spending policy.
   Manufacturer STEP import, purchased-component assemblies, exact solid clearances,
   keepouts, enclosure templates, inspection, and revision-bound release evidence.
   Agent-native parametric 2D/3D design. Designs are immutable revisions of
@@ -20,7 +23,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/design
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [design, cad, 2d, 3d, manufacturing, printing, open-hardware, robotics, assemblies]
+tags: [design, cad, 2d, 3d, manufacturing, printing, open-hardware, robotics, assemblies, fabrication, quotes]
 
 scopes: [project]
 min_apteva_version: "0.11.0"
@@ -30,6 +33,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.connections.execute
   integrations:
     - role: storage
       kind: app
@@ -49,6 +53,13 @@ requires:
       required: false
       label: PCB Studio source
       hint: Optional. Bind PCB Studio to generate revision-linked enclosures from validated mechanical envelopes.
+    - role: fabrication_provider
+      kind: integration
+      mode: multiple
+      compatible_slugs: [craftcloud, slant3d, shapeways, treatstock, sculpteo]
+      required: false
+      label: 3D printing services
+      hint: "Optional. Bind one or more print services to get quotes for printed parts and place orders under the spending policy set in the Design panel."
 
 provides:
   http_routes:
@@ -69,6 +80,9 @@ provides:
     - name: designs.export
       resource: design
       description: Export CAD files and manufacturing packages.
+    - name: fabrication.order
+      resource: design
+      description: Submit approved print orders to a print service. This spends money.
   mcp_tools:
     - { name: design_verification_record, description: "Attach revision-bound physical fit or thermal test evidence.", requires: designs.write }
     - { name: design_step_import, description: "Import manufacturer STEP with immutable assets, assembly names/placements and component evidence.", requires: designs.write }
@@ -92,6 +106,13 @@ provides:
     - { name: design_export, description: "Build and persist assembly plus per-part STEP, STL, or 3MF artifacts in Storage. Args: design_id, revision_id?, formats?.", requires: designs.export, resource_from: "design/{arg.design_id}" }
     - { name: design_artifacts, description: "List derived artifacts for a design or revision.", requires: designs.read, resource_from: "design/{arg.design_id}" }
     - { name: manufacturing_package_create, description: "Create a traceable open-hardware ZIP containing source, per-part CAD/print files, BOM, SPDX license, assembly guide, print profiles, hashes, measurements, and validation.", requires: designs.export, resource_from: "design/{arg.design_id}" }
+    - { name: fabrication_providers, description: "List bound print services, adapter support and the order policy.", requires: designs.read }
+    - { name: fabrication_quote, description: "Quote a validated revision's printed parts across bound print services. Nothing is ordered.", requires: designs.read, resource_from: "design/{arg.design_id}" }
+    - { name: fabrication_quotes_list, description: "List earlier print quotes for a design.", requires: designs.read, resource_from: "design/{arg.design_id}" }
+    - { name: fabrication_order_prepare, description: "Create a draft print order from a quote option; the policy decides whether a person must approve it.", requires: designs.write }
+    - { name: fabrication_order_submit, description: "Submit an approved print order. Spends money.", requires: fabrication.order }
+    - { name: fabrication_orders, description: "List print orders with status and tracking; refresh polls providers.", requires: designs.read }
+    - { name: fabrication_order_cancel, description: "Cancel a draft or ask the provider to cancel a submitted order.", requires: designs.write }
   ui_panels:
     - slot: project.page
       label: Design
@@ -127,13 +148,16 @@ provides:
     - { name: design.pcb_enclosure.created, description: "A Design enclosure was created from an immutable PCB mechanical revision." }
     - { name: design.pcb_enclosure.refreshed, description: "A linked enclosure was refreshed into a new immutable Design revision." }
     - { name: design.assembly.created, description: "An assembly was created from revision-linked component designs." }
+    - { name: design.fabrication.quoted, description: "Print quotes were collected for a revision." }
+    - { name: design.fabrication.order_prepared, description: "A draft print order was created and checked against the policy." }
+    - { name: design.fabrication.order_submitted, description: "A print order was submitted to a print service." }
     - { name: design.assembly.sources_refreshed, description: "An assembly revision advanced one or more component revision pins." }
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: design/v0.5.0
+    ref: design/v0.6.0
     entry: mcp/design
   port: 8080
   health_check: /health

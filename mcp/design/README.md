@@ -63,9 +63,20 @@ The engine integration test performs a real OpenCascade boolean build and writes
 
 Failed, unversioned, untraceable, or unsupported mechanical envelopes are rejected. Design Studio never reads PCB databases or files directly and never silently follows a moving PCB revision.
 
+## Fabrication (v0.6)
+
+Bind one or more print-service connections to the optional `fabrication_provider` role. Supported slugs: `craftcloud`, `slant3d`, `shapeways`, `treatstock`, `sculpteo`.
+
+1. `fabrication_quote` — STL exports of printed parts → quotes from each bound service, ranked by total.
+2. `fabrication_order_prepare` — a draft priced by the provider and checked against the policy → `approved` or `awaiting_approval`.
+3. A person approves in the panel (`POST /api/fabrication/orders/{id}/approve` with `confirm_total`), unless the policy allowed it.
+4. `fabrication_order_submit` places the order once; `fabrication_orders` and the 30-minute worker track it.
+
+Policy (auto-order, per-order max, monthly budget, allowed services, currency) and ship-to addresses are edited only in the panel (`PUT /api/fabrication/settings`). Service options live under `provider_settings.<slug>`: Slant 3D needs `platform_id` (optional `filament_id`); Sculpteo takes `materials`; Craftcloud takes `payment: invoice` and `test_orders`.
+
 ## V1 boundary
 
-V1 generates both exact solids and derived triangle meshes from a deterministic parametric source. External text-to-3D/image-to-3D models and paid manufacturing providers are intentionally adapter seams, not bundled providers. A future mesh-source revision should retain model/provider/prompt provenance and run mesh repair checks; a manufacturing adapter should quote from a validated package and require an explicit human approval before ordering.
+V1 generates both exact solids and derived triangle meshes from a deterministic parametric source. External text-to-3D/image-to-3D models are intentionally an adapter seam; paid manufacturing providers arrived in 0.6 (see Fabrication). A future mesh-source revision should retain model/provider/prompt provenance and run mesh repair checks; a manufacturing adapter should quote from a validated package and require an explicit human approval before ordering.
 
 ## Version 0.5 — purchased assemblies and enclosure verification
 

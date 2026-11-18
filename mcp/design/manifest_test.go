@@ -9,7 +9,7 @@ import (
 func TestManifestMatchesRuntimeSurface(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "design" || manifest.Version != "0.5.0" {
+	if manifest.Name != "design" || manifest.Version != "0.6.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	declared := map[string]bool{}
@@ -47,10 +47,31 @@ func TestManifestUsesNativeStorageAndOptionalPCBSourceBindings(t *testing.T) {
 		"storage":    {required: true, app: "storage"},
 		"pcb_source": {required: false, app: "pcb"},
 	}
-	if len(manifest.Requires.Integrations) != len(want) {
+	var fabrication bool
+	for _, dependency := range manifest.Requires.Integrations {
+		if dependency.Role != fabricationRole {
+			continue
+		}
+		fabrication = true
+		if dependency.Kind != "integration" || dependency.Required || dependency.Mode != "multiple" {
+			t.Errorf("fabrication_provider must be an optional multi-connection integration: %#v", dependency)
+		}
+		for _, slug := range dependency.CompatibleSlugs {
+			if _, ok := providerFor(slug); !ok {
+				t.Errorf("compatible slug %s has no adapter", slug)
+			}
+		}
+	}
+	if !fabrication {
+		t.Fatal("fabrication_provider binding missing")
+	}
+	if len(manifest.Requires.Integrations) != len(want)+1 {
 		t.Fatalf("got %d bindings, want %d", len(manifest.Requires.Integrations), len(want))
 	}
 	for _, dependency := range manifest.Requires.Integrations {
+		if dependency.Role == fabricationRole {
+			continue
+		}
 		expected, ok := want[dependency.Role]
 		if !ok {
 			t.Errorf("unexpected dependency role %q", dependency.Role)

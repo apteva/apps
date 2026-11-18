@@ -27,7 +27,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		"lid_fit_mm": numberSchema(.05, 3), "lip_depth_mm": numberSchema(.05, 12),
 		"lip_thickness_mm": numberSchema(.05, 8), "opening_clearance_mm": numberSchema(.05, 5),
 	}}
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{Name: "design_verification_record", Description: "Attach a physical fit or enclosed thermal test result to the exact tested revision and source hash, without mutating CAD source. Requires evidence URL and notes describing actual results.", InputSchema: schemaObject(map[string]any{"revision_id": id, "source_sha256": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"physical_fit", "enclosed_thermal"}}, "status": map[string]any{"type": "string", "enum": []string{"pass", "fail"}}, "evidence_url": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}}, []string{"revision_id", "source_sha256", "kind", "status", "evidence_url"}), HandlerCtx: a.toolVerificationRecord},
 		{Name: "design_step_import", Description: "Import immutable manufacturer STEP with XDE names/placements and evidence. Returns a purchased component design. Use HTTP multipart for large files.", InputSchema: schemaObject(map[string]any{"filename": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "evidence": map[string]any{"type": "object"}}, []string{"filename", "content_base64", "evidence"}), HandlerCtx: a.toolSTEPImport},
 		{Name: "design_measure", Description: "Measure exact B-rep instance/face distances in one immutable revision. Query a/b instance IDs, optional face_a/face_b indices or point_a/point_b world coordinates.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "query": map[string]any{"type": "object"}}, []string{"design_id", "query"}), HandlerCtx: a.toolMeasure},
@@ -73,6 +73,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "design_artifacts", Description: "List generated artifacts for a design, optionally limited to one revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id}, []string{"design_id"}), HandlerCtx: a.toolArtifacts},
 		{Name: "manufacturing_package_create", Description: "Validate and create an open-hardware ZIP with source, assembly, BOM, SPDX license, instructions, print profiles, per-part STEP/STL/3MF, measurements, checks, and hashes.", InputSchema: designBuildSchema(id, nil), HandlerCtx: a.toolManufacturingPackage},
 	}
+	return append(tools, fabricationTools(a)...)
 }
 
 func numberSchema(min, max float64) map[string]any {
