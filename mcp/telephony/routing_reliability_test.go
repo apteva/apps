@@ -134,8 +134,16 @@ func TestReliabilityFailedAnswerSetupMustReleaseHumanClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Status != "pending" || current.PeerToken != "" {
+	// The claim is one transaction: a failed owner write leaves the call exactly
+	// as it was, with nothing from the failed claim behind.
+	if current.Status != "pending" || current.PeerToken != row.PeerToken || current.ThreadID != row.ThreadID {
 		t.Fatalf("failed setup cleanup stranded call: status=%s thread=%s", current.Status, current.ThreadID)
+	}
+	for _, table := range []string{"telephony_call_owners", "phone_capacity", "telephony_media_sessions"} {
+		var count int
+		if err = a.db().db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE call_id=?`, row.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s retained %d rows: %v", table, count, err)
+		}
 	}
 	if _, err = a.db().db.Exec(`DROP TRIGGER fail_owner`); err != nil {
 		t.Fatal(err)
@@ -415,7 +423,7 @@ func TestReliabilityFailedSessionCreationReleasesOwnerAndCapacity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Status != "pending" || current.PeerToken != "" {
+	if current.Status != "pending" || current.PeerToken != row.PeerToken {
 		t.Fatalf("session failure stranded claim: %+v", current)
 	}
 	for _, table := range []string{"telephony_call_owners", "phone_capacity", "telephony_media_sessions"} {

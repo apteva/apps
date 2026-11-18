@@ -72,6 +72,8 @@ export interface CallSession {
   /** Local monotonic request start; never supplied by the server. */
   lease_started_ms?: number;
   coaching?: boolean;
+  /** "promoted" when the browser's ring-time connection now carries the call. */
+  standby?: "promoted" | "unavailable";
 }
 export interface CarrierJitterBufferPolicy { enabled:boolean; min_ms?:number; max_ms?:number }
 export interface CarrierMediaSettingsRequest {
@@ -127,7 +129,11 @@ export interface DialRequest {
   /** Retain the same key and request when retrying an uncertain response. */
   idempotency_key: string;
 }
-export interface AnswerRequest { destination_id?: string; rejoin?: boolean; auto_answer_session?:string;auto_answer_warning_completed?:boolean }
+export interface AnswerRequest { destination_id?: string; rejoin?: boolean; auto_answer_session?:string;auto_answer_warning_completed?:boolean;
+  /** This browser's ring-time connection for the call, from standby(). */
+  standby_id?: string }
+/** A ring-time WebRTC connection for a call offered to this browser. */
+export interface StandbyGrant { standby_id: string; call_id: string; url: string; expires_in_ms?: number }
 export class TelephonyOfferExpiredError extends Error {
   readonly code = "offer_expired";
   readonly status = 409;
@@ -431,6 +437,16 @@ export class TelephonyClient {
 
   async renew(session: CallSession): Promise<{lease_seconds?: number}> {
     return this.mediaPost(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
+  }
+
+  /** Opens nothing: authorizes one WebRTC connection while the call rings. */
+  async standby(id: string, request: { destination_id?: string } = {}, signal?: AbortSignal): Promise<StandbyGrant> {
+    const value = await this.mediaPost<{ standby_id?: unknown; call_id?: unknown; media_url?: unknown; expires_in_ms?: unknown }>(this.path(`/softphone/standby/${callID(id)}`), request, signal ? { signal } : undefined);
+    if (!value || typeof value.standby_id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(value.standby_id) || value.call_id !== id || typeof value.media_url !== "string") {
+      throw new Error("Invalid Telephony standby response");
+    }
+    return { standby_id: value.standby_id, call_id: id, url: this.resolveMediaURL({ call_id: id, media_url: value.media_url }, "media", "webrtc"),
+      expires_in_ms: typeof value.expires_in_ms === "number" ? value.expires_in_ms : undefined };
   }
 
   async release(session: CallSession): Promise<void> {

@@ -214,8 +214,18 @@ func (c *callsDB) claimRingOffer(callID, project, destinationID, kind string, ag
 		return false, false, err
 	}
 	defer tx.Rollback()
+	grouped, claimed, err := claimRingOfferTx(tx, callID, project, destinationID, kind, agentID)
+	if err != nil || !claimed {
+		return grouped, false, err
+	}
+	return true, true, c.commitCall(tx, callID)
+}
+
+// claimRingOfferTx claims the call's current ring offer inside tx without
+// committing. grouped is false when the call has no ringing ring group.
+func claimRingOfferTx(tx *sql.Tx, callID, project, destinationID, kind string, agentID int64) (bool, bool, error) {
 	var runID string
-	err = tx.QueryRow(`SELECT r.id FROM call_ring_runs r JOIN call_route_executions e ON e.call_id=r.call_id AND e.current_node_id=r.node_id WHERE r.call_id=? AND r.project_id=? AND r.status='ringing'`, callID, project).Scan(&runID)
+	err := tx.QueryRow(`SELECT r.id FROM call_ring_runs r JOIN call_route_executions e ON e.call_id=r.call_id AND e.current_node_id=r.node_id WHERE r.call_id=? AND r.project_id=? AND r.status='ringing'`, callID, project).Scan(&runID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}
@@ -268,7 +278,7 @@ func (c *callsDB) claimRingOffer(callID, project, destinationID, kind string, ag
 	if _, err = tx.Exec(`UPDATE call_route_executions SET selected_destination_id=?,status='claimed' WHERE call_id=?`, o.DestinationID, callID); err != nil {
 		return true, false, err
 	}
-	return true, true, c.commitCall(tx, callID)
+	return true, true, nil
 }
 
 func (c *callsDB) activeRingOffers(callID, project string) ([]ringOffer, error) {

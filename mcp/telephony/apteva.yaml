@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.20.0
+version: 0.21.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -375,7 +375,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.20.0
+    ref: telephony/v0.21.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -391,6 +391,7 @@ config_schema:
   - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. The built-in panel prefers WebRTC when available; embedded clients choose their transport. Requires reachable ICE/UDP or configured TURN." }
   - { name: softphone_webrtc_path_recovery, type: boolean, default: false, label: "Restart a stalled WebRTC audio path", description: "When a browser reports its audio path disconnected for 3 seconds, try an ICE restart on the existing connection. If signaling does not answer and audio has stopped, reconnect at once instead of waiting. Applies to new browser connections." }
   - { name: softphone_webrtc_handover, type: boolean, default: false, label: "Keep audio during a signaling reconnect", description: "When signaling drops while WebRTC audio is still flowing, keep the current audio until a replacement connection is ready, for up to 20 seconds. Revocation, takeover, lease expiry and hangup still stop it at once. Applies to new browser connections." }
+  - { name: softphone_webrtc_standby, type: boolean, default: true, label: "Connect audio while a call rings", description: "A browser that is offered a call opens its WebRTC audio connection while the call rings, so answering only claims the call. The connection carries nothing until this browser answers; the caller is connected only once its microphone is attached. Turn off to connect after answering instead." }
   - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "distribution", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
   - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }

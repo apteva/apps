@@ -205,7 +205,7 @@ func phoneAction(r *http.Request) string {
 		return "call.listen"
 	case path == "/softphone/place":
 		return "call.dial"
-	case strings.HasPrefix(path, "/softphone/answer/"):
+	case strings.HasPrefix(path, "/softphone/answer/"), strings.HasPrefix(path, "/softphone/standby/"):
 		return "call.answer"
 	case strings.HasPrefix(path, "/softphone/offer/ack/"), strings.HasPrefix(path, "/softphone/recovery/"):
 		return "call.read"
@@ -321,7 +321,19 @@ func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error 
 		return err
 	}
 	defer tx.Rollback()
-	if err = reserveCapacityTx(tx, row.ID, row.ProjectID, dest, capacity, ""); err != nil {
+	if err = setPhoneOwnerTx(tx, row, p, dest, capacity); err != nil {
+		return err
+	}
+	if h := a.softphones.lookup(row.ID); h != nil {
+		h.invalidateCoaching()
+	}
+	return a.db().commitCall(tx, row.ID)
+}
+
+// setPhoneOwnerTx reserves capacity and records p as the call's owner inside
+// tx without committing. capacity is p's own limit, read before tx.
+func setPhoneOwnerTx(tx *sql.Tx, row *callRow, p *phonePrincipal, dest string, capacity destinationCapacity) error {
+	if err := reserveCapacityTx(tx, row.ID, row.ProjectID, dest, capacity, ""); err != nil {
 		return err
 	}
 	// A supervisor may take over, but the reserved personal destination remains
@@ -344,17 +356,11 @@ func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error 
 			}
 		}
 	}
-	if _, err = tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND principal<>? AND principal<>?`, row.ID, p.Identity.key(), resourcePrincipal); err != nil {
+	if _, err := tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND principal<>? AND principal<>?`, row.ID, p.Identity.key(), resourcePrincipal); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
-	if err != nil {
-		return err
-	}
-	if h := a.softphones.lookup(row.ID); h != nil {
-		h.invalidateCoaching()
-	}
-	return a.db().commitCall(tx, row.ID)
+	_, err := tx.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
+	return err
 }
 func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) bool {
 	if p == nil {
@@ -532,15 +538,8 @@ func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guar
 	if len(diagnostic) > 0 {
 		s = diagnostic[0]
 	}
-	s = normalizeAudioSessionCorrelation(s)
-	s.SessionID = newAudioSessionID()
-	s.PreviousSessionID = ""
-	s.IssuedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	raw, _ := json.Marshal(s)
-	token := newSecret()
+	token, query, args, s := phoneMediaSessionInsert(row, principal, revision, s)
 	var saved string
-	query := `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,pending_token_hash='',pending_expires_at=0,pending_diagnostic_json='{}',diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
-	args := []any{row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix() + phoneLeaseSeconds, string(raw)}
 	if guard != nil {
 		query = strings.Replace(query, `VALUES(?,?,?,?,?,?,?)`, `SELECT ?,?,?,?,?,?,? WHERE ?='' OR EXISTS(SELECT 1 FROM telephony_media_sessions WHERE call_id=? AND project_id=?)`, 1)
 		args = append(args, guard.Expected, row.ID, row.ProjectID)
@@ -556,6 +555,25 @@ func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guar
 	if err != nil {
 		return nil, err
 	}
+	return a.phoneSessionIssued(row, p, token, s), nil
+}
+
+// phoneMediaSessionInsert builds the statement that makes a new browser media
+// grant the call's current one.
+func phoneMediaSessionInsert(row *callRow, principal string, revision int64, s audioSessionCorrelation) (token, query string, args []any, issued audioSessionCorrelation) {
+	s = normalizeAudioSessionCorrelation(s)
+	s.SessionID = newAudioSessionID()
+	s.PreviousSessionID = ""
+	s.IssuedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, _ := json.Marshal(s)
+	token = newSecret()
+	query = `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,pending_token_hash='',pending_expires_at=0,pending_diagnostic_json='{}',diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
+	args = []any{row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix() + phoneLeaseSeconds, string(raw)}
+	return token, query, args, s
+}
+
+// phoneSessionIssued records a committed media grant and returns it.
+func (a *App) phoneSessionIssued(row *callRow, p *phonePrincipal, token string, s audioSessionCorrelation) *softphoneSession {
 	if h := a.softphones.lookup(row.ID); h != nil {
 		h.invalidateCoaching()
 		identity := phoneIdentity{}
@@ -572,7 +590,7 @@ func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guar
 		}
 		enqueueAudioSessionIssued(network, s, a.audioNetworks.enqueue)
 	}
-	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds, AttachmentGuardVersion: 1}, nil
+	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds, AttachmentGuardVersion: 1}
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
 	return a.phoneMediaDenialReason(row, token) == ""

@@ -18,8 +18,13 @@ export class FakePeer {
  connectionState="new";iceConnectionState="new";iceGatheringState="complete";signalingState="stable";
  localDescription:any;onconnectionstatechange:any;ontrack:any;closed=false;
  configurations:any[]=[];offers:any[]=[];age=10;listeners=new Map<string,Set<any>>();
+ tracks=0;transceivers:{kind:string;init:any;sender:{replaced:any[];replaceTrack(track:any):Promise<void>;getParameters():any;setParameters():Promise<void>}}[]=[];
  constructor(public config:any){FakePeer.instances.push(this);}
- addTrack(){return {getParameters:()=>({encodings:[{}]}),setParameters:async()=>{}};}
+ addTrack(){this.tracks++;return {getParameters:()=>({encodings:[{}]}),setParameters:async()=>{}};}
+ addTransceiver(kind:string,init:any){
+  const sender={replaced:[] as any[],async replaceTrack(track:any){sender.replaced.push(track);},getParameters:()=>({encodings:[{}]}),setParameters:async()=>{}};
+  this.transceivers.push({kind,init,sender});return {sender};
+ }
  async createOffer(options?:any){this.offers.push(options);return {type:"offer",sdp:"v=0 offer"};}
  async setLocalDescription(value:any){this.localDescription=value;if(value?.type==="offer")this.signalingState="have-local-offer";}
  async setRemoteDescription(){this.signalingState="stable";}
@@ -34,7 +39,10 @@ export class FakePeer {
 const node=()=>({connect:(n:any)=>n,disconnect(){},port:{postMessage(){},onmessage:null}});
 const track=()=>({getSettings:()=>({}),stop(){},readyState:"live",muted:false,enabled:true,onended:null as any,onmute:null,onunmute:null});
 const mediaStream=()=>{const t=track();return {getAudioTracks:()=>[t],getTracks:()=>[t]};};
+/** Devices a test can count: microphones opened and audio contexts created. */
+export const fakeDevices={opened:0,contexts:0};
 class FakeContext{
+ constructor(){fakeDevices.contexts++;}
  state="running";sampleRate=48000;onstatechange:any;destination={};audioWorklet={addModule:async()=>{}};currentTime=0;
  createMediaStreamDestination(){return {channelCount:2,stream:mediaStream()};}
  createMediaStreamSource(){return node();}
@@ -47,10 +55,10 @@ class FakeWorklet{port={postMessage(){},onmessage:null as any};connect(n:any){re
 export function installFakeBrowser(){
  const names=["WebSocket","RTCPeerConnection","AudioContext","AudioWorkletNode","navigator"];
  const saved=new Map(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
- FakeSocket.instances=[];FakePeer.instances=[];
+ FakeSocket.instances=[];FakePeer.instances=[];fakeDevices.opened=fakeDevices.contexts=0;
  const define=(name:string,value:unknown)=>Object.defineProperty(globalThis,name,{configurable:true,writable:true,value});
  define("WebSocket",FakeSocket);define("RTCPeerConnection",FakePeer);define("AudioContext",FakeContext);define("AudioWorkletNode",FakeWorklet);
- define("navigator",{onLine:true,mediaDevices:{getUserMedia:async()=>mediaStream()}});
+ define("navigator",{onLine:true,mediaDevices:{getUserMedia:async()=>{fakeDevices.opened++;return mediaStream();}}});
  return ()=>{for(const [name,descriptor] of saved){if(descriptor)Object.defineProperty(globalThis,name,descriptor);else Reflect.deleteProperty(globalThis,name);}};
 }
 /** Lets chained promises and zero-delay work run. */

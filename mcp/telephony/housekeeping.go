@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	sdk "github.com/apteva/app-sdk"
+	"log"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const housekeepingBatch = 100
@@ -50,18 +53,26 @@ func (a *App) runHousekeepingAt(workerCtx context.Context, ctx *sdk.AppCtx, now 
 		return err
 	}
 	for _, id := range ids {
-		if _, err = tx.ExecContext(workerCtx, `DELETE FROM inbound_event_outbox WHERE call_id=?`, id); err != nil {
+		// Each call is its own savepoint: one call that cannot be deleted is
+		// deferred to its next check instead of rolling back the whole batch,
+		// which would retry the same failing batch every minute.
+		if _, err = tx.ExecContext(workerCtx, `SAVEPOINT housekeeping_call`); err != nil {
 			return err
 		}
-		result, e := tx.ExecContext(workerCtx, `DELETE FROM calls WHERE id=? AND project_id=? AND ended_at<>'' AND ended_at<? AND NOT EXISTS(SELECT 1 FROM recordings r WHERE r.call_id=calls.id AND r.deleted_at='')`, id, project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
+		deleted, e := deleteRetainedCall(workerCtx, tx, id, project, now)
 		if e != nil {
-			return e
+			if err = workerCtx.Err(); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(workerCtx, `ROLLBACK TO housekeeping_call`); err != nil {
+				return err
+			}
+			log.Printf("telephony housekeeping deferred call=%s err=%v", id, e)
 		}
-		n, e := result.RowsAffected()
-		if e != nil {
-			return e
+		if _, err = tx.ExecContext(workerCtx, `RELEASE housekeeping_call`); err != nil {
+			return err
 		}
-		if n == 0 {
+		if !deleted {
 			if _, err = tx.ExecContext(workerCtx, `UPDATE calls SET housekeeping_after=? WHERE id=?`, now.Add(24*time.Hour).Unix(), id); err != nil {
 				return err
 			}
@@ -84,4 +95,18 @@ func (a *App) runHousekeepingAt(workerCtx context.Context, ctx *sdk.AppCtx, now 
 		}
 	}
 	return nil
+}
+
+// deleteRetainedCall deletes a call past retention unless it still holds a
+// recording. deleted is false when the call stays.
+func deleteRetainedCall(ctx context.Context, tx *sql.Tx, id, project string, now time.Time) (bool, error) {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM inbound_event_outbox WHERE call_id=?`, id); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM calls WHERE id=? AND project_id=? AND ended_at<>'' AND ended_at<? AND NOT EXISTS(SELECT 1 FROM recordings r WHERE r.call_id=calls.id AND r.deleted_at='')`, id, project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
 }

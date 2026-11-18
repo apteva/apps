@@ -11,7 +11,7 @@ import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./a
 import { RecoveryRecorder, runRecoveryChecks, type MediaRecoveryRecord, type RecoveryEvidence } from "./media-recovery-record";
 import { rtcRecoveryLimits } from "./webrtc-audio";
 import { measureAudioSetup } from "../../ui/audio-setup";
-import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
+import { isIncomingBrowserCall, isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
 
 /** Carrier progress; connected is exposed only after browser media is live. */
 export type SoftphonePhase = "idle" | "placing" | "ringing" | "connected" | "ended";
@@ -65,6 +65,10 @@ export interface SoftphoneOptions {
   audioRuntime?: AudioRuntime;
   /** Play a locally synthesized ringback while an outbound call rings. Off by default; pass a country code for its cadence (France otherwise). */
   ringback?: boolean | RingbackOptions;
+  /** Open the WebRTC audio connection while an offered call rings, so
+   * answering does not wait for it. Needs observeCalls; WebRTC and automatic
+   * transport only. On by default. */
+  ringStandby?: boolean;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -115,6 +119,10 @@ export class HeadlessSoftphone {
   private autoPrepared=false;
   private automaticAnswerStartedAt?:number;
   private observedOffers=new Map<string,Call>();
+  // One ring-time connection per idle tab, for one offered call.
+  private standby?:{callId:string;ref:AudioRef;audio:AudioConnection;abort:AbortController;id?:string;ready?:boolean;claiming?:boolean};
+  private standbyTried=new Set<string>();
+  private standbyPausedUntil=0;
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
@@ -257,6 +265,7 @@ export class HeadlessSoftphone {
 
   async dial(input: Omit<DialRequest, "idempotency_key"> & { idempotency_key?: string }): Promise<string> {
     this.autoAnswer.cancel(undefined,"another_call_started");
+    this.dropStandby();
     const generation = this.begin(true);
     let placed: CallSession | undefined;
     let attached = false;
@@ -291,12 +300,61 @@ export class HeadlessSoftphone {
   answerAutoAnswerNow():void{this.autoAnswer.answerNow();}
   cancelAutoAnswer(callId?:string):void{this.autoAnswer.cancel(callId);}
   /** Hosts that disable polling feed the same complete permission-scoped call list. */
-  observeCalls(calls:Call[]):void{this.observedOffers=new Map(calls.map(c=>[c.id,c]));for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
+  observeCalls(calls:Call[]):void{this.observedOffers=new Map(calls.map(c=>[c.id,c]));for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);this.syncStandby();}
+
+  private syncStandby(){
+    const entry=this.standby,offered=(id:string)=>{const call=this.observedOffers.get(id);return call!==undefined&&isIncomingBrowserCall(call);};
+    // While an answer is claiming it, the call stops being an offer: keep it.
+    if(entry&&!entry.claiming&&(!offered(entry.callId)||!this.idleForStandby()||entry.ready&&!entry.audio.standing?.()))this.dropStandby();
+    for(const id of this.standbyTried)if(!this.observedOffers.has(id))this.standbyTried.delete(id);
+    if(this.standby||!this.idleForStandby()||Date.now()<this.standbyPausedUntil)return;
+    const transport=this.audioOptions.mediaTransport;
+    if(this.options.ringStandby===false||(transport!=="webrtc"&&transport!=="auto")||typeof RTCPeerConnection!=="function")return;
+    for(const call of this.observedOffers.values())if(isIncomingBrowserCall(call)&&!this.standbyTried.has(call.id)){this.openStandby(call);return;}
+  }
+  private idleForStandby(){return !this.disposed&&!this.session&&!this.snapshot.busy&&!this.hangingUp;}
+  private openStandby(call:Call){
+    this.standbyTried.add(call.id);
+    const ref:AudioRef={session:{call_id:call.id,media_url:""}};
+    let audio:AudioConnection;
+    try{audio=this.runtime.create(this.audioCallbacks(ref));}catch{return;}
+    if(!audio.standby){try{audio.stop();}catch{/* adapters must not block */}return;}
+    // Its callbacks stay inert until an answer adopts it as this.audio.
+    ref.audio=audio;
+    const entry:NonNullable<HeadlessSoftphone["standby"]>={callId:call.id,ref,audio,abort:new AbortController()};
+    this.standby=entry;
+    const destination=call.ring_offers?.find(offer=>offer.kind==="browser")?.destination_id;
+    void (async()=>{
+      try{
+        const grant=await this.client.standby(call.id,{destination_id:destination},entry.abort.signal);
+        if(this.standby!==entry)return;
+        entry.id=grant.standby_id;
+        await audio.standby!(grant.url,{...this.audioOptions});
+        if(this.standby===entry)entry.ready=true;
+      }catch(error){
+        // An install without ring-time connections is not asked again for a while.
+        const status=(error as {status?:number})?.status,body=String((error as {body?:unknown})?.body??"");
+        if(status===404||/standby_disabled|webrtc_unavailable/.test(body))this.standbyPausedUntil=Date.now()+600000;
+        if(this.standby===entry)this.dropStandby();
+      }
+    })();
+  }
+  private dropStandby(){
+    const entry=this.standby;if(!entry)return;
+    this.standby=undefined;entry.abort.abort();
+    try{entry.audio.stop();}catch{/* adapters must not block */}
+  }
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
     const clickedAt = new Date().toISOString();
     if(!request.auto_answer_session)this.autoAnswer.cancel(id);
+    // A ready ring-time connection for this call lets the answer skip setup.
+    const standby=this.standby;
+    if(standby?.callId===id&&!request.rejoin&&standby.ready&&standby.id&&standby.audio.standing?.())request={...request,standby_id:standby.id};
+    else this.dropStandby();
     const prepared=Boolean(request.auto_answer_session&&this.autoPrepared&&this.runtime.isPrepared?.()!==false);
     const generation = this.begin(true,prepared);
+    // Only once this answer runs: a refused one must not pin the standby.
+    if(request.standby_id&&this.standby?.callId===id)this.standby.claiming=true;
     const signal = this.cancellation.signal;
     const manualPickup = !request.auto_answer_session && !request.rejoin;
     const requestID = manualPickup ? `tel-${diagnosticID()}` : undefined;
@@ -367,6 +425,7 @@ export class HeadlessSoftphone {
       // The server may have accepted a claim even after local preparation
       // failed or was cancelled. Wait for its token and release only that claim.
       if (claim && !claimed) await claim.catch(() => {});
+      if (this.standby?.callId === id) this.dropStandby();
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
         const session = claimed;
         await this.recoverStartup(session, generation, () => this.client.release(session));
@@ -400,6 +459,7 @@ export class HeadlessSoftphone {
 
   private async acquireSession(id: string, takeover: boolean, action: MediaInitiatingAction = "takeover"): Promise<void> {
     const generation = this.begin(true);
+    this.dropStandby();
     try {
       const setupEvents = await this.prepareAudio(generation, true);
       this.assertCurrent(generation);
@@ -589,12 +649,18 @@ export class HeadlessSoftphone {
     this.session = session;
     this.update({ callId: session.call_id, carrierStatus: undefined, audioState: "connecting", phase: "placing", termination: undefined, answeredBy: undefined, endedAt: undefined,
       holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
-    const ref:AudioRef={session};
+    // The server moved this call onto the ring-time connection; anything else
+    // about that connection is no longer needed.
+    const standby=this.standby;this.standby=undefined;
+    const adopt=standby?.callId===session.call_id&&session.standby==="promoted"?standby:undefined;
+    if(standby&&!adopt){standby.abort.abort();try{standby.audio.stop();}catch{/* adapters must not block */}}
+    const ref:AudioRef=adopt?.ref??{session};
+    ref.session=session;
     const current = () => !this.disposed && ref.audio !== undefined && this.audio === ref.audio;
     let audio: AudioConnection | undefined;
     try {
       this.assertCurrent(generation);
-      audio = this.runtime.create(this.audioCallbacks(ref));
+      audio = adopt?.audio ?? this.runtime.create(this.audioCallbacks(ref));
       ref.audio = audio;
       this.audio = audio;
       this.assertCurrent(generation);
@@ -961,6 +1027,7 @@ export class HeadlessSoftphone {
     if (this.disposed) return;
     this.autoAnswer.dispose();
     this.disposed = true;
+    this.dropStandby();
     this.invalidate();
     this.listeners.clear();
     this.clearCall();

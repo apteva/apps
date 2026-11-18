@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.20.0
+version: 0.21.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -422,7 +422,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.20.0
+    ref: telephony/v0.21.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -438,6 +438,7 @@ config_schema:
   - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. The built-in panel prefers WebRTC when available; embedded clients choose their transport. Requires reachable ICE/UDP or configured TURN." }
   - { name: softphone_webrtc_path_recovery, type: boolean, default: false, label: "Restart a stalled WebRTC audio path", description: "When a browser reports its audio path disconnected for 3 seconds, try an ICE restart on the existing connection. If signaling does not answer and audio has stopped, reconnect at once instead of waiting. Applies to new browser connections." }
   - { name: softphone_webrtc_handover, type: boolean, default: false, label: "Keep audio during a signaling reconnect", description: "When signaling drops while WebRTC audio is still flowing, keep the current audio until a replacement connection is ready, for up to 20 seconds. Revocation, takeover, lease expiry and hangup still stop it at once. Applies to new browser connections." }
+  - { name: softphone_webrtc_standby, type: boolean, default: true, label: "Connect audio while a call rings", description: "A browser that is offered a call opens its WebRTC audio connection while the call rings, so answering only claims the call. The connection carries nothing until this browser answers; the caller is connected only once its microphone is attached. Turn off to connect after answering instead." }
   - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "distribution", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
   - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
@@ -530,6 +531,8 @@ type App struct {
 	installID           int64
 	sip                 sipRuntimeHolder
 	autoAnswerMu        sync.Mutex
+	pickupTimings       sync.Map // call ID → *pickupTiming
+	softphoneStandbys   softphoneStandbyRegistry
 	softphones          softphoneRegistry
 	phoneAttachments    phoneAttachmentCache
 	listeners           callListenerRegistry
@@ -4865,14 +4868,25 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 	if len(destinations) > 0 {
 		destination = destinations[0]
 	}
-	if grouped, claimed, err := c.claimRingOffer(id, project, destination, "browser", 0); grouped || err != nil {
-		return claimed, err
-	}
 	tx, err := c.db.Begin()
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
+	claimed, err := claimPendingCallForHumanTx(tx, id, project, destination)
+	if err != nil || !claimed {
+		return false, err
+	}
+	return true, c.commitCall(tx, id)
+}
+
+// claimPendingCallForHumanTx claims a pending inbound call for a browser
+// inside tx without committing: the ringing group's offer when there is one,
+// otherwise the call's own browser destination.
+func claimPendingCallForHumanTx(tx *sql.Tx, id, project, destination string) (bool, error) {
+	if grouped, claimed, err := claimRingOfferTx(tx, id, project, destination, "browser", 0); grouped || err != nil {
+		return claimed, err
+	}
 	res, err := tx.Exec(`UPDATE calls SET status = 'answering'
 	        WHERE id = ? AND direction = 'inbound' AND status = 'pending'
 	          AND COALESCE(handling_reason,'')='' AND project_id = ? AND peer_kind = 'human' AND (routing_flow_version_id='' OR routing_destination_id<>'') AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
@@ -4898,12 +4912,22 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 			return false, e
 		}
 	}
-	return true, c.commitCall(tx, id)
+	return true, nil
+}
+
+// sqlWriter is a database or a transaction.
+type sqlWriter interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 func (c *callsDB) settleHumanOffers(id, project string) error {
+	return settleHumanOffersOn(c.db, id, project)
+}
+
+func settleHumanOffersOn(q sqlWriter, id, project string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := c.db.Exec(`UPDATE call_offers SET
+	_, err := q.Exec(`UPDATE call_offers SET
 		status=CASE WHEN destination_id=(SELECT routing_destination_id FROM calls WHERE id=?) THEN 'claimed' ELSE 'canceled' END,
 		claimed_at=CASE WHEN destination_id=(SELECT routing_destination_id FROM calls WHERE id=?) THEN ? ELSE claimed_at END
 		WHERE call_id=? AND project_id=? AND status='offered'`, id, id, now, id, project)
@@ -4914,7 +4938,11 @@ func (c *callsDB) settleHumanOffers(id, project string) error {
 // bridge URL so the carrier bridge can dial the hub. Mirrors attachCall, minus
 // the thread/directive/voice fields that only exist for realtime peers.
 func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
-	res, err := c.db.Exec(`UPDATE calls SET audio_bridge_url = ?, peer_token = ?,
+	return attachHumanCallOn(c.db, id, bridgeURL, peerToken)
+}
+
+func attachHumanCallOn(q sqlWriter, id, bridgeURL, peerToken string) error {
+	res, err := q.Exec(`UPDATE calls SET audio_bridge_url = ?, peer_token = ?,
 	        thread_id = 'human-' || id, directive = '', voice = ''
 	        WHERE id = ? AND status = 'answering'`, bridgeURL, peerToken, id)
 	if err != nil {

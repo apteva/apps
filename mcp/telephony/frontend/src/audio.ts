@@ -53,6 +53,11 @@ export function createMicrophonePreview(onLevel?: (level: number) => void, app?:
 
 export interface AudioConnection {
   start(url: string, options: SoftphoneAudioOptions): Promise<void>;
+  /** Opens the transport while a call rings, without devices. A later start()
+   * attaches the devices to it once the answer has claimed the call. */
+  standby?(url: string, options: SoftphoneAudioOptions): Promise<void>;
+  /** True while a ring-time connection is still open and waiting. */
+  standing?(): boolean;
   stop(): void;
   recordSessionEvent?(event: MediaSessionEvent): void;
   setMuted(muted: boolean): void;
@@ -141,6 +146,11 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime {
               await connection.start(url, options, modules.urls[0], takePrepared());
             } catch (error) { connection.stop(); modules?.dispose(); modules=undefined; throw error; }
           },
+          async standby(url, options) {
+            if (stopped) throw new Error("Audio session cancelled");
+            await connection.standby(url, options);
+          },
+          standing: () => connection.standing(),
           stop() { stopped=true; connection.stop(); modules?.dispose(); modules=undefined; },
           setMuted:value=>connection.setMuted(value), sendDTMF:digits=>connection.sendDTMF(digits),
           setOutputVolume:value=>connection.setOutputVolume(value), recordSessionEvent:event=>connection.recordSessionEvent(event),

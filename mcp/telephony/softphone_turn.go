@@ -317,6 +317,7 @@ func (a *App) configureManagedTURN(c *softphoneRTCConfig, row *callRow, token st
 		return nil
 	}
 	ctx := globalCtx.WithProject(row.ProjectID)
+	standby := c.Standby
 
 	session := newAudioSessionID()
 	c.TURN = &rtcTURNProvider{policy: policy, fetch: func(request context.Context) (rtcTURNCredentials, error) {
@@ -327,13 +328,27 @@ func (a *App) configureManagedTURN(c *softphoneRTCConfig, row *callRow, token st
 		if err != nil || current == nil || isTerminalStatus(current.Status) {
 			return rtcTURNCredentials{}, errors.New("call unavailable")
 		}
-		reason := ""
+		reason, checked := "", token
+		if standby != nil {
+			// A waiting standby is authorized by its offer; once promoted, by the
+			// claim's media grant like any other connection.
+			switch standby.state.Load() {
+			case standbyPromoted:
+				if checked = standby.mediaToken(); checked == "" {
+					return rtcTURNCredentials{}, errors.New("media authorization unavailable")
+				}
+			case standbyEnded:
+				return rtcTURNCredentials{}, errors.New("media authorization unavailable")
+			default:
+				checked = ""
+			}
+		}
 		if listener {
 			reason, _ = a.listenerSessionCheck(current, token)
-		} else {
-			reason, _, _ = a.phoneMediaCheckDetails(current, token)
+		} else if checked != "" {
+			reason, _, _ = a.phoneMediaCheckDetails(current, checked)
 			if reason == "media_token_replaced" {
-				if pendingReason, _, _, _, pending := a.phoneMediaPendingCheck(current, token); pending {
+				if pendingReason, _, _, _, pending := a.phoneMediaPendingCheck(current, checked); pending {
 					reason = pendingReason
 				}
 			}

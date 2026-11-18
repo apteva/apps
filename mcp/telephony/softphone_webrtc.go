@@ -41,6 +41,8 @@ type softphoneRTCConfig struct {
 	KnownVPNExits    string
 	CollectNetwork   func(audioNetworkEvent)
 	Enabled          bool
+	// Standby authorizes a ring-time connection until its claim promotes it.
+	Standby *softphoneStandby
 	// Both off by default: each lets a call keep its audio through a signaling or
 	// path fault, and each is enabled per install.
 	PathRecovery     bool

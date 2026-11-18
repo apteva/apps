@@ -302,6 +302,25 @@ WebRTC reports setup failure, while `auto` can fall back during initial setup.
 See [softphone transports](../docs/softphone-transports.md) for configuration,
 recovery, provider independence, diagnostics and verification limits.
 
+### Connecting while a call rings (0.21.0)
+
+With WebRTC or automatic transport, a softphone fed by `observeCalls()` opens
+its WebRTC connection while an offered call rings: one connection per idle
+softphone, for one offered call, with no microphone or playback. Answering
+that call then only claims it; the claim moves the call onto the open
+connection, the SDK attaches the microphone and the carrier is answered once it
+is attached, as before. If the connection is not ready or was lost, the answer
+connects as it always did. Answering skips the WebRTC setup, which was most
+of the time between the click and live audio.
+
+```ts
+// On by default; turn it off for one softphone.
+const phone = telephony.createSoftphone({ mediaTransport: "auto", ringStandby: false });
+```
+
+The install setting `softphone_webrtc_standby` (on by default) turns it off
+for every browser.
+
 ### Optional WebRTC packet recovery
 
 Opus FEC is enabled by default when the server has a compatible native codec.
