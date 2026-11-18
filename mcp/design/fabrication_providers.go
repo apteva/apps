@@ -140,10 +140,13 @@ func (craftcloudProvider) Quote(ctx context.Context, call ToolCaller, req QuoteR
 	models := make([]map[string]any, 0, len(req.Parts))
 	modelPart := map[string]PartFile{}
 	for _, part := range req.Parts {
-		raw, _, err := call(ctx, "upload_model", map[string]any{
+		raw, status, err := call(ctx, "upload_model", map[string]any{
 			"file": base64.StdEncoding.EncodeToString(part.Body), "filename": part.Filename, "unit": "mm",
 		})
 		if err != nil {
+			if craftcloudNeedsPartnerAccess(status) {
+				return nil, fmt.Errorf("%w (upload %s: %v)", errCraftcloudPartnerAccess, part.PartID, err)
+			}
 			return nil, fmt.Errorf("upload %s: %w", part.PartID, err)
 		}
 		body := decodeAny(raw)
@@ -191,6 +194,19 @@ func (craftcloudProvider) Quote(ctx context.Context, call ToolCaller, req QuoteR
 		}
 	}
 	return craftcloudOptions(prices, req, modelPart, priceID), nil
+}
+
+// errCraftcloudPartnerAccess explains the one Craftcloud failure users hit
+// first: the public v5 API has no model upload, so quoting needs the partner
+// model API URL (and key) on the Craftcloud connection.
+var errCraftcloudPartnerAccess = errors.New("Craftcloud quotes need partner API access: its public API cannot accept model uploads. " +
+	"Ask Craftcloud for partner model API access, then set the partner model API URL and key on the Craftcloud connection")
+
+// craftcloudNeedsPartnerAccess reports upload failures that mean the partner
+// model API is missing or not authorized: no HTTP response (unset URL),
+// 401/403 (blocked or wrong key) and 404 (public host without upload).
+func craftcloudNeedsPartnerAccess(status int) bool {
+	return status == 0 || status == 401 || status == 403 || status == 404
 }
 
 func craftcloudOptions(prices any, req QuoteRequest, modelPart map[string]PartFile, priceID string) []QuoteOption {

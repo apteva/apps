@@ -72,7 +72,7 @@ Bind one or more print-service connections to the optional `fabrication_provider
 3. A person approves in the panel (`POST /api/fabrication/orders/{id}/approve` with `confirm_total`), unless the policy allowed it.
 4. `fabrication_order_submit` places the order once; `fabrication_orders` and the 30-minute worker track it.
 
-Policy (auto-order, per-order max, monthly budget, allowed services, currency) and ship-to addresses are edited only in the panel (`PUT /api/fabrication/settings`). Service options live under `provider_settings.<slug>`: Slant 3D needs `platform_id` (optional `filament_id`); Sculpteo takes `materials`; Craftcloud takes `payment: invoice` and `test_orders`.
+Policy (auto-order, per-order max, monthly budget, allowed services, currency) and ship-to addresses are edited only in the panel (`PUT /api/fabrication/settings`). Service options live under `provider_settings.<slug>`: Slant 3D needs `platform_id` (optional `filament_id`); Sculpteo takes `materials`; Craftcloud takes `payment: invoice` and `test_orders`. Craftcloud quotes also need partner model API access: its public API cannot accept uploads, so set the partner model API URL (and key) from Craftcloud on the Craftcloud connection.
 
 ## V1 boundary
 
