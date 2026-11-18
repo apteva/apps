@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.16.0
+version: 0.16.1
 description: |
   Multi-provider SMS through Twilio and Telnyx with account-pinned numbers,
   verified durable inbound webhooks, delivery tracking and receive-only mode.
@@ -217,7 +217,7 @@ runtime:
   startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
-    ref: messaging/v0.16.0
+    ref: messaging/v0.16.1
     entry: mcp/messaging
   port: 8080
   health_check: /health
