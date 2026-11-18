@@ -83,6 +83,7 @@ type sendersCreateInbound struct {
 	Region          string `json:"region,omitempty"`
 	RuleSetName     string `json:"rule_set_name,omitempty"`
 	RuleName        string `json:"rule_name,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type sendersCreateResp struct {
@@ -97,9 +98,12 @@ type sendersCreateResp struct {
 	// failed. Top-level signal so callers/UI can show a warning without
 	// scanning the per-step list — the buried ✗ used to be masked by a
 	// green dkim_status (which reflects SES, not whether DNS landed).
-	DnsPublishPartial bool                  `json:"dns_publish_partial,omitempty"`
-	Inbound           *sendersCreateInbound `json:"inbound,omitempty"`
-	Steps             []bootstrapStep       `json:"steps"`
+	DnsPublishPartial bool `json:"dns_publish_partial,omitempty"`
+	// InboundFailed is true when inbound mail setup was requested but
+	// stopped at a failed step; inbound.error names the step and cause.
+	InboundFailed bool                  `json:"inbound_failed,omitempty"`
+	Inbound       *sendersCreateInbound `json:"inbound,omitempty"`
+	Steps         []bootstrapStep       `json:"steps"`
 }
 
 // HTTP entry point — POST /senders/create.
@@ -309,6 +313,7 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		resp.DkimStatus = domainResp.DkimStatus
 		resp.DnsRecords = domainResp.DnsRecords
 		resp.DnsPublishPartial = domainResp.DnsPublishPartial
+		resp.InboundFailed = domainResp.InboundFailed
 		resp.Inbound = domainResp.Inbound
 		resp.Steps = append(resp.Steps, domainResp.Steps...)
 		parentIdentity, _ = dbFindIdentity(ctx.AppDB(), pid, "email_domain", parent)
@@ -365,6 +370,9 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		if resp.DnsPublishPartial {
 			resp.NextStep = "Some DNS records failed to publish — review the dns_* steps and re-run senders_create. " + resp.NextStep
 		}
+	}
+	if resp.InboundFailed && resp.Inbound != nil {
+		resp.NextStep = inboundFailureNextStep(resp.Inbound.Error, resp.NextStep)
 	}
 	return resp, nil
 }
@@ -435,6 +443,43 @@ func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr
 }
 
 func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, domain string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
+	out, err := a.sendersCreateDomainSteps(ctx, pid, sesConnID, domain, req, resp)
+	if err == nil {
+		markInboundFailure(out)
+	}
+	return out, err
+}
+
+// markInboundFailure surfaces an unfinished inbound setup at the top level.
+// Every inbound step returns early on failure, so a requested inbound setup
+// (no skip reason) that is not bootstrapped stopped at the last failed step.
+// Without this the result looked successful: pending, DKIM-only next step,
+// and a single ok:false entry inside steps.
+func markInboundFailure(resp *sendersCreateResp) {
+	if resp == nil || resp.Inbound == nil || resp.Inbound.Bootstrapped || resp.Inbound.SkippedReason != "" {
+		return
+	}
+	reason := "inbound setup did not complete"
+	for i := len(resp.Steps) - 1; i >= 0; i-- {
+		if st := resp.Steps[i]; !st.OK {
+			reason = st.Step + ": " + st.Error
+			break
+		}
+	}
+	resp.InboundFailed = true
+	resp.Inbound.Error = reason
+	resp.NextStep = inboundFailureNextStep(reason, resp.NextStep)
+}
+
+func inboundFailureNextStep(reason, next string) string {
+	msg := "Inbound mail setup failed (" + reason + "). The domain can send but cannot receive mail until this is fixed; re-run senders_create afterwards."
+	if next != "" {
+		msg += " " + next
+	}
+	return msg
+}
+
+func (a *App) sendersCreateDomainSteps(ctx *sdk.AppCtx, pid string, sesConnID int64, domain string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
 	region := req.Region
 	if region == "" {
 		region = "eu-west-1"

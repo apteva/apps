@@ -327,16 +327,27 @@ func validAWSActions(v any) bool {
 		if member, yes := m["member"]; yes && len(m) == 1 {
 			return validAWSActions(member)
 		}
-		if len(m) != 1 {
-			return false
-		}
+		// SES returns every action type on each action and leaves the unused
+		// ones null, e.g. {"S3Action":{...},"SNSAction":null,"LambdaAction":null,…}.
+		// Ignore those; exactly one action type must be populated.
+		populated := 0
 		for name, action := range m {
 			if !strings.HasSuffix(name, "Action") {
 				return false
 			}
+			if action == nil {
+				continue
+			}
 			fields, ok := action.(map[string]any)
-			return ok && len(fields) > 0
+			if !ok {
+				return false
+			}
+			if len(fields) == 0 {
+				continue
+			}
+			populated++
 		}
+		return populated == 1
 	}
 	if list, ok := v.([]any); ok {
 		if len(list) == 0 {
