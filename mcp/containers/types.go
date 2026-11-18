@@ -99,6 +99,9 @@ type VolumeSpec struct {
 	// the same caller on the same host. Shared mounts must be read-only and are
 	// never deleted, retained, or measured by the borrowing workload.
 	SharedFrom string `json:"shared_from,omitempty"`
+	// VolumeID mounts a standalone volume from containers_volume_create.
+	// Several workloads may mount it at once, read-write or read-only.
+	VolumeID string `json:"volume_id,omitempty"`
 }
 
 type FileSpec struct {
@@ -169,6 +172,7 @@ type Blueprint struct {
 }
 
 var workloadNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var numericOwnerRE = regexp.MustCompile(`^[0-9]{1,10}:[0-9]{1,10}$`)
 var containerUserRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?$`)
 
 func normalizeRunSpec(in RunSpec) (RunSpec, error) {
@@ -400,7 +404,7 @@ func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) (int, error) {
 	if contentSize > maxInjectedFileBytes {
 		return 0, fmt.Errorf("files[%d] content exceeds %d bytes", i, maxInjectedFileBytes)
 	}
-	if f.Owner != "" && !regexp.MustCompile(`^[0-9]+:[0-9]+$`).MatchString(f.Owner) {
+	if f.Owner != "" && !numericOwnerRE.MatchString(f.Owner) {
 		return 0, errors.New("file owner must be numeric uid:gid")
 	}
 	mode := strings.TrimSpace(f.Mode)

@@ -1,5 +1,37 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.7.0
+
+Users, file ownership and shared volumes for multi-user sandboxes. Local
+workloads only; every change is additive.
+
+- **Run a command as a chosen user.** `containers_exec_start` takes `user`
+  (name or `uid[:gid]`) and `umask` (for example `022`). Without `umask`,
+  commands keep the private `077` default. Hardened workloads refuse `root` and
+  `0`. A session belongs to the user that opened it; use another `session_key`
+  for another user. Cancelling, reading output and the restart cleanup run as
+  the command's own user, so a capability-less workload can still kill
+  everything that user started.
+- **Ownership on import.** `containers_volume_import` takes `owner`
+  (numeric `uid:gid`), applied to every imported entry and every folder the
+  import creates.
+- **Import mode change.** Folders the import creates are now `0755` so other
+  users can read them, and the existing target folder
+  keeps its own mode and owner instead of taking the archive root's. Imported
+  entries keep their archived modes. Without `owner`, imported entries keep
+  the archive's own uid:gid, as before.
+- **Standalone volumes.** `containers_volume_create` (idempotent by name per
+  owner, optional `labels`), `containers_volume_list` (label and
+  `owner_app_name` filters, optional size) and `containers_volume_delete`.
+  Mount one with `containers_run` `volumes[].volume_id`, optionally
+  `read_only`; several workloads can mount it at once. Destroying a workload
+  never deletes it, even with `delete_volumes`. Delete is refused while any
+  live workload or any Docker container, running or stopped, still uses it.
+  Standalone volumes are not counted in per-workload usage.
+- Real-Docker tests (`RUN_CONTAINERS_TESTS=1`) cover two users sharing a
+  folder (readable, not writable), import ownership and modes, and a volume
+  shared read-write and read-only that outlives both workloads.
+
 ## v0.6.0
 
 Sandbox features for running untrusted code (used by Workspaces).

@@ -167,7 +167,10 @@ func helperContainer(ctx context.Context, input []byte, limit int, args ...strin
 	return out.buf.String(), nil
 }
 
-func containerTreeKill(ctx context.Context, container, dir string) error {
+// containerTreeKill runs as user (the session's or command's own user, or the
+// container default when empty): without capabilities only the owner can
+// read a process's environment and signal it.
+func containerTreeKill(ctx context.Context, container, dir, user string) error {
 	if dir == "" {
 		return nil
 	}
@@ -182,7 +185,7 @@ collect
 for pid in $pids; do kill -KILL "$pid" 2>/dev/null || true; done
 collect
 for pid in $pids; do kill -KILL "$pid" 2>/dev/null || true; done`
-	_, err := docker(ctx, "exec", container, "/bin/sh", "-c", script, "sh", dir)
+	_, err := docker(ctx, execAs(user, container, "/bin/sh", "-c", script, "sh", dir)...)
 	return err
 }
 func typedInputError(err error) error { return fmt.Errorf("invalid input: %w", err) }

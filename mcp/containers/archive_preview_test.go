@@ -28,7 +28,7 @@ func TestPreviewSourceImportPreservesUnrelatedDependencyLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := testTarGzip(t, []*tar.Header{{Name: "proof", Mode: 0644, Size: 2, Typeflag: tar.TypeReg}}, [][]byte{[]byte("ok")})
-	if err = (LocalDocker{}).ImportVolumeArchive(ctx, vol, ".", archive); err != nil {
+	if err = (LocalDocker{}).ImportVolumeArchive(ctx, vol, ".", archive, ""); err != nil {
 		t.Fatal("unrelated node_modules symlink blocked sync:", err)
 	}
 	out, err := docker(ctx, "run", "--rm", "-v", vol+":/volume:ro", "alpine:3.20", "sh", "-c", "test -L /volume/node_modules/.bin/vite && test \"$(cat /volume/safe/secret)\" = keep && cat /volume/proof")
@@ -37,7 +37,7 @@ func TestPreviewSourceImportPreservesUnrelatedDependencyLinks(t *testing.T) {
 	}
 	for _, entry := range []string{"redirect/secret", "node_modules/.bin/vite"} {
 		archive = testTarGzip(t, []*tar.Header{{Name: entry, Mode: 0644, Size: 2, Typeflag: tar.TypeReg}}, [][]byte{[]byte("no")})
-		if err = (LocalDocker{}).ImportVolumeArchive(ctx, vol, ".", archive); err == nil {
+		if err = (LocalDocker{}).ImportVolumeArchive(ctx, vol, ".", archive, ""); err == nil {
 			t.Fatalf("write through symlink %q allowed", entry)
 		}
 	}

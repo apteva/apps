@@ -323,7 +323,7 @@ func TestAuditArchiveDestinationSymlink(t *testing.T) {
 	if err := validateTarGzip(archive, 1<<20, 1<<20, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := (LocalDocker{}).ImportVolumeArchive(ctx, vol, "requested", archive); err != nil {
+	if err := (LocalDocker{}).ImportVolumeArchive(ctx, vol, "requested", archive, ""); err != nil {
 		return
 	}
 	out, err := docker(ctx, "run", "--rm", "-v", vol+":/volume:ro", "alpine:3.20", "cat", "/volume/other/proof")

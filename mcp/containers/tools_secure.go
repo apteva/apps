@@ -247,7 +247,7 @@ func (a *App) toolVolumeImport(callCtx context.Context, app *sdk.AppCtx, args ma
 	if err != nil {
 		return nil, err
 	}
-	return a.importVolumeArchive(app, workload, getStr(args, "volume"), getStr(args, "path"), getStr(args, "archive_base64"))
+	return a.importVolumeArchive(app, workload, getStr(args, "volume"), getStr(args, "path"), getStr(args, "archive_base64"), getStr(args, "owner"))
 }
 
 func (a *App) toolVolumeExport(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

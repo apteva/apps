@@ -148,7 +148,7 @@ func (m *persistentShellManager) Start(ctx context.Context, spec executionRuntim
 	}
 	if session.user != spec.User {
 		session.mu.Unlock()
-		return "", errors.New("session user does not match workload user")
+		return "", fmt.Errorf("session %q runs as %q; use another session_key for user %q", spec.SessionKey, displayUser(session.user), displayUser(spec.User))
 	}
 	if session.current != nil && session.current.isRunning() {
 		session.mu.Unlock()
@@ -198,6 +198,9 @@ func (m *persistentShellManager) Start(ctx context.Context, spec executionRuntim
 }
 
 func startPersistentShell(ctx context.Context, manager *persistentShellManager, key string, spec executionRuntimeSpec) (*persistentShellSession, error) {
+	if err := prepareControlDirs(ctx, spec); err != nil {
+		return nil, err
+	}
 	readyMarker := "\x1eAPTEVA_READY_" + strings.TrimPrefix(newExecutionID(), "exe_") + "\x1f"
 	controlDir := "/tmp/.apteva-sessions/" + newExecutionID()
 	// The marker is the control dir's basename; containerTreeKill uses it to find
@@ -230,7 +233,7 @@ func startPersistentShell(ctx context.Context, manager *persistentShellManager, 
 		return nil, errors.New("persistent Docker shell exited during initialization")
 	case <-ctx.Done():
 		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		killErr := containerTreeKill(killCtx, session.containerName, session.controlDir)
+		killErr := containerTreeKill(killCtx, session.containerName, session.controlDir, session.user)
 		killCancel()
 		if killErr != nil {
 			session.close()
@@ -248,6 +251,10 @@ func persistentShellCommand(spec executionRuntimeSpec, runtimeID string) string 
 	}
 	for _, key := range envKeys(spec.Env) {
 		command.WriteString("export " + key + "=" + shellSingleQuote(spec.Env[key]) + "\n")
+	}
+	// Like export, a umask set in a session stays in effect for later commands.
+	if spec.Umask != "" {
+		command.WriteString("umask " + spec.Umask + "\n")
 	}
 	if spec.StatefulCommand && len(spec.Argv) == 3 {
 		command.WriteString(spec.Argv[2])
@@ -371,7 +378,7 @@ func (s *persistentShellSession) isClosed() bool {
 func (s *persistentShellSession) close() {
 	s.closedOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = containerTreeKill(ctx, s.containerName, s.controlDir)
+		_ = containerTreeKill(ctx, s.containerName, s.controlDir, s.user)
 		cancel()
 		_ = s.terminal.Close()
 		if s.cmd.Process != nil {
@@ -490,7 +497,7 @@ func (m *persistentShellManager) Interrupt(ctx context.Context, execution *Execu
 		return nil
 	case <-ctx.Done():
 		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		killErr := containerTreeKill(killCtx, session.containerName, session.controlDir)
+		killErr := containerTreeKill(killCtx, session.containerName, session.controlDir, session.user)
 		killCancel()
 		if killErr != nil {
 			return killErr

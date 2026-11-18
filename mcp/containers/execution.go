@@ -36,6 +36,8 @@ type Execution struct {
 	TimeoutSeconds       int               `json:"timeout_s"`
 	SessionKey           string            `json:"session_key,omitempty"`
 	StatefulCommand      bool              `json:"stateful_command,omitempty"`
+	User                 string            `json:"user,omitempty"`
+	Umask                string            `json:"umask,omitempty"`
 	Status               string            `json:"status"`
 	ExitCode             *int              `json:"exit_code,omitempty"`
 	ErrorCode            string            `json:"error_code,omitempty"`
@@ -59,9 +61,16 @@ type executionInput struct {
 	TimeoutSeconds   int               `json:"timeout_s"`
 	IdempotencyKey   string            `json:"idempotency_key"`
 	SessionKey       string            `json:"session_key"`
+	User             string            `json:"user"`
+	Umask            string            `json:"umask"`
 }
 
 type executionRuntimeSpec struct {
+	// Umask applies to the command (not to control files); empty keeps 0077.
+	Umask string
+	// ControlUser is the workload's own user. It prepares shared control
+	// folders when a command runs as a different user.
+	ControlUser      string
 	RuntimeReady     func(string) error
 	ExecutionID      string
 	ContainerName    string
@@ -162,6 +171,25 @@ func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeo
 			return in, fmt.Errorf("argv[%d] contains the platform app token", i)
 		}
 	}
+	in.User = strings.TrimSpace(in.User)
+	if in.User != "" {
+		if !containerUserRE.MatchString(in.User) || len(in.User) > 64 {
+			return in, errors.New("user must be a user, uid, or user:group without whitespace")
+		}
+		if name, _, _ := strings.Cut(in.User, ":"); workload.Hardened && (name == "root" || name == "0") {
+			return in, errors.New("commands in hardened workloads cannot run as root")
+		}
+	}
+	in.Umask = strings.TrimSpace(in.Umask)
+	if in.Umask != "" {
+		if !umaskRE.MatchString(in.Umask) {
+			return in, errors.New("umask must be an octal mask such as 022 or 0027")
+		}
+		in.Umask = "0" + strings.TrimPrefix(in.Umask, "0")
+		for len(in.Umask) < 4 {
+			in.Umask = "0" + in.Umask
+		}
+	}
 	in.IdempotencyKey = strings.TrimSpace(in.IdempotencyKey)
 	if len(in.IdempotencyKey) > 256 {
 		return in, errors.New("idempotency_key exceeds 256 bytes")
@@ -216,7 +244,8 @@ func (a *App) startExecution(callCtx context.Context, app *sdk.AppCtx, workload 
 		Env: in.Env, EnvKeys: envKeys(in.Env), TimeoutSeconds: in.TimeoutSeconds,
 		SessionKey:      in.SessionKey,
 		StatefulCommand: in.ShellCommand != "",
-		Status:          executionQueued, IdempotencyKey: in.IdempotencyKey,
+		User:            in.User, Umask: in.Umask,
+		Status: executionQueued, IdempotencyKey: in.IdempotencyKey,
 		RuntimeContainerName: workload.ContainerName,
 	}
 	created, duplicate, err := insertExecution(app.AppDB(), execution)
@@ -286,7 +315,8 @@ func (a *App) launchExecution(app *sdk.AppCtx, execution *Execution, workload *W
 			return err
 		},
 		Env: env, Argv: execution.Argv,
-		WorkingDirectory: execution.WorkingDirectory, User: workload.User,
+		WorkingDirectory: execution.WorkingDirectory, User: effectiveExecutionUser(execution, workload),
+		Umask: execution.Umask, ControlUser: workload.User,
 		SessionKey:      execution.SessionKey,
 		StatefulCommand: execution.StatefulCommand, MaxOutputBytes: configInt(app, "max_execution_output_bytes", 1048576),
 	})
@@ -613,12 +643,12 @@ func insertExecution(db *sql.DB, execution *Execution) (*Execution, bool, error)
 	_, err := db.Exec(`INSERT INTO containers_executions (
 		id, workload_id, project_id, owner_app_install_id, owner_app_name,
 		argv_json, working_directory, env_json, timeout_s, session_key, stateful_command, status,
-		runtime_container_name, idempotency_key, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		runtime_container_name, idempotency_key, exec_user, exec_umask, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		execution.ID, execution.WorkloadID, execution.ProjectID, execution.OwnerAppInstallID,
 		execution.OwnerAppName, string(argvJSON), execution.WorkingDirectory, string(envJSON),
 		execution.TimeoutSeconds, execution.SessionKey, execution.StatefulCommand, execution.Status, execution.RuntimeContainerName,
-		execution.IdempotencyKey, now, now)
+		execution.IdempotencyKey, execution.User, execution.Umask, now, now)
 	if err != nil {
 		if execution.IdempotencyKey != "" && strings.Contains(strings.ToLower(err.Error()), "unique") {
 			existing, getErr := getExecutionByIdempotency(db, execution.OwnerAppInstallID, execution.ProjectID, execution.IdempotencyKey)
@@ -633,7 +663,7 @@ func insertExecution(db *sql.DB, execution *Execution) (*Execution, bool, error)
 const executionColumns = `id, workload_id, project_id, owner_app_install_id, owner_app_name,
 	argv_json, working_directory, env_json, timeout_s, session_key, stateful_command, status, exit_code,
 	error_code, error, runtime_container_id, runtime_container_name,
-	output_bytes, output_truncated, idempotency_key,
+	output_bytes, output_truncated, idempotency_key, exec_user, exec_umask,
 	created_at, COALESCE(started_at,''), COALESCE(finished_at,''), updated_at`
 
 func scanExecution(scanner interface{ Scan(...any) error }) (*Execution, error) {
@@ -647,7 +677,7 @@ func scanExecution(scanner interface{ Scan(...any) error }) (*Execution, error) 
 		&argvJSON, &execution.WorkingDirectory, &envJSON, &execution.TimeoutSeconds,
 		&execution.SessionKey, &execution.StatefulCommand, &execution.Status, &exitCode, &execution.ErrorCode, &execution.Error,
 		&execution.RuntimeContainerID, &execution.RuntimeContainerName,
-		&execution.OutputBytes, &truncated, &execution.IdempotencyKey,
+		&execution.OutputBytes, &truncated, &execution.IdempotencyKey, &execution.User, &execution.Umask,
 		&execution.CreatedAt, &execution.StartedAt, &execution.FinishedAt, &execution.UpdatedAt,
 	)
 	if err != nil {

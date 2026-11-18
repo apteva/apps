@@ -124,19 +124,24 @@ func (a *App) recoverShellSessions(ctx context.Context, app *sdk.AppCtx) error {
 			defer func() { <-sem }()
 			c, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			raw, err := docker(c, "exec", name, "sh", "-c", `for d in /tmp/.apteva-sessions/*; do [ ! -d "$d" ] || printf '%s\n' "$d"; done`)
+			// Sessions may belong to different users; clean each as its owner uid.
+			raw, err := docker(c, "exec", name, "sh", "-c", `for d in /tmp/.apteva-sessions/*; do [ ! -d "$d" ] || printf '%s %s\n' "$(stat -c %u "$d" 2>/dev/null)" "$d"; done`)
 			if dockerExecUnavailable(err) {
 				return
 			}
 			if err == nil {
-				for _, dir := range strings.Fields(raw) {
-					if !strings.HasPrefix(dir, "/tmp/.apteva-sessions/") || strings.Contains(strings.TrimPrefix(dir, "/tmp/.apteva-sessions/"), "/") {
+				for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+					uid, dir, ok := strings.Cut(strings.TrimSpace(line), " ")
+					if !ok || !strings.HasPrefix(dir, "/tmp/.apteva-sessions/") || strings.Contains(strings.TrimPrefix(dir, "/tmp/.apteva-sessions/"), "/") {
 						continue
 					}
-					if err = containerTreeKill(c, name, dir); err != nil {
+					if strings.Trim(uid, "0123456789") != "" {
+						uid = ""
+					}
+					if err = containerTreeKill(c, name, dir, uid); err != nil {
 						break
 					}
-					if _, err = docker(c, "exec", name, "rm", "-rf", dir); err != nil {
+					if _, err = docker(c, execAs(uid, name, "rm", "-rf", dir)...); err != nil {
 						break
 					}
 				}

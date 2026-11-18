@@ -190,8 +190,8 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 			}
 		}
 		log.Printf("[containers] db insert volume begin workload_id=%s volume=%q mount=%q", w.ID, v.DockerVolumeName, v.MountPath)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path, read_only, shared_from) VALUES (?, ?, ?, ?, ?, ?)`,
-			w.ID, v.Name, v.DockerVolumeName, v.MountPath, boolInt(v.ReadOnly), v.SharedFrom); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path, read_only, shared_from, volume_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			w.ID, v.Name, v.DockerVolumeName, v.MountPath, boolInt(v.ReadOnly), v.SharedFrom, v.VolumeID); err != nil {
 			log.Printf("[containers] db insert volume error workload_id=%s err=%q", w.ID, err.Error())
 			return err
 		}
@@ -430,7 +430,7 @@ func hydrateWorkloads(db *sql.DB, workloads []*Workload) error {
 	if err := portRows.Close(); err != nil {
 		return err
 	}
-	volumeRows, err := db.Query(`SELECT workload_id, name, docker_volume_name, mount_path, size_bytes, read_only, shared_from FROM containers_volumes WHERE workload_id IN (`+strings.Join(marks, ",")+`) ORDER BY id`, ids...)
+	volumeRows, err := db.Query(`SELECT workload_id, name, docker_volume_name, mount_path, size_bytes, read_only, shared_from, volume_id FROM containers_volumes WHERE workload_id IN (`+strings.Join(marks, ",")+`) ORDER BY id`, ids...)
 	if err != nil {
 		return err
 	}
@@ -438,7 +438,7 @@ func hydrateWorkloads(db *sql.DB, workloads []*Workload) error {
 		var workloadID string
 		var v VolumeSpec
 		var readOnly int
-		if err := volumeRows.Scan(&workloadID, &v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes, &readOnly, &v.SharedFrom); err != nil {
+		if err := volumeRows.Scan(&workloadID, &v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes, &readOnly, &v.SharedFrom, &v.VolumeID); err != nil {
 			_ = volumeRows.Close()
 			return err
 		}
@@ -474,7 +474,7 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 	if err := portRows.Close(); err != nil {
 		return err
 	}
-	volRows, err := db.Query(`SELECT name, docker_volume_name, mount_path, size_bytes, read_only, shared_from FROM containers_volumes WHERE workload_id=? ORDER BY id`, w.ID)
+	volRows, err := db.Query(`SELECT name, docker_volume_name, mount_path, size_bytes, read_only, shared_from, volume_id FROM containers_volumes WHERE workload_id=? ORDER BY id`, w.ID)
 	if err != nil {
 		return err
 	}
@@ -482,7 +482,7 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 	for volRows.Next() {
 		var v VolumeSpec
 		var readOnly int
-		if err := volRows.Scan(&v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes, &readOnly, &v.SharedFrom); err != nil {
+		if err := volRows.Scan(&v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes, &readOnly, &v.SharedFrom, &v.VolumeID); err != nil {
 			return err
 		}
 		v.ReadOnly = readOnly != 0
