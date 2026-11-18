@@ -138,7 +138,7 @@ func TestNativeVCS_BranchTagRestoreAndExactExport(t *testing.T) {
 	if _, err := n.checkpoint(repo, "Revert", "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := n.switchBranch(repo, "feature"); err != nil {
+	if _, err := n.switchBranch(repo, "feature"); err != nil {
 		t.Fatal(err)
 	}
 	status, err := n.status(repo)

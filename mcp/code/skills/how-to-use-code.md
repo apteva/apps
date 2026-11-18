@@ -177,6 +177,20 @@ several agents share a repository, pass the head you last saw as
 `expected_head` to `repos_checkpoint`; a "native ref moved" error means someone
 else checkpointed first, so review their change before checkpointing again.
 
+Branches and merging are native too. `repos_branch` lists, creates, switches,
+deletes and compares branches; switching with unsaved changes stashes them
+for that branch and restores them when you come back. To combine work, switch
+to the target branch and call `repos_merge` with `action=start` and `source`
+(a branch, tag or revision). `mode` can be `squash`, `cherry_pick` or
+`revert` instead of a normal merge. If it returns `conflicts`, each conflict
+includes the base, ours and theirs text. Settle each path with
+`action=resolve` and a `choice` (`ours`, `theirs`, `base`, `delete`, or
+`working` after editing the file yourself) or with the merged `content`. Then
+call `action=continue` to record the merge, or `action=abort` to give up.
+Checkpoints are refused until the merge is continued or aborted. Use
+`repos_diff` with `lines=true` to see patches, and `repos_history` with
+`path` (and `lines=true` for blame) to see who changed a file.
+
 External Git remains optional. The `repos_git_*` tools connect, fetch, commit,
 pull and push provider history; they are separate from native checkpoints. Do
 not infer Git support from the word “repository”: use `repos_git_status` and

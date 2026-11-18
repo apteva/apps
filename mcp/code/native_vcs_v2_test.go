@@ -630,12 +630,12 @@ func TestNativeV2_UndoOtherBranchLeavesWorkingTree(t *testing.T) {
 	if err := n.createBranch(repo, "feature", a); err != nil {
 		t.Fatal(err)
 	}
-	if err := n.switchBranch(repo, "feature"); err != nil {
+	if _, err := n.switchBranch(repo, "feature"); err != nil {
 		t.Fatal(err)
 	}
 	writeOld(t, store, repo, "f.txt", "feature\n")
 	f := mustCheckpoint(t, n, repo, "feature work")
-	if err := n.switchBranch(repo, "main"); err != nil {
+	if _, err := n.switchBranch(repo, "main"); err != nil {
 		t.Fatal(err)
 	}
 	writeOld(t, store, repo, "f.txt", "main unsaved\n")

@@ -239,6 +239,13 @@ func (s *autoSyncSupervisor) tick(ctx *sdk.AppCtx, repo *Repo, now time.Time, fo
 	if state.Status == "needs_attention" && !force {
 		return state, nil
 	}
+	if s.native != nil && s.native.mergeInProgress(repo) {
+		// Never push a half-merged working tree; resume after continue/abort.
+		if force {
+			return nil, errNativeMergeInProgress
+		}
+		return state, nil
+	}
 	work, gd, err := s.git.paths(repo)
 	if err != nil {
 		return s.attention(ctx, repo, state, err)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.15.0
+version: 0.16.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,14 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.16.0 adds native merging. repos_merge merges, squashes, cherry-picks or
+  reverts into the checked-out branch with line-level three-way merges;
+  conflicts come back as data (base, ours, theirs) and are settled with
+  resolve, continue or abort. repos_branch lists, creates, switches, deletes
+  and compares branches, and switching auto-stashes unsaved changes for the
+  branch you leave. repos_diff takes branch or tag names and returns unified
+  patches with lines=true; repos_history filters by path and gives blame with
+  lines=true.
   v0.15.0 moves native version control to storage format 2: checkpoints only
   reread files whose size or timestamp changed, revisions share unchanged
   folder trees, every branch move is logged, and repos_undo lists those moves
@@ -256,6 +264,10 @@ provides:
       description: List native Code tags.
     - name: repos_restore
       description: Restore selected paths from a native Code revision.
+    - name: repos_branch
+      description: List, create, switch (with auto-stash), delete or compare native branches.
+    - name: repos_merge
+      description: Merge, squash, cherry-pick or revert native history, with structured conflicts to resolve, continue or abort.
     - name: repos_undo
       description: List a native branch's recent moves, or move the branch back to a revision from that list.
     - name: repos_export_ref
@@ -381,7 +393,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.15.0
+    ref: code/v0.16.0
     entry: mcp/code
   port: 8080
   health_check: /health

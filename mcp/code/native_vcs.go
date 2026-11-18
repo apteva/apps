@@ -51,7 +51,10 @@ const (
 	nativeRacyWindow = 2 * time.Second
 )
 
-var errNativeRefMoved = errors.New("native ref moved")
+var (
+	errNativeRefMoved        = errors.New("native ref moved")
+	errNativeMergeInProgress = errors.New("a native merge is in progress; resolve and continue it, or abort it, first (repos_merge)")
+)
 
 type nativeVCS struct {
 	root  string
@@ -731,6 +734,7 @@ type nativeCommit struct {
 	ExpectedHead string
 	Action       string
 	ExtraParents []string
+	InMerge      bool // only repos_merge may commit while a merge is in progress
 }
 
 func (n *nativeVCS) checkpointLocked(_ context.Context, repo *Repo, message, actor string, allowEmpty bool) (*nativeRevision, error) {
@@ -740,6 +744,9 @@ func (n *nativeVCS) checkpointLocked(_ context.Context, repo *Repo, message, act
 func (n *nativeVCS) commitLocked(repo *Repo, opts nativeCommit) (*nativeRevision, error) {
 	if err := n.ensureDirs(repo); err != nil {
 		return nil, err
+	}
+	if !opts.InMerge && n.mergeInProgress(repo) {
+		return nil, errNativeMergeInProgress
 	}
 	branch, err := n.currentBranch(repo)
 	if err != nil {
@@ -763,18 +770,8 @@ func (n *nativeVCS) commitLocked(repo *Repo, opts nativeCommit) (*nativeRevision
 		}
 	}
 	parents := append(nonEmpty(parent), opts.ExtraParents...)
-	now := n.timestamp()
-	canonical := struct {
-		Tree      string   `json:"tree"`
-		Parents   []string `json:"parents,omitempty"`
-		Message   string   `json:"message"`
-		Actor     string   `json:"actor,omitempty"`
-		CreatedAt string   `json:"created_at"`
-	}{snap.Tree, parents, strings.TrimSpace(opts.Message), strings.TrimSpace(opts.Actor), now}
-	seed, _ := json.Marshal(canonical)
-	rev := &nativeRevision{ID: hashBytes(seed), Tree: snap.Tree, Root: snap.Root, Parents: parents, Message: canonical.Message, Actor: canonical.Actor, CreatedAt: now}
-	body, _ := json.Marshal(rev)
-	if err := atomicWrite(filepath.Join(n.revisionsDir(repo), rev.ID+".json"), body, 0o600); err != nil {
+	rev, err := n.writeRevisionLocked(repo, snap, parents, opts.Message, opts.Actor)
+	if err != nil {
 		return nil, err
 	}
 	action := opts.Action
@@ -783,6 +780,26 @@ func (n *nativeVCS) commitLocked(repo *Repo, opts nativeCommit) (*nativeRevision
 	}
 	entry := nativeRefLogEntry{Actor: rev.Actor, Action: action, Message: rev.Message}
 	if err := n.moveRefLocked(repo, branch, false, true, parent, rev.ID, entry); err != nil {
+		return nil, err
+	}
+	return rev, nil
+}
+
+// writeRevisionLocked stores a revision object for a persisted snapshot
+// without moving any ref.
+func (n *nativeVCS) writeRevisionLocked(repo *Repo, snap *nativeSnapshot, parents []string, message, actor string) (*nativeRevision, error) {
+	now := n.timestamp()
+	canonical := struct {
+		Tree      string   `json:"tree"`
+		Parents   []string `json:"parents,omitempty"`
+		Message   string   `json:"message"`
+		Actor     string   `json:"actor,omitempty"`
+		CreatedAt string   `json:"created_at"`
+	}{snap.Tree, parents, strings.TrimSpace(message), strings.TrimSpace(actor), now}
+	seed, _ := json.Marshal(canonical)
+	rev := &nativeRevision{ID: hashBytes(seed), Tree: snap.Tree, Root: snap.Root, Parents: parents, Message: canonical.Message, Actor: canonical.Actor, CreatedAt: now}
+	body, _ := json.Marshal(rev)
+	if err := atomicWrite(filepath.Join(n.revisionsDir(repo), rev.ID+".json"), body, 0o600); err != nil {
 		return nil, err
 	}
 	return rev, nil
@@ -917,28 +934,19 @@ func (n *nativeVCS) branches(repo *Repo) (map[string]string, error) {
 	return n.listRefs(repo, false)
 }
 
-func (n *nativeVCS) switchBranch(repo *Repo, name string) error {
+// switchBranch checks out another branch. Changes that are not in a revision
+// travel with the branch they were made on: they are saved as an auto-stash
+// revision for the branch being left and put back when that branch is checked
+// out again (see native_merge.go).
+func (n *nativeVCS) switchBranch(repo *Repo, name string) (*nativeSwitchResult, error) {
 	if err := n.ensureRepo(repo); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := normaliseRefName(name); err != nil {
-		return err
+		return nil, err
 	}
 	defer n.lock(repo)()
-	if !fileExists(n.refPath(repo, name, false)) {
-		return errors.New("branch not found")
-	}
-	status, err := n.statusLocked(repo)
-	if err != nil {
-		return err
-	}
-	if status.Dirty {
-		return errors.New("working tree must be clean before switching branches")
-	}
-	if err := n.restoreRevisionLocked(repo, n.readRef(repo, name, false), nil); err != nil {
-		return err
-	}
-	return atomicWrite(n.headPath(repo), []byte(name+"\n"), 0o600)
+	return n.switchBranchLocked(repo, name, "")
 }
 
 func normaliseRefName(name string) (string, error) {
@@ -995,6 +1003,9 @@ func (n *nativeVCS) restore(repo *Repo, revision string, only []string, workingT
 		return nil, err
 	}
 	defer n.lock(repo)()
+	if !workingTreeOnly && n.mergeInProgress(repo) {
+		return nil, errNativeMergeInProgress
+	}
 	if err := n.restoreRevisionLocked(repo, revision, only); err != nil {
 		return nil, err
 	}
@@ -1013,6 +1024,13 @@ func (n *nativeVCS) restoreRevisionLocked(repo *Repo, revision string, only []st
 	if err != nil {
 		return err
 	}
+	return n.applyEntriesLocked(repo, target, only)
+}
+
+// applyEntriesLocked makes the working tree match target (for the selected
+// paths, or every path when only is empty). Every target blob must already be
+// stored.
+func (n *nativeVCS) applyEntriesLocked(repo *Repo, target map[string]nativeEntry, only []string) error {
 	current, err := n.snapshotLocked(repo, false)
 	if err != nil {
 		return err
@@ -1117,6 +1135,9 @@ func (n *nativeVCS) undo(repo *Repo, branch, revision, actor string) (string, *n
 	}
 	revision = strings.TrimSpace(revision)
 	defer n.lock(repo)()
+	if n.mergeInProgress(repo) {
+		return "", nil, errNativeMergeInProgress
+	}
 	branch, err := n.resolveBranchLocked(repo, branch)
 	if err != nil {
 		return "", nil, err
@@ -1380,6 +1401,13 @@ func (n *nativeVCS) gc(repo *Repo, grace time.Duration) (*nativeGCResult, error)
 				roots[e.Old], roots[e.New] = true, true
 			}
 		}
+	}
+	extra, err := n.extraRootsLocked(repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range extra {
+		roots[id] = true
 	}
 	delete(roots, "")
 	if heads == 0 {

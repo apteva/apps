@@ -27,6 +27,7 @@ apteva test ./scenarios/01-create-from-template.yaml -v
 | `06-workspace-round-trip.yaml` | Real Containers + Workspaces execution, revision preview, exact-digest apply, and source verification |
 | `10-native-html-preview.yaml` | Blank native repo, one-file HTML editing and live workspace preview, with no Git mutations or checkpoint; verifies saved source and preview state |
 | `11-native-undo.yaml` | Two named native revisions, then `repos_undo` moves the branch back (no revert revision); verifies file, clean status, history and the branch-move log |
+| `12-native-merge.yaml` | Two branches change the same line; `repos_merge` start → resolve → continue; verifies merged file, clean main, no merge in progress, two-parent revision |
 
 ## Adding a scenario
 
@@ -72,3 +73,17 @@ GOWORK=off OPENCODE_GO_API_KEY=... apteva test --provider opencode-go --model ki
 Validated on 2026-11-18 on a clean spawned server: all 15 assertions passed in
 9 iterations. `beam-free` (the OpenCode Go default) currently rejects Core's
 `search_tools` schema, and `kimi-k2.6` is deprecated upstream.
+
+## Native merge regression
+
+`12-native-merge.yaml` has an agent change the same line on two native
+branches, merge with `repos_merge`, keep the feature side of the conflicting
+line, and record the merge. It verifies the exact merged file, the feature
+file, a clean `main`, no merge in progress, and a two-parent head revision.
+
+```bash
+GOWORK=off OPENCODE_GO_API_KEY=... apteva test --provider opencode-go --model kimi-k2.7-code scenarios/12-native-merge.yaml
+```
+
+Validated on 2026-11-18 on a clean spawned server: all 18 checks passed in 15
+iterations. The runner takes one scenario file per run.

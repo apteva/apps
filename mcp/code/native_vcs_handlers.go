@@ -54,7 +54,7 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			body.Message = "Checkpoint"
 		}
 		value, err := n.checkpointExpect(repo, body.Message, body.Actor, body.ExpectedHead)
-		if errors.Is(err, errNativeRefMoved) {
+		if errors.Is(err, errNativeRefMoved) || errors.Is(err, errNativeMergeInProgress) {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -68,13 +68,122 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			httpErr(w, http.StatusMethodNotAllowed, "GET")
 			return
 		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		values, err := n.history(repo, limit)
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		var values []nativeRevision
+		if path := q.Get("path"); path != "" {
+			_, values, err = n.pathHistory(repo, q.Get("ref"), path, limit)
+		} else {
+			values, err = n.historyRef(repo, q.Get("ref"), limit)
+		}
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		httpJSON(w, map[string]any{"revisions": values, "count": len(values)})
+	case "blame":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		head, lines, truncated, err := n.blame(repo, r.URL.Query().Get("ref"), r.URL.Query().Get("path"))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"revision": head, "lines": lines, "count": len(lines), "truncated": truncated})
+	case "diff":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		q := r.URL.Query()
+		from, to, files, err := n.lineDiff(repo, q.Get("from"), q.Get("to"), q["path"])
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"from_revision": from, "to_revision": to, "files": files, "count": len(files)})
+	case "compare":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		value, err := n.compareRefs(repo, r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, value)
+	case "branches/delete":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Name  string `json:"name"`
+			Force bool   `json:"force"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		head, err := n.deleteBranch(repo, body.Name, body.Force, httpActor(r))
+		if err != nil {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"deleted": body.Name, "head": head})
+	case "merge":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		value, err := n.mergeStatus(repo)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, value)
+	case "merge/start", "merge/resolve", "merge/continue", "merge/abort":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Source  string  `json:"source"`
+			Mode    string  `json:"mode"`
+			Message string  `json:"message"`
+			Markers bool    `json:"markers"`
+			NoFF    bool    `json:"no_ff"`
+			Path    string  `json:"path"`
+			Choice  string  `json:"choice"`
+			Content *string `json:"content"`
+		}
+		if r.ContentLength != 0 && json.NewDecoder(r.Body).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		var value *nativeMergeResult
+		switch action {
+		case "merge/start":
+			value, err = n.mergeStart(repo, nativeMergeOptions{Source: body.Source, Mode: body.Mode, Message: body.Message, Actor: httpActor(r), Markers: body.Markers, NoFF: body.NoFF})
+		case "merge/resolve":
+			value, err = n.mergeResolve(repo, body.Path, body.Choice, body.Content)
+		case "merge/continue":
+			value, err = n.mergeContinue(repo, body.Message, httpActor(r))
+		default:
+			value, err = n.mergeAbort(repo)
+		}
+		if errors.Is(err, errNativeMergeInProgress) || errors.Is(err, errNativeRefMoved) {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, value)
 	case "branches":
 		if r.Method != http.MethodGet {
 			httpErr(w, http.StatusMethodNotAllowed, "GET")
@@ -116,12 +225,13 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		if err := n.switchBranch(repo, body.Name); err != nil {
+		result, err := n.switchBranchActor(repo, body.Name, httpActor(r))
+		if err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
 		}
 		value, _ := n.status(repo)
-		httpJSON(w, value)
+		httpJSON(w, map[string]any{"native": value.Native, "branch": value.Branch, "head": value.Head, "dirty": value.Dirty, "revision_count": value.Revision, "switch": result})
 	case "tags":
 		if r.Method != http.MethodGet {
 			httpErr(w, http.StatusMethodNotAllowed, "GET")

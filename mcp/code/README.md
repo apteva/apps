@@ -1,5 +1,16 @@
 # Apteva Code
 
+## v0.16.0 — native merging
+
+`repos_merge` merges, squashes, cherry-picks or reverts into the checked-out
+branch with line-level three-way merges. Conflicts come back as data (base,
+ours, theirs) and are settled with `resolve`, then `continue` or `abort`.
+`repos_branch` lists, creates, switches, deletes and compares branches, and
+switching auto-stashes unsaved changes for the branch you leave. `repos_diff`
+accepts branch and tag names and returns unified patches with `lines=true`.
+`repos_history` filters by `path` and gives blame with `lines=true`. Details
+in RELEASE-NOTES.md.
+
 ## v0.15.0 — native storage format 2
 
 Checkpoints only reread files whose size or timestamp changed, revisions share

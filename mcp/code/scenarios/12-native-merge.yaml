@@ -1,0 +1,112 @@
+name: native-merge
+description: |
+  A real agent works on two native branches that both change the same line,
+  merges one into the other with repos_merge, resolves the structured
+  conflict, and records the merge. Verifies the merged file, a clean tree on
+  main, no merge left in progress, and a two-parent merge revision through
+  the running sidecar, with no Git tools and no checkpoint during the merge.
+
+timeout: 300s
+max_iterations: 24
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  cleanup_mcp_calls:
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-native-merge
+        force: true
+
+directive: |
+  Use the Code app. Create a blank repository named "Merge Test" with slug
+  "tier3-native-merge". Write settings.txt with exactly these three lines:
+
+  title=Demo
+  color=blue
+  size=10
+
+  Save a native revision called "Base". Create a native branch called
+  "feature", switch to it, change the color line to color=green, add a file
+  feature.txt containing "feature", and save a revision called "Green".
+
+  Switch back to main. On main change the color line to color=red and the
+  size line to size=12, and save a revision called "Red".
+
+  Now merge feature into main with Code's native merge (not Git). Where both
+  branches changed the same line, keep the feature branch's color; keep
+  everything else from both sides. Finish the merge so it is recorded, then
+  read settings.txt to confirm and stop.
+
+assert:
+  - tool_called_with:
+      tool: repos_create
+      args:
+        slug: tier3-native-merge
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_merge
+      args:
+        slug: tier3-native-merge
+        action: start
+      min_count: 1
+      success: true
+      result_contains: conflicts
+  - tool_called_with:
+      tool: repos_merge
+      args:
+        slug: tier3-native-merge
+        action: resolve
+      min_count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_merge
+      args:
+        slug: tier3-native-merge
+        action: continue
+      min_count: 1
+      success: true
+      result_contains: merged
+  - tool_called_with:
+      tool: code_read_file
+      args:
+        slug: tier3-native-merge
+        path: settings.txt
+      success: true
+  - tool_not_called: repos_git_connect | repos_git_import | repos_git_commit | repos_git_push | repos_git_pull | repos_git_fetch | repos_git_sync_configure | repos_git_sync_now
+  - tool_not_called_with:
+      tool: repos_create | repos_checkpoint | repos_branch | repos_branch_create | repos_branch_switch | repos_merge | code_read_file
+      success: false
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/files/settings.txt?annotated=1
+    expect_field_at: content
+    expect_field_matches: 'color=green'
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/files/settings.txt?annotated=1
+    expect_field_at: content
+    expect_field_matches: 'size=12'
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/files/settings.txt?annotated=1
+    expect_field_at: content
+    expect_field_matches: '^\s*1\ttitle=Demo\n\s*2\tcolor=green\n\s*3\tsize=12\n?$'
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/files/feature.txt?annotated=1
+    expect_field_at: content
+    expect_field_matches: 'feature'
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/version/status
+    expect_field_at: branch
+    expect_field_eq: main
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/version/status
+    expect_field_at: dirty
+    expect_field_eq: false
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/version/merge
+    expect_field_at: status
+    expect_field_eq: none
+  - http: GET /api/apps/code/api/repos/tier3-native-merge/version/history
+    expect_count_at: revisions.0.parents
+    expect_count: 2
+  - iterations_at_most: 24
+
+budget:
+  total_tokens: 600000
+  cost_usd: 1.50
