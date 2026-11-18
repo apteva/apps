@@ -1,0 +1,143 @@
+schema: apteva-app/v1
+
+name: credits
+display_name: Credits
+version: 0.1.0
+description: |
+  Prepaid credit wallets. One wallet per subject and unit (usd in
+  micro-units, minutes, points, tokens). Credit arrives in lots (purchase,
+  promo, reward, adjustment, transfer) with their own expiry and spend
+  priority; operations reserve a hold, then commit or release it; every
+  change is an append-only ledger entry. Optional spending caps per wallet
+  or per scope. Paid top-ups go through billing, and a purchase lot exists
+  only once billing reports the invoice paid.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/credits
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [credits, wallet, prepaid, balance, usage, billing, saas]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call         # billing: top-up invoices, payment sessions, off-session charges
+  apps:
+    - name: billing
+      version: ">=0.13.0"
+      reason: paid top-ups (one-off invoices, payment sessions, off-session charges) and refunds
+      optional: true             # grants, holds and caps work without billing
+      events:
+        - invoice.paid
+        - invoice.refunded
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: credits_wallet_ensure
+      description: Create a wallet for a subject and unit if missing, and return it.
+    - name: credits_wallet_get
+      description: Read a wallet's available and held balance, caps and auto-reload settings.
+    - name: credits_wallet_update
+      description: Change low_threshold, billing customer, metadata or auto-reload.
+    - name: credits_wallets_list
+      description: List wallets.
+    - name: credits_wallet_freeze
+      description: Freeze a wallet so new reserves and transfers out are denied.
+    - name: credits_wallet_unfreeze
+      description: Unfreeze a wallet.
+    - name: credits_grant
+      description: Add promo, reward or adjustment credit as a lot. Idempotent by source_ref.
+    - name: credits_topup_create
+      description: Start a paid top-up through a billing invoice and payment session.
+    - name: credits_topups_list
+      description: List a wallet's top-ups.
+    - name: credits_reserve
+      description: Hold money for an operation; denied with a reason when balance, cap or status says no.
+    - name: credits_commit
+      description: Spend a hold, fully or partly; overruns take from the balance or record a shortfall.
+    - name: credits_release
+      description: Give a hold back.
+    - name: credits_spend
+      description: Reserve and commit in one call.
+    - name: credits_adjust
+      description: Manual correction with a required reason.
+    - name: credits_transfer
+      description: Move credit between two wallets of the same unit and customer.
+    - name: credits_entries_list
+      description: Paginated ledger for a wallet (the customer statement).
+    - name: credits_holds_list
+      description: List a wallet's holds.
+    - name: credits_lots_list
+      description: List a wallet's lots in spend order.
+    - name: credits_caps_set
+      description: Set a spending ceiling over a day, week, month or lifetime.
+    - name: credits_caps_get
+      description: List caps with current-period usage.
+    - name: credits_shortfalls_list
+      description: Money the ledger could not take, for review.
+    - name: credits_shortfall_resolve
+      description: Mark a shortfall reviewed.
+    - name: credits_reconcile
+      description: Check the ledger invariants.
+    - name: credits_liability_report
+      description: Unspent paid credit at a date.
+  publishes:
+    - name: credits.granted
+      description: A lot was added (promo, reward, adjustment, or a paid purchase).
+      payload: {wallet_id: integer, subject_type: string, subject_id: string, unit: string, lot_id: integer, source: string, source_ref: string, amount: integer, expires_at: string, available: integer}
+    - name: credits.topup.paid
+      description: Billing reported a top-up invoice paid and the purchase lot was created.
+      payload: {topup_id: integer, wallet_id: integer, subject_type: string, subject_id: string, unit: string, amount: integer, price_cents: integer, currency: string, invoice_id: integer, lot_id: integer, kind: string, available: integer}
+    - name: credits.balance.low
+      description: Available balance dropped below the wallet's low_threshold.
+      payload: {wallet_id: integer, subject_type: string, subject_id: string, unit: string, available: integer, held: integer, low_threshold: integer}
+    - name: credits.balance.empty
+      description: Available balance reached zero.
+      payload: {wallet_id: integer, subject_type: string, subject_id: string, unit: string, available: integer, held: integer, low_threshold: integer}
+    - name: credits.balance.recovered
+      description: Available balance is back at or above low_threshold.
+      payload: {wallet_id: integer, subject_type: string, subject_id: string, unit: string, available: integer, held: integer, low_threshold: integer}
+    - name: credits.cap.reached
+      description: A reserve was denied by a spending cap. Once per cap per period.
+      payload: {wallet_id: integer, cap_id: integer, scope: string, window: string, period: string, limit_amount: integer, spent: integer, held: integer}
+    - name: credits.lot.expired
+      description: The unspent part of a lot expired.
+      payload: {wallet_id: integer, lot_id: integer, source: string, amount: integer, unit: string}
+    - name: credits.hold.expired
+      description: A hold passed its expires_at and was released automatically.
+      payload: {hold_id: integer, wallet_id: integer, amount: integer, reference: string}
+    - name: credits.shortfall
+      description: Money the ledger could not take (commit overrun or refund of spent credit), recorded for review.
+      payload: {wallet_id: integer, kind: string, amount: integer, reference: string}
+  skills:
+    - name: how-to-use-credits
+      command: /credits
+      body_file: skills/how-to-use-credits.md
+      description: |
+        Credits' model — wallets, lots, holds, caps, the reserve/commit/
+        release flow, paid top-ups through billing, and the rules that
+        keep balances honest. Triggers on: "credits", "wallet",
+        "prepaid", "balance", "top-up", "hold", "spend".
+      metadata:
+        category: billing
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/credits
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/credits.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
