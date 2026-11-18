@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.7.0
+version: 0.8.0
 description: |
+  v0.8.0 reports Android selection state (checkable, checked, selected, scrollable) in UI source and advertises the selection_state capability on the ADB driver.
   v0.7.0 adds Android password entry through a private stdin pipe and accessibility ACTION_SET_TEXT, with exact screen guards, confirmation and recording exclusion.
   v0.6.0 collects bounded Android UI trees without waiting for animations
   to stop, and verifies focused-field text replacement and clearing by readback.
@@ -98,7 +99,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.7.0
+    ref: mobile/v0.8.0
     entry: mcp/mobile
   port: 8080
   health_check: /health

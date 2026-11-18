@@ -25,6 +25,7 @@ public final class AptevaUiSource {
     attr("package",n.getPackageName());attr("resource-id",n.getViewIdResourceName());attr("class",n.getClassName());
     attr("text",n.isPassword()?"":n.getText());attr("content-desc",n.isPassword()?"":n.getContentDescription());
     attr("clickable",n.isClickable());attr("enabled",n.isEnabled());attr("focused",n.isFocused());attr("password",n.isPassword());attr("visible-to-user",n.isVisibleToUser());
+    attr("checkable",n.isCheckable());attr("checked",n.isChecked());attr("selected",n.isSelected());attr("scrollable",n.isScrollable());
     attr("bounds","["+r.left+","+r.top+"]["+r.right+","+r.bottom+"]");out.append('>');
     for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){node(c,depth+1);c.recycle();}}
     out.append("</node>");

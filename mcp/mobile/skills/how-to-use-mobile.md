@@ -6,6 +6,9 @@
    Use screen mode for visual/native control, structured mode for Chrome/Safari
    element automation through Appium. Keep the returned session_id.
 3. Call `mobile_observe` to see the screenshot. Ask for source=true when useful.
+   On devices with the selection_state capability (Android ADB), source nodes
+   carry checkable/checked/selected/scrollable as "true"/"false"; use them to
+   confirm a radio or checkbox changed and to find scrollable lists.
 4. Call `mobile_action`: navigate to HTTP(S) URLs, tap/swipe using normalized
    0..1 coordinates, type into the focused field, or press home/back/enter.
    Observe again after actions; do not assume the screen stayed unchanged.
