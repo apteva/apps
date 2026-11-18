@@ -14,9 +14,14 @@ import (
 // consumer (Live Link, Deploy, Backup, future Containers) sees this
 // shape via `instance_get` / `instance_list`.
 type Instance struct {
-	Setup                *InstanceSetup `json:"setup,omitempty"`
-	SetupJSON            string         `json:"-"`
-	EnrollmentPeer       string         `json:"enrollment_peer,omitempty"`
+	Setup          *InstanceSetup `json:"setup,omitempty"`
+	SetupJSON      string         `json:"-"`
+	EnrollmentPeer string         `json:"enrollment_peer,omitempty"`
+	// ConnectMode is how Instances reaches the host: direct, vpn or
+	// reverse_tunnel. Connected/LastSeenAt come from the periodic presence check.
+	ConnectMode          string `json:"connect_mode"`
+	Connected            bool   `json:"connected"`
+	LastSeenAt           string `json:"last_seen_at,omitempty"`
 	workContext          context.Context
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -95,7 +100,7 @@ func (i *Instance) stripSecrets() *Instance {
 	c.SSHCredentialRef = ""
 	c.SSHHostKey = ""
 	c.Capabilities = instanceCapabilities(&c)
-	return &c
+	return withLocalPresence(&c)
 }
 
 // ─── Inputs ────────────────────────────────────────────────────────
@@ -104,6 +109,7 @@ type CreateInstanceInput struct {
 	Firewall             *FirewallPolicy
 	OVH                  *OVHOrderOptions
 	Setup                *SetupOptions
+	ConnectMode          string
 	Name                 string
 	Provider             string
 	ProviderConnectionID int64
@@ -181,7 +187,7 @@ const instanceCols = `id, name, provider, provider_connection_id, provider_id, p
 		status, region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
 		tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
 		lifecycle_stage, primary_error, cleanup_error, retain_on_failure, provider_inventory_json, COALESCE(provider_checked_at,''),
-		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,''), create_pending, destroy_options_json, setup_json, enrollment_peer`
+		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,''), create_pending, destroy_options_json, setup_json, enrollment_peer, connect_mode, connected, last_seen_at`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
@@ -190,7 +196,7 @@ func scanInstance(s rowScanner) (*Instance, error) {
 		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
 		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
-		&i.CreatePending, &i.DestroyOptionsJSON, &i.SetupJSON, &i.EnrollmentPeer,
+		&i.CreatePending, &i.DestroyOptionsJSON, &i.SetupJSON, &i.EnrollmentPeer, &i.ConnectMode, &i.Connected, &i.LastSeenAt,
 	); err != nil {
 		return nil, err
 	}
@@ -233,6 +239,9 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	if !in.RetainOnFailureSet {
 		in.RetainOnFailure = true
 	}
+	if in.ConnectMode == "" {
+		in.ConnectMode = "direct"
+	}
 	storageJSON := "{}"
 	if in.Storage.Boot != nil {
 		if encoded, marshalErr := json.Marshal(in.Storage); marshalErr == nil {
@@ -255,12 +264,12 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 		INSERT INTO instances (
 			id, create_pending, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
 				region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
-				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at, setup_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at, setup_json, connect_mode
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Status == "provisioning" && in.ProviderID == "",
 		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
 		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, credentialRef, in.SSHPublicKey, in.SSHHostKey,
-		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(), initialSetupJSON(in.Setup),
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(), initialSetupJSON(in.Setup), in.ConnectMode,
 	)
 	if err != nil {
 		return nil, err
@@ -308,7 +317,7 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "storage_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
 		"lifecycle_stage", "primary_error", "cleanup_error", "retain_on_failure", "provider_inventory_json", "provider_checked_at",
-		"create_pending", "destroy_options_json", "setup_json", "enrollment_peer",
+		"create_pending", "destroy_options_json", "setup_json", "enrollment_peer", "connect_mode",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")

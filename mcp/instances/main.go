@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.17.2
+version: 0.18.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -99,6 +99,21 @@ config_schema:
     type: text
     default: "7200"
     description: "Complete snapshot or restore deadline, from 60 to 21600 seconds. Default 2 hours. Server must use a compatible deadline."
+  - name: reverse_tunnel_host
+    label: Reverse tunnel server address
+    type: text
+    default: ""
+    description: "Public hostname or IP of this server that machines behind a router connect to over SSH (connect=reverse_tunnel). Leave empty to disable reverse tunnels. Instances must run directly on the server (not in a container) with root or passwordless sudo; it creates a forward-only apteva-tunnel account. Env override: APTEVA_INSTANCES_TUNNEL_HOST."
+  - name: reverse_tunnel_ssh_port
+    label: Reverse tunnel server SSH port
+    type: text
+    default: "22"
+    description: "SSH port machines use to reach reverse_tunnel_host. Env override: APTEVA_INSTANCES_TUNNEL_SSH_PORT."
+  - name: reverse_tunnel_ports
+    label: Reverse tunnel port range
+    type: text
+    default: "22000-22999"
+    description: "Loopback ports on this server assigned one per tunnel machine. They are never exposed publicly. Env override: APTEVA_INSTANCES_TUNNEL_PORTS."
 
 provides:
   http_routes:
@@ -138,9 +153,9 @@ provides:
     - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
     - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
     - { name: object_storage_destroy, description: "Permanently delete an object-storage resource with explicit confirmation." }
-    - { name: instance_register,     description: "Register an existing SSH host; optionally configure baseline utilities, Docker, and language tools. Returns an enrollment command; vpn=true reuses the bound VPN app. Args: name, ssh_host (unless vpn), ssh_user, ssh_port?, setup?, vpn?, tags_json?; or id to resume enrollment." }
-    - { name: instance_get,          description: "Fetch one instance by id." }
-    - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
+    - { name: instance_register,     description: "Register an existing Linux (Ubuntu/Debian) or macOS machine; optionally configure baseline utilities, Docker (Linux), and language tools. Returns one enrollment command that detects the OS. Args: name, ssh_user, ssh_host? (direct), ssh_port?, connect? (direct|vpn|reverse_tunnel), platform?, setup?, tags_json?; or id to resume enrollment." }
+    - { name: instance_get,          description: "Fetch one instance by id, including connect_mode, connected and last_seen_at." }
+    - { name: instance_list,         description: "List instances with online status. Args: provider?, status?, connected? (filters)." }
     - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
     - { name: instance_compare_provider, description: "Read provider state and compare it with the tracked server, IP, and volume inventory without making changes." }
     - { name: instance_provider_inventory, description: "Read full provider resource inventory, including Scaleway Instances, Elastic Metal servers, Flexible IPs, and tracked storage." }
@@ -206,6 +221,26 @@ provides:
         old_size: string
         new_size: string
         upgrade_disk: boolean
+    - name: instance.connected
+      description: A registered machine answered the reachability check (about every 45 seconds) after being unreachable.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        connected: boolean
+        last_seen_at: string
+        connect_mode: string
+    - name: instance.disconnected
+      description: A registered machine stopped answering the reachability check.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        connected: boolean
+        last_seen_at: string
+        connect_mode: string
     - name: instance.error
       description: An instance entered an error state.
       payload:
@@ -229,7 +264,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.17.2
+    ref: instances/v0.18.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -314,6 +349,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
+	startPresence(ctx)
 	return startMonitoring(ctx)
 }
 

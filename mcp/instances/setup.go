@@ -54,7 +54,7 @@ func initialSetupJSON(options *SetupOptions) string {
 	return string(data)
 }
 func setupSchema() map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": false, "description": "Optional host setup. Empty object discovers OS and verifies SSH/files/metrics without installing packages. baseline installs common utilities; docker installs and verifies Docker; runtimes installs distribution-provided Node.js, npm, and Go. Installation is owned by Instances and runs through its SSH implementation. Ubuntu/Debian AMD64/ARM64 for package setup.", "properties": map[string]any{
+	return map[string]any{"type": "object", "additionalProperties": false, "description": "Optional host setup. Empty object discovers OS and verifies SSH/files/metrics without installing packages. baseline installs common utilities (macOS: keeps the Mac awake and installs the Command Line Tools); docker installs and verifies Docker (Linux only); runtimes installs Node.js, npm, and Go (Linux: distribution packages; macOS: Homebrew, which needs a non-root administrator account). Installation is owned by Instances and runs through its SSH implementation. Ubuntu/Debian or macOS, AMD64/ARM64.", "properties": map[string]any{
 		"suppress_dynamic_motd": map[string]any{"type": "boolean", "description": "Explicit host-wide Ubuntu option: add pam_motd noupdate for SSH sessions, avoiding dynamic login-message generation while retaining PAM authentication and session protections. Default false."},
 		"baseline":              map[string]any{"type": "boolean"}, "docker": map[string]any{"type": "boolean"}, "runtimes": map[string]any{"type": "boolean"}}}
 }
@@ -186,8 +186,15 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		inst.Setup.Facts = facts
 		inst.Platform = facts.Platform
 		if options.Baseline || options.Docker || options.Runtimes {
-			if facts.Platform != "linux" || (facts.OS != "ubuntu" && facts.OS != "debian") || (facts.Architecture != "amd64" && facts.Architecture != "arm64") {
-				return fmt.Errorf("automatic package setup supports Ubuntu/Debian on AMD64/ARM64; detected %s/%s/%s", facts.Platform, facts.OS, facts.Architecture)
+			supportedArch := facts.Architecture == "amd64" || facts.Architecture == "arm64"
+			switch {
+			case facts.Platform == "macos" && supportedArch:
+				if options.Docker {
+					return errors.New(macOSDockerUnsupported)
+				}
+			case facts.Platform == "linux" && (facts.OS == "ubuntu" || facts.OS == "debian") && supportedArch:
+			default:
+				return fmt.Errorf("automatic package setup supports Ubuntu/Debian and macOS on AMD64/ARM64; detected %s/%s/%s", facts.Platform, facts.OS, facts.Architecture)
 			}
 		}
 		return dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"platform": facts.Platform})
@@ -209,7 +216,12 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		}
 	}
 	if options.Baseline {
-		if err = step("Baseline", func() error { _, e := setupCommand(ctx, inst, baselineSetupScript, 10*time.Minute); return e }); err != nil {
+		script := baselineSetupScript
+		if inst.Setup.Facts.Platform == "macos" {
+			// Command Line Tools download and install can take a while.
+			script = macBaselineSetupScript
+		}
+		if err = step("Baseline", func() error { _, e := setupCommand(ctx, inst, script, 30*time.Minute); return e }); err != nil {
 			return err
 		}
 	}
@@ -235,9 +247,20 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 	}
 	if options.Runtimes {
 		if err = step("Language tools", func() error {
-			output, e := setupCommand(ctx, inst, runtimesSetupScript, 10*time.Minute)
+			script, timeout := runtimesSetupScript, 10*time.Minute
+			if inst.Setup.Facts.Platform == "macos" {
+				script, timeout = macRuntimesSetupScript, 45*time.Minute
+			}
+			output, e := setupCommand(ctx, inst, script, timeout)
 			if e != nil {
 				return e
+			}
+			if inst.Setup.Facts.Platform == "macos" {
+				// A new SSH session must find the tools without help: Homebrew's
+				// directory is not on the PATH of non-login sessions by default.
+				if _, e = setupCommand(ctx, inst, macRuntimesPathCheck, time.Minute); e != nil {
+					return e
+				}
 			}
 			for _, line := range strings.Split(output, "\n") {
 				key, value, ok := strings.Cut(line, "=")
@@ -469,4 +492,58 @@ instance_go_version=$(go version)
 printf 'node=%s\n' "$instance_node_version"
 printf 'npm=%s\n' "$instance_npm_version"
 printf 'go=%s\n' "$instance_go_version"
+`
+
+// macOS baseline: keep the Mac up, install the Command Line Tools (git, make,
+// compilers) unattended and create the data directory Linux hosts also have.
+const macBaselineSetupScript = setupPrivilegeScript + `
+for setting in 'sleep 0' 'disksleep 0' 'autorestart 1' 'womp 1'; do $SUDO pmset -a $setting >/dev/null 2>&1 || true; done
+[ "$(pmset -g | awk '$1=="sleep"{print $2; exit}')" = 0 ] || { echo 'Could not turn off system sleep'; exit 1; }
+if ! xcode-select -p >/dev/null 2>&1; then
+ marker=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+ $SUDO touch "$marker"
+ trap '$SUDO rm -f "$marker"' EXIT
+ label=$(softwareupdate -l 2>/dev/null | sed -n 's/^[* ]*Label: \(Command Line Tools.*\)$/\1/p' | sort -V | tail -n 1)
+ [ -n "$label" ] || { echo 'Software Update did not offer the Command Line Tools'; exit 1; }
+ $SUDO softwareupdate -i "$label" >/dev/null
+ $SUDO rm -f "$marker"
+ trap - EXIT
+fi
+xcode-select -p >/dev/null
+command -v git >/dev/null
+$SUDO install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/apteva-instances
+`
+
+// macOS runtimes come from Homebrew, which must run as an administrator
+// account rather than root. Its directory is added to ~/.zshenv, which zsh
+// reads for every SSH command, so later sessions find node, npm and go.
+const macRuntimesSetupScript = setupPrivilegeScript + `
+[ "$(id -u)" -ne 0 ] || { echo 'Homebrew cannot run as root: register this Mac with a non-root SSH user'; exit 1; }
+find_brew() { for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }; done; return 1; }
+brew_bin=$(find_brew || true)
+if [ -z "$brew_bin" ]; then
+ installer=$(mktemp)
+ trap 'rm -f "$installer"' EXIT
+ curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o "$installer"
+ NONINTERACTIVE=1 /bin/bash "$installer" >/dev/null
+ rm -f "$installer"
+ trap - EXIT
+ brew_bin=$(find_brew) || { echo 'Homebrew installation did not complete'; exit 1; }
+fi
+export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+eval "$("$brew_bin" shellenv)"
+shellenv_line='eval "$('"$brew_bin"' shellenv)"'
+touch "$HOME/.zshenv"
+grep -qxF "$shellenv_line" "$HOME/.zshenv" || printf '%s\n' "$shellenv_line" >> "$HOME/.zshenv"
+instance_packages=""
+command -v node >/dev/null 2>&1 || instance_packages="$instance_packages node"
+command -v go >/dev/null 2>&1 || instance_packages="$instance_packages go"
+[ -z "$instance_packages" ] || "$brew_bin" install --quiet $instance_packages >/dev/null
+printf 'node=%s\n' "$(node --version)"
+printf 'npm=%s\n' "$(npm --version)"
+printf 'go=%s\n' "$(go version)"
+`
+
+const macRuntimesPathCheck = `set -eu
+for tool in node npm go; do command -v "$tool" >/dev/null 2>&1 || { echo "$tool is installed but not on the PATH of new SSH sessions; the SSH account must use zsh"; exit 1; }; done
 `

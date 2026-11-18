@@ -85,6 +85,12 @@ func TestSSHCredentialsUpgradePreservesDataAndRestorableSnapshot(t *testing.T) {
 	if !bytes.Equal(beforePublic, upgradeDatabaseRows(t, db, true)) {
 		t.Fatal("upgrade changed non-credential data")
 	}
+	// Later releases add columns read by dbGetInstance.
+	if later, err := os.ReadFile("migrations/015_connect_modes_and_presence.sql"); err != nil {
+		t.Fatal(err)
+	} else if _, err := db.Exec(string(later)); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []int64{2, 7} {
 		inst, err := dbGetInstance(db, id)
 		if err != nil || inst.SSHPrivateKey != private || inst.SSHPublicKey != public {

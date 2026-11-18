@@ -137,11 +137,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "object_storage_destroy", Description: "Delete a managed object-storage resource. Requires confirm=true. Scaleway buckets must be empty.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolObjectStorageDestroy},
 		{
 			Name:        "instance_register",
-			Description: "Register an existing SSH server. Returns an authorization command and public key. Optional setup prepares baseline utilities, Docker, and language tools before ready. vpn=true reuses the bound VPN app for home connectivity. Resume with id alone to recover the same enrollment. Args: name, ssh_host (unless vpn), ssh_user, ssh_port?, setup?, vpn?, tags_json?; or id.",
+			Description: "Register an existing Linux (Ubuntu/Debian) or macOS machine. Returns one authorization command that detects the OS. connect: direct (default; needs ssh_host), vpn (bound WireGuard VPN app; Linux only), or reverse_tunnel (machine behind a router keeps an SSH tunnel open to this server; needs reverse_tunnel_host configured, no ssh_host; ssh_port is the machine's own SSH port). Optional setup prepares baseline utilities, Docker (Linux), and language tools before ready. Resume with id alone to recover the same enrollment. Args: name, ssh_user, ssh_host?, ssh_port?, connect?, platform? (linux|macos, adjusts instructions), setup?, tags_json?; or id.",
 			InputSchema: schemaObject(map[string]any{
 				"id":        map[string]any{"type": "integer", "description": "Resume enrollment for an existing external registration; returns its existing authorization command without generating a new key."},
 				"setup":     setupSchema(),
-				"vpn":       map[string]any{"type": "boolean", "description": "Use the bound VPN app to create a WireGuard peer and return a home-server enrollment script. Requires an installed, reachable VPN server."},
+				"vpn":       map[string]any{"type": "boolean", "description": "Same as connect=vpn."},
+				"connect":   map[string]any{"type": "string", "enum": []string{"direct", "vpn", "reverse_tunnel"}, "description": "How Instances reaches the machine. direct: ssh_host is reachable from this server. vpn: WireGuard peer from the bound VPN app (Ubuntu/Debian). reverse_tunnel: the machine opens an outbound SSH tunnel to this server, for machines behind a router; Linux or macOS."},
+				"platform":  map[string]any{"type": "string", "enum": []string{"linux", "macos"}, "description": "Optional hint for instructions and early checks; the command detects the OS itself."},
 				"name":      map[string]any{"type": "string"},
 				"ssh_host":  map[string]any{"type": "string"},
 				"ssh_user":  map[string]any{"type": "string"},
@@ -152,16 +154,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "instance_get",
-			Description: "Fetch one instance by id (0 for local).",
+			Description: "Fetch one instance by id (0 for local). Includes connect_mode (direct, vpn, reverse_tunnel, local), connected and last_seen_at.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolGet,
 		},
 		{
 			Name:        "instance_list",
-			Description: "List instances. Optional filters: provider, status.",
+			Description: "List instances with connect_mode, connected and last_seen_at. Optional filters: provider, status, connected.",
 			InputSchema: schemaObject(map[string]any{
-				"provider": map[string]any{"type": "string"},
-				"status":   map[string]any{"type": "string"},
+				"provider":  map[string]any{"type": "string"},
+				"status":    map[string]any{"type": "string"},
+				"connected": map[string]any{"type": "boolean", "description": "true: only machines that answered the latest reachability check (about every 45 s); false: only unreachable ones."},
 			}, nil),
 			Handler: a.toolList,
 		},
@@ -386,6 +389,9 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	stripped := make([]*Instance, 0, len(rows))
 	for _, r := range rows {
 		stripped = append(stripped, r.stripSecrets())
+	}
+	if stripped, err = filterConnected(stripped, args["connected"]); err != nil {
+		return nil, err
 	}
 	return map[string]any{"instances": stripped, "count": len(stripped)}, nil
 }

@@ -215,6 +215,25 @@ func loadSSHCredential(db *sql.DB, owner, ref string) (string, error) {
 	return v.get(owner, ref)
 }
 
+// Deletes one vault entry. A missing entry is already removed.
+func removeSSHCredential(db *sql.DB, ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if !validSSHCredentialRef(ref) {
+		return errors.New("invalid SSH credential reference")
+	}
+	v, err := sshVault(db)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(v.dir, strings.TrimPrefix(ref, sshCredentialPrefix)))
+	if err != nil && !os.IsNotExist(err) {
+		return errors.New("remove encrypted SSH credential")
+	}
+	return nil
+}
+
 func instanceCredentialOwner(id int64) string { return fmt.Sprintf("instance:%d", id) }
 func orderCredentialOwner(id string) string   { return "ovh-order:" + id }
 

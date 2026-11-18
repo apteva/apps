@@ -3,7 +3,7 @@ import {Window} from "happy-dom";
 import React, {act} from "react";
 import type {Root} from "react-dom/client";
 let createRoot:typeof import("react-dom/client").createRoot;
-import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection} from "./InstancesPanel";
+import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection, presenceText} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
 const win = new Window({url:"http://localhost"});
@@ -283,4 +283,39 @@ test("OVH cancellation sends its email token only in a POST and clears it",async
  const button=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Confirm OVH cancellation')!;
  await act(async()=>button.click());
  expect(sent).toEqual({id:9,action:'confirm_termination',token:'email-secret'});expect(url).not.toContain('email-secret');expect(field.value).toBe('');expect(container.textContent).toContain('OVH service still exists');
+});
+
+test("a Mac behind a router registers with a reverse tunnel and no Docker", async () => {
+ let sent:any;
+ globalThis.fetch=(async(_input:any,init:any)=>{sent=JSON.parse(init.body);return response({instance:{id:12,name:'Studio',provider:'external',status:'provisioning',platform:'macos',connect_mode:'reverse_tunnel',monthly_cost_cents:0},authorization:{command:'sudo sh tunnel',public_key:'ssh-ed25519 k'}});}) as unknown as typeof fetch;
+ await render(<HostOnboardingDialog withParams={params} onClose={()=>{}} onChange={()=>{}} />);
+ const setValue=async(el:HTMLInputElement|HTMLSelectElement,value:string)=>{await act(async()=>{const proto=el instanceof win.HTMLSelectElement?win.HTMLSelectElement.prototype:win.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value')!.set!.call(el,value);el.dispatchEvent(new win.Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}) as any);});};
+ const [machine,connect]=Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+ await setValue(container.querySelector('input')!,'Studio');
+ await setValue(machine,'macos');
+ const vpnOption=Array.from(connect.options).find(o=>o.value==='vpn')!;
+ expect(vpnOption.disabled).toBe(true);
+ await setValue(connect,'reverse_tunnel');
+ expect(container.textContent).toContain('behind a router');
+ expect(container.textContent).not.toContain('SSH address');
+ expect(container.textContent).not.toContain('Docker engine');
+ expect(container.textContent).toContain('Machine SSH port');
+ const register=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Register server')!;
+ expect(register.disabled).toBe(false);
+ await act(async()=>{register.click();});
+ expect(sent).toMatchObject({name:'Studio',connect:'reverse_tunnel',platform:'macos',ssh_port:22,setup:{docker:false}});
+ expect(sent.ssh_host).toBeUndefined();
+ expect(container.textContent).toContain('tunnel key');
+ expect(container.textContent).toContain('Remote Login');
+});
+
+test("machine list shows online status", async () => {
+ const now=Date.parse('2026-11-17T12:00:00Z');
+ expect(presenceText({connected:true},now)).toBe('online');
+ expect(presenceText({connected:false},now)).toBe('never reached');
+ expect(presenceText({connected:false,last_seen_at:'2026-11-17T11:55:00Z'},now)).toBe('offline · seen 5m ago');
+ globalThis.fetch=(async()=>response({metrics:null})) as unknown as typeof fetch;
+ await render(<InstanceCard inst={{id:3,name:'Mac',provider:'external',status:'ready',connect_mode:'reverse_tunnel',ssh_host:'127.0.0.1',ssh_port:22004,connected:true,monthly_cost_cents:0} as any} withParams={params} busy={false} onUpgrade={()=>{}} onVolumes={()=>{}} onDestroy={()=>{}}/>);
+ expect(container.textContent).toContain('online');
+ expect(container.textContent).toContain('reverse tunnel · port 22004');
 });

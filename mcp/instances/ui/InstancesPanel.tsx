@@ -21,6 +21,9 @@ interface NativePanelProps {
 interface SetupOptions { baseline: boolean; docker: boolean; runtimes: boolean; }
 interface Instance {
   enrollment_peer?: string;
+  connect_mode?: "direct" | "vpn" | "reverse_tunnel" | "local";
+  connected?: boolean;
+  last_seen_at?: string;
   setup?: { requested: SetupOptions; status: string; stage: string; completed: string[]; error?: string; facts?: { platform: string; architecture: string; os: string }; verified?: { docker: boolean; runtimes: boolean; metrics: boolean } };
   provider_connection_id?: number;
   id: number;
@@ -147,6 +150,21 @@ interface MetricsWire {
 }
 
 const API = "/api/apps/instances/api";
+
+export function presenceText(inst: Pick<Instance, "connected" | "last_seen_at">, now = Date.now()): string {
+  if (inst.connected) return "online";
+  if (!inst.last_seen_at) return "never reached";
+  const seconds = Math.max(0, Math.floor((now - Date.parse(inst.last_seen_at)) / 1000));
+  const age = seconds < 120 ? `${seconds}s` : seconds < 7200 ? `${Math.floor(seconds / 60)}m` : seconds < 172800 ? `${Math.floor(seconds / 3600)}h` : `${Math.floor(seconds / 86400)}d`;
+  return `offline · seen ${age} ago`;
+}
+
+function PresenceLabel({ inst }: { inst: Instance }) {
+  const text = presenceText(inst);
+  return <span className={inst.connected ? "text-green" : "text-text-dim"} title={inst.last_seen_at ? `Last reached ${new Date(inst.last_seen_at).toLocaleString()}` : "Not reached yet"}>
+    {text}
+  </span>;
+}
 
 function statusColor(s: string): string {
   if (s === "ready") return "text-green";
@@ -1193,7 +1211,7 @@ export function InstanceCard({
 
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
   const sshHost = inst.ssh_host || ip;
-  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
+  const endpoint = inst.connect_mode === "reverse_tunnel" ? `reverse tunnel · port ${inst.ssh_port}` : inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
   const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "clouding", "upcloud", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
@@ -1242,6 +1260,7 @@ export function InstanceCard({
               <span className="font-mono">{formatProviderPrice(inst.monthly_cost_cents, inst.provider)}/mo</span>
             )}
             {stale && <span className="text-amber">stale {staleAge}s</span>}
+            {!isLocal && <PresenceLabel inst={inst} />}
           </div>
         </div>
         <span className="flex-1" />
@@ -2197,14 +2216,28 @@ function GlobalVolumes({withParams, instances, refresh}: {withParams: () => stri
   </section>;
 }
 
-export function HostSetupOptions({ value, onChange, disabled }: { value: SetupOptions; onChange: (value: SetupOptions) => void; disabled?: boolean }) {
+export function HostSetupOptions({ value, onChange, disabled, platform = "linux" }: { value: SetupOptions; onChange: (value: SetupOptions) => void; disabled?: boolean; platform?: "linux" | "macos" }) {
+  const mac = platform === "macos";
+  const options = mac
+    ? ([['baseline', 'Keep awake, Command Line Tools and metrics'], ['runtimes', 'Node.js, npm, and Go (Homebrew)']] as const)
+    : ([['baseline', 'Common utilities and metrics'], ['docker', 'Docker engine'], ['runtimes', 'Node.js, npm, and Go']] as const);
   return <fieldset className="space-y-2 border border-border rounded p-3" disabled={disabled}>
     <legend className="text-sm font-medium px-1">Configure this server</legend>
-    {([['baseline', 'Common utilities and metrics'], ['docker', 'Docker engine'], ['runtimes', 'Node.js, npm, and Go']] as const).map(([key, label]) =>
+    {options.map(([key, label]) =>
       <label key={key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{label}</label>)}
-    <p className="text-xs text-text-dim">Automatic installation supports Ubuntu/Debian on AMD64 or ARM64 and needs root or passwordless sudo. Instances installs the selected software directly over SSH. Language tools use distribution packages; existing installations are reused.</p>
+    <p className="text-xs text-text-dim">{mac
+      ? "Docker isn't set up on macOS. Language tools come from Homebrew, which needs a non-root administrator account: selecting software makes the SSH account an administrator with passwordless sudo. Existing installations are reused."
+      : "Automatic installation supports Ubuntu/Debian on AMD64 or ARM64 and needs root or passwordless sudo. Instances installs the selected software directly over SSH. Language tools use distribution packages; existing installations are reused."}</p>
   </fieldset>;
 }
+
+type ConnectMode = "direct" | "vpn" | "reverse_tunnel";
+
+const CONNECT_HELP: Record<ConnectMode, string> = {
+  direct: "This server can reach the machine's SSH address directly (public IP, or same network).",
+  vpn: "Requires a bound, installed WireGuard VPN server reachable from the machine, and a route from Instances to its VPN subnet. No router port forwarding needed.",
+  reverse_tunnel: "For machines behind a router: the machine keeps an outbound SSH tunnel open to this server, so it needs only internet access. Requires the reverse tunnel server address in the Instances settings.",
+};
 
 export function HostOnboardingDialog({ initial, withParams, onClose, onChange }: { initial?: Instance; withParams: () => string; onClose: () => void; onChange: () => void }) {
   const [instance, setInstance] = useState<Instance | undefined>(initial);
@@ -2212,7 +2245,8 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
   const [host, setHost] = useState("");
   const [user, setUser] = useState("apteva");
   const [port, setPort] = useState(22);
-  const [vpn, setVPN] = useState(false);
+  const [platform, setPlatform] = useState<"linux" | "macos">("linux");
+  const [connect, setConnect] = useState<ConnectMode>("direct");
   const [setup, setSetup] = useState<SetupOptions>(initial?.setup?.requested || { baseline: true, docker: true, runtimes: false });
   const [command, setCommand] = useState("");
   const [publicKey, setPublicKey] = useState(initial?.ssh_public_key || "");
@@ -2243,7 +2277,8 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
   const register = async () => {
     setBusy(true); setError("");
     try {
-      const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: vpn ? undefined : host, ssh_user: user, ssh_port: port, vpn, setup });
+      const requested = platform === "macos" ? { ...setup, docker: false } : setup;
+      const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: connect === "direct" ? host : undefined, ssh_user: user, ssh_port: port, connect, platform, setup: requested });
       setInstance(result.instance); setCommand(result.authorization.command); setPublicKey(result.authorization.public_key); setCopied(false); onChange();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -2261,18 +2296,29 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
       <h2 id="host-onboarding-title" className="font-semibold text-text">{instance ? `Configure ${instance.name}` : 'Add your server'}</h2>
       {!instance && <div className="space-y-3">
         <label className="block text-sm">Name<input className="block w-full bg-bg-input border border-border rounded p-2" value={name} onChange={e => setName(e.target.value)} placeholder="Home server" /></label>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={vpn} onChange={e => { setVPN(e.target.checked); if (e.target.checked) setPort(22); }} />Connect through the VPN app</label>
-        {vpn ? <p className="text-xs text-text-dim">Requires a bound, installed WireGuard VPN server reachable from home, and a route from Instances to its VPN subnet. The command below will join your server without router port forwarding.</p> : <label className="block text-sm">SSH address<input className="block w-full bg-bg-input border border-border rounded p-2" value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.20 or server.example.com" /></label>}
-        <div className="flex gap-3"><label className="text-sm flex-1">SSH user<input className="block w-full bg-bg-input border border-border rounded p-2" value={user} onChange={e => setUser(e.target.value)} /></label><label className="text-sm w-24">Port<input type="number" min="1" max="65535" disabled={vpn} className="block w-full bg-bg-input border border-border rounded p-2" value={port} onChange={e => setPort(Number(e.target.value))} /></label></div>
+        <div className="flex gap-3">
+          <label className="text-sm flex-1">Machine type<select className="block w-full bg-bg-input border border-border rounded p-2" value={platform} onChange={e => { const next = e.target.value as "linux" | "macos"; setPlatform(next); if (next === "macos" && connect === "vpn") setConnect("reverse_tunnel"); }}>
+            <option value="linux">Linux (Ubuntu/Debian)</option>
+            <option value="macos">macOS</option>
+          </select></label>
+          <label className="text-sm flex-1">How to connect<select className="block w-full bg-bg-input border border-border rounded p-2" value={connect} onChange={e => { const next = e.target.value as ConnectMode; setConnect(next); if (next === "vpn") setPort(22); }}>
+            <option value="direct">Direct SSH</option>
+            <option value="vpn" disabled={platform === "macos"}>VPN app (Linux only)</option>
+            <option value="reverse_tunnel">Reverse tunnel (behind a router)</option>
+          </select></label>
+        </div>
+        <p className="text-xs text-text-dim">{CONNECT_HELP[connect]}</p>
+        {connect === "direct" && <label className="block text-sm">SSH address<input className="block w-full bg-bg-input border border-border rounded p-2" value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.20 or server.example.com" /></label>}
+        <div className="flex gap-3"><label className="text-sm flex-1">SSH user<input className="block w-full bg-bg-input border border-border rounded p-2" value={user} onChange={e => setUser(e.target.value)} /></label><label className="text-sm" style={{ width: 140 }}>{connect === "reverse_tunnel" ? "Machine SSH port" : "Port"}<input type="number" min="1" max="65535" disabled={connect === "vpn"} className="block w-full bg-bg-input border border-border rounded p-2" value={port} onChange={e => setPort(Number(e.target.value))} /></label></div>
       </div>}
-      <HostSetupOptions value={setup} onChange={setSetup} disabled={busy || instance?.status === "provisioning"} />
+      <HostSetupOptions value={setup} onChange={setSetup} platform={(instance?.platform === "macos" || (!instance && platform === "macos")) ? "macos" : "linux"} disabled={busy || instance?.status === "provisioning"} />
       {instance && <div className="text-sm space-y-1" aria-live="polite"><p>{instance.setup?.stage || instance.status} · {instance.setup?.status || instance.status}</p>{instance.setup?.completed?.map(stage => <p key={stage} className="text-green">✓ {stage}</p>)}{instance.setup?.error && <p className="text-red">{instance.setup.error}</p>}</div>}
-      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.enrollment_peer && <p className="text-xs text-amber">This command contains the VPN peer credential. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button></div>}
+      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.platform === "macos" && <p className="text-xs text-text-dim">On a Mac, run it in Terminal. If macOS refuses to turn on Remote Login, turn it on once in System Settings, General, Sharing (or give Terminal Full Disk Access), then run the command again.</p>}{(instance?.enrollment_peer || instance?.connect_mode === "reverse_tunnel") && <p className="text-xs text-amber">This command contains a {instance?.connect_mode === "reverse_tunnel" ? "tunnel key" : "VPN peer credential"}. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button></div>}
       {instance?.provider === 'external' && publicKey && <details className="text-xs"><summary>Authorize an existing SSH account manually</summary><p className="mt-2">Add this public key to the account’s ~/.ssh/authorized_keys. Configure VPN separately if selected. Package setup needs passwordless sudo; discovery-only registration supports macOS too.</p><pre className="whitespace-pre-wrap break-all mt-2">{publicKey}</pre></details>}
       {error && <p role="alert" className="text-sm text-red">{error}</p>}
       <div className="flex justify-end gap-3">
         <button type="button" onClick={onClose} className="px-3 py-2 text-sm border border-border rounded">Close</button>
-        {!instance ? <button type="button" disabled={busy || !name.trim() || !user.trim() || (!vpn && !host.trim())} onClick={register} className="px-3 py-2 text-sm bg-blue text-white rounded disabled:opacity-50">{busy ? 'Registering…' : 'Register server'}</button> : <>
+        {!instance ? <button type="button" disabled={busy || !name.trim() || !user.trim() || (connect === "direct" && !host.trim())} onClick={register} className="px-3 py-2 text-sm bg-blue text-white rounded disabled:opacity-50">{busy ? 'Registering…' : 'Register server'}</button> : <>
           {instance.provider === 'external' && !command && <button type="button" disabled={busy} onClick={register} className="px-3 py-2 text-sm border border-border rounded">Show connection command</button>}
           <button type="button" disabled={busy || instance.setup?.status === 'running'} onClick={configure} className="px-3 py-2 text-sm bg-blue text-white rounded disabled:opacity-50">{instance.status === 'ready' ? 'Check / apply setup' : instance.status === 'error' ? 'Retry setup' : 'Verify connection'}</button>
         </>}

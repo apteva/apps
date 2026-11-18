@@ -231,6 +231,12 @@ func (a *App) httpList(w http.ResponseWriter, r *http.Request) {
 	for _, r := range rows {
 		out = append(out, r.stripSecrets())
 	}
+	if raw := r.URL.Query().Get("connected"); raw != "" {
+		if out, err = filterConnected(out, raw); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	httpJSON(w, map[string]any{"instances": out, "count": len(out)})
 }
 

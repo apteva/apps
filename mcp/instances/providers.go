@@ -246,7 +246,11 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	switch normalizeProvider(inst.Provider) {
 	case "external":
-		return revokeEnrollmentPeer(ctx, inst)
+		// Never contacts the machine: only this server's side is removed.
+		if err := revokeEnrollmentPeer(ctx, inst); err != nil {
+			return err
+		}
+		return removeReverseTunnel(ctx.AppDB(), inst)
 	case "hetzner":
 		return hetznerDestroy(ctx, inst)
 	case "digitalocean":
