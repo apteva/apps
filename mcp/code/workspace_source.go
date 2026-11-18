@@ -387,7 +387,13 @@ func sourceEntriesEqual(a, b sourceEntry) bool {
 		a.LinkTarget == b.LinkTarget && bytes.Equal(a.Data, b.Data)
 }
 
-func applySourceSnapshot(root string, previousPaths []string, snapshot *sourceSnapshot) (returnErr error) {
+func applySourceSnapshot(root string, previousPaths []string, snapshot *sourceSnapshot) error {
+	return applySourceSnapshotLimit(root, previousPaths, snapshot, maxFileBytes())
+}
+
+// applySourceSnapshotLimit is applySourceSnapshot with an explicit per-file
+// cap (native history restores pass nativeMaxBlobBytes).
+func applySourceSnapshotLimit(root string, previousPaths []string, snapshot *sourceSnapshot, maxBytes int64) (returnErr error) {
 	managed := map[string]bool{}
 	for _, p := range previousPaths {
 		managed[p] = true
@@ -438,7 +444,7 @@ func applySourceSnapshot(root string, previousPaths []string, snapshot *sourceSn
 		return err
 	}
 	for _, entry := range snapshot.Entries {
-		if int64(len(entry.Data)) > maxFileBytes() {
+		if int64(len(entry.Data)) > maxBytes {
 			return errors.New("file exceeds configured size limit")
 		}
 		total += int64(len(entry.Data))

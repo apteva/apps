@@ -97,6 +97,14 @@ type fileMutation struct {
 // applyFileMutations validates and applies a batch with rollback. Call under
 // withRepoWrite. Local storage preserves modes and symlinks in the journal.
 func applyFileMutations(store FileStore, slug string, changes []fileMutation) error {
+	return applyFileMutationsLimit(store, slug, changes, maxFileBytes())
+}
+
+// applyFileMutationsLimit is applyFileMutations with an explicit per-file
+// cap. Native version history restores files that were committed upstream
+// (a Git clone may hold files above the editing limit), so it passes
+// nativeMaxBlobBytes instead of the editing limit.
+func applyFileMutationsLimit(store FileStore, slug string, changes []fileMutation, maxBytes int64) error {
 	seen := map[string]bool{}
 	for _, c := range changes {
 		p, e := normalisePath(c.Path)
@@ -107,7 +115,7 @@ func applyFileMutations(store FileStore, slug string, changes []fileMutation) er
 			return fmt.Errorf("duplicate mutation path %q", p)
 		}
 		seen[p] = true
-		if !c.Delete && int64(len(c.Body)) > maxFileBytes() {
+		if !c.Delete && int64(len(c.Body)) > maxBytes {
 			return errors.New("file exceeds configured size limit")
 		}
 	}
@@ -133,7 +141,7 @@ func applyFileMutations(store FileStore, slug string, changes []fileMutation) er
 		if err != nil {
 			return err
 		}
-		return applySourceSnapshot(root, paths, snapshot)
+		return applySourceSnapshotLimit(root, paths, snapshot, maxBytes)
 	}
 	// Non-local backends must restore all successful writes on any failure.
 	before := map[string][]byte{}

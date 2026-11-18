@@ -1,3 +1,39 @@
+# Apteva Code 0.18.1
+
+Fixes Git imports of repositories that hold files above the editing limit.
+
+## Fixes
+
+- **Large files in version history.** After `repos_git_import` cloned a
+  repository with a file above `max_file_size_mb` (default 10 MB), building
+  Code's own version history read every file under that editing limit, so
+  the tool returned an error even though the clone had succeeded. History
+  stopped working for that repository. The bug was already present in
+  0.14.10. `github.com/apteva/apps` hits it (a 16 MB binary and a 66 MB
+  `.wasm` file).
+  - History now stores and restores such files up to the repository limit
+    (`max_repo_size_mb`, default 1024 MB). Files at or under the editing
+    limit are read exactly as before.
+  - Writing, uploading and reading files through the editing tools keeps the
+    editing limit, as do changes applied back from a workspace.
+
+## Upgrade and rollback
+
+No migration or format change. Installs that raised `max_file_size_mb` to
+work around the import error can set it back to the default after
+upgrading. Rolling back to 0.18.0 brings the error back for such
+repositories.
+
+## Validation
+
+- Tier 1: a new test snapshots, changes and restores a file 1 MB above the
+  editing limit. The full suite passes with `-race`; the integration suite
+  passes.
+- End to end on a local 0.18.0 install, where the bug was found: with the
+  file limit raised as a workaround, `github.com/apteva/apps` was imported,
+  an edit in `mcp/inventory` was tested in a Go workspace (vet and tests
+  pass), committed and pushed to a branch on GitHub from Code.
+
 # Apteva Code 0.18.0
 
 Adds native remotes: Code repositories can now clone, fetch from and push to

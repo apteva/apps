@@ -1,5 +1,11 @@
 # Apteva Code
 
+## v0.18.1 — large files in Git imports
+
+Git imports of repositories with files above the editing limit no longer
+fail: version history stores those files up to the repository limit, while
+the editing tools keep the per-file limit. Details in RELEASE-NOTES.md.
+
 ## v0.18.0 — native remotes
 
 `repos_remote` clones, fetches from and pushes to other Code repositories

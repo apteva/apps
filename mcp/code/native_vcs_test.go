@@ -199,3 +199,43 @@ func TestNativeVCS_CheckpointWithLockedStoreDoesNotDeadlock(t *testing.T) {
 		t.Fatal("checkpoint deadlocked while using the app's locked file store")
 	}
 }
+
+// A Git clone can hold files above the editing limit (committed binaries,
+// wasm bundles). Native history must snapshot and restore them instead of
+// failing the whole repository.
+func TestNativeVCS_FilesAboveEditingLimit(t *testing.T) {
+	n, repo, store := nativeFixture(t)
+	big := filepath.Join(store.RepoPath(repoStoreKey(repo)), "assets", "bundle.wasm")
+	if err := os.MkdirAll(filepath.Dir(big), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := bytes.Repeat([]byte{0xAB}, int(maxFileBytes())+1<<20)
+	if err := os.WriteFile(big, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.ensureRepo(repo); err != nil {
+		t.Fatalf("snapshot with a file above the editing limit: %v", err)
+	}
+	base, err := n.history(repo, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]byte{}, original...)
+	changed[0] = 0xCD
+	if err := os.WriteFile(big, changed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.checkpoint(repo, "Rebuild bundle", "agent:test"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := n.restore(repo, base[0].ID, []string{"assets/bundle.wasm"}, true, "agent:test"); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err := os.ReadFile(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("restored file differs from the first revision")
+	}
+}

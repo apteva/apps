@@ -674,7 +674,7 @@ func (n *nativeVCS) snapshotLocked(repo *Repo, persist bool) (*nativeSnapshot, e
 			}
 		}
 		if blob == "" {
-			body, err := store.Read(key, path)
+			body, err := readSnapshotFile(store, key, localRoot, path, stat, stated)
 			if err != nil {
 				return nil, err
 			}
@@ -1091,7 +1091,31 @@ func (n *nativeVCS) applyEntriesLocked(repo *Repo, target map[string]nativeEntry
 		return nil
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	return applyFileMutations(n.rawStore(), nativeStoreKey(repo), changes)
+	return applyFileMutationsLimit(n.rawStore(), nativeStoreKey(repo), changes, nativeMaxBlobBytes())
+}
+
+// nativeMaxBlobBytes caps one file in native version history. It is the
+// repository cap, not the editing cap: history must capture whatever the
+// working tree holds (for example large files from a Git clone), or
+// snapshotting the repository fails outright.
+func nativeMaxBlobBytes() int64 { return maxRepoBytes() }
+
+// readSnapshotFile reads a working-tree file for a native snapshot through
+// the store. Only a regular local file above the editing limit is read
+// directly, under nativeMaxBlobBytes, since the store refuses it.
+func readSnapshotFile(store FileStore, key, localRoot, path string, stat nativeIndexEntry, stated bool) ([]byte, error) {
+	if localRoot == "" || !stated || stat.Size <= maxFileBytes() {
+		return store.Read(key, path)
+	}
+	full := filepath.Join(localRoot, filepath.FromSlash(path))
+	info, err := os.Lstat(full)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > nativeMaxBlobBytes() {
+		return nil, fmt.Errorf("%s exceeds the repository size limit", path)
+	}
+	return os.ReadFile(full)
 }
 
 // nativeRefMove is a ref log entry as returned to callers (newest first).
