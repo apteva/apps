@@ -60,7 +60,7 @@ func (d LocalDocker) ExecutionOutput(ctx context.Context, e *Execution) (string,
 		out, err := d.Logs(ctx, e.RuntimeContainerName, 2000)
 		return out, len(out), false, err
 	}
-	out, err := dockerWithInputLimit(ctx, nil, maxDockerOutputBytes+128, "exec", e.RuntimeContainerName, "sh", "-c", `if [ -f "$1/output" ]; then cat "$1/bytes"; printf '\n'; cat "$1/output"; else printf '0\n'; fi`, "sh", executionControlDir(e.ID))
+	out, err := dockerWithInputLimit(ctx, nil, maxDockerOutputBytes+128, execAs(e.User, e.RuntimeContainerName, "sh", "-c", `if [ -f "$1/output" ]; then cat "$1/bytes"; printf '\n'; cat "$1/output"; else printf '0\n'; fi`, "sh", executionControlDir(e.ID))...)
 	if err != nil {
 		return "", 0, false, err
 	}

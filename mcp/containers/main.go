@@ -159,6 +159,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_exec_get", Description: "Fetch one owned execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionGet},
 		{Name: "containers_exec_logs", Description: "Tail bounded logs for one owned execution.", InputSchema: executionLogsSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionLogs},
 		{Name: "containers_exec_cancel", Description: "Cancel one owned queued or running execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionCancel},
+		{Name: "containers_volume_create", Description: "Create a standalone named volume that outlives workloads. Mount it with containers_run volumes[].volume_id in any number of your local workloads at once. Creating an existing name returns it.", InputSchema: volumeCreateSchema(), HandlerCtx: a.toolVolumeCreate},
+		{Name: "containers_volume_list", Description: "List your standalone volumes with labels, mounting workloads, last_used_at, and optionally current size.", InputSchema: volumeListSchema(), HandlerCtx: a.toolVolumeList},
+		{Name: "containers_volume_delete", Description: "Delete a standalone volume and its data. Refused while any workload or Docker container mounts it.", InputSchema: volumeDeleteSchema(), HandlerCtx: a.toolVolumeDelete},
 		{Name: "containers_volume_import", Description: "Import a bounded tar.gz archive into an attached named volume owned by the caller.", InputSchema: volumeImportSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolVolumeImport},
 		{Name: "containers_volume_export", Description: "Export a bounded tar.gz archive from an attached named volume owned by the caller.", InputSchema: volumeExportSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolVolumeExport},
 	}
@@ -249,7 +252,13 @@ func (a *App) prepareOwnedWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec, o
 	containerName := "containers-" + dockerSafeName(spec.Name) + "-" + runtimeSuffix
 	networkName := containerName
 	for i := range spec.Volumes {
-		if spec.Volumes[i].SharedFrom != "" {
+		if spec.Volumes[i].VolumeID != "" {
+			name, err := standaloneVolumeForRun(db, spec.Volumes[i].VolumeID, owner, runSpecTargetID(spec))
+			if err != nil {
+				return nil, spec, err
+			}
+			spec.Volumes[i].DockerVolumeName = name
+		} else if spec.Volumes[i].SharedFrom != "" {
 			name, err := sharedVolume(db, spec.Volumes[i].SharedFrom, spec.Volumes[i].Name, owner, runSpecTargetID(spec))
 			if err != nil {
 				return nil, spec, err
@@ -358,6 +367,10 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 			createdVolumes = append(createdVolumes, v.DockerVolumeName)
 			return cleanupRuntime(fmt.Errorf("shared volume %q no longer exists on workload %s", v.Name, v.SharedFrom))
 		}
+		if created && v.VolumeID != "" {
+			createdVolumes = append(createdVolumes, v.DockerVolumeName)
+			return cleanupRuntime(fmt.Errorf("standalone volume %s no longer exists in Docker", v.VolumeID))
+		}
 		if created {
 			createdVolumes = append(createdVolumes, v.DockerVolumeName)
 		}
@@ -430,6 +443,9 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 		return cleanupRuntime(fmt.Errorf("record running workload: %w", err))
 	}
 	_ = recordEvent(db, id, "started", "tool", map[string]any{"container_id": cid})
+	if started, err := getWorkload(db, id); err == nil {
+		touchStandaloneVolumes(db, started)
+	}
 	log.Printf("[containers] runtime probe workload_id=%s", id)
 	_ = a.probeWorkloadUnlocked(ctx, appCtx, db, id)
 	log.Printf("[containers] runtime done workload_id=%s duration=%s", id, time.Since(start).Round(time.Millisecond))
@@ -594,7 +610,9 @@ func (a *App) startWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB,
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "desired_status": StatusRunning, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "started", "tool", map[string]any{})
 	_ = a.probeWorkloadUnlocked(ctx, appCtx, db, id)
-	return getWorkload(db, id)
+	started, err := getWorkload(db, id)
+	touchStandaloneVolumes(db, started)
+	return started, err
 }
 
 func (a *App) stopWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*Workload, error) {
@@ -656,7 +674,9 @@ func (a *App) restartWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "desired_status": StatusRunning, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "restarted", "tool", map[string]any{})
 	_ = a.probeWorkloadUnlocked(ctx, appCtx, db, id)
-	return getWorkload(db, id)
+	restarted, err := getWorkload(db, id)
+	touchStandaloneVolumes(db, restarted)
+	return restarted, err
 }
 
 func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string, deleteVolumes bool) error {
@@ -693,8 +713,8 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 		cleanupErrs = append(cleanupErrs, err)
 	}
 	for _, v := range w.Volumes {
-		// A shared mount belongs to its source workload: drop the row, keep the volume.
-		if v.SharedFrom != "" {
+		// Shared and standalone mounts belong to someone else: drop the row, keep the volume.
+		if v.SharedFrom != "" || v.VolumeID != "" {
 			if _, err := db.Exec(`DELETE FROM containers_volumes WHERE workload_id=? AND name=?`, id, v.Name); err != nil {
 				cleanupErrs = append(cleanupErrs, err)
 			}
@@ -702,7 +722,7 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 	}
 	if deleteVolumes {
 		for _, v := range w.Volumes {
-			if v.SharedFrom != "" {
+			if v.SharedFrom != "" || v.VolumeID != "" {
 				continue
 			}
 			if err := backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
@@ -845,7 +865,7 @@ func (a *App) workloadUsage(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB,
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if volume.SharedFrom != "" {
+		if volume.SharedFrom != "" || volume.VolumeID != "" {
 			continue
 		}
 		size, err := backend.VolumeUsage(ctx, volume.DockerVolumeName)
@@ -1374,7 +1394,7 @@ func runSchema() map[string]any {
 		"use_local":      map[string]any{"type": "boolean"},
 		"ports":          map[string]any{"type": "array"},
 		"env":            map[string]any{"type": "object"},
-		"volumes":        map[string]any{"type": "array", "items": schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "mount_path": map[string]any{"type": "string"}, "retained_from": map[string]any{"type": "string"}, "read_only": map[string]any{"type": "boolean"}, "shared_from": map[string]any{"type": "string", "description": "Mount the same-named volume of another live workload you own on the same host. Requires read_only."}}, []string{"name", "mount_path"})},
+		"volumes":        map[string]any{"type": "array", "items": schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "mount_path": map[string]any{"type": "string"}, "retained_from": map[string]any{"type": "string"}, "read_only": map[string]any{"type": "boolean"}, "shared_from": map[string]any{"type": "string", "description": "Mount the same-named volume of another live workload you own on the same host. Requires read_only."}, "volume_id": map[string]any{"type": "string", "description": "Mount a standalone volume from containers_volume_create (local workloads). Read-write unless read_only."}}, []string{"name", "mount_path"})},
 		"files":          map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "owner": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
 		"pull_policy":    map[string]any{"type": "string", "enum": []string{"missing", "always", "never"}},
 		"health_path":    map[string]any{"type": "string"},
@@ -1407,6 +1427,8 @@ func executionStartSchema() map[string]any {
 		"timeout_s":         map[string]any{"type": "integer", "minimum": 1, "maximum": 86400},
 		"idempotency_key":   map[string]any{"type": "string"},
 		"session_key":       map[string]any{"type": "string", "maxLength": 64},
+		"user":              map[string]any{"type": "string", "description": "Run as this user (name, uid, or uid:gid) instead of the workload user. Not root on hardened workloads. A session keeps the user it started with."},
+		"umask":             map[string]any{"type": "string", "description": "Octal umask for the command, e.g. 022 so other users can read created files. Default 077. In a session it persists for later commands."},
 	}, []string{"workload_id"})
 }
 
@@ -1423,6 +1445,7 @@ func volumeImportSchema() map[string]any {
 		"volume":         map[string]any{"type": "string"},
 		"path":           map[string]any{"type": "string"},
 		"archive_base64": map[string]any{"type": "string"},
+		"owner":          map[string]any{"type": "string", "description": "Numeric uid:gid applied to everything the import creates or replaces. Without it, archived entries keep the owner recorded in the archive."},
 	}, []string{"workload_id", "volume", "archive_base64"})
 }
 

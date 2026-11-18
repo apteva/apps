@@ -125,6 +125,10 @@ func normalizeSandboxSpec(in *RunSpec) error {
 		v := &in.Volumes[i]
 		mounts[v.MountPath] = true
 		v.SharedFrom = strings.TrimSpace(v.SharedFrom)
+		v.VolumeID = strings.TrimSpace(v.VolumeID)
+		if v.VolumeID != "" && (v.SharedFrom != "" || v.RetainedFrom != "") {
+			return fmt.Errorf("volumes[%d].volume_id cannot be combined with shared_from or retained_from", i)
+		}
 		if v.SharedFrom == "" {
 			continue
 		}

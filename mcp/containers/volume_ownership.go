@@ -107,6 +107,9 @@ func retainedVolume(db *sql.DB, sourceID, name string, owner ownerIdentity, targ
 	if v.SharedFrom != "" {
 		return "", fmt.Errorf("%w: volume %q was borrowed from workload %s and cannot be retained", errConflict, name, v.SharedFrom)
 	}
+	if v.VolumeID != "" {
+		return "", fmt.Errorf("%w: volume %q is standalone volume %s; mount it with volume_id instead", errConflict, name, v.VolumeID)
+	}
 	return v.DockerVolumeName, nil
 }
 

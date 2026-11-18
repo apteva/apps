@@ -24,15 +24,19 @@ const (
 )
 
 type volumeArchiveBackend interface {
-	ImportVolumeArchive(context.Context, string, string, []byte) error
+	ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error
 	ExportVolumeArchive(context.Context, string, string, int) ([]byte, error)
 }
 
-func (d LocalDocker) ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte) error {
+func (d LocalDocker) ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error {
 	script := `set -eu
-umask 077
+owner="$2"
+# Readable defaults: created folders are 0755; archived entries keep their modes.
+umask 022
 mkdir /tmp/stage
+chmod 700 /tmp/stage
 tar -xzf - -C /tmp/stage
+[ -z "$owner" ] || chown -R -h "$owner" /tmp/stage
 # No pre-existing links may redirect this import. The caller pauses the workload
 # while committing so its processes cannot replace checked components.
 dest=/volume
@@ -52,9 +56,24 @@ find /tmp/stage -mindepth 1 -exec sh -c '
     done
   done
 ' sh "$dest" {} +
-mkdir -p "$dest"
-cp -a --remove-destination /tmp/stage/. "$dest/"`
-	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath)
+# Create only missing parents. Existing folders, including the target, keep
+# their own mode and owner.
+cur=/volume
+for part in "$@"; do
+ [ "$part" = . ] && continue
+ cur="$cur/$part"
+ [ -e "$cur" ] && continue
+ mkdir "$cur"
+ [ -z "$owner" ] || chown "$owner" "$cur"
+done
+# Copy the archive's entries rather than the staging folder itself, so the
+# staging folder's attributes are never applied to the target.
+set +f
+for entry in /tmp/stage/* /tmp/stage/.[!.]* /tmp/stage/..?*; do
+ [ -e "$entry" ] || [ -L "$entry" ] || continue
+ cp -a --remove-destination "$entry" "$dest/"
+done`
+	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath, owner)
 	return err
 }
 func (d LocalDocker) ExportVolumeArchive(ctx context.Context, volumeName, relativePath string, maxBytes int) ([]byte, error) {
@@ -223,9 +242,13 @@ func findWorkloadVolume(workload *Workload, name string) (*VolumeSpec, error) {
 	return nil, fmt.Errorf("volume %q is not attached to workload", name)
 }
 
-func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath, encoded string) (result map[string]any, resultErr error) {
+func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath, encoded, owner string) (result map[string]any, resultErr error) {
 	if workload.HostID != 0 || workload.InstanceID != 0 {
 		return nil, errors.New("volume archive transfer currently supports local workloads only")
+	}
+	owner = strings.TrimSpace(owner)
+	if owner != "" && !numericOwnerRE.MatchString(owner) {
+		return nil, typedInputError(errors.New("owner must be numeric uid:gid, for example 1000:1000"))
 	}
 	volume, err := findWorkloadVolume(workload, volumeName)
 	if err != nil {
@@ -293,10 +316,14 @@ func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 			resultErr = errors.Join(resultErr, fmt.Errorf("archive completed but workload resume is pending: %w", err))
 		}
 	}()
-	if err := archiveBackend.ImportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, archive); err != nil {
+	if err := archiveBackend.ImportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, archive, owner); err != nil {
 		return nil, err
 	}
-	return map[string]any{"workload_id": workload.ID, "volume": volume.Name, "path": relativePath, "compressed_bytes": len(archive)}, nil
+	result = map[string]any{"workload_id": workload.ID, "volume": volume.Name, "path": relativePath, "compressed_bytes": len(archive)}
+	if owner != "" {
+		result["owner"] = owner
+	}
+	return result, nil
 }
 
 func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath string) (result map[string]any, resultErr error) {

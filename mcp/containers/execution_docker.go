@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +20,7 @@ import (
 )
 
 const persistentExecutionScript = `set -eu
-state_dir="$1"; limit="$2"; shift 2
+state_dir="$1"; limit="$2"; cmd_umask="$3"; shift 3
 umask 077
 mkdir -p "$state_dir"
 : > "$state_dir/output"
@@ -44,6 +45,8 @@ capture=$!
 # Every process the command starts inherits this marker, so cancellation can
 # find descendants that left the process group and were re-parented.
 mark="${state_dir##*/}"
+# Control files stay private; the command itself gets the requested umask.
+[ -z "$cmd_umask" ] || umask "$cmd_umask"
 if command -v setsid >/dev/null 2>&1; then
  APTEVA_PROCESS_TREE="$mark" setsid "$@" </dev/null > "$state_dir/pipe" 2>&1 &
  child=$!; : > "$state_dir/process_group"
@@ -140,7 +143,10 @@ func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSp
 	if spec.SessionKey != "" {
 		return persistentShells.Start(ctx, spec)
 	}
-	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID), strconv.Itoa(executionOutputLimit(spec.MaxOutputBytes))}
+	if err := prepareControlDirs(ctx, spec); err != nil {
+		return "", err
+	}
+	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID), strconv.Itoa(executionOutputLimit(spec.MaxOutputBytes)), spec.Umask}
 	cmd = append(cmd, spec.Argv...)
 	env := make([]string, 0, len(spec.Env))
 	for _, key := range envKeys(spec.Env) {
@@ -190,7 +196,7 @@ func (d LocalDocker) InspectExecution(ctx context.Context, execution *Execution)
 	}
 	if execution != nil && persistentShellRuntime(execution.RuntimeContainerID) {
 		if persistentShells.execution(execution.ID) == nil {
-			if err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID)); err != nil && !dockerExecUnavailable(err) {
+			if err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID), execution.User); err != nil && !dockerExecUnavailable(err) {
 				return nil, err
 			}
 		}
@@ -230,7 +236,7 @@ func (d LocalDocker) StopExecution(ctx context.Context, execution *Execution) er
 	}
 	if persistentShellRuntime(execution.RuntimeContainerID) {
 		if persistentShells.execution(execution.ID) == nil {
-			err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID))
+			err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID), execution.User)
 			if dockerExecUnavailable(err) {
 				return nil
 			}
@@ -238,8 +244,8 @@ func (d LocalDocker) StopExecution(ctx context.Context, execution *Execution) er
 		}
 		return persistentShells.Interrupt(ctx, execution)
 	}
-	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "/bin/sh", "-c", stopPersistentExecutionScript,
-		"apteva-exec", executionControlDir(execution.ID))
+	_, err := docker(ctx, execAs(execution.User, execution.RuntimeContainerName, "/bin/sh", "-c", stopPersistentExecutionScript,
+		"apteva-exec", executionControlDir(execution.ID))...)
 	if dockerExecUnavailable(err) {
 		return nil
 	}
@@ -260,8 +266,8 @@ func (d LocalDocker) ExecutionLogs(ctx context.Context, execution *Execution, ta
 		tail = 200
 	}
 	script := `if [ -f "$1/output" ]; then tail -n "$2" "$1/output"; fi`
-	return docker(ctx, "exec", execution.RuntimeContainerName, "/bin/sh", "-c", script, "apteva-exec",
-		executionControlDir(execution.ID), strconv.Itoa(tail))
+	return docker(ctx, execAs(execution.User, execution.RuntimeContainerName, "/bin/sh", "-c", script, "apteva-exec",
+		executionControlDir(execution.ID), strconv.Itoa(tail))...)
 }
 
 func (d LocalDocker) RemoveExecution(ctx context.Context, execution *Execution) error {
@@ -276,7 +282,7 @@ func (d LocalDocker) RemoveExecution(ctx context.Context, execution *Execution) 
 		persistentShells.Remove(execution)
 		return nil
 	}
-	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "rm", "-rf", executionControlDir(execution.ID))
+	_, err := docker(ctx, execAs(execution.User, execution.RuntimeContainerName, "rm", "-rf", executionControlDir(execution.ID))...)
 	if isDockerMissingResourceError(err, "container") {
 		return nil
 	}
@@ -395,4 +401,48 @@ func localDockerEngine(ctx context.Context) (*dockerEngineConnection, error) {
 	connection := &dockerEngineConnection{client: client, baseURL: "http://docker/v" + version.APIVersion}
 	dockerEngineState.connection = connection
 	return connection, nil
+}
+
+var umaskRE = regexp.MustCompile(`^0?[0-7]{3}$`)
+
+// execAs builds `docker exec` arguments, running as user when one is set.
+func execAs(user, container string, argv ...string) []string {
+	args := []string{"exec"}
+	if user != "" {
+		args = append(args, "--user", user)
+	}
+	return append(append(args, container), argv...)
+}
+
+func displayUser(user string) string {
+	if user == "" {
+		return "the workload user"
+	}
+	return user
+}
+
+func effectiveExecutionUser(execution *Execution, workload *Workload) string {
+	if execution.User != "" {
+		return execution.User
+	}
+	return workload.User
+}
+
+// prepareControlDirs makes the per-container control parents world-writable
+// with the sticky bit (like /tmp) when a command runs as another user. Each
+// execution or session still gets its own 0700 folder inside. It runs as the
+// workload user, who owns parents created by earlier commands.
+func prepareControlDirs(ctx context.Context, spec executionRuntimeSpec) error {
+	if spec.User == "" || spec.User == spec.ControlUser {
+		return nil
+	}
+	script := `for p in /tmp/.apteva-executions /tmp/.apteva-sessions; do
+ [ -d "$p" ] || mkdir -p "$p"
+ [ -k "$p" ] && [ -w "$p" ] && continue
+ chmod 1777 "$p" || { echo "cannot share $p for other users" >&2; exit 1; }
+done`
+	if _, err := docker(ctx, execAs(spec.ControlUser, spec.ContainerName, "/bin/sh", "-c", script)...); err != nil {
+		return fmt.Errorf("prepare control folders for user %s: %w", spec.User, err)
+	}
+	return nil
 }
