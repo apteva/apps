@@ -88,6 +88,10 @@ interface Machine {
 interface Availability {
   for_sale: boolean;
   available?: number;
+  machines?: number;
+  presale?: number;
+  presale_limit?: number;
+  presale_note?: string;
   waiting?: number;
   reason?: string;
 }
@@ -661,7 +665,9 @@ export default function HostingPanel(_props: NativePanelProps) {
                       <td className="py-2 pr-2">{size}</td>
                       <td className="py-2">
                         {av && <Badge value={av.for_sale ? "available" : "maintenance"} />}
-                        {av?.available != null && <span className="text-text-dim"> {av.available} free</span>}
+                        {av?.machines != null && <span className="text-text-dim"> {av.machines} free</span>}
+                        {av?.presale_limit != null && <span className="text-text-dim"> · presale {av.presale ?? 0} of {av.presale_limit} left</span>}
+                        {av?.presale_note && <div className="text-text-dim">{av.presale_note}</div>}
                         {av?.waiting ? <span className="text-text-dim"> · {av.waiting} waiting</span> : null}
                         {av?.reason && <div className="text-text-dim">{av.reason}</div>}
                       </td>
