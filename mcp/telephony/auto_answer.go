@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"log"
 	"net/http"
@@ -136,6 +137,13 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 	}
 	p := phoneUserFrom(r)
 	principal := autoAnswerOwner(r)
+	// A check-in never waits on the lock below. The browser gives it 5 s, and
+	// queuing behind offers, policy reads or an automatic pick-up made it miss
+	// that. Each check-in statement is atomic on its own.
+	if r.URL.Path == "/softphone/auto-answer-session" {
+		a.autoAnswerCheckIn(w, r, project, principal, args.SessionID, args.Available, args.WarningSupported, args.Takeover)
+		return
+	}
 	a.autoAnswerMu.Lock()
 	defer a.autoAnswerMu.Unlock()
 	switch r.URL.Path {
@@ -303,43 +311,6 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 			result["routes"], result["destinations"] = routes, dests
 		}
 		writeJSON(w, result)
-	case "/softphone/auto-answer-session":
-		if r.Method != "POST" || !autoAnswerSessionID(args.SessionID) {
-			http.Error(w, "valid browser session required", 400)
-			return
-		}
-		now := time.Now().UnixMilli()
-		if !args.Available {
-			_, err := a.db().db.Exec(`DELETE FROM telephony_auto_answer_sessions WHERE project_id=? AND principal=? AND session_id=?`, project, principal, args.SessionID)
-			if err != nil {
-				http.Error(w, "session unavailable", 503)
-				return
-			}
-			_, err = a.db().db.Exec(`DELETE FROM telephony_auto_answer_reservations WHERE project_id=? AND principal=? AND session_id=? AND call_id IN (SELECT id FROM calls WHERE status='pending')`, project, principal, args.SessionID)
-			if err != nil {
-				http.Error(w, "reservation unavailable", 503)
-				return
-			}
-			writeJSON(w, map[string]any{"designated": false})
-			return
-		}
-		// Expiry is indexed and small. Heartbeats never scan historical calls.
-		_, err := a.db().db.Exec(`DELETE FROM telephony_auto_answer_sessions WHERE expires_at<=?`, now)
-		if err != nil {
-			http.Error(w, "session unavailable", 503)
-			return
-		}
-		res, err := a.db().db.Exec(`INSERT INTO telephony_auto_answer_sessions(project_id,principal,session_id,expires_at,warning_supported) VALUES(?,?,?,?,?) ON CONFLICT(project_id,principal) DO UPDATE SET session_id=excluded.session_id,expires_at=excluded.expires_at,warning_supported=excluded.warning_supported WHERE telephony_auto_answer_sessions.session_id=excluded.session_id OR ?`, project, principal, args.SessionID, now+30000, args.WarningSupported, args.Takeover)
-		if err != nil {
-			http.Error(w, "session unavailable", 503)
-			return
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			http.Error(w, "session unavailable", 503)
-			return
-		}
-		writeJSON(w, map[string]any{"designated": n == 1, "lease_ms": 30000})
 	case "/softphone/auto-answer-offer":
 		if r.Method != "POST" || !autoAnswerSessionID(args.SessionID) || args.CallID == "" {
 			http.Error(w, "session and call required", 400)
@@ -434,6 +405,70 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 		http.NotFound(w, r)
 	}
 }
+// autoAnswerLease is how long one check-in keeps a browser designated.
+const autoAnswerLease = 30 * time.Second
+
+// autoAnswerSlowCheckIn logs a check-in that the server itself held this long,
+// so a browser timeout can be told apart from a slow database.
+const autoAnswerSlowCheckIn = time.Second
+
+// autoAnswerCheckIn registers, renews or releases this browser's claim on
+// automatic answering for its adviser. Renewing is one statement: it keeps
+// this session's claim, replaces a claim that has lapsed, or takes over when
+// asked; otherwise another browser holds it and the answer is not designated.
+// Lapsed claims are deleted by housekeeping, not here.
+func (a *App) autoAnswerCheckIn(w http.ResponseWriter, r *http.Request, project, principal, session string, available, warning, takeover bool) {
+	if r.Method != "POST" || !autoAnswerSessionID(session) {
+		http.Error(w, "valid browser session required", 400)
+		return
+	}
+	started := time.Now()
+	logLine := func(outcome, statement string, err error) {
+		line := fmt.Sprintf("auto_answer checkin %s at=%s project=%s principal_hash=%s session_hash=%s available=%t takeover=%t elapsed_ms=%d", outcome, ringTime(started), project, phoneHash(principal)[:12], phoneHash(session)[:12], available, takeover, time.Since(started).Milliseconds())
+		if statement != "" {
+			line += " statement=" + statement
+		}
+		if err != nil {
+			line += fmt.Sprintf(" err=%q", err.Error())
+		}
+		log.Print(line)
+	}
+	if !available {
+		if _, err := a.db().db.Exec(`DELETE FROM telephony_auto_answer_sessions WHERE project_id=? AND principal=? AND session_id=?`, project, principal, session); err != nil {
+			logLine("failed", "release_session", err)
+			http.Error(w, "session unavailable", 503)
+			return
+		}
+		if _, err := a.db().db.Exec(`DELETE FROM telephony_auto_answer_reservations WHERE project_id=? AND principal=? AND session_id=? AND call_id IN (SELECT id FROM calls WHERE status='pending')`, project, principal, session); err != nil {
+			logLine("failed", "release_reservations", err)
+			http.Error(w, "reservation unavailable", 503)
+			return
+		}
+		writeJSON(w, map[string]any{"designated": false})
+		return
+	}
+	now := started.UnixMilli()
+	res, err := a.db().db.Exec(`INSERT INTO telephony_auto_answer_sessions(project_id,principal,session_id,expires_at,warning_supported) VALUES(?,?,?,?,?) ON CONFLICT(project_id,principal) DO UPDATE SET session_id=excluded.session_id,expires_at=excluded.expires_at,warning_supported=excluded.warning_supported WHERE telephony_auto_answer_sessions.session_id=excluded.session_id OR telephony_auto_answer_sessions.expires_at<=? OR ?`, project, principal, session, now+autoAnswerLease.Milliseconds(), warning, now, takeover)
+	if err != nil {
+		logLine("failed", "claim", err)
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		logLine("failed", "claim_result", err)
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	switch {
+	case n != 1:
+		logLine("not_designated", "", nil)
+	case time.Since(started) >= autoAnswerSlowCheckIn:
+		logLine("slow", "", nil)
+	}
+	writeJSON(w, map[string]any{"designated": n == 1, "lease_ms": autoAnswerLease.Milliseconds()})
+}
+
 func autoAnswerOfferTTL(expires string) int64 {
 	at, err := time.Parse(time.RFC3339Nano, expires)
 	if err != nil {

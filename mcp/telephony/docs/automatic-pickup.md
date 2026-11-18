@@ -34,7 +34,18 @@ This prepares microphone and playback access and registers a 30-second identity-
 await phone.setAutoAnswerAvailable(false);
 ```
 
-One browser is designated per adviser and project. A second browser cannot silently replace it. Explicitly selecting **Use this browser** calls `setAutoAnswerAvailable(true, {takeover:true})`. Server checks reject the old browser's reservation even before it notices its lease was replaced. Closing/unloading a browser attempts release; expiry handles crashes and interrupted cleanup. Heartbeat failure disables future automatic pickup and leaves existing call audio intact.
+One browser is designated per adviser and project. A second browser cannot silently replace it. Explicitly selecting **Use this browser** calls `setAutoAnswerAvailable(true, {takeover:true})`. Server checks reject the old browser's reservation even before it notices its lease was replaced. Closing/unloading a browser attempts release; expiry handles crashes and interrupted cleanup.
+
+A check-in that gets no answer, times out, or gets a server error (5xx, 408, 429) is retried after about 2 s, then about 5 s, while the lease still has time; offers, the call watcher and the microphone stay as they are. Automatic pickup stops (`snapshot.autoAnswer.state === "blocked"`) only when another browser holds the lease, the server refuses the check-in, or the lease runs out without a successful check-in. Existing call audio is never affected. `snapshot.autoAnswer.code` says why:
+
+| `code` | Meaning | What happens next |
+|---|---|---|
+| `heartbeat_failed` | The server could not be reached before the lease ran out. | The softphone registers again every 30–60 s while no call is active. **Retry now** does it at once. |
+| `moved_to_another_browser` | Another browser holds the lease for this adviser. | Nothing automatic. **Use this browser** takes it back. |
+| `session_rejected` | The server refused the check-in (another 4xx). | Nothing automatic. |
+| `prepare_failed` | The microphone or playback could not be prepared. | Nothing automatic. |
+
+A check-in is one statement on the server and does not wait on the lock that offers and policy changes use. A lapsed lease is replaced by the next browser that checks in. The server logs every check-in it refuses (`auto_answer checkin not_designated`), fails (`auto_answer checkin failed`, with the statement) or holds for 1 s or more (`auto_answer checkin slow`), with the elapsed time and hashed principal and session.
 
 Embedding hosts using the default polling configuration get permission-scoped call push/poll updates automatically while available. Hosts using `pollIntervalMs: 0` must supply complete current lists through `phone.observeCalls(calls)`. Feed withdrawn/terminal updates too. Existing single-call `observeCall` behavior is unchanged.
 
@@ -46,7 +57,7 @@ Server logs retain reservation/attempt time, call, policy source and configured 
 
 ## Verification
 
-Go regressions cover policy defaults/precedence/locks, full identity tuples, project isolation, occupied advisers, competing calls/advisers, browser lease expiry/takeover, policy and permission revocation, withdrawn/terminal offers and normal human placement. TypeScript tests cover immediate action, countdown/cancel/answer-now, readiness failure, late responses, busy state, duplicate notifications and teardown.
+Go regressions cover policy defaults/precedence/locks, full identity tuples, project isolation, occupied advisers, competing calls/advisers, browser lease expiry/takeover, check-ins that do not wait on the auto-answer lock, lapsed-lease replacement, check-in logging, policy and permission revocation, withdrawn/terminal offers and normal human placement. TypeScript tests cover immediate action, countdown/cancel/answer-now, readiness failure, late responses, busy state, duplicate notifications, teardown, check-in retries within the lease, block codes and background recovery.
 
 An opt-in local Chromium test exercises real microphone/playback preparation and the HTTP answer/media path against a fake carrier, for zero and delayed pickup. It places no external calls:
 

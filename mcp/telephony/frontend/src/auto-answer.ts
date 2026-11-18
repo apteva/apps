@@ -5,35 +5,84 @@ export interface AutoAnswerEffective {warning_tone?:AutoAnswerWarningPolicy;mode
 export interface AutoAnswerPolicyRequest {scope?:"project"|"route"|"destination"|"adviser";scope_id?:string;identity?:Record<string,string>;policy?:AutoAnswerPolicy;inherit?:boolean}
 export interface AutoAnswerPolicyView {scope:string;scope_id:string;policy:AutoAnswerPolicy;configured:boolean;effective:AutoAnswerEffective;admin:boolean;advisers?:Array<Record<string,string>>;routes?:Array<{id:string;name:string}>;destinations?:Array<{id:string;name:string}>}
 export interface AutoAnswerSnapshot {available:boolean;designated:boolean;state:"off"|"preparing"|"available"|"warning"|"countdown"|"answering"|"blocked";callId?:string;answerAt?:number;source?:string;detail?:string;offerReceivedAt?:number;answerStartedAt?:number;warningStartedAt?:number;warningCompletedAt?:number;code?:string;eventCallId?:string;offerId?:string;manualAnswerAvailable?:boolean}
+/** Why automatic answering stopped. heartbeat_failed recovers by itself; the others wait for the adviser. */
+export type AutoAnswerBlockCode="moved_to_another_browser"|"heartbeat_failed"|"prepare_failed"|"session_rejected";
+/** Check-in timing. The server keeps a claim for lease_ms (30 s) after each successful check-in. */
+export interface AutoAnswerTiming {heartbeatMs:number;retryMs:number[];recoveryMs:[number,number]}
+const defaultTiming:AutoAnswerTiming={heartbeatMs:10000,retryMs:[2000,5000],recoveryMs:[30000,60000]};
+const defaultLeaseMs=30000;
+/** A check-in that may work if repeated: no response, a timeout, or a server-side failure. */
+export function transientCheckInFailure(error:unknown):boolean{const status=(error as {status?:number}|undefined)?.status;return status===undefined||status===408||status===429||status>=500;}
+const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 interface Host {busy():boolean;prepare():Promise<void>;releasePreparation():void;warning?(windowMs:number,signal:AbortSignal):Promise<void>;answer(id:string,dest:string,session:string,warningCompleted:boolean):Promise<void>;changed(value:AutoAnswerSnapshot):void}
 /** The shared softphone owns pickup. The server only coordinates identity-bound offers. */
 export class AutomaticAnswer {
  private readonly session=crypto.randomUUID();private generation=0;private disposed=false;
  private state:AutoAnswerSnapshot={available:false,designated:false,state:"off"};
  private attempt?:AbortController;private expiry?:ReturnType<typeof setTimeout>;private pendingCallId?:string;
- private heartbeat?:ReturnType<typeof setTimeout>;private countdown?:ReturnType<typeof setTimeout>;private watcher?:{close():void};
+ private heartbeat?:ReturnType<typeof setTimeout>;private recovery?:ReturnType<typeof setTimeout>;private leaseUntil=0;private readonly timing:AutoAnswerTiming;private countdown?:ReturnType<typeof setTimeout>;private watcher?:{close():void};
  private handledOffers=new Set<string>();
  private offered=new Map<string,Call>();private ignored=new Set<string>();private reserved=new Set<string>();private pending=false;private answerNowAction?:()=>void;
- constructor(private client:TelephonyClient,private host:Host,private watch:boolean){}
+ constructor(private client:TelephonyClient,private host:Host,private watch:boolean,timing:Partial<AutoAnswerTiming>={}){this.timing={...defaultTiming,...timing};}
  private update(patch:Partial<AutoAnswerSnapshot>){this.state={...this.state,...patch};this.host.changed({...this.state});}
  async setAvailable(available:boolean,takeover=false):Promise<void>{
   if(this.disposed)throw Error("Softphone has been disposed");
   if(this.host.busy()&&available)throw Error("Finish the current call before enabling automatic answering");
-  const gen=++this.generation;clearTimeout(this.heartbeat);this.watcher?.close();this.watcher=undefined;this.cancel(undefined,"adviser_unavailable");
-  if(!available){this.host.releasePreparation();this.update({available:false,designated:false,state:"off",detail:undefined});await this.client.autoAnswerSession({session_id:this.session,available:false});return;}
-  this.update({available:false,designated:false,state:"preparing",detail:undefined});
+  const gen=++this.generation;clearTimeout(this.heartbeat);clearTimeout(this.recovery);this.recovery=undefined;this.watcher?.close();this.watcher=undefined;
+  // Only a pending pick-up needs cancelling; otherwise a background recovery would briefly report "off".
+  if(this.state.callId||this.pendingCallId)this.cancel(undefined,"adviser_unavailable");
+  if(!available){this.host.releasePreparation();this.update({available:false,designated:false,state:"off",detail:undefined,code:undefined,eventCallId:undefined});await this.client.autoAnswerSession({session_id:this.session,available:false});return;}
+  this.update({available:false,designated:false,state:"preparing",detail:undefined,code:undefined,eventCallId:undefined});
+  let prepared=false;
   try{
-   await this.host.prepare();if(gen!==this.generation||this.disposed){if(!this.state.available)this.host.releasePreparation();return;}
+   await this.host.prepare();prepared=true;if(gen!==this.generation||this.disposed){if(!this.state.available)this.host.releasePreparation();return;}
+   const sent=Date.now();
    const result=await this.client.autoAnswerSession({session_id:this.session,available:true,takeover,warning_tone_supported:Boolean(this.host.warning)});if(gen!==this.generation||this.disposed){await this.client.autoAnswerSession({session_id:this.session,available:false});return;}
-   if(!result.designated)throw Error("Another browser is available for this adviser. Choose Use this browser to move automatic answering here.");
-   this.update({available:true,designated:true,state:"available"});this.scheduleHeartbeat(gen);
+   if(!result.designated)throw Object.assign(Error("Another browser is available for this adviser. Choose Use this browser to move automatic answering here."),{code:"moved_to_another_browser"});
+   this.leaseUntil=sent+(result.lease_ms??defaultLeaseMs);
+   this.update({available:true,designated:true,state:"available",code:undefined});this.scheduleHeartbeat(gen);
    if(this.watch)this.watcher=this.client.watchCalls(calls=>this.observe(calls),{onError:e=>this.update({detail:String(e)})});
    this.consider();
-  }catch(error){if(gen===this.generation){this.host.releasePreparation();this.update({available:false,designated:false,state:"blocked",detail:error instanceof Error?error.message:String(error)});}throw error;}
+  }catch(error){
+   if(gen===this.generation){this.host.releasePreparation();this.block(prepared?this.failureCode(error):"prepare_failed",error);}
+   throw error;
+  }
  }
- private scheduleHeartbeat(gen:number){clearTimeout(this.heartbeat);this.heartbeat=setTimeout(()=>{void this.client.autoAnswerSession({session_id:this.session,available:true,warning_tone_supported:Boolean(this.host.warning)}).then(v=>{
-  if(gen!==this.generation||this.disposed)return;if(!v.designated)throw Error("Automatic answering moved to another browser");this.scheduleHeartbeat(gen);
- }).catch(error=>{if(gen!==this.generation||this.disposed)return;this.generation++;this.cancel();this.watcher?.close();this.watcher=undefined;this.host.releasePreparation();this.update({available:false,designated:false,state:"blocked",detail:String(error)});});},10000);}
+ private failureCode(error:unknown):AutoAnswerBlockCode{
+  if((error as {code?:string}|undefined)?.code==="moved_to_another_browser")return "moved_to_another_browser";
+  return transientCheckInFailure(error)?"heartbeat_failed":"session_rejected";
+ }
+ private block(code:AutoAnswerBlockCode,error:unknown){
+  clearTimeout(this.heartbeat);this.watcher?.close();this.watcher=undefined;
+  this.update({available:false,designated:false,state:"blocked",code,detail:code==="heartbeat_failed"?`Lost contact with Telephony: ${message(error)}. Retrying automatically.`:message(error)});
+  if(code==="heartbeat_failed")this.scheduleRecovery();
+ }
+ /** After a temporary failure, registers again in the background while no call is active. */
+ private scheduleRecovery(){
+  clearTimeout(this.recovery);const [min,max]=this.timing.recoveryMs;
+  this.recovery=setTimeout(()=>{
+   this.recovery=undefined;
+   if(this.disposed||this.state.state!=="blocked"||this.state.code!=="heartbeat_failed")return;
+   if(this.host.busy()){this.scheduleRecovery();return;}
+   // A failure blocks again; a temporary one schedules the next attempt.
+   void this.setAvailable(true).catch(()=>{});
+  },min+Math.random()*Math.max(0,max-min));
+ }
+ /** Renews the claim. A failed check-in is retried while the server still holds the claim, with offers, the watcher and the microphone kept as they are. */
+ private scheduleHeartbeat(gen:number,delay=this.timing.heartbeatMs,failures=0){clearTimeout(this.heartbeat);this.heartbeat=setTimeout(()=>{
+  const sent=Date.now();
+  void this.client.autoAnswerSession({session_id:this.session,available:true,warning_tone_supported:Boolean(this.host.warning)}).then(v=>{
+   if(gen!==this.generation||this.disposed)return;
+   if(!v.designated)throw Object.assign(Error("Automatic answering moved to another browser"),{code:"moved_to_another_browser"});
+   this.leaseUntil=sent+(v.lease_ms??defaultLeaseMs);this.scheduleHeartbeat(gen);
+  }).catch(error=>{
+   if(gen!==this.generation||this.disposed)return;
+   const code=this.failureCode(error),retry=this.timing.retryMs[Math.min(failures,this.timing.retryMs.length-1)]??this.timing.heartbeatMs;
+   if(code==="heartbeat_failed"&&Date.now()+retry<this.leaseUntil){this.scheduleHeartbeat(gen,retry,failures+1);return;}
+   // The plain cancel code reports a pending offer as cancelled; block() then says why.
+   this.generation++;this.cancel();this.host.releasePreparation();this.block(code,error);
+  });
+ },delay);}
  observe(calls:Call[]){
   this.offered=new Map(calls.filter(isIncomingBrowserCall).map(c=>[c.id,c]));
   for(const id of this.ignored)if(!calls.some(c=>c.id===id))this.ignored.delete(id);
@@ -103,5 +152,5 @@ export class AutomaticAnswer {
    if(remaining===0)answer();else {this.update({state:"countdown"});this.countdown=setTimeout(answer,remaining);}
   }).catch(error=>{if(gen===this.generation){this.ignored.add(call.id);const code=(error as {code?:string})?.code;this.update({code:code==="auto_answer_warning_unsupported"?code:"reservation_failed",eventCallId:call.id,manualAnswerAvailable:true,detail:error instanceof Error?error.message:String(error)});}}).finally(()=>{this.pending=false;this.pendingCallId=undefined;});
  }
- dispose(){if(this.disposed)return;this.disposed=true;this.generation++;clearTimeout(this.heartbeat);this.watcher?.close();this.cancel();if(this.state.available)void this.client.autoAnswerSession({session_id:this.session,available:false}).catch(()=>{});this.host.releasePreparation();}
+ dispose(){if(this.disposed)return;this.disposed=true;this.generation++;clearTimeout(this.heartbeat);clearTimeout(this.recovery);this.watcher?.close();this.cancel();if(this.state.available)void this.client.autoAnswerSession({session_id:this.session,available:false}).catch(()=>{});this.host.releasePreparation();}
 }

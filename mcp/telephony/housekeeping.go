@@ -88,6 +88,9 @@ func (a *App) runHousekeepingAt(workerCtx context.Context, ctx *sdk.AppCtx, now 
 		{`DELETE FROM inbound_burst_attempts WHERE rowid IN (SELECT rowid FROM inbound_burst_attempts WHERE project_id=? AND received_at<? ORDER BY received_at LIMIT 100)`, now.Add(-24 * time.Hour).Unix()},
 		{`DELETE FROM inbound_burst_cooldowns WHERE rowid IN (SELECT rowid FROM inbound_burst_cooldowns WHERE project_id=? AND expires_at<? ORDER BY expires_at LIMIT 100)`, now.Unix()},
 		{`DELETE FROM carrier_media_bridges WHERE generation IN (SELECT generation FROM carrier_media_bridges WHERE project_id=? AND started_at<? AND state IN ('ended','failed','replaced','disconnected') ORDER BY started_at LIMIT 100)`, ringTime(now.Add(-30 * 24 * time.Hour))},
+		// Lapsed automatic-answer claims. A check-in already replaces a lapsed
+		// claim itself, so this only keeps the table small.
+		{`DELETE FROM telephony_auto_answer_sessions WHERE project_id=? AND expires_at<=?`, now.UnixMilli()},
 	}
 	for _, q := range queries {
 		if _, err = db.ExecContext(workerCtx, q.sql, project, q.cutoff); err != nil {
