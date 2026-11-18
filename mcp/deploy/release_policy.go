@@ -115,13 +115,27 @@ func releaseApprovalDigest(d *Deployment, b *Build, channel, artifact string, op
 	return jsonDigest(map[string]any{"deployment": d.ID, "environment": d.EnvironmentID, "build": b.ID, "channel": channel, "artifact": artifact, "target": frozen, "options": opts}), nil
 }
 func checkReleasePolicy(d *Deployment, b *Build, opts releaseOptions, ignoreApproval bool) (string, error) {
+	digest, _, err := checkReleasePolicyDetailed(d, b, opts, ignoreApproval)
+	return digest, err
+}
+
+// checkReleasePolicyDetailed also returns the Tests gate override, when the
+// release goes ahead past a blocking gate.
+func checkReleasePolicyDetailed(d *Deployment, b *Build, opts releaseOptions, ignoreApproval bool) (string, *testsOverride, error) {
 	t, e := genericTarget(d.TargetConfigJSON)
 	if e != nil {
-		return "", e
+		return "", nil, e
 	}
-	if e = checkTestsGate(d, b, t.TestsGate, !ignoreApproval); e != nil {
-		return "", e
+	override, e := checkTestsGateOrOverride(d, b, t.TestsGate, !ignoreApproval, opts.TestsOverrideReason)
+	if e != nil {
+		return "", nil, e
 	}
+	digest, e := checkReleasePolicyAfterTests(d, b, t, opts, ignoreApproval)
+	return digest, override, e
+}
+
+func checkReleasePolicyAfterTests(d *Deployment, b *Build, t genericTargetConfig, opts releaseOptions, ignoreApproval bool) (string, error) {
+	var e error
 	// A pipeline's integrity gate applies independently of an optional
 	// promotion policy. Every native release still needs matching evidence.
 	buildPipeline, e := pipelineConfig(b.TargetConfigJSON)

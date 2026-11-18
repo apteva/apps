@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.32.1
+version: 0.33.0
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,12 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.33.0 records each build's source before build commands run: a source
+  digest computed like Workspaces, lockfile hashes per package folder and the
+  Code snapshot, or a kept tar.gz for local sources (deploy_build_source).
+  Tests gates also check the source digest; a required gate cannot be removed
+  without a reason, and tests_override_reason releases past a blocking gate,
+  recorded on the release.
   v0.32.1 seals static, mobile and command artifacts read-only under a digest
   that ignores write bits, keeps Python bytecode out of workloads, names the
   added, removed and changed files when an artifact no longer matches, accepts
@@ -143,6 +149,9 @@ provides:
     - prefix: /build-exports/
       method: GET
       no_auth: true
+    - prefix: /build-sources/
+      method: GET
+      no_auth: true
     - prefix: /
   mcp_tools:
     - name: deploy_release_approve
@@ -169,6 +178,9 @@ provides:
     - name: deploy_build_export
       read_only: true
       description: Export a sealed build's file manifest, env template and signed archive URL without secret values.
+    - name: deploy_build_source
+      read_only: true
+      description: Show a build's source digest, lockfile hashes and Code snapshot, or a signed link to the source copy kept for local sources.
     - name: deploy_build_import
       description: Import an exported static build and verify it against its candidate digest.
     - name: deploy_build_pin
@@ -251,7 +263,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.32.1
+    ref: deploy/v0.33.0
     entry: mcp/deploy
   port: 8080
   health_check: /health

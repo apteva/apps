@@ -411,6 +411,9 @@ func (a *App) toolBuildExport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if raw := strings.TrimSpace(build.ArtifactManifestJSON); raw != "" && raw != "{}" && json.Valid([]byte(raw)) {
 		out["artifact_manifest"] = json.RawMessage(raw)
 	}
+	if src, _ := dbBuildSource(db, build.ID); src != nil {
+		out["source"] = sourceSummary(src)
+	}
 	if body, err := os.ReadFile(filepath.Join(build.ArtifactPath, "backend", "release.json")); err == nil && json.Valid(body) {
 		out["backend"] = json.RawMessage(body)
 	}
