@@ -210,7 +210,7 @@ type Pool struct {
 	Key              string          `json:"key"`
 	Name             string          `json:"name"`
 	Platform         string          `json:"platform"`
-	ScriptSet        string          `json:"script_set"`
+	ScriptSet        string          `json:"-"` // always the platform; scripts are picked by platform
 	ExecutionEnabled bool            `json:"execution_enabled"`
 	Metadata         json.RawMessage `json:"metadata"`
 	CreatedAt        string          `json:"created_at"`

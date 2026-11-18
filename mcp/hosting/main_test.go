@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 func TestMain(m *testing.M) {
 	// Runs execute synchronously so tests can assert on their outcome.
 	kickOperation = func(a *App, ctx *sdk.AppCtx, id string) { a.drive(ctx, id) }
+	now = func() time.Time { return time.Now().UTC().Add(time.Duration(clockOffset.Load())) }
 	os.Exit(m.Run())
 }
 
@@ -47,6 +49,10 @@ type platformStub struct {
 	pendingClean  int    // verify_clean polls that report "not yet"
 	createErr     error
 	destroyCalled []int64
+	osVersion     string            // sw_vers / os-release answer
+	onCall        map[string]func() // hooks run before a tool, outside the lock
+	runErrStarted bool              // containers_run fails after starting the container
+	workloads     []map[string]any  // what containers_list returns
 }
 
 type callAppCall struct {
@@ -69,6 +75,9 @@ var allMarkerSteps = []string{"prepare", "preflight", "grant", "verify_access", 
 	"wipe", "reinstall", "verify_clean", "install_wipe", "install_reinstall", "install_verify-clean"}
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if hook := p.onCall[tool]; hook != nil {
+		hook()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, callAppCall{App: appName, Tool: tool, Input: input})
@@ -77,7 +86,15 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		return json.Unmarshal(b, out)
 	}
 	switch tool {
+	case "containers_list":
+		return reply(map[string]any{"workloads": p.workloads})
 	case "containers_run":
+		w := map[string]any{"id": "wl_" + strFromAny(input["name"]), "name": input["name"], "status": "running", "health_status": "healthy",
+			"ports": []map[string]any{{"container_port": 80, "host_port": 18080, "bind_addr": "127.0.0.1"}}}
+		p.workloads = append(p.workloads, w)
+		if p.runErrStarted {
+			return errors.New("containers_run: context deadline exceeded")
+		}
 		return reply(map[string]any{"workload": map[string]any{"id": "wl_" + strFromAny(input["name"]), "status": "running", "health_status": "healthy",
 			"ports": []map[string]any{{"container_port": 80, "host_port": 18080, "bind_addr": "127.0.0.1"}}}})
 	case "containers_stop", "containers_start", "containers_restart", "containers_health":
@@ -127,6 +144,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		cmd := strFromAny(input["cmd"])
 		p.commands = append(p.commands, cmd)
 		op := opIDRE.FindString(cmd)
+		if strings.Contains(cmd, "sw_vers") || strings.Contains(cmd, "os-release") {
+			return reply(map[string]any{"output": firstNonEmpty(p.osVersion, "15.3") + "\n", "exit_code": 0})
+		}
 		if p.failStep != "" && strings.Contains(cmd, "'"+p.failStep+"'") {
 			return reply(map[string]any{"output": "boom", "exit_code": 1})
 		}
@@ -449,8 +469,8 @@ func TestContainerTenantLifecycleIsIdempotent(t *testing.T) {
 	if tenant(t, db, id).Status != TenantActive || stub.called("containers_start") != 1 {
 		t.Fatal("resume did not start the container")
 	}
-	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1"})
-	rel := call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1"})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1", "confirm": id})
+	rel := call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-1", "confirm": id})
 	if rel["already_released"] != true || stub.called("containers_destroy") != 1 || len(stub.unexposed) != 1 {
 		t.Fatalf("release not idempotent: %v destroys=%d", rel, stub.called("containers_destroy"))
 	}
@@ -531,7 +551,7 @@ func TestPoolMachineFullCycle(t *testing.T) {
 	}
 
 	before := len(stub.commands)
-	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-9"})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-9", "confirm": tn.ID})
 	if got := tenant(t, db, tn.ID); got.Status != TenantReleased {
 		t.Fatalf("tenant after release = %s", got.Status)
 	}
@@ -660,7 +680,7 @@ func TestVerifyCleanIsPolledUntilItPasses(t *testing.T) {
 	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-p", "profile": "mac-m4", "owner_email": "p@example.com"})
 	id := strArg(mapFromAny(out["tenant"]), "id")
 	stub.pendingClean = 2
-	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
 	if tenant(t, db, id).Status != TenantReleasing || machine(t, db, ids[0]).State != MachineCleaning {
 		t.Fatal("release should wait for verify-clean")
 	}
@@ -690,7 +710,7 @@ func TestVerifyCleanTimeoutQuarantines(t *testing.T) {
 	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-t", "profile": "mac-m4", "owner_email": "t@example.com"})
 	id := strArg(mapFromAny(out["tenant"]), "id")
 	stub.pendingClean = 1000
-	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
 	advanceClock(t, 61*time.Minute)
 	_ = a.tick(ctx)
 	if m := machine(t, db, ids[0]); m.State != MachineQuarantined || !strings.Contains(m.StateReason, "verify_clean") {
@@ -782,7 +802,7 @@ func TestLinuxPoolReleaseWaitsForManualClean(t *testing.T) {
 	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
 	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-l", "profile": "box", "owner_email": "l@example.com", "ssh_keys": testKey})
 	id := strArg(mapFromAny(out["tenant"]), "id")
-	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
 	if tenant(t, db, id).Status != TenantReleased {
 		t.Fatal("tenant should be released")
 	}
@@ -820,7 +840,7 @@ func TestOnDemandMachineCreateAndDelayedDestroy(t *testing.T) {
 		t.Fatalf("tenant after ready = %s access=%+v", tn.Status, tn.Access)
 	}
 	// Release inside the 24-hour minimum: access goes now, destroy waits.
-	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-o"})
+	call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-o", "confirm": id})
 	if len(stub.destroyCalled) != 0 || tenant(t, db, id).Status != TenantReleasing {
 		t.Fatal("destroy must wait for deletable_at")
 	}
@@ -886,10 +906,285 @@ func TestHTTPRoutesServePanelData(t *testing.T) {
 
 // ─── Clock ───────────────────────────────────────────────────────────────
 
+// clockOffset shifts the app clock in tests. It is atomic because a running
+// step's lease heartbeat reads the clock from its own goroutine.
+var clockOffset atomic.Int64
+
 func advanceClock(t *testing.T, d time.Duration) {
 	t.Helper()
-	prev := now
-	base := prev()
-	now = func() time.Time { return base.Add(d) }
-	t.Cleanup(func() { now = prev })
+	clockOffset.Add(int64(d))
+	t.Cleanup(func() { clockOffset.Add(-int64(d)) })
+}
+
+// ─── Review fixes (2.1.0) ────────────────────────────────────────────────
+
+func TestCreateAgainResumesSuspendedTenant(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	args := map[string]any{"external_ref": "acct-c", "profile": "starter", "owner_email": "c@example.com"}
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, args)["tenant"]), "id")
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": id})
+	again := call(t, a.toolTenantCreate, ctx, args)
+	if strArg(mapFromAny(again["tenant"]), "id") != id || tenant(t, db, id).Status != TenantActive || stub.called("containers_start") != 1 {
+		t.Fatalf("create on a suspended container tenant should resume it: %s", tenant(t, db, id).Status)
+	}
+
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	margs := map[string]any{"external_ref": "acct-m", "profile": "mac-m4", "owner_email": "m@example.com", "ssh_keys": testKey}
+	mid := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, margs)["tenant"]), "id")
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": mid})
+	call(t, a.toolTenantCreate, ctx, margs)
+	if tenant(t, db, mid).Status != TenantActive || machine(t, db, ids[0]).State != MachineAssigned {
+		t.Fatalf("create on a suspended machine tenant should resume it: %s", tenant(t, db, mid).Status)
+	}
+
+	stub.pendingClean = 5
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": mid, "confirm": mid})
+	if tenant(t, db, mid).Status != TenantReleasing {
+		t.Fatal("release should be waiting on verify-clean")
+	}
+	callErr(t, a.toolTenantCreate, ctx, margs, "is being released")
+}
+
+func TestCreateUsesTheCallersOwnHold(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	res := call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-a"})
+	rid := strArg(mapFromAny(res["reservation"]), "id")
+	b := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-b", "profile": "mac-m4", "owner_email": "b@example.com"})
+	if tenant(t, db, strArg(mapFromAny(b["tenant"]), "id")).Status != TenantWaitingForMachine {
+		t.Fatal("another account must not take a held machine")
+	}
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-a", "profile": "mac-m4", "owner_email": "a@example.com"})
+	ta := tenant(t, db, strArg(mapFromAny(out["tenant"]), "id"))
+	if ta.MachineID != ids[0] || ta.ReservationID != rid || ta.Status != TenantActive {
+		t.Fatalf("holder should get its machine without passing reservation_id: %+v", ta)
+	}
+	if r, _ := dbReservationGet(db, rid); r.Status != "confirmed" {
+		t.Fatalf("hold = %s", r.Status)
+	}
+}
+
+func TestOfflineHeldMachineIsNotAssigned(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	res := call(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-off"})
+	rid := strArg(mapFromAny(res["reservation"]), "id")
+	off := false
+	stub.instances[100].Connected = &off // switched off, Instances still says ready
+	_ = a.tick(ctx)
+	if m := machine(t, db, ids[0]); m.Online {
+		t.Fatal("a disconnected machine must be offline")
+	}
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-off", "profile": "mac-m4", "owner_email": "o@example.com", "reservation_id": rid})
+	tn := tenant(t, db, strArg(mapFromAny(out["tenant"]), "id"))
+	if tn.MachineID != 0 || tn.Status != TenantWaitingForMachine {
+		t.Fatalf("offline held machine was assigned: %+v", tn)
+	}
+	if r, _ := dbReservationGet(db, rid); r.Status != "released" {
+		t.Fatalf("unusable hold should be released, got %s", r.Status)
+	}
+	// It comes back: the waiting tenant gets it.
+	on := true
+	stub.instances[100].Connected = &on
+	_ = a.tick(ctx)
+	if got := tenant(t, db, tn.ID); got.MachineID != ids[0] || got.Status != TenantActive {
+		t.Fatalf("tenant after machine came back = %s machine=%d", got.Status, got.MachineID)
+	}
+}
+
+func TestDestructiveTenantToolsNeedConfirm(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 1)
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-d", "profile": "mac-m4", "owner_email": "d@example.com"})["tenant"]), "id")
+	callErr(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id}, "confirm must be the tenant id")
+	callErr(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-d", "confirm": "acct-d"}, "confirm must be the tenant id")
+	callErr(t, a.toolTenantReinstall, ctx, map[string]any{"tenant_id": id}, "confirm must be the tenant id")
+	if tenant(t, db, id).Status != TenantActive {
+		t.Fatal("refused calls must not change the tenant")
+	}
+	// Already released: repeating without confirm stays a no-op.
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	rel := call(t, a.toolTenantRelease, ctx, map[string]any{"external_ref": "acct-d"})
+	if rel["already_released"] != true {
+		t.Fatalf("repeat release = %v", rel)
+	}
+}
+
+func TestSlowStepRunsOnce(t *testing.T) {
+	prevRenew := leaseRenewEvery
+	leaseRenewEvery = 5 * time.Millisecond
+	t.Cleanup(func() { leaseRenewEvery = prevRenew })
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "vps", "backend": "machine_on_demand", "product_key": "ssh-access", "settings": map[string]any{"provider": "hetzner", "server_type": "cx22"}})
+	fired := false
+	stub.onCall = map[string]func(){"instance_create": func() {
+		if fired {
+			return
+		}
+		fired = true
+		// The provider takes longer than the lock; the worker ticks meanwhile.
+		advanceClock(t, leaseDuration+time.Minute)
+		time.Sleep(50 * time.Millisecond)
+		_ = a.tick(ctx)
+	}}
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-s", "profile": "vps", "owner_email": "s@example.com"})
+	if n := stub.called("instance_create"); n != 1 {
+		t.Fatalf("instance_create ran %d times", n)
+	}
+	if tenant(t, db, strArg(mapFromAny(out["tenant"]), "id")).InstanceID == 0 {
+		t.Fatal("instance not recorded")
+	}
+}
+
+func TestWorkloadStartIsAdoptedAfterTimeout(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "vps-app", "backend": "machine_on_demand", "product_key": "apteva", "settings": map[string]any{"provider": "hetzner", "server_type": "cx22"}})
+	stub.runErrStarted = true // containers_run times out after starting the container
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-w2", "profile": "vps-app", "owner_email": "w@example.com"})
+	id := strArg(mapFromAny(out["tenant"]), "id")
+	stub.instances[tenant(t, db, id).InstanceID].Status = "ready"
+	advanceClock(t, time.Minute)
+	_ = a.tick(ctx)
+	tn := tenant(t, db, id)
+	if tn.Status != TenantActive || tn.WorkloadID == "" {
+		t.Fatalf("tenant = %s workload=%q (%s)", tn.Status, tn.WorkloadID, tn.LastError)
+	}
+	if n := stub.called("containers_run"); n != 1 {
+		t.Fatalf("containers_run ran %d times", n)
+	}
+}
+
+func TestExpectedOSIsChecked(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addInstance(310, "macos", "ready")
+	mid := int64Arg(mapFromAny(call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 310, "expected_os": "15", "serial": "S", "management_user": "admin"})["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": fmt.Sprint(mid)})
+	stub.osVersion = "14.6"
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	if m := machine(t, db, mid); m.State != MachineQuarantined || !strings.Contains(m.StateReason, "expected \"15\"") {
+		t.Fatalf("machine = %s (%s)", m.State, m.StateReason)
+	}
+	stub.osVersion = "15.3"
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	if m := machine(t, db, mid); m.State != MachineAvailable {
+		t.Fatalf("machine on the expected OS = %s (%s)", m.State, m.StateReason)
+	}
+	if osMatches("15.30", "15.3") || !osMatches("15.3.1", "15.3") || !osMatches("ubuntu 24.04", "Ubuntu 24.04") {
+		t.Fatal("osMatches prefix rules")
+	}
+}
+
+func TestResolveStuckTenant(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 1)
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-q", "profile": "mac-m4", "owner_email": "q@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	stub.failStep = "revoke"
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": id})
+	if tenant(t, db, id).Status != TenantSuspending || machine(t, db, ids[0]).State != MachineQuarantined {
+		t.Fatalf("setup: tenant=%s machine=%s", tenant(t, db, id).Status, machine(t, db, ids[0]).State)
+	}
+	callErr(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id, "action": "release", "confirm": id}, "reviewed=true")
+	callErr(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id, "action": "release", "reviewed": true}, "confirm must be")
+	callErr(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id, "action": "nope", "reviewed": true, "confirm": id}, "action must be")
+	// revoke keeps failing on this host: erase it without revoking first.
+	before := len(stub.commands)
+	call(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id, "action": "force_clean", "reviewed": true, "confirm": id, "actor": "ops"})
+	if tenant(t, db, id).Status != TenantReleased || machine(t, db, ids[0]).State != MachineAvailable {
+		t.Fatalf("after force_clean: tenant=%s machine=%s (%s)", tenant(t, db, id).Status, machine(t, db, ids[0]).State, machine(t, db, ids[0]).StateReason)
+	}
+	for _, c := range stub.commands[before:] {
+		if strings.Contains(c, "'revoke'") {
+			t.Fatal("force_clean must not run revoke")
+		}
+	}
+	stub.failStep = ""
+
+	// resume path
+	id2 := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-q2", "profile": "mac-m4", "owner_email": "q@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	call(t, a.toolMachineQuarantine, ctx, map[string]any{"machine_id": ids[0], "reason": "noise"})
+	call(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id2, "action": "resume", "reviewed": true, "confirm": id2})
+	if tenant(t, db, id2).Status != TenantActive || machine(t, db, ids[0]).State != MachineAssigned {
+		t.Fatalf("after resume: tenant=%s machine=%s", tenant(t, db, id2).Status, machine(t, db, ids[0]).State)
+	}
+	callErr(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id2, "action": "resume", "reviewed": true, "confirm": id2}, "nothing to resolve")
+}
+
+func TestTenantUpdateLinksMigratedTenant(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "tmp", "profile": "starter", "owner_email": "u@example.com"})["tenant"]), "id")
+	if _, err := db.Exec(`UPDATE hosting_tenants SET external_ref='' WHERE id=?`, id); err != nil { // as migrated from 1.x
+		t.Fatal(err)
+	}
+	call(t, a.toolTenantUpdate, ctx, map[string]any{"tenant_id": id, "external_ref": "acct-u", "owner_email": "New@Example.com", "metadata": map[string]any{"saas_account": 7}})
+	got := tenant(t, db, id)
+	if got.ExternalRef != "acct-u" || got.OwnerEmail != "new@example.com" || mapFromAny(got.Metadata)["saas_account"] == nil {
+		t.Fatalf("tenant = %+v", got)
+	}
+	callErr(t, a.toolTenantUpdate, ctx, map[string]any{"tenant_id": id, "external_ref": "acct-v"}, "confirm must be")
+	call(t, a.toolTenantUpdate, ctx, map[string]any{"tenant_id": id, "external_ref": "acct-v", "confirm": id})
+	other := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-x", "profile": "starter", "owner_email": "x@example.com"})["tenant"]), "id")
+	callErr(t, a.toolTenantUpdate, ctx, map[string]any{"tenant_id": other, "external_ref": "acct-v", "confirm": other}, "already has a live tenant")
+	// SaaS can now drive the migrated tenant by its account id.
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"external_ref": "acct-v"})
+	if tenant(t, db, id).Status != TenantSuspended {
+		t.Fatal("suspend by the new external_ref")
+	}
+}
+
+func TestMigrationHandlesMissingRowsAndReleasedHostnames(t *testing.T) {
+	db := openTestDB(t)
+	applyMigrations(t, db, "003_addons_metering.sql")
+	mustExec := func(q string, args ...any) {
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	mustExec(`PRAGMA foreign_keys=OFF`)
+	mustExec(`INSERT INTO hosting_products (key, name) VALUES ('apteva', 'Apteva')`)
+	mustExec(`INSERT INTO hosting_plans (key, name, image, cpu, memory_mb, storage_mb) VALUES ('wp', 'WP', 'img', 1, 1024, 2048)`)
+	mustExec(`INSERT INTO hosting_plan_bindings (plan_key, product_key) VALUES ('wp', 'wordpress-custom')`) // product row gone
+	mustExec(`INSERT INTO hosting_customers (id, email) VALUES (1, 'a@example.com')`)
+	mustExec(`INSERT INTO hosting_tenants (id, customer_id, workload_id, slug, default_hostname, owner_email, plan_key, status) VALUES ('htn_wp', 1, 'wl1', 'blog', 'blog.hosted.example.com', 'a@example.com', 'wp', 'active')`)
+	mustExec(`INSERT INTO hosting_tenants (id, customer_id, workload_id, slug, default_hostname, owner_email, plan_key, status) VALUES ('htn_gone', 1, 'wl2', 'shop', 'shop.hosted.example.com', 'a@example.com', 'wp', 'deleted')`)
+	mustExec(`INSERT INTO hosting_tenants (id, customer_id, workload_id, slug, default_hostname, owner_email, plan_key, status) VALUES ('htn_orphan', 1, 'wl3', 'lost', 'lost.hosted.example.com', 'a@example.com', 'vanished-plan', 'active')`)
+	mustExec(`PRAGMA foreign_keys=ON`)
+	applyMigrations(t, db, "")
+
+	if p, _ := dbProfileGet(db, "wp"); p == nil || p.ProductKey != "wordpress-custom" {
+		t.Fatalf("plan with a missing product must still become a profile: %+v", p)
+	}
+	if p, _ := dbProfileGet(db, "vanished-plan"); p == nil || p.Status != "archived" {
+		t.Fatalf("tenant with a missing plan needs an archived placeholder profile: %+v", p)
+	}
+	if got, _ := dbTenantGet(db, "htn_orphan"); got == nil || got.Status != TenantActive {
+		t.Fatal("orphan tenant lost")
+	}
+	gone, _ := dbTenantGet(db, "htn_gone")
+	if gone.Status != TenantReleased || gone.DefaultHostname != "" {
+		t.Fatalf("released tenant keeps hostname %q", gone.DefaultHostname)
+	}
+	rows, _ := db.Query(`PRAGMA foreign_key_check`)
+	if rows.Next() {
+		t.Fatal("foreign key problems after migration")
+	}
+	rows.Close()
+
+	// The released slug can be used again on the migrated database.
+	a := &App{}
+	manifest := a.Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{"default_base_domain": "hosted.example.com", "default_image": "apteva:test"}, newStub(), nil)
+	if err := a.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-shop", "profile": "starter", "owner_email": "s@example.com", "slug": "shop"})
 }

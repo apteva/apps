@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.0.0
+version: 2.1.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
@@ -49,6 +49,10 @@ provides:
       description: "Create a tenant on a runtime profile, keyed by external_ref (repeat calls return the same tenant). Machine profiles finish in the background."
     - name: hosting_tenant_get
       description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details, current run and recent events."
+    - name: hosting_tenant_update
+      description: "Update a tenant's external_ref, owner_email or metadata. Links a tenant migrated from 1.x to the caller's account id; changing an external_ref already set needs confirm equal to the tenant id."
+    - name: hosting_tenant_resolve
+      description: "Settle a machine tenant left by a failure: resume, release, or force_clean a validated macOS machine. Needs reviewed=true and confirm equal to the tenant id."
     - name: hosting_tenant_list
       description: "List tenants. Filters: status, profile_key, backend, owner_email, external_ref, include_released."
     - name: hosting_tenant_suspend
@@ -56,11 +60,11 @@ provides:
     - name: hosting_tenant_resume
       description: "Resume a suspended tenant: start its container, or restore SSH access. Repeating it is a no-op."
     - name: hosting_tenant_release
-      description: "End a tenant now: destroy its container, wipe and recycle its pool machine, or destroy its on-demand machine. Repeat calls are no-ops."
+      description: "End a tenant now: destroy its container, wipe and recycle its pool machine, or destroy its on-demand machine. Needs confirm equal to the tenant id. Repeat calls are no-ops."
     - name: hosting_tenant_restart
       description: "Restart a tenant's container or reboot its machine."
     - name: hosting_tenant_reinstall
-      description: "Erase and reinstall a macOS pool machine for the same tenant, then restore access. Destroys the customer's data."
+      description: "Erase and reinstall a macOS pool machine for the same tenant, then restore access. Destroys the customer's data. Needs confirm equal to the tenant id."
     - name: hosting_tenant_access_keys_set
       description: "Replace a machine tenant's SSH public keys. An empty list removes access."
     - name: hosting_tenant_logs

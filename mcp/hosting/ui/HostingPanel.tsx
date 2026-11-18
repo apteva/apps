@@ -318,8 +318,14 @@ export default function HostingPanel(_props: NativePanelProps) {
       setCreateForm({ external_ref: "", profile: createForm.profile, owner_email: "", ssh_keys: "" });
     }, "Tenant created");
 
-  const tenantAction = (t: Tenant, tool: string, done: string) =>
-    act(`${tool}:${t.id}`, () => callTool(tool, { tenant_id: t.id }), done);
+  const tenantAction = (t: Tenant, tool: string, done: string, extra: Record<string, unknown> = {}) =>
+    act(`${tool}:${t.id}`, () => callTool(tool, { tenant_id: t.id, ...extra }), done);
+
+  const stuck = (t: Tenant) => {
+    const m = machines.find((x) => x.id === t.machine_id);
+    return t.backend !== "container" && t.status !== "released" &&
+      (["failed", "suspending", "resuming", "releasing"].includes(t.status) || m?.state === "quarantined");
+  };
 
   const machineAction = (m: Machine, tool: string, args: Record<string, unknown>, done: string) =>
     act(`${tool}:${m.id}`, () => callTool(tool, { machine_id: m.id, ...args }), done);
@@ -441,12 +447,29 @@ export default function HostingPanel(_props: NativePanelProps) {
                       {selected.backend === "machine_pool" && selected.status === "active" && (
                         <button type="button" className={btnDanger} disabled={!!busy}
                           onClick={() => ask("Reinstall machine", selected.slug, "Erases the machine and reinstalls macOS for the same tenant. The customer's data is lost.",
-                            () => tenantAction(selected, "hosting_tenant_reinstall", "Reinstall started"))}>Reinstall</button>
+                            () => tenantAction(selected, "hosting_tenant_reinstall", "Reinstall started", { confirm: selected.id }))}>Reinstall</button>
                       )}
                       <button type="button" className={btnDanger} disabled={!!busy}
                         onClick={() => ask("Release tenant", selected.slug,
                           selected.backend === "container" ? "Destroys the container and its hostname." : "Removes access and wipes or destroys the machine.",
-                          () => tenantAction(selected, "hosting_tenant_release", "Release started"))}>Release</button>
+                          () => tenantAction(selected, "hosting_tenant_release", "Release started", { confirm: selected.id }))}>Release</button>
+                    </div>
+                  )}
+                  {stuck(selected) && (
+                    <div className="border border-border rounded p-3 space-y-2">
+                      <p className="text-xs text-text-dim">This tenant was left by a failed run or a quarantined machine. Check the machine and the log, then settle it.</p>
+                      <div className="flex flex-wrap gap-2">
+                        {(["resume", "release", "force_clean"] as const).map((action) => (
+                          <button key={action} type="button" className={action === "resume" ? btn : btnDanger} disabled={!!busy}
+                            onClick={() => ask(`Resolve: ${action.replace("_", " ")}`, selected.slug,
+                              action === "resume" ? "Restores the customer's access and runs the tenant again."
+                                : action === "release" ? "Removes access and resets the machine as a normal release."
+                                : "Erases the macOS machine without revoking access first, then puts it back on sale.",
+                              () => tenantAction(selected, "hosting_tenant_resolve", "Resolve started", { action, reviewed: true, confirm: selected.id }))}>
+                            {action === "force_clean" ? "Force clean" : action === "resume" ? "Resume" : "Release"}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                   <div className="space-y-2">
