@@ -501,11 +501,29 @@ func (a *App) toolMachineAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if inst.Platform != "" && inst.Platform != pool.Platform {
 		return nil, fmt.Errorf("instance %d is %s but pool %s is %s", instanceID, inst.Platform, pool.Key, pool.Platform)
 	}
-	port := intArg(args, "public_port", inst.port())
-	res, err := db.Exec(`INSERT INTO hosting_machines (pool_key, instance_id, name, state, state_reason, online, last_seen_at, public_host, public_port, serial, expected_os, management_user)
-		VALUES (?, ?, ?, 'quarantined', 'added; run inspect', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?, ?, ?, ?, ?)`,
+	manualHost := strings.TrimSpace(strArg(args, "public_host"))
+	if inst.ConnectMode == "reverse_tunnel" && boolArg(args, "enable_public_ssh") && (inst.PublicSSH == nil || !inst.PublicSSH.Enabled) {
+		var out map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("instances", "instance_public_ssh_set", withProject(ctx.CurrentProject(), map[string]any{"id": instanceID, "enabled": true}), &out); err != nil {
+			return nil, fmt.Errorf("instance_public_ssh_set: %w", err)
+		}
+		if inst, err = instanceGet(ctx, ctx.CurrentProject(), instanceID); err != nil {
+			return nil, fmt.Errorf("instances: %w", err)
+		}
+	}
+	if inst.ConnectMode == "reverse_tunnel" && inst.PublicSSH == nil && manualHost == "" {
+		return nil, fmt.Errorf("instance %d reaches this server through a reverse tunnel, and this Instances version has no public SSH for customers; upgrade Instances to 0.19 or later", instanceID)
+	}
+	host, port, issue := customerEndpoint(inst)
+	source := "instances"
+	if manualHost != "" {
+		host, port, issue, source = manualHost, intArg(args, "public_port", inst.port()), "", "manual"
+	}
+	res, err := db.Exec(`INSERT INTO hosting_machines (pool_key, instance_id, name, state, state_reason, online, last_seen_at, public_host, public_port,
+		connect_mode, endpoint_source, endpoint_issue, serial, expected_os, management_user)
+		VALUES (?, ?, ?, 'quarantined', 'added; run inspect', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pool.Key, instanceID, firstNonEmpty(strArg(args, "name"), inst.Name, fmt.Sprintf("instance-%d", instanceID)),
-		boolToInt(inst.online()), inst.online(), firstNonEmpty(strArg(args, "public_host"), inst.host()), port,
+		boolToInt(inst.online()), inst.online(), host, port, inst.ConnectMode, source, issue,
 		strArg(args, "serial"), strArg(args, "expected_os"), strArg(args, "management_user"))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -526,6 +544,34 @@ type machineView struct {
 	Operation *Operation `json:"operation,omitempty"`
 	Tenant    *Tenant    `json:"tenant,omitempty"`
 	ForSale   bool       `json:"for_sale"`
+	// NotForSale says why a machine is not for sale, first reason only.
+	NotForSale string `json:"not_for_sale,omitempty"`
+}
+
+func notForSaleReason(p *Pool, m *Machine) string {
+	switch {
+	case m.TenantID != "":
+		return "assigned"
+	case m.State != MachineAvailable:
+		return m.State
+	case !m.Online:
+		if m.ConnectMode == "reverse_tunnel" {
+			return "tunnel down"
+		}
+		return "offline"
+	case !m.Validated:
+		return "not validated"
+	case p == nil || !p.ExecutionEnabled:
+		return "pool execution off"
+	case m.EndpointIssue != "":
+		if strings.HasPrefix(m.EndpointIssue, "no public SSH") {
+			return "no public SSH"
+		}
+		return m.EndpointIssue
+	case m.PublicHost == "":
+		return "no customer endpoint"
+	}
+	return ""
 }
 
 func machineViews(db *sql.DB, machines []*Machine) ([]machineView, error) {
@@ -544,7 +590,8 @@ func machineViews(db *sql.DB, machines []*Machine) ([]machineView, error) {
 			p, _ = dbPoolGet(db, m.PoolKey)
 			pools[m.PoolKey] = p
 		}
-		v.ForSale = p != nil && p.ExecutionEnabled && m.State == MachineAvailable && m.Online && m.Validated && m.TenantID == ""
+		v.NotForSale = notForSaleReason(p, m)
+		v.ForSale = v.NotForSale == ""
 		out = append(out, v)
 	}
 	return out, nil
@@ -595,14 +642,26 @@ func (a *App) toolMachineUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	sets := []string{}
 	params := []any{}
-	for _, f := range []string{"name", "serial", "management_user", "expected_os", "public_host"} {
+	for _, f := range []string{"name", "serial", "management_user", "expected_os"} {
 		if v, ok := args[f]; ok {
 			sets = append(sets, f+"=?")
 			params = append(params, strings.TrimSpace(strFromAny(v)))
 		}
 	}
-	if v := intArg(args, "public_port", 0); v > 0 {
-		sets = append(sets, "public_port=?")
+	// An endpoint typed by the operator wins over Instances; an empty
+	// public_host hands the endpoint back to Instances.
+	resetEndpoint := false
+	if v, ok := args["public_host"]; ok {
+		if host := strings.TrimSpace(strFromAny(v)); host != "" {
+			sets = append(sets, "public_host=?", "endpoint_source='manual'", "endpoint_issue=''")
+			params = append(params, host)
+		} else {
+			sets = append(sets, "endpoint_source='instances'")
+			resetEndpoint = true
+		}
+	}
+	if v := intArg(args, "public_port", 0); v > 0 && !resetEndpoint {
+		sets = append(sets, "public_port=?", "endpoint_source='manual'")
 		params = append(params, v)
 	}
 	if _, ok := args["validated"]; ok {
@@ -623,6 +682,11 @@ func (a *App) toolMachineUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	params = append(params, m.ID)
 	if _, err := db.Exec(`UPDATE hosting_machines SET `+strings.Join(sets, ", ")+`, updated_at=CURRENT_TIMESTAMP WHERE id=?`, params...); err != nil {
 		return nil, err
+	}
+	if resetEndpoint {
+		if m, err = dbMachineGet(db, m.ID); err == nil {
+			a.refreshMachine(ctx, m)
+		}
 	}
 	m, err = dbMachineGet(db, m.ID)
 	if err != nil {
@@ -664,6 +728,9 @@ func (a *App) toolMachineInspect(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	if m.EndpointIssue != "" && m.EndpointSource != "manual" {
+		return nil, fmt.Errorf("machine %d cannot be sold: %s", m.ID, m.EndpointIssue)
+	}
 	steps := []string{"prepare_ssh", "preflight", "check_os", "check_clean"}
 	if pool.Platform == "macos" {
 		steps = []string{"prepare_ssh", "preflight", "check_os", "install_reset_scripts", "check_clean"}
@@ -694,6 +761,9 @@ func (a *App) toolMachineClean(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	if pool.Platform != "macos" {
 		return nil, errors.New("automatic cleaning is only available for macOS pools; clean the machine by hand and run inspect")
+	}
+	if reason := eraseRefusedReason(m); reason != "" {
+		return nil, errors.New("clean refused: " + reason + "; clean it by hand and run inspect")
 	}
 	if !m.Validated {
 		return nil, errors.New("machine is not validated; erase is refused until its recovery has been tested")
@@ -805,20 +875,49 @@ func (a *App) toolMachineRemove(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 // refreshMachines records whether each pool machine's Instances host answers.
 func (a *App) refreshMachines(ctx *sdk.AppCtx) {
-	db := ctx.AppDB()
-	machines, err := dbMachineList(db, "", "")
+	machines, err := dbMachineList(ctx.AppDB(), "", "")
 	if err != nil {
 		return
 	}
 	for _, m := range machines {
-		inst, err := instanceGet(ctx, ctx.CurrentProject(), m.InstanceID)
-		online := err == nil && inst.online()
-		if online {
-			_, _ = db.Exec(`UPDATE hosting_machines SET online=1, last_seen_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID)
-		} else if m.Online {
+		a.refreshMachine(ctx, m)
+	}
+}
+
+// refreshMachine copies Instances' view of one machine: whether it is
+// connected, how it is reached, and (unless an operator set it by hand)
+// where customers reach it. A changed endpoint shows up in the assigned
+// tenant's SSH command at once, since that is built from the machine row.
+func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) {
+	db := ctx.AppDB()
+	inst, err := instanceGet(ctx, ctx.CurrentProject(), m.InstanceID)
+	if err != nil {
+		if m.Online {
 			_, _ = db.Exec(`UPDATE hosting_machines SET online=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID)
 		}
+		return
 	}
+	online := inst.online()
+	seen := m.LastSeenAt
+	if inst.LastSeenAt != "" {
+		seen = inst.LastSeenAt
+	} else if online {
+		seen = sqlTime(now())
+	}
+	host, port, issue := m.PublicHost, m.PublicPort, m.EndpointIssue
+	if m.EndpointSource != "manual" {
+		host, port, issue = customerEndpoint(inst)
+	}
+	if host != m.PublicHost || port != m.PublicPort {
+		ctx.Logger().Info("hosting machine endpoint changed", "machine_id", m.ID, "from", fmt.Sprintf("%s:%d", m.PublicHost, m.PublicPort), "to", fmt.Sprintf("%s:%d", host, port), "issue", issue)
+		if m.TenantID != "" {
+			_ = recordEvent(db, m.TenantID, "access.endpoint_changed", "instances", map[string]any{"machine_id": m.ID, "host": host, "port": port, "issue": issue})
+		}
+	}
+	_, _ = db.Exec(`UPDATE hosting_machines SET online=?, last_seen_at=NULLIF(?, ''), connect_mode=?, public_host=?, public_port=?, endpoint_issue=?,
+		updated_at=CASE WHEN online!=? OR public_host!=? OR public_port!=? OR endpoint_issue!=? OR connect_mode!=? THEN CURRENT_TIMESTAMP ELSE updated_at END
+		WHERE id=?`, boolToInt(online), seen, inst.ConnectMode, host, port, issue,
+		boolToInt(online), host, port, issue, inst.ConnectMode, m.ID)
 }
 
 // ─── Runs ────────────────────────────────────────────────────────────────

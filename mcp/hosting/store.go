@@ -280,6 +280,9 @@ type Machine struct {
 	LastSeenAt     string            `json:"last_seen_at,omitempty"`
 	PublicHost     string            `json:"public_host"`
 	PublicPort     int               `json:"public_port"`
+	ConnectMode    string            `json:"connect_mode"`
+	EndpointSource string            `json:"endpoint_source"`
+	EndpointIssue  string            `json:"endpoint_issue,omitempty"`
 	Serial         string            `json:"serial"`
 	ExpectedOS     string            `json:"expected_os"`
 	ManagementUser string            `json:"management_user"`
@@ -292,14 +295,14 @@ type Machine struct {
 }
 
 const machineSelect = `SELECT id, pool_key, instance_id, name, state, state_reason, online, COALESCE(last_seen_at,''), public_host, public_port,
-	serial, expected_os, management_user, script_hashes_json, validated, COALESCE(tenant_id,''), metadata_json, created_at, updated_at FROM hosting_machines`
+	connect_mode, endpoint_source, endpoint_issue, serial, expected_os, management_user, script_hashes_json, validated, COALESCE(tenant_id,''), metadata_json, created_at, updated_at FROM hosting_machines`
 
 func scanMachine(row rowScanner) (*Machine, error) {
 	var m Machine
 	var online, validated int
 	var hashes, meta string
 	if err := row.Scan(&m.ID, &m.PoolKey, &m.InstanceID, &m.Name, &m.State, &m.StateReason, &online, &m.LastSeenAt, &m.PublicHost, &m.PublicPort,
-		&m.Serial, &m.ExpectedOS, &m.ManagementUser, &hashes, &validated, &m.TenantID, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		&m.ConnectMode, &m.EndpointSource, &m.EndpointIssue, &m.Serial, &m.ExpectedOS, &m.ManagementUser, &hashes, &validated, &m.TenantID, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
 	m.Online = online != 0
@@ -367,6 +370,7 @@ func dbMachineSetState(db querier, id int64, state, reason string) error {
 // forSaleCondition is the SQL predicate for a machine Hosting may hand to a
 // new tenant: available, online, validated, in a pool with execution on.
 const forSaleCondition = `m.state='available' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
+	AND m.public_host != '' AND m.endpoint_issue = ''
 	AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`
 
 // ─── Tenants ─────────────────────────────────────────────────────────────
@@ -403,32 +407,41 @@ type TenantAccess struct {
 	Port    int    `json:"port"`
 	User    string `json:"user"`
 	Command string `json:"ssh_command"`
+	Issue   string `json:"issue,omitempty"` // why customers cannot reach the machine
 	Granted bool   `json:"granted"`
 }
 
 const tenantSelect = `SELECT id, external_ref, profile_key, backend, workload_id, COALESCE(machine_id,0), COALESCE(instance_id,0), COALESCE(reservation_id,''),
 	slug, COALESCE(default_hostname,''), owner_email, ssh_user, access_keys_json, status, apteva_version, image, last_health_status, last_error,
-	metadata_json, COALESCE(released_at,''), created_at, updated_at FROM hosting_tenants`
+	metadata_json, COALESCE(released_at,''), created_at, updated_at,
+	COALESCE((SELECT hm.public_host FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
+	COALESCE((SELECT hm.public_port FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), 0),
+	COALESCE((SELECT hm.endpoint_issue FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), '')
+	FROM hosting_tenants`
 
 func scanTenant(row rowScanner) (*Tenant, error) {
 	var t Tenant
-	var keys, meta string
+	var keys, meta, machineHost, machineIssue string
+	var machinePort int
 	if err := row.Scan(&t.ID, &t.ExternalRef, &t.ProfileKey, &t.Backend, &t.WorkloadID, &t.MachineID, &t.InstanceID, &t.ReservationID,
 		&t.Slug, &t.DefaultHostname, &t.OwnerEmail, &t.SSHUser, &keys, &t.Status, &t.AptevaVersion, &t.Image, &t.LastHealthStatus, &t.LastError,
-		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt, &machineHost, &machinePort, &machineIssue); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(keys), &t.AccessKeys)
 	t.Metadata = json.RawMessage(meta)
 	md := mapFromAny(t.Metadata)
-	if host := strArg(md, "access_host"); host != "" && t.SSHUser != "" {
-		port := intArg(md, "access_port", 22)
-		t.Access = &TenantAccess{
-			Host:    host,
-			Port:    port,
-			User:    t.SSHUser,
-			Command: fmt.Sprintf("ssh %s@%s -p %d", t.SSHUser, host, port),
-			Granted: boolFromAny(md["access_granted"], false),
+	// A pool tenant's endpoint is read from its machine, so a moved tunnel
+	// port or an operator's fix reaches the customer at once. On-demand
+	// tenants keep the endpoint found when their instance became ready.
+	host, port, issue := strArg(md, "access_host"), intArg(md, "access_port", 22), ""
+	if t.MachineID > 0 {
+		host, port, issue = machineHost, machinePort, machineIssue
+	}
+	if t.SSHUser != "" && (host != "" || issue != "") {
+		t.Access = &TenantAccess{Host: host, Port: port, User: t.SSHUser, Issue: issue, Granted: boolFromAny(md["access_granted"], false)}
+		if host != "" {
+			t.Access.Command = fmt.Sprintf("ssh %s@%s -p %d", t.SSHUser, host, port)
 		}
 	}
 	return &t, nil

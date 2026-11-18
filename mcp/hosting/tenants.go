@@ -38,9 +38,21 @@ func join(parts ...[]string) []string {
 	return out
 }
 
-func planSteps(kind string, profile *Profile, product *Product, pool *Pool, t *Tenant) ([]string, error) {
+// eraseRefusedReason says why a pool machine must not be erased
+// automatically. Erasing a reverse-tunnel Mac also removes the tunnel and
+// Instances' key, and nothing restores them yet, so the machine would never
+// come back online.
+func eraseRefusedReason(m *Machine) string {
+	if m != nil && m.ConnectMode == "reverse_tunnel" {
+		return "this Mac reaches the server through a reverse tunnel; erasing it removes the tunnel and Instances' access, and no recovery restores them yet"
+	}
+	return ""
+}
+
+func planSteps(kind string, profile *Profile, product *Product, pool *Pool, m *Machine, t *Tenant) ([]string, error) {
 	onDemand := profile.Backend == BackendMachineOnDemand
 	macPool := pool != nil && pool.Platform == "macos"
+	canErase := macPool && eraseRefusedReason(m) == ""
 	switch kind {
 	case OpProvision:
 		if onDemand {
@@ -66,13 +78,18 @@ func planSteps(kind string, profile *Profile, product *Product, pool *Pool, t *T
 			return []string{"revoke_quiet", "destroy_instance"}, nil
 		}
 		base := join([]string{"revoke", "verify_revoked"}, workloadSteps(product, "destroy_workload"))
-		if macPool {
+		if canErase {
 			return join(base, []string{"wipe"}, afterResetSteps), nil
 		}
+		// No automatic reset (Linux pool, tunnel Mac): access is removed and
+		// the machine is quarantined for a manual clean.
 		return base, nil
 	case OpReinstall:
 		if !macPool {
 			return nil, errors.New("reinstall is only available for macOS pool machines")
+		}
+		if reason := eraseRefusedReason(m); reason != "" {
+			return nil, errors.New("reinstall refused: " + reason)
 		}
 		return join([]string{"revoke", "verify_revoked"}, workloadSteps(product, "destroy_workload"), []string{"reinstall"}, afterResetSteps,
 			[]string{"preflight", "check_os"}, accessGrantSteps(t), workloadSteps(product, "run_workload")), nil
@@ -305,10 +322,6 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 			t.Status = TenantWaitingForMachine
 		} else {
 			t.MachineID = machine.ID
-			t.Metadata = jsonRaw(mergeMaps(mapFromAny(t.Metadata), map[string]any{
-				"access_host": machine.PublicHost,
-				"access_port": machine.PublicPort,
-			}))
 		}
 	}
 	if err := dbTenantInsert(tx, t); err != nil {
@@ -328,7 +341,7 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 	}
 	var op *Operation
 	if t.Status == TenantProvisioning {
-		steps, err := planSteps(OpProvision, profile, product, pool, t)
+		steps, err := planSteps(OpProvision, profile, product, pool, machine, t)
 		if err != nil {
 			return nil, err
 		}
@@ -373,6 +386,7 @@ func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID strin
 	if r != nil && r.Status == "held" {
 		var ok int
 		err := tx.QueryRow(`SELECT 1 FROM hosting_machines m WHERE m.id=? AND m.state='reserved' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
+			AND m.public_host != '' AND m.endpoint_issue = ''
 			AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`, r.MachineID).Scan(&ok)
 		if err == nil {
 			t.ReservationID = r.ID
@@ -464,15 +478,12 @@ func (a *App) assignWaitingTenant(ctx *sdk.AppCtx, tenantID string) (bool, error
 	if _, err := tx.Exec(`UPDATE hosting_tenants SET machine_id=?, reservation_id=NULLIF(?, ''), status='provisioning', updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID, t.ReservationID, t.ID); err != nil {
 		return false, err
 	}
-	if err := dbTenantMergeMetadata(tx, t.ID, map[string]any{"access_host": m.PublicHost, "access_port": m.PublicPort}); err != nil {
-		return false, err
-	}
 	t.MachineID = m.ID
 	product, err := productForTx(tx, profile.ProductKey)
 	if err != nil {
 		return false, err
 	}
-	steps, err := planSteps(OpProvision, profile, product, pool, t)
+	steps, err := planSteps(OpProvision, profile, product, pool, m, t)
 	if err != nil {
 		return false, err
 	}
@@ -558,16 +569,16 @@ func (a *App) enqueueTenantOp(ctx *sdk.AppCtx, t *Tenant, kind, transient, actor
 		return nil, err
 	}
 	var pool *Pool
+	var m *Machine
 	if t.MachineID > 0 {
-		m, err := requireMachine(db, t.MachineID)
-		if err != nil {
+		if m, err = requireMachine(db, t.MachineID); err != nil {
 			return nil, err
 		}
 		if pool, err = requirePool(db, m.PoolKey); err != nil {
 			return nil, err
 		}
 	}
-	steps, err := planSteps(kind, profile, product, pool, t)
+	steps, err := planSteps(kind, profile, product, pool, m, t)
 	if err != nil {
 		return nil, err
 	}
@@ -966,6 +977,9 @@ func (a *App) resolveStuckTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant,
 		}
 		if !m.Validated {
 			return nil, nil, fmt.Errorf("machine %d is not validated; erase is refused", m.ID)
+		}
+		if reason := eraseRefusedReason(m); reason != "" {
+			return nil, nil, errors.New("force_clean refused: " + reason + "; use release, then clean the Mac by hand")
 		}
 		kind, transient = OpRelease, TenantReleasing
 		steps = join([]string{"wipe"}, afterResetSteps)
