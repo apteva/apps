@@ -81,6 +81,9 @@ func fileWorkspace(callCtx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return actor, nil, err
 	}
+	if err := requireDevWorkspace(w, "file access"); err != nil {
+		return actor, nil, err
+	}
 	if err := requireFileAccessible(w); err != nil {
 		return actor, nil, err
 	}

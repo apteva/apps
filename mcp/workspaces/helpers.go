@@ -95,6 +95,10 @@ func canAccess(actor Actor, w *Workspace) bool {
 	if actor.Kind == "user" || actor.Kind == "system" {
 		return true
 	}
+	if w.Kind == kindTest && actor.InstallID <= 0 {
+		// Test workspaces belong to the app that created them; agents never see them.
+		return false
+	}
 	if actor.InstallID > 0 {
 		return w.ConsumerInstallID > 0 && actor.InstallID == w.ConsumerInstallID
 	}

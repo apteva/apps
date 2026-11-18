@@ -1,5 +1,63 @@
 # Workspaces
 
+## v0.8.0
+
+Requires Containers 0.7.1 or later.
+
+**Test workspaces** (`kind: test`) let an app run an untrusted test suite in a
+locked-down workspace. One workspace is one container.
+
+- App-only tools: `workspace_test_create`, `workspace_results_export` and
+  `workspace_source_digest`. Agents never see test workspaces, and other apps
+  cannot open one. Operators can limit which apps may create them with
+  `test_workspace_apps` (empty allows any installed app).
+- The container is hardened by Containers: no capabilities,
+  no-new-privileges, read-only root, at most 256 processes, a writable `/tmp`
+  tmpfs (`test_tmp_mb`, default 512 MB, holds `HOME`), and CPU and memory
+  limits for the whole workspace (`test_cpu`, `test_memory_mb`). Local hosts
+  only.
+- No shell session, no previews, no file tools and no source sync or export.
+  `workspace_command_start` takes `argv` only.
+- Two numeric users replace read-only mounts. `builder` (1000:1000) owns the
+  source in `/workspace/src` and the dependency cache in `/cache/bun`.
+  `runner` (1001:1001) owns only `/workspace/out` (`$TESTS_OUT`) and can read,
+  but not write, source and cache. Without capabilities neither user can get
+  around file permissions. Nobody can write the volume roots.
+- Each command picks `user` (`builder` or `runner`, default `runner`) and
+  `network` (`none`, `registry_only` or `default`, default `none`).
+  Workspaces switches the container's network before the command starts;
+  only one command runs at a time, so the setting cannot leak into another
+  one. `registry_only` reaches `test_egress_allow` hosts (default
+  `registry.npmjs.org`). Every command result names the digest-pinned image
+  it ran in. A typical run: `bun install` as `builder` with `registry_only`,
+  then `bun test` as `runner` with `none`.
+- Expiry: default 30 minutes, at most 120 (`test_default_ttl_minutes`,
+  `test_max_ttl_minutes`). An expired test workspace is destroyed at once,
+  without the retention window regular workspaces get.
+- `workspace_results_export` returns `/workspace/out` as tar.gz (8 MB
+  compressed limit) and then destroys the workspace unless `destroy=false`.
+  Only that folder is collected. Docker volumes cannot enforce a disk quota,
+  so the export limit is the bound on results.
+- `workspace_source_digest` returns the tree digest Workspaces computed from
+  the archive it imported, never from inside the container. Method
+  `workspaces-tree-v1`: sha256 over sorted lines `path NUL type NUL mode NUL
+  sha256` for every file and symlink (type `f` or `l`; mode 755 for
+  executables, 644 otherwise, 777 for symlinks; for symlinks the hash is of
+  the link target). Folders are implied by files, and anything under
+  `node_modules` is left out.
+- Dependency cache: one standalone Containers volume per project and lockfile
+  hash (the lockfiles at the archive root: `bun.lock`, `bun.lockb`,
+  `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`). Without a lockfile, or
+  with `use_cache=false`, the workspace gets its own cache that is deleted
+  with it. Caches unused for `test_cache_retention_days` (default 7) are
+  deleted.
+- Profile `bun-test` uses `bun_test_image`, which must be digest pinned
+  (default `oven/bun:1-debian` at a fixed digest, Bun 1.4.4).
+
+**Regular workspaces:** commands and previews now run with umask 022, so
+files and folders they create are readable by others (0644 and 0755) instead
+of private to their user.
+
 ## v0.7.0
 
 Agents can use a workspace as their computer without shell workarounds:
@@ -20,8 +78,8 @@ Agents can use a workspace as their computer without shell workarounds:
   callers, so Code keeps its v0.6 behaviour.
 
 New files are written as 0644 and existing files keep their mode and owner.
-Missing parent directories are created with the workspace's umask (0077, so
-0700), matching what `mkdir -p` in the workspace shell produces.
+With Containers 0.5.2 missing parent directories were created as 0700; since
+v0.8.0 (Containers 0.7.1) they are 0755.
 
 File transfers pause the container for the duration of the copy, as every
 Containers volume archive operation does.
@@ -118,6 +176,9 @@ The product boundary is deliberate:
 - App-only creation, exact managed-source refresh, filtered source export, and
   accepted-revision tracking.
 - App-only origin/Git-safety context updates without taking ownership of Git.
+- App-only test workspaces: hardened container, builder and runner users,
+  per-command network, source digest, results export, per-project dependency
+  cache.
 
 Only one tracked command may execute in a workspace at a time. Commands share a
 long-lived PTY shell inside the persistent container, so `cd`, exported
@@ -197,6 +258,10 @@ latest SDK tag so source installation outside the monorepo resolves correctly.
 - Public preview routing (previews are loopback-only on the Apteva host).
 - Live CPU/RAM telemetry (the backend currently returns limits and volume
   storage usage).
-- Secret injection and selectable network policy.
+- Secret injection, and network policy for regular workspaces (test
+  workspaces choose the network per command).
+- A `browser-test` profile (Bun plus Chromium) for test workspaces; it needs
+  an image built and published under `ghcr.io/apteva/`.
+- Sharing the source digest method with Deploy as one Go package.
 - Snapshot/restore, a file browser in the panel, binary file transfer through
   the agent tools, checks, and Git operations.

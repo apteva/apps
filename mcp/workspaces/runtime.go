@@ -224,9 +224,16 @@ func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[st
 	if err := ensureNoActiveCommand(app.AppDB(), w.ID); err != nil {
 		return nil, err
 	}
+	opts, err := parseTestCommandOptions(w, args)
+	if err != nil {
+		return nil, err
+	}
 	argv, display, workingDirectory, timeout, err := normalizeCommand(args, configInt(app, "default_command_timeout_seconds", 1800))
 	if err != nil {
 		return nil, err
+	}
+	if w.Kind == kindTest && workingDirectory == "" {
+		workingDirectory = testSourceDir
 	}
 	now := nowUTC()
 	c := &Command{
@@ -234,15 +241,30 @@ func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[st
 		DisplayCommand: display, Argv: argv, WorkingDirectory: workingDirectory,
 		TimeoutSeconds: timeout, ActorKind: actor.Kind, ActorID: actor.ID,
 		ActorLabel: actor.Label, Status: "queued", CreatedAt: now, UpdatedAt: now,
+		User: opts.User, Network: opts.Network,
+	}
+	if w.Kind == kindTest {
+		c.Image = w.Image
 	}
 	if err := insertCommand(app.AppDB(), c, idempotencyKey); err != nil {
 		return nil, err
 	}
-	var out executionResponse
-	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{
+	// New files are readable by others (umask 022). Test workspaces rely on
+	// it: runner reads what builder wrote.
+	execInput := map[string]any{
 		"workload_id": w.WorkloadID, "argv": argv, "working_directory": workingDirectory,
-		"timeout_s": timeout, "idempotency_key": c.ID, "session_key": "workspace",
-	}, &out)
+		"timeout_s": timeout, "idempotency_key": c.ID, "umask": "022",
+	}
+	if w.Kind == kindTest {
+		execInput["user"] = opts.UID
+		err = a.switchTestNetwork(app, w, opts.Network)
+	} else {
+		execInput["session_key"] = "workspace"
+	}
+	var out executionResponse
+	if err == nil {
+		err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", execInput, &out)
+	}
 	if err != nil {
 		_ = updateCommand(app.AppDB(), c.ID, map[string]any{
 			"status": "failed", "error_code": "start_failed", "error": err.Error(),
@@ -461,12 +483,18 @@ func (a *App) resumeWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace) (*Work
 
 func (a *App) extendWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace, minutes int) (*Workspace, error) {
 	maxTTL := configInt(app, "max_ttl_minutes", 480)
+	if w.Kind == kindTest {
+		maxTTL = testMaxTTL(app)
+	}
 	if minutes < 1 || minutes > maxTTL {
 		return nil, fmt.Errorf("ttl_minutes must be between 1 and %d", maxTTL)
 	}
 	now := time.Now().UTC()
 	expires := now.Add(time.Duration(minutes) * time.Minute)
 	deleteAt := expires.Add(time.Duration(configInt(app, "expired_retention_minutes", 1440)) * time.Minute)
+	if w.Kind == kindTest {
+		deleteAt = expires
+	}
 	fields := map[string]any{"expires_at": expires.Format(time.RFC3339), "delete_at": deleteAt.Format(time.RFC3339), "updated_at": nowUTC()}
 	if w.LifecycleStatus == statusExpired {
 		fields["lifecycle_status"] = statusSuspended
@@ -535,6 +563,13 @@ func (a *App) expire(ctx context.Context, app *sdk.AppCtx) error {
 			return ctx.Err()
 		}
 		system.ProjectID = w.ProjectID
+		if w.Kind == kindTest && !parseTime(w.ExpiresAt).After(now) {
+			// Test workspaces have no retention: expiry destroys them.
+			if _, err := a.destroyWorkspace(app, system, w); err != nil {
+				errs = append(errs, fmt.Errorf("destroy expired test %s: %w", w.ID, err))
+			}
+			continue
+		}
 		if w.LifecycleStatus == statusExpired && !parseTime(w.DeleteAt).After(now) {
 			if _, err := a.destroyWorkspace(app, system, w); err != nil {
 				errs = append(errs, fmt.Errorf("destroy expired %s: %w", w.ID, err))
@@ -546,6 +581,9 @@ func (a *App) expire(ctx context.Context, app *sdk.AppCtx) error {
 				errs = append(errs, fmt.Errorf("expire %s: %w", w.ID, err))
 			}
 		}
+	}
+	if err := a.collectTestCaches(app, now); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

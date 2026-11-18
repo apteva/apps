@@ -13,6 +13,9 @@ const (
 
 	activityIdle      = "idle"
 	activityExecuting = "executing"
+
+	kindDev  = "dev"
+	kindTest = "test"
 )
 
 type Workspace struct {
@@ -57,6 +60,11 @@ type Workspace struct {
 	DestroyedAt       string   `json:"destroyed_at,omitempty"`
 	CurrentCommand    *Command `json:"current_command,omitempty"`
 	StorageBytes      int64    `json:"storage_bytes,omitempty"`
+	Kind              string   `json:"kind"`
+	NetworkMode       string   `json:"network_mode,omitempty"`
+	CacheVolumeID     string   `json:"cache_volume_id,omitempty"`
+	CacheKey          string   `json:"cache_key,omitempty"`
+	ResultsExportedAt string   `json:"results_exported_at,omitempty"`
 }
 
 func (w *Workspace) deriveStatus() {
@@ -88,6 +96,9 @@ type Command struct {
 	StartedAt        string   `json:"started_at,omitempty"`
 	FinishedAt       string   `json:"finished_at,omitempty"`
 	UpdatedAt        string   `json:"updated_at"`
+	User             string   `json:"user,omitempty"`
+	Network          string   `json:"network,omitempty"`
+	Image            string   `json:"image,omitempty"`
 }
 
 type Activity struct {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -20,6 +21,8 @@ var manifestYAML string
 
 type App struct {
 	workspaceLocks sync.Map
+	cacheGCMu      sync.Mutex
+	lastCacheGC    time.Time
 }
 
 var globalCtx *sdk.AppCtx
@@ -40,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.7.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.8.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -92,6 +95,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "workspace_command_start", Description: "Run one asynchronous command through the workspace's persistent PTY shell session.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema(), "maxItems": 256},
 			"shell_command": strSchema(), "working_directory": strSchema(), "timeout_s": intSchema(), "idempotency_key": strSchema(),
+			"user":    map[string]any{"type": "string", "enum": []string{"builder", "runner"}, "description": "Test workspaces only. Default runner."},
+			"network": map[string]any{"type": "string", "enum": []string{networkNone, networkRegistryOnly, networkDefault}, "description": "Test workspaces only. Default none."},
 		}, []string{"workspace_id"}), HandlerCtx: a.toolCommandStart},
 		{Name: "workspace_command_get", Description: "Refresh and fetch one workspace command.", InputSchema: schemaObject(commandID, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandGet},
 		{Name: "workspace_command_logs", Description: "Tail bounded logs for one workspace command.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "command_id": strSchema(), "tail": intSchema()}, []string{"workspace_id", "command_id"}), HandlerCtx: a.toolCommandLogs},
@@ -139,6 +144,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			"workspace_id": strSchema(), "path": strSchema(), "managed": boolSchema(),
 			"exclude_paths": map[string]any{"type": "array", "items": strSchema(), "maxItems": 64},
 		}, []string{"workspace_id"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSourceExport},
+		{Name: "workspace_test_create", Description: "Create a locked-down test workspace from a source archive: one hardened container, no shell, previews or file tools. Source lands in /workspace/src owned by builder; runner can only write /workspace/out ($TESTS_OUT).", InputSchema: schemaObject(map[string]any{
+			"name": strSchema(), "purpose": strSchema(), "source_archive_base64": strSchema(),
+			"profile":     map[string]any{"type": "string", "enum": []string{testProfileBun}},
+			"ttl_minutes": intSchema(), "use_cache": boolSchema(), "idempotency_key": strSchema(),
+			"owner_label": strSchema(), "resource_kind": strSchema(), "resource_id": strSchema(),
+			"repo_label": strSchema(), "branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
+		}, []string{"name", "source_archive_base64"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolTestCreate},
+		{Name: "workspace_results_export", Description: "Export /workspace/out of a test workspace as tar.gz (8 MB compressed limit), then destroy the workspace unless destroy=false.", InputSchema: schemaObject(map[string]any{
+			"workspace_id": strSchema(), "destroy": boolSchema(),
+		}, []string{"workspace_id"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolResultsExport},
+		{Name: "workspace_source_digest", Description: "Return the tree digest Workspaces computed from the archive it imported into a test workspace, with the digest method.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSourceDigest},
 		{Name: "workspace_source_accept", Description: "Record the source revision accepted by the originating app after it applies exported changes.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "source_digest": strSchema(), "source_paths": map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000},
 		}, []string{"workspace_id", "source_digest", "source_paths"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSourceAccept},
@@ -404,6 +420,9 @@ func (a *App) toolSourceExport(callCtx context.Context, app *sdk.AppCtx, args ma
 	}
 	w, err := requireWorkspaceForActor(app.AppDB(), actor, strArg(args, "workspace_id"))
 	if err != nil {
+		return nil, err
+	}
+	if err := requireDevWorkspace(w, "source export"); err != nil {
 		return nil, err
 	}
 	if boolArg(args, "managed") {

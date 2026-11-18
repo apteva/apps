@@ -34,6 +34,7 @@ type platformStub struct {
 	volumeArchive   string
 	executionLogs   string
 	exportErr       error
+	volumes         []map[string]any
 }
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
@@ -96,6 +97,14 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			"feature_key": "containers.storage.bytes", "quantity": 2048,
 			"unit": "bytes", "kind": "gauge", "source": "docker_volume_total",
 		}}}
+	case "containers_volume_create":
+		response = map[string]any{"volume": map[string]any{"id": "vol_cache", "name": input["name"], "labels": input["labels"]}}
+	case "containers_volume_list":
+		response = map[string]any{"volumes": p.volumes, "count": len(p.volumes)}
+	case "containers_volume_delete":
+		response = map[string]any{"deleted": true, "volume_id": input["volume_id"]}
+	case "containers_network_set":
+		response = map[string]any{"workload": map[string]any{"id": "wrk_test", "status": "running"}}
 	case "containers_volume_import":
 		response = map[string]any{"workload_id": "wrk_test", "volume": "workspace", "compressed_bytes": 10}
 	case "containers_volume_export":
@@ -166,17 +175,17 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.7.0" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.8.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
 	for _, dependency := range manifest.Requires.Apps {
-		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.5.2" {
+		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.7.1" {
 			requiredContainers = true
 		}
 	}
 	if !requiredContainers {
-		t.Fatal("Containers >=0.5.2 must be the required app dependency")
+		t.Fatal("Containers >=0.7.1 must be the required app dependency")
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {
 		t.Fatalf("Workspaces must remain project-scoped: %+v", manifest.Scopes)

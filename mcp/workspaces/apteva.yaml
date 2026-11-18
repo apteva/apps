@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.7.0
+version: 0.8.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -16,6 +16,13 @@ description: |
   write, list and exact-string edits with SHA-256 preconditions, archive
   import, a blocking command wait with cursor-based output, and HTTP
   previews that agents can start and stop themselves.
+  v0.8.0 adds app-only test workspaces (kind test): one hardened container
+  per workspace with a builder user that owns source and dependency cache and
+  a runner user that can only write results, per-command user and network,
+  a source digest computed outside the container, a results export that
+  destroys the workspace, and per-project dependency caches keyed by
+  lockfile. Commands in regular workspaces now create files readable by
+  others (umask 022).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -36,9 +43,9 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.5.2"
+      version: ">=0.7.1"
       optional: false
-      reason: Owns each persistent Docker workspace, named volumes, stateful PTY shell execution, cancellation, and bounded logs used by Workspaces.
+      reason: Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces.
 
 provides:
   permissions:
@@ -71,7 +78,7 @@ provides:
       description: "Fetch one workspace with its commands and recent activity. Args: workspace_id."
       requires: workspaces.read
     - name: workspace_command_start
-      description: "Run one asynchronous command through the workspace's persistent PTY shell. Current directory, exported variables, installed packages, system files, volumes, and background processes persist across commands. Prefer argv for standalone programs and shell_command for shell state or syntax. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
+      description: "Run one asynchronous command through the workspace's persistent PTY shell. Current directory, exported variables, installed packages, system files, volumes, and background processes persist across commands. Prefer argv for standalone programs and shell_command for shell state or syntax. New files are readable by others (umask 022). Test workspaces take argv only (no shell) plus user (builder|runner, default runner) and network (none|registry_only|default, default none). Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?, user?, network?."
       requires: workspaces.write
     - name: workspace_command_get
       description: "Refresh and fetch one command. Args: workspace_id, command_id."
@@ -127,6 +134,15 @@ provides:
     - name: workspace_source_sync
       description: "Refresh caller-managed source files while preserving workspace caches and unrelated files. Authenticated originating app only."
       exposure: app_only
+    - name: workspace_test_create
+      description: "Create a locked-down test workspace for an app: one hardened container (no capabilities, read-only root, numeric non-root users, 256 processes), no shell, previews or file tools, local host only. Source is imported into /workspace/src owned by builder; runner can write only /workspace/out ($TESTS_OUT). Expires after ttl_minutes (default 30, max 120) and is destroyed then, with no retention. Args: name, source_archive_base64, profile? (bun-test), ttl_minutes?, use_cache?, idempotency_key?, owner_label?, resource_kind?, resource_id?, repo_label?, branch_label?, origin_label?, origin_href?."
+      exposure: app_only
+    - name: workspace_results_export
+      description: "Export /workspace/out of a test workspace as tar.gz (8 MB compressed limit) and destroy the workspace unless destroy=false. Requires no active command. Args: workspace_id, destroy?."
+      exposure: app_only
+    - name: workspace_source_digest
+      description: "Return the tree digest (method workspaces-tree-v1) Workspaces computed from the archive it imported into a test workspace, plus cache_key and image. Args: workspace_id."
+      exposure: app_only
     - name: workspace_source_accept
       description: "Record the source revision accepted by the originating app after it applies exported changes. Authenticated originating app only."
       exposure: app_only
@@ -170,7 +186,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.7.0
+    ref: workspaces/v0.8.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health
@@ -246,5 +262,50 @@ config_schema:
     default: "1800"
     label: Command timeout
     description: Default asynchronous command deadline in seconds.
+  - name: test_workspace_apps
+    type: text
+    default: ""
+    label: Apps allowed to create test workspaces
+    description: Comma-separated app names allowed to call workspace_test_create. Empty allows any installed app.
+  - name: bun_test_image
+    type: text
+    default: "oven/bun:1-debian@sha256:93d5032fe06d163427822dc1598f420363759bb18155c9cc90eb1be05a64a19e"
+    label: Bun test image
+    description: Digest-pinned image for the bun-test profile. Must end in @sha256.
+  - name: test_default_ttl_minutes
+    type: text
+    default: "30"
+    label: Test workspace TTL
+    description: Minutes before a test workspace is destroyed when the caller does not set ttl_minutes.
+  - name: test_max_ttl_minutes
+    type: text
+    default: "120"
+    label: Maximum test workspace TTL
+    description: Maximum ttl_minutes for creating or extending a test workspace.
+  - name: test_cpu
+    type: text
+    default: "2"
+    label: Test workspace CPUs
+    description: CPU limit for the whole test workspace (Docker cannot limit one command).
+  - name: test_memory_mb
+    type: text
+    default: "4096"
+    label: Test workspace memory
+    description: Memory limit in MB for the whole test workspace.
+  - name: test_tmp_mb
+    type: text
+    default: "512"
+    label: Test workspace /tmp size
+    description: Size in MB of the writable /tmp tmpfs (HOME lives there).
+  - name: test_egress_allow
+    type: text
+    default: "registry.npmjs.org"
+    label: Test registry hosts
+    description: Hosts reachable when a test command uses network registry_only.
+  - name: test_cache_retention_days
+    type: text
+    default: "7"
+    label: Test cache retention
+    description: Days an unused per-project dependency cache is kept before deletion.
 
 upgrade_policy: auto-patch

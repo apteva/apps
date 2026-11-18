@@ -181,6 +181,9 @@ func (a *App) toolSourceSync(callCtx context.Context, app *sdk.AppCtx, args map[
 	if err != nil {
 		return nil, err
 	}
+	if err := requireDevWorkspace(w, "source sync"); err != nil {
+		return nil, err
+	}
 	release := a.lockWorkspace(w.ID)
 	defer release()
 	w, err = requireWorkspaceForActor(app.AppDB(), actor, w.ID)
@@ -262,6 +265,9 @@ func (a *App) toolSourceAccept(callCtx context.Context, app *sdk.AppCtx, args ma
 	}
 	w, err := requireWorkspaceForActor(app.AppDB(), actor, strArg(args, "workspace_id"))
 	if err != nil {
+		return nil, err
+	}
+	if err := requireDevWorkspace(w, "source accept"); err != nil {
 		return nil, err
 	}
 	release := a.lockWorkspace(w.ID)

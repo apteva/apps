@@ -59,6 +59,9 @@ func previewContext(c context.Context, app *sdk.AppCtx, args map[string]any) (Ac
 		return actor, nil, err
 	}
 	w, err := requireWorkspaceForActor(app.AppDB(), actor, strArg(args, "workspace_id"))
+	if err == nil {
+		err = requireDevWorkspace(w, "preview")
+	}
 	return actor, w, err
 }
 func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -112,7 +115,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 		return nil, err
 	}
 	var out executionResponse
-	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{"workload_id": w.WorkloadID, "argv": argv, "env": args["env"], "working_directory": "/workspace", "timeout_s": ttl, "idempotency_key": "preview-" + w.ID + "-" + p.StartedAt}, &out)
+	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{"workload_id": w.WorkloadID, "argv": argv, "env": args["env"], "working_directory": "/workspace", "umask": "022", "timeout_s": ttl, "idempotency_key": "preview-" + w.ID + "-" + p.StartedAt}, &out)
 	if err != nil {
 		p.Status = "crashed"
 		p.Error = err.Error()

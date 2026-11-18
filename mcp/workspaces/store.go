@@ -14,7 +14,8 @@ const workspaceColumns = `id, project_id, name, purpose, profile, image, workloa
 	owner_agent_id, owner_thread_id, owner_label, resource_kind, resource_id,
 	repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
 	source_digest, source_manifest_json, source_synced_at, last_error, created_at,
-	updated_at, last_activity_at, expires_at, delete_at, destroyed_at`
+	updated_at, last_activity_at, expires_at, delete_at, destroyed_at,
+	kind, network_mode, cache_volume_id, cache_key, results_exported_at`
 
 func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 	_, err := db.Exec(`INSERT INTO workspaces (
@@ -25,8 +26,9 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
 		source_digest, source_manifest_json, source_synced_at,
 		last_error, idempotency_key, created_at, updated_at, last_activity_at,
-		expires_at, delete_at, destroyed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		expires_at, delete_at, destroyed_at,
+		kind, network_mode, cache_volume_id, cache_key, results_exported_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.ProjectID, w.Name, w.Purpose, w.Profile, w.Image, w.WorkloadID,
 		w.LifecycleStatus, w.ActivityStatus, w.RuntimeStatus, w.HealthStatus, w.HostLabel,
 		w.NetworkPolicy, w.CPU, w.MemoryMB, w.ConsumerApp, w.ConsumerInstallID,
@@ -34,7 +36,8 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		w.RepoLabel, w.BranchLabel, w.OriginLabel, w.OriginHref, w.DirtyState, w.UnpushedState,
 		w.SourceDigest, mustJSON(w.SourceManifest), w.SourceSyncedAt,
 		w.LastError, idempotencyKey, w.CreatedAt, w.UpdatedAt, w.LastActivityAt,
-		w.ExpiresAt, w.DeleteAt, w.DestroyedAt)
+		w.ExpiresAt, w.DeleteAt, w.DestroyedAt,
+		firstNonEmpty(w.Kind, kindDev), w.NetworkMode, w.CacheVolumeID, w.CacheKey, w.ResultsExportedAt)
 	return err
 }
 
@@ -49,6 +52,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (*Workspace, error) 
 		&w.RepoLabel, &w.BranchLabel, &w.OriginLabel, &w.OriginHref, &w.DirtyState, &w.UnpushedState,
 		&w.SourceDigest, &sourceManifest, &w.SourceSyncedAt,
 		&w.LastError, &w.CreatedAt, &w.UpdatedAt, &w.LastActivityAt, &w.ExpiresAt, &w.DeleteAt, &w.DestroyedAt,
+		&w.Kind, &w.NetworkMode, &w.CacheVolumeID, &w.CacheKey, &w.ResultsExportedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -132,7 +136,7 @@ func updateWorkspace(db *sql.DB, id string, fields map[string]any) error {
 		"runtime_status", "health_status", "repo_label", "branch_label", "origin_label",
 		"origin_href", "dirty_state", "unpushed_state", "last_error", "updated_at",
 		"last_activity_at", "expires_at", "delete_at", "destroyed_at", "source_digest",
-		"source_manifest_json", "source_synced_at",
+		"source_manifest_json", "source_synced_at", "network_mode", "results_exported_at",
 	}
 	sets := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+1)
@@ -161,19 +165,19 @@ func insertCommand(db *sql.DB, c *Command, idempotencyKey string) error {
 		id, workspace_id, project_id, execution_id, display_command, argv_json,
 		working_directory, timeout_s, actor_kind, actor_id, actor_label, status,
 		error_code, error, output_bytes, output_truncated, idempotency_key,
-		created_at, started_at, finished_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		created_at, started_at, finished_at, updated_at, run_user, network, image
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.WorkspaceID, c.ProjectID, c.ExecutionID, c.DisplayCommand, string(argv),
 		c.WorkingDirectory, c.TimeoutSeconds, c.ActorKind, c.ActorID, c.ActorLabel, c.Status,
 		c.ErrorCode, c.Error, c.OutputBytes, boolInt(c.OutputTruncated), idempotencyKey,
-		c.CreatedAt, c.StartedAt, c.FinishedAt, c.UpdatedAt)
+		c.CreatedAt, c.StartedAt, c.FinishedAt, c.UpdatedAt, c.User, c.Network, c.Image)
 	return err
 }
 
 const commandColumns = `id, workspace_id, project_id, execution_id, display_command,
 	argv_json, working_directory, timeout_s, actor_kind, actor_id, actor_label,
 	status, exit_code, error_code, error, output_bytes, output_truncated,
-	created_at, started_at, finished_at, updated_at`
+	created_at, started_at, finished_at, updated_at, run_user, network, image`
 
 func scanCommand(scanner interface{ Scan(...any) error }) (*Command, error) {
 	var c Command
@@ -184,7 +188,7 @@ func scanCommand(scanner interface{ Scan(...any) error }) (*Command, error) {
 		&c.ID, &c.WorkspaceID, &c.ProjectID, &c.ExecutionID, &c.DisplayCommand,
 		&argv, &c.WorkingDirectory, &c.TimeoutSeconds, &c.ActorKind, &c.ActorID, &c.ActorLabel,
 		&c.Status, &exit, &c.ErrorCode, &c.Error, &c.OutputBytes, &truncated,
-		&c.CreatedAt, &c.StartedAt, &c.FinishedAt, &c.UpdatedAt,
+		&c.CreatedAt, &c.StartedAt, &c.FinishedAt, &c.UpdatedAt, &c.User, &c.Network, &c.Image,
 	)
 	if err != nil {
 		return nil, err
