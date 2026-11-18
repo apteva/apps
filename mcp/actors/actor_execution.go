@@ -836,7 +836,7 @@ func (e *actorExecution) runStep(step actorStep) error {
 	switch step.Action {
 	case "open":
 		return e.gotoURL("")
-	case "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private":
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
 		return e.screenInteract(step)
 	case "prepare_upload":
 		return e.prepareUpload(step)
@@ -2154,6 +2154,25 @@ func renderActorDefinition(def actorDefinition, vars map[string]any) (actorDefin
 	return resolved, validateActorDefinition(resolved)
 }
 
+func renderActorMapKeys(m map[string]any, vars map[string]any) (map[string]any, error) {
+	out := make(map[string]any, len(m))
+	for k, item := range m {
+		rendered, err := renderActorValue(k, vars)
+		if err != nil {
+			return nil, err
+		}
+		key, ok := rendered.(string)
+		if !ok {
+			key = fmt.Sprint(rendered)
+		}
+		if _, dup := out[key]; dup {
+			return nil, fmt.Errorf("native guard selector %q appears twice after rendering", key)
+		}
+		out[key] = item
+	}
+	return out, nil
+}
+
 func renderActorValue(value any, vars map[string]any) (any, error) {
 	switch v := value.(type) {
 	case map[string]any:
@@ -2162,6 +2181,13 @@ func renderActorValue(value any, vars map[string]any) (any, error) {
 			rendered, err := renderActorValue(item, vars)
 			if err != nil {
 				return nil, err
+			}
+			if guards, ok := rendered.(map[string]any); ok && (k == "native_checked" || k == "native_values") {
+				// Native guard selectors are map keys; render them so a row
+				// selector can name an input, e.g. "{{page}} >> RadioButton".
+				if rendered, err = renderActorMapKeys(guards, vars); err != nil {
+					return nil, err
+				}
 			}
 			out[k] = rendered
 		}

@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.8.1
+version: 0.9.0
 description: |
+  v0.9.0 passes Android selection steps to Computer 0.15.0: native_select (native_state), native_scroll_to (native_container, direction, max_swipes) and native_checked guards on any native step, with {{input}} selectors rendered in guard keys.
   v0.8.1 accepts next_cursor passed back as cursor on actors_list, actors_dataset_read and actors_dataset_query (it was ignored and restarted at the first page).
   v0.8.0 adds Android Instagram login variants with encrypted context-bound password references, private secret input confirmation, guarded onboarding and verified account identity.
   v0.7.0 adds guarded Android field reads, replacement and explicit clearing
@@ -188,7 +189,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: actors/v0.8.1
+    ref: actors/v0.9.0
     entry: mcp/actors
   port: 8080
   health_check: /health

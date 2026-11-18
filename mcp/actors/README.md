@@ -521,9 +521,22 @@ markers that must all be on screen before Computer acts:
   `native_target`.
 - `native_type` and `native_replace` enter 1–256 bytes of single-line `text`
   into `native_target`.
+- `native_select` (Android, Computer 0.15.0+) sets a checkable `native_target`
+  to `native_state` (default `true`), tapping only when needed and confirming
+  the state afterwards.
+- `native_scroll_to` (Android, Computer 0.15.0+) swipes the one
+  `native_container` list `direction` `down` (default) or `up`, at most
+  `max_swipes` times (1–20, default 8), until `native_target` is visible. It
+  never taps.
 - `native_type_secret` enters a `secret_ref` into `native_target`;
   `native_type_private` with `mode: "keypad"` taps a numeric secret digit by
   digit.
+
+Any native step may add `native_checked`, a map of selector to required
+checked state verified before Computer acts (Android, Computer 0.15.0+).
+Selectors accept `ROW >> PART` row scoping, e.g.
+`"{{plan}} >> android.widget.RadioButton"`; `{{input}}` templates are rendered
+in `native_checked` and `native_values` keys as well as values.
 
 Secret steps require `private_screen: true` on the operation and a saved
 `browser.context_id`. A private operation opens the session extraction-only,
