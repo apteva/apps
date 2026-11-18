@@ -1,5 +1,14 @@
 # Apteva Code
 
+## v0.18.0 — native remotes
+
+`repos_remote` clones, fetches from and pushes to other Code repositories
+without Git: another repository in the same project, or one on another
+Apteva install over HTTPS with a per-call token that is never stored. Fetched
+branches read as `<remote>/<branch>` (pull = fetch + `repos_merge`), pushes
+are fast-forward only and refuse protected branches, and every received
+object is verified by hash. Details in RELEASE-NOTES.md.
+
 ## v0.17.0 — change requests and protected branches
 
 `change_requests` opens a request to land a source branch on a target

@@ -29,6 +29,7 @@ apteva test ./scenarios/01-create-from-template.yaml -v
 | `11-native-undo.yaml` | Two named native revisions, then `repos_undo` moves the branch back (no revert revision); verifies file, clean status, history and the branch-move log |
 | `12-native-merge.yaml` | Two branches change the same line; `repos_merge` start → resolve → continue; verifies merged file, clean main, no merge in progress, two-parent revision |
 | `13-change-request.yaml` | Protect main, work on a separate branch, open and merge a change request; verifies the merged request, main's head and move log, and main's files via REST blame |
+| `14-native-remote.yaml` | Clone a repository with `repos_remote`, change the clone, push back to the original's main; verifies file, clean status, history and the `push` move |
 
 ## Adding a scenario
 
@@ -98,3 +99,14 @@ is `change_request.*`, and both files on `main` through REST blame.
 
 Validated on 2026-11-18 on a clean spawned server with `opencode-go` /
 `kimi-k2.7-code`: all 15 checks passed in 11 iterations.
+
+## Native remote regression
+
+`14-native-remote.yaml` has an agent clone one repository into another with
+`repos_remote`, change a file in the clone, and push it back to the
+original's `main`. It verifies the original's file and clean status, its
+two-revision history, that its last move is a `push`, and the clone's
+`origin` remote.
+
+Validated on 2026-11-18 on a clean spawned server with `opencode-go` /
+`kimi-k2.7-code`: all 14 checks passed in 13 iterations.

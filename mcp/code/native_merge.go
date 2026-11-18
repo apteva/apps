@@ -46,6 +46,12 @@ func (n *nativeVCS) resolveRefLocked(repo *Repo, ref string) (string, error) {
 		}
 		return ref, nil
 	}
+	if strings.Contains(ref, "/") {
+		if id, ok := n.trackingRefLocked(repo, ref); ok {
+			return id, nil
+		}
+		return "", fmt.Errorf("%q is not a revision, branch, tag or fetched remote branch", ref)
+	}
 	if _, err := normaliseRefName(ref); err != nil {
 		return "", fmt.Errorf("%q is not a revision, branch or tag", ref)
 	}
@@ -933,6 +939,18 @@ func (n *nativeVCS) extraRootsLocked(repo *Repo) ([]string, error) {
 		}
 		for _, s := range list {
 			out = append(out, s.Revision, s.Head)
+		}
+	}
+	remotes, err := n.loadRemotesLocked(repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range remotes {
+		for _, id := range r.Branches {
+			out = append(out, id)
+		}
+		for _, id := range r.Tags {
+			out = append(out, id)
 		}
 	}
 	logs, err := os.ReadDir(filepath.Join(n.logsDir(repo), "heads"))

@@ -201,6 +201,15 @@ and `action=merge` once `can_merge` is true. Reviewers use `action=review`
 with `verdict=approve` or `request_changes`; approvals only count on the
 current head of the source branch.
 
+To copy or sync a repository without Git, use `repos_remote`. `action=clone
+from_slug=<repo> name=<new name>` makes a full copy with an `origin` remote.
+`action=fetch name=origin` downloads new revisions (then merge with
+`repos_merge source=origin/main`), and `action=push name=origin` sends the
+checked-out branch (`remote_branch` to target another name). Pushes are
+fast-forward only: if refused, fetch and merge first. For a repository on
+another Apteva install, add it with `url=https://host/api/apps/code/api/repos/<slug>`
+and pass `token` on each fetch or push.
+
 External Git remains optional. The `repos_git_*` tools connect, fetch, commit,
 pull and push provider history; they are separate from native checkpoints. Do
 not infer Git support from the word “repository”: use `repos_git_status` and

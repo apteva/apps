@@ -1,0 +1,88 @@
+name: native-remote
+description: |
+  A real agent clones one Code repository into another with repos_remote,
+  makes a change in the clone, and pushes it back to the original's main
+  branch, without Git. Verifies the clone shares history with its source, the
+  pushed revision is the original's main head (logged as a push), and the
+  original's checked-out files were updated.
+
+timeout: 300s
+max_iterations: 22
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  cleanup_mcp_calls:
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-upstream
+        force: true
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-downstream
+        force: true
+
+directive: |
+  Use the Code app. Create a blank repository named "Upstream" with slug
+  "tier3-upstream", write notes.txt containing exactly "first note", and save
+  a native revision called "First note".
+
+  Clone it with Code's native remotes (not Git) into a new repository named
+  "Downstream" with slug "tier3-downstream". In the clone, change notes.txt
+  to exactly "second note", save a revision called "Second note", and push
+  the clone's main branch back to the original repository's main branch.
+  Then stop.
+
+assert:
+  - tool_called_with:
+      tool: repos_create
+      args:
+        slug: tier3-upstream
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_remote
+      args:
+        action: clone
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: repos_remote
+      args:
+        slug: tier3-downstream
+        action: push
+      min_count: 1
+      success: true
+      result_contains: pushed
+  - tool_not_called: repos_git_connect | repos_git_import | repos_git_commit | repos_git_push | repos_git_pull | repos_git_fetch | repos_git_sync_configure | repos_git_sync_now | repos_import
+  - tool_not_called_with:
+      tool: repos_create | repos_remote | repos_checkpoint
+      success: false
+  - http: GET /api/apps/code/api/repos/tier3-upstream/files/notes.txt?annotated=1
+    expect_field_at: content
+    expect_field_matches: '^\s*1\tsecond note\n?$'
+  - http: GET /api/apps/code/api/repos/tier3-upstream/version/status
+    expect_field_at: dirty
+    expect_field_eq: false
+  - http: GET /api/apps/code/api/repos/tier3-upstream/version/history
+    expect_field_at: revisions.0.message
+    expect_field_eq: Second note
+  - http: GET /api/apps/code/api/repos/tier3-upstream/version/history
+    expect_field_at: revisions.1.message
+    expect_field_eq: First note
+  - http: GET /api/apps/code/api/repos/tier3-upstream/version/moves
+    expect_field_at: moves.0.action
+    expect_field_eq: push
+  - http: GET /api/apps/code/api/repos/tier3-downstream/version/remotes
+    expect_field_at: remotes.0.slug
+    expect_field_eq: tier3-upstream
+  - iterations_at_most: 22
+
+budget:
+  total_tokens: 600000
+  cost_usd: 1.50

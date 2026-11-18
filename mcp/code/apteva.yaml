@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.17.0
+version: 0.18.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,12 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.18.0 adds native remotes. repos_remote adds another Code repository as a
+  remote (in this project, or on another Apteva install over HTTPS with a
+  per-call token), fetches its branches as <remote>/<branch>, pushes branches
+  (fast-forward only; protected branches refuse), and clones a repository
+  with its full history. Every received object is verified by hash. Pull is
+  fetch then repos_merge.
   v0.17.0 adds native change requests and protected branches.
   change_requests opens a request to land a source branch on a target branch,
   takes comments and reviews (approve / request changes), and merges it
@@ -273,6 +279,8 @@ provides:
       description: Restore selected paths from a native Code revision.
     - name: repos_branch
       description: List, create, switch (with auto-stash), delete or compare native branches.
+    - name: repos_remote
+      description: Add, list, remove, fetch from, push to, or clone native Code remotes (other Code repositories), without Git.
     - name: change_requests
       description: Open, review, comment on, merge or close native change requests that land a branch on another branch.
     - name: repos_merge
@@ -402,7 +410,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.17.0
+    ref: code/v0.18.0
     entry: mcp/code
   port: 8080
   health_check: /health

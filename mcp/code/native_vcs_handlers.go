@@ -353,6 +353,70 @@ func (a *App) httpRepoVersion(w http.ResponseWriter, r *http.Request, slug, acti
 			return
 		}
 		httpJSON(w, map[string]any{"change_requests": list, "count": len(list)})
+	case "sync/refs":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		refs, err := n.serveRefs(repo)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, refs)
+	case "sync/fetch":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Wants []string `json:"wants"`
+			Haves []string `json:"haves"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		bundle, err := n.serveFetch(repo, body.Wants, body.Haves)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, bundle)
+	case "sync/receive":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Bundle  *nativeBundle     `json:"bundle"`
+			Updates []nativeRefUpdate `json:"updates"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, nativeBundleMaxBytes+(4<<20))).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON or push too large")
+			return
+		}
+		res, err := n.serveReceive(repo, body.Bundle, body.Updates, httpActor(r))
+		if errors.Is(err, errNativeRefMoved) || errors.Is(err, errNativeProtected) || errors.Is(err, errNativeMergeInProgress) {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, res)
+	case "remotes":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		list, err := n.listRemotes(repo)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"remotes": list, "count": len(list)})
 	case "protection":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")

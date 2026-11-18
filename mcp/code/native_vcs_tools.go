@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -17,6 +19,7 @@ func (a *App) nativeMCPTools() []sdk.Tool {
 		{Name: "repos_diff", Description: "Compare two native refs (revision IDs, branch or tag names), or a ref and the working tree, and return changed paths. Defaults: from = checked-out head, to = working tree. Pass lines=true for per-file unified patches with added/removed counts, optionally limited to paths. Args: slug, from_revision?, to_revision?, lines?, paths?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "from_revision": map[string]any{"type": "string"}, "to_revision": map[string]any{"type": "string"}, "lines": map[string]any{"type": "boolean"}, "paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"slug"}), HandlerCtx: a.toolNativeDiff},
 		{Name: "repos_branch", Description: "Manage native Code branches with one action. list: every branch with its head. create: name, start? (revision, branch or tag; default checked-out head); with switch=true the new branch starts at the checked-out head and is checked out at once, carrying unsaved changes with it (use this to start isolated work). switch: name; changes that are not in a revision are auto-stashed for the branch you leave and restored when you come back. delete: name, force? (refuses unmerged branches without force; the branch can be recreated from its head). compare: name (from) against target? (default checked-out branch): ahead/behind, merge base, fast-forward possible, changed paths. protect: name, required_approvals? (default 0): the branch then only changes through merged change_requests. unprotect: name. Args: slug, action, name?, start?, switch?, target?, force?, required_approvals?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "action": map[string]any{"type": "string", "enum": []string{"list", "create", "switch", "delete", "compare", "protect", "unprotect"}}, "name": map[string]any{"type": "string"}, "start": map[string]any{"type": "string"}, "switch": map[string]any{"type": "boolean"}, "target": map[string]any{"type": "string"}, "force": map[string]any{"type": "boolean"}, "required_approvals": map[string]any{"type": "integer"}}, []string{"slug", "action"}), HandlerCtx: a.toolNativeBranch},
 		{Name: "change_requests", Description: "Native change requests: ask to land a source branch on a target branch, review it, and merge it. Protected branches (repos_branch action=protect) only change this way. create: title, source, target? (default main), body?, issues? (issue numbers). list: state? open|merged|closed|all. get: number, lines? (include unified patches); shows reviews, mergeability, blockers and notes. comment: number, body, path?, line?. review: number, verdict approve|request_changes|comment, body? (approvals count only on the current source head; authors cannot approve their own). merge: number, mode? merge|squash, message?, delete_source?; merges without needing the target checked out, refused while blockers remain. close / reopen: number. Args: slug, action, number?, title?, body?, source?, target?, issues?, state?, lines?, path?, line?, verdict?, mode?, message?, delete_source?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "action": map[string]any{"type": "string", "enum": []string{"create", "list", "get", "comment", "review", "merge", "close", "reopen"}}, "number": map[string]any{"type": "integer"}, "title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "target": map[string]any{"type": "string"}, "issues": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "state": map[string]any{"type": "string", "enum": []string{"open", "merged", "closed", "all"}}, "lines": map[string]any{"type": "boolean"}, "path": map[string]any{"type": "string"}, "line": map[string]any{"type": "integer"}, "verdict": map[string]any{"type": "string", "enum": []string{"approve", "request_changes", "comment"}}, "mode": map[string]any{"type": "string", "enum": []string{"merge", "squash"}}, "message": map[string]any{"type": "string"}, "delete_source": map[string]any{"type": "boolean"}}, []string{"slug", "action"}), HandlerCtx: a.toolChangeRequests},
+		{Name: "repos_remote", Description: "Sync native Code history with another Code repository, without Git. A remote is a repository in this project (from_slug) or on another Apteva install (url: https://host/api/apps/code/api/repos/<slug>, with a token per call; tokens are never stored). add: name (e.g. origin), from_slug | url, project_id?. list. remove: name. fetch: name, token? - downloads new revisions and updates remote branches, readable as <remote>/<branch> in repos_merge, repos_diff, repos_history and repos_branch compare. pull = fetch then repos_merge action=start source=<remote>/<branch>. push: name, branch? (default checked out), remote_branch? (default same name), token? - fast-forward only; protected remote branches refuse pushes. clone: from_slug | url, token?, name, slug? - creates a new repository with the full history and an origin remote. Args: slug (not for clone), action, name?, url?, project_id?, from_slug?, token?, branch?, remote_branch?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "action": map[string]any{"type": "string", "enum": []string{"add", "list", "remove", "fetch", "push", "clone"}}, "name": map[string]any{"type": "string"}, "url": map[string]any{"type": "string"}, "project_id": map[string]any{"type": "string"}, "from_slug": map[string]any{"type": "string"}, "token": map[string]any{"type": "string"}, "branch": map[string]any{"type": "string"}, "remote_branch": map[string]any{"type": "string"}}, []string{"action"}), HandlerCtx: a.toolNativeRemote},
 		{Name: "repos_merge", Description: "Combine native history into the checked-out branch. start: source (branch, tag or revision), mode? merge (default; fast-forwards when possible unless no_ff) | squash (one ordinary revision) | cherry_pick (apply one revision) | revert (undo one revision), message?, markers? (write conflict markers into files). Lines changed on only one side merge automatically. Conflicts come back as data with base/ours/theirs content and leave a merge in progress: resolve each with action=resolve, path, and choice (ours, theirs, base, delete, working = keep the file as edited) or content; then action=continue (records the revision) or action=abort (restores the branch head). status shows the merge in progress. While a merge is in progress, checkpoints, branch switches and undo are refused. Args: slug, action, source?, mode?, message?, markers?, no_ff?, path?, choice?, content?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "action": map[string]any{"type": "string", "enum": []string{"start", "status", "resolve", "continue", "abort"}}, "source": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"merge", "squash", "cherry_pick", "revert"}}, "message": map[string]any{"type": "string"}, "markers": map[string]any{"type": "boolean"}, "no_ff": map[string]any{"type": "boolean"}, "path": map[string]any{"type": "string"}, "choice": map[string]any{"type": "string", "enum": []string{"ours", "theirs", "base", "delete", "working"}}, "content": map[string]any{"type": "string"}}, []string{"slug", "action"}), HandlerCtx: a.toolNativeMerge},
 		{Name: "repos_branch_create", Description: "Create a native Code branch at a revision (defaults to current head). Args: slug, name, start_revision?.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "start_revision": map[string]any{"type": "string"}}, []string{"slug", "name"}), HandlerCtx: a.toolNativeBranchCreate},
 		{Name: "repos_branch_switch", Description: "Switch the native working tree to another branch; unsaved changes are auto-stashed for the branch you leave and restored when you return (same as repos_branch action=switch). Args: slug, name.", InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}}, []string{"slug", "name"}), HandlerCtx: a.toolNativeBranchSwitch},
@@ -451,4 +454,158 @@ func (a *App) toolNativeExportRef(_ context.Context, ctx *sdk.AppCtx, args map[s
 		return nil, errors.New("native revision export exceeds 32 MiB")
 	}
 	return map[string]any{"revision": strArg(args, "revision"), "sha256": sha, "size": len(body), "zip_b64": base64.StdEncoding.EncodeToString(body)}, nil
+}
+
+func (a *App) nativeTransportFor(ctx *sdk.AppCtx, args map[string]any, remote *nativeRemote) (nativeTransport, error) {
+	if remote.Kind == "apteva" {
+		return newNativeHTTPTransport(remote, strArg(args, "token")), nil
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	other, err := requireRepo(ctx, pid, remote.Slug)
+	if err != nil {
+		return nil, fmt.Errorf("remote %s: %w", remote.Name, err)
+	}
+	return &nativeLocalTransport{n: a.native, repo: other}, nil
+}
+
+func (a *App) toolNativeRemote(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	action := strings.TrimSpace(strArg(args, "action"))
+	if action == "clone" {
+		return a.nativeClone(ctx, args)
+	}
+	n, repo, err := a.nativeRepo(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(strArg(args, "name"))
+	needName := func() error {
+		if name == "" {
+			return errors.New(action + " needs name (the remote, e.g. origin)")
+		}
+		return nil
+	}
+	switch action {
+	case "add":
+		if err := needName(); err != nil {
+			return nil, err
+		}
+		slug := strings.TrimSpace(strArg(args, "from_slug"))
+		if slug == repo.Slug {
+			return nil, errors.New("a repository cannot be its own remote")
+		}
+		r, err := n.addRemote(repo, nativeRemote{Name: name, Slug: slug, URL: strArg(args, "url"), ProjectID: strArg(args, "project_id"), AddedBy: strArg(args, "actor")})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"remote": r}, nil
+	case "list":
+		list, err := n.listRemotes(repo)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"remotes": list, "count": len(list)}, nil
+	case "remove":
+		if err := needName(); err != nil {
+			return nil, err
+		}
+		if err := n.removeRemote(repo, name); err != nil {
+			return nil, err
+		}
+		return map[string]any{"removed": name}, nil
+	case "fetch", "push":
+		if err := needName(); err != nil {
+			return nil, err
+		}
+		remote, err := n.getRemote(repo, name)
+		if err != nil {
+			return nil, err
+		}
+		t, err := a.nativeTransportFor(ctx, args, remote)
+		if err != nil {
+			return nil, err
+		}
+		if action == "fetch" {
+			res, err := n.fetch(repo, name, t)
+			if err != nil {
+				return nil, err
+			}
+			if ctx != nil {
+				ctx.Emit("repo.remote.fetched", map[string]any{"id": repo.ID, "slug": repo.Slug, "remote": name, "revisions": res.Revisions})
+			}
+			return res, nil
+		}
+		res, err := n.push(repo, name, strArg(args, "branch"), strArg(args, "remote_branch"), strArg(args, "actor"), t)
+		if err != nil {
+			return nil, err
+		}
+		if ctx != nil && res.Status == "pushed" {
+			ctx.Emit("repo.remote.pushed", map[string]any{"id": repo.ID, "slug": repo.Slug, "remote": name, "branch": res.RemoteBranch, "revision": res.New})
+		}
+		return res, nil
+	case "":
+		return nil, errors.New("action is required: add, list, remove, fetch, push or clone")
+	default:
+		return nil, errors.New("unknown action " + action + ": use add, list, remove, fetch, push or clone")
+	}
+}
+
+// nativeClone creates a new repository whose history is a copy of another
+// Code repository's, with an "origin" remote pointing back at it.
+func (a *App) nativeClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if a.native == nil || ctx == nil {
+		return nil, errors.New("native version control is not initialized")
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(strArg(args, "name"))
+	if name == "" {
+		return nil, errors.New("clone needs name: the new repository's name")
+	}
+	remote := nativeRemote{Name: "origin", Slug: strings.TrimSpace(strArg(args, "from_slug")), URL: strings.TrimSpace(strArg(args, "url")), ProjectID: strArg(args, "project_id"), AddedBy: strArg(args, "actor")}
+	switch {
+	case remote.Slug != "" && remote.URL == "":
+		remote.Kind = "local"
+	case remote.URL != "" && remote.Slug == "":
+		clean, err := validateAptevaRemoteURL(remote.URL)
+		if err != nil {
+			return nil, err
+		}
+		remote.Kind, remote.URL = "apteva", clean
+	default:
+		return nil, errors.New("clone needs exactly one of from_slug (a repository in this project) or url (another Apteva install)")
+	}
+	t, err := a.nativeTransportFor(ctx, args, &remote)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := t.Refs(); err != nil {
+		return nil, err
+	}
+	r, err := dbCreateRepo(ctx.AppDB(), pid, CreateRepoInput{Name: name, Slug: strArg(args, "slug"), Framework: "blank", Description: strArg(args, "description")})
+	if err != nil {
+		return nil, err
+	}
+	repoStore := a.storeFor(r)
+	fail := func(e error) (any, error) {
+		_ = repoStore.DropRepo(r.Slug)
+		_ = os.RemoveAll(a.native.repoDir(r))
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, e
+	}
+	if err := repoStore.CreateRepo(r.Slug); err != nil {
+		return fail(fmt.Errorf("create repo dir: %w", err))
+	}
+	res, err := a.native.cloneInto(r, remote, t, strArg(args, "actor"))
+	if err != nil {
+		return fail(fmt.Errorf("clone: %w", err))
+	}
+	_ = dbRecordImport(ctx.AppDB(), r.ID, "clone:"+firstNonEmpty(remote.Slug, remote.URL))
+	ctx.Emit("repo.added", map[string]any{"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework, "cloned_from": firstNonEmpty(remote.Slug, remote.URL)})
+	status, _ := a.native.status(r)
+	return map[string]any{"repository": r, "clone": res, "status": status}, nil
 }
