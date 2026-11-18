@@ -1,5 +1,58 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.6.0
+
+Sandbox features for running untrusted code (used by Workspaces).
+
+- **Network modes.** `network_mode` on `containers_run`: `default` (the
+  per-workload bridge network with internet, unchanged), `none` (no network
+  interface besides loopback), or `registry_only` (an internal Docker network
+  whose only route out is a per-workload tinyproxy that allows `egress_allow`
+  hosts and denies everything else; default allow list `registry.npmjs.org`).
+  Entries are `host`, `*.domain`, or `host:port`. Proxy variables
+  (`HTTP(S)_PROXY`, `npm_config_*proxy`) are set on the container and on every
+  execution. Direct connections cannot bypass the proxy because the internal
+  network has no gateway. Published ports require `default`.
+- **Switching between commands.** `containers_network_set` (app-only) moves a
+  running workload between modes without restarting it, disconnecting before
+  connecting so a stricter mode never overlaps a looser one. Typical flow:
+  `registry_only` to install, then `none` to test. Non-default workloads are
+  created stopped, moved to their network, then started.
+- **Mounts.** `volumes[].read_only` mounts with `:ro`. `volumes[].shared_from`
+  mounts the same-named volume of another live workload owned by the same
+  caller on the same host (read-only only), which is how a test-phase workload
+  reads what a prepare-phase workload wrote, without recreating the prepare
+  workload. Borrowed mounts are never deleted, retained, or measured by the
+  borrower. `tmpfs: [{mount_path, size_mb}]` adds size-limited tmpfs mounts.
+  Injected files and archive imports into read-only volumes are rejected.
+- **Hardening.** `hardened: true` drops all Linux capabilities, sets
+  `no-new-privileges`, makes the root filesystem read-only (adding a 256 MB
+  `/tmp` tmpfs so executions keep working), lowers the process cap to 256, and
+  requires a non-root `user`. `read_only_rootfs` and `pids_limit` (16-4096,
+  default 512) are also available on their own.
+- **No Docker socket or platform token.** Workload volumes are always named
+  volumes; a source that would become a host bind mount is refused. The
+  sidecar's `APTEVA_APP_TOKEN` is rejected in env, files, and execution argv.
+  Hardened workloads and their executions also reject `DOCKER_HOST` and
+  `APTEVA_*` environment variables.
+- **Process-tree kill.** Every execution and persistent session now marks its
+  processes with `APTEVA_PROCESS_TREE`. Cancellation and session close kill
+  marked processes too, so commands that `setsid` and double-fork away from the
+  tree no longer survive. Processes that clear their environment are only
+  reachable through the parent tree.
+- **Tests.** Real-Docker tests prove `none` blocks traffic, `registry_only`
+  allows the registry (including a real package install) and blocks other
+  hosts, direct sockets, and look-alike domains, read-only and shared mounts
+  reject writes, hardening removes capabilities, `pids_limit` is enforced,
+  destroy removes the proxy and internal network, and cancellation reaches
+  detached descendants.
+
+Upgrade: migration `006_sandbox.sql` adds `read_only` and `shared_from` to
+`containers_volumes`. Existing workloads keep `network_mode: default` and the
+512 process cap. The first `registry_only` workload on a host builds the local
+`apteva-containers-egress` image from `alpine:3.20` (needs internet once).
+
+
 ## v0.5.2
 
 Source imports can update a running workspace after dependency installation.

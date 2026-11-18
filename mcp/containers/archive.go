@@ -231,6 +231,9 @@ func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	if err != nil {
 		return nil, err
 	}
+	if volume.ReadOnly {
+		return nil, fmt.Errorf("volume %q is mounted read-only", volume.Name)
+	}
 	relativePath, err = normalizeVolumePath(relativePath)
 	if err != nil {
 		return nil, err

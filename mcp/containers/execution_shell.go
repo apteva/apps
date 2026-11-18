@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -198,7 +199,10 @@ func (m *persistentShellManager) Start(ctx context.Context, spec executionRuntim
 
 func startPersistentShell(ctx context.Context, manager *persistentShellManager, key string, spec executionRuntimeSpec) (*persistentShellSession, error) {
 	readyMarker := "\x1eAPTEVA_READY_" + strings.TrimPrefix(newExecutionID(), "exe_") + "\x1f"
-	args := []string{"exec", "-it", "-e", "PS1=", "-e", "PS2=", "-e", "TERM=xterm-256color"}
+	controlDir := "/tmp/.apteva-sessions/" + newExecutionID()
+	// The marker is the control dir's basename; containerTreeKill uses it to find
+	// session processes that escaped the shell's process tree.
+	args := []string{"exec", "-it", "-e", "PS1=", "-e", "PS2=", "-e", "TERM=xterm-256color", "-e", "APTEVA_PROCESS_TREE=" + path.Base(controlDir)}
 	if spec.User != "" {
 		args = append(args, "--user", spec.User)
 	}
@@ -211,7 +215,7 @@ func startPersistentShell(ctx context.Context, manager *persistentShellManager, 
 	session := &persistentShellSession{
 		manager: manager, key: key, containerName: spec.ContainerName,
 		sessionKey: spec.SessionKey, user: spec.User, cmd: cmd, terminal: terminal,
-		readyMarker: readyMarker, ready: make(chan struct{}), closed: make(chan struct{}), lastUsed: time.Now(), controlDir: "/tmp/.apteva-sessions/" + newExecutionID(),
+		readyMarker: readyMarker, ready: make(chan struct{}), closed: make(chan struct{}), lastUsed: time.Now(), controlDir: controlDir,
 	}
 	go session.readLoop()
 	initCommand := "exec 3>&1; stty -echo 2>/dev/null || true; umask 077; mkdir -p " + shellSingleQuote(session.controlDir) + "; echo $$ > " + shellSingleQuote(session.controlDir+"/pid") + "; printf '\\036" + strings.Trim(readyMarker, "\x1e\x1f") + "\\037' >&3\n"
