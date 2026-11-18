@@ -1,5 +1,27 @@
 # Workspaces
 
+## v0.8.1
+
+Fixes creates that failed and then blocked every retry with
+`UNIQUE constraint failed: workspaces.project_id, workspaces.name`.
+
+- A create that fails (container start, source import, or a test workspace
+  setup step) removes what it started and marks the workspace `destroyed`
+  with the error kept in `last_error`, so its name is free again.
+- `workspace_create_for_resource` is idempotent per caller and resource
+  (`resource_kind` + `resource_id`), not only per tool call. A repeat call
+  returns the existing workspace with `reused: true`: running ones as they
+  are, stopped or expired ones extended if needed and resumed, and ones that
+  failed after they had run resumed rather than replaced, because their
+  volumes may hold work. A workspace for that resource that never became
+  ready is cleared and a new one is created.
+- Failed records left by 0.8.0 that never became ready are cleared the next
+  time the same caller creates a workspace with that name.
+- A workspace stuck in `provisioning` for 15 minutes (for example after a
+  restart mid-create) is cleaned up by the reconcile worker.
+- When another caller's live workspace holds the name, the error names that
+  workspace and its status instead of the database error.
+
 ## v0.8.0
 
 Requires Containers 0.7.1 or later.

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.8.0
+version: 0.8.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -23,6 +23,9 @@ description: |
   destroys the workspace, and per-project dependency caches keyed by
   lockfile. Commands in regular workspaces now create files readable by
   others (umask 022).
+  v0.8.1: a create that fails releases the workspace name, and
+  workspace_create_for_resource returns the caller's existing workspace for
+  the same resource instead of failing on the name.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -123,7 +126,7 @@ provides:
       description: "Permanently destroy a workspace and its volumes. Requires confirm=true. Git safety is only authoritative when the originating app supplied dirty/unpushed state. Args: workspace_id, confirm."
       requires: workspaces.write
     - name: workspace_create_for_resource
-      description: "Create a workspace for a caller-owned resource with an optional allowlisted digest-pinned image override and bounded tar.gz source archive. Authenticated app callers only."
+      description: "Create a workspace for a caller-owned resource with an optional allowlisted digest-pinned image override and bounded tar.gz source archive. One workspace per caller and resource_kind+resource_id: a repeat call returns the existing workspace (reused=true), resuming it if it was stopped, expired or failed after it had run. Authenticated app callers only."
       exposure: app_only
     - name: workspace_context_update
       description: "Update origin labels, navigation, and consumer-reported dirty/unpushed safety state. Authenticated originating app only."
@@ -186,7 +189,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.8.0
+    ref: workspaces/v0.8.1
     entry: mcp/workspaces
   port: 8080
   health_check: /health

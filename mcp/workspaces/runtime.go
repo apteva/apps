@@ -87,6 +87,9 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 			return existing, nil
 		}
 	}
+	if err := a.claimName(app, actor, name); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	expires := now.Add(time.Duration(ttl) * time.Minute)
 	deleteAt := expires.Add(time.Duration(configInt(app, "expired_retention_minutes", 1440)) * time.Minute)
@@ -124,7 +127,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 				return existing, nil
 			}
 		}
-		return nil, err
+		return nil, insertError(app, actor.ProjectID, name, err)
 	}
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Workspace provisioning started", map[string]any{"profile": profile, "image": image})
 
@@ -152,16 +155,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	}
 	var runOut workloadResponse
 	if err := app.PlatformAPI().CallAppResult("containers", "containers_run", input, &runOut); err != nil {
-		_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{
-			"lifecycle_status": statusFailed, "last_error": err.Error(), "updated_at": nowUTC(),
-		})
-		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.failed", Actor{Kind: "runtime", Label: "Containers"}, "Workspace provisioning failed", map[string]any{"error": err.Error()})
-		return nil, err
+		return nil, a.failCreate(app, w, err)
 	}
 	if runOut.Workload.ID == "" {
-		err := errors.New("containers_run returned an empty workload id")
-		_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"lifecycle_status": statusFailed, "last_error": err.Error(), "updated_at": nowUTC()})
-		return nil, err
+		return nil, a.failCreate(app, w, errors.New("containers_run returned an empty workload id"))
 	}
 	w.WorkloadID = runOut.Workload.ID
 	if sourceArchive != "" {
@@ -169,14 +166,9 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
 			"workload_id": w.WorkloadID, "volume": "workspace", "path": ".", "archive_base64": sourceArchive,
 		}, &imported); err != nil {
-			var destroyed map[string]any
-			_ = app.PlatformAPI().CallAppResult("containers", "containers_destroy", map[string]any{"workload_id": w.WorkloadID, "delete_volumes": true}, &destroyed)
-			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{
-				"workload_id": w.WorkloadID, "lifecycle_status": statusFailed,
-				"runtime_status": "destroyed", "last_error": "source import: " + err.Error(), "updated_at": nowUTC(),
-			})
+			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"workload_id": w.WorkloadID, "updated_at": nowUTC()})
 			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.import_failed", Actor{Kind: "runtime", Label: "Containers"}, "Source archive import failed", map[string]any{"error": err.Error()})
-			return nil, err
+			return nil, a.failCreate(app, w, fmt.Errorf("source import: %w", err))
 		}
 		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.imported", actor, "Source archive imported", nil)
 		w.SourceSyncedAt = nowUTC()
@@ -536,9 +528,15 @@ func (a *App) reconcile(ctx context.Context, app *sdk.AppCtx) error {
 		return err
 	}
 	var errs []error
+	if err := a.retireStuckCreates(app, rows); err != nil {
+		errs = append(errs, err)
+	}
 	for _, w := range rows {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if w.LifecycleStatus == statusProvisioning {
+			continue
 		}
 		if _, err := a.refreshPreview(app, w); err != nil {
 			errs = append(errs, err)

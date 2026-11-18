@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.8.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.8.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -172,6 +172,20 @@ func (a *App) toolCreate(callCtx context.Context, app *sdk.AppCtx, args map[stri
 }
 
 func (a *App) toolCreateForResource(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	actor, err := actorFrom(callCtx, app)
+	if err != nil {
+		return nil, err
+	}
+	// One workspace per resource: a retry for the same resource gets the
+	// existing workspace back (resumed if needed) instead of a name clash.
+	ttl := intArg(args, "ttl_minutes", configInt(app, "default_ttl_minutes", 120))
+	if ttl >= 1 && ttl <= configInt(app, "max_ttl_minutes", 480) {
+		if existing, ok, err := a.reuseResourceWorkspace(callCtx, app, actor, args, ttl); err != nil {
+			return nil, err
+		} else if ok {
+			return map[string]any{"workspace": existing, "reused": true}, nil
+		}
+	}
 	w, err := a.createWorkspace(callCtx, app, args, true)
 	if err != nil {
 		return nil, err

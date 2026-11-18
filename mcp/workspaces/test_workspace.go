@@ -285,6 +285,9 @@ func (a *App) createTestWorkspace(callCtx context.Context, app *sdk.AppCtx, args
 	if useCache {
 		cacheKey = source.CacheKey
 	}
+	if err := a.claimName(app, actor, name); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	expires := now.Add(time.Duration(ttl) * time.Minute)
 	w := &Workspace{
@@ -311,20 +314,14 @@ func (a *App) createTestWorkspace(callCtx context.Context, app *sdk.AppCtx, args
 				return existing, nil
 			}
 		}
-		return nil, err
+		return nil, insertError(app, actor.ProjectID, name, err)
 	}
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Test workspace provisioning started", map[string]any{"profile": profile, "image": image, "source_digest": source.Digest})
 	fail := func(stage string, err error) (*Workspace, error) {
 		if w.WorkloadID != "" {
-			var destroyed map[string]any
-			_ = app.PlatformAPI().CallAppResult("containers", "containers_destroy", map[string]any{"workload_id": w.WorkloadID, "delete_volumes": true}, &destroyed)
+			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"workload_id": w.WorkloadID, "updated_at": nowUTC()})
 		}
-		_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{
-			"workload_id": w.WorkloadID, "lifecycle_status": statusFailed,
-			"last_error": stage + ": " + err.Error(), "updated_at": nowUTC(),
-		})
-		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.failed", Actor{Kind: "runtime", Label: "Containers"}, "Test workspace provisioning failed", map[string]any{"stage": stage, "error": err.Error()})
-		return nil, fmt.Errorf("%s: %w", stage, err)
+		return nil, a.failCreate(app, w, fmt.Errorf("%s: %w", stage, err))
 	}
 
 	cacheVolume := map[string]any{"name": "cache", "mount_path": "/cache"}
