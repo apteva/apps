@@ -29,7 +29,7 @@ func saveBrowserArtifact(app *sdk.AppCtx, run, check int64, step string, artifac
 		return 0, errors.New("screenshot integrity check failed")
 	}
 	var count int
-	if err = app.AppDB().QueryRow(`SELECT count(*) FROM test_artifacts WHERE project_id=? AND run_id=?`, app.CurrentProject(), run).Scan(&count); err != nil {
+	if err = app.AppDB().QueryRow(`SELECT count(*) FROM test_artifacts WHERE project_id=? AND run_id=? AND mime='image/png'`, app.CurrentProject(), run).Scan(&count); err != nil {
 		return 0, err
 	}
 	if count >= 10 {
@@ -66,6 +66,11 @@ func (a *App) httpBrowserArtifact(w http.ResponseWriter, r *http.Request) {
 	if err = app.AppDB().QueryRow(`SELECT mime,digest,bytes FROM test_artifacts WHERE project_id=? AND id=?`, app.CurrentProject(), id).Scan(&mime, &digest, &bytes); err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	if mime != "image/png" {
+		// Reports and logs are untrusted project output: plain text only.
+		mime = "text/plain; charset=utf-8"
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	}
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "private, no-store")

@@ -135,8 +135,17 @@ func (t *TargetConfig) validate() error {
 				return fmt.Errorf("target %q uses app %q, which is not in the environment", name, target.App)
 			}
 		}
+	case "source":
+		// Source mode tests a Deploy build's own source with code checks; it
+		// has no endpoints, browser or environment.
+		if len(t.Targets) > 0 || t.Environment != nil || t.Browser != nil {
+			return errors.New("source mode takes only a candidate: no targets, browser or environment")
+		}
+		if t.Candidate == nil {
+			return errors.New("source mode needs target.candidate {deployment_id, build}")
+		}
 	default:
-		return errors.New(`target.mode must be "existing" or "isolated"`)
+		return errors.New(`target.mode must be "existing", "isolated" or "source"`)
 	}
 	if t.Browser != nil {
 		if err := t.Browser.validate(); err != nil {
@@ -286,6 +295,9 @@ func validateSuiteExtensions(v *Suite) error {
 			return fmt.Errorf("invalid credential alias %q", alias)
 		}
 	}
+	if v.ReleaseBlocking && v.Release == nil && (v.Target == nil || v.Target.Candidate == nil && v.Target.Mode != "isolated") {
+		return errors.New("release_blocking suites need a verdict: a release configuration, an isolated target, or a target.candidate")
+	}
 	if v.Session != nil {
 		mode := ""
 		if v.Target != nil {
@@ -403,8 +415,26 @@ func validateHeaderRefs(refs map[string]HeaderRef) error {
 // --- Deploy candidate resolution ---
 
 type deployCandidate struct {
-	BuildID int64  `json:"build_id"`
-	Digest  string `json:"candidate_digest"`
+	BuildID      int64  `json:"build_id"`
+	Digest       string `json:"candidate_digest"`
+	SourceDigest string `json:"source_digest,omitempty"`
+}
+
+// candidateByDigest finds the Deploy build sealed with a candidate digest.
+func candidateByDigest(ctx context.Context, app *sdk.AppCtx, digest string) (deployCandidate, error) {
+	platform := app.PlatformAPI()
+	if platform == nil {
+		return deployCandidate{}, errors.New("the Deploy binding is unavailable; bind the Deploy app to Tests")
+	}
+	var out deployCandidate
+	if err := sdk.CallAppResultContext(ctx, platform, "deploy", "deploy_candidate_digest",
+		map[string]any{"candidate_digest": digest, "_project_id": app.CurrentProject()}, &out); err != nil {
+		return out, fmt.Errorf("Deploy has no build with candidate digest %s: %s", short(digest), deployReason(err))
+	}
+	if out.BuildID < 1 || out.Digest != digest {
+		return out, fmt.Errorf("Deploy returned build %d for candidate digest %s", out.BuildID, short(digest))
+	}
+	return out, nil
 }
 
 func resolveCandidate(ctx context.Context, app *sdk.AppCtx, ref *CandidateRef) (_ deployCandidate, failure error) {

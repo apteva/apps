@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="5" failures="2" errors="0" time="0.27">
+  <testsuite name="add" errors="0" failures="2" skipped="1" timestamp="2026-11-18T00:00:00" time="0.206" tests="5">
+    <testcase classname="add adds" name="add adds" time="0.001">
+    </testcase>
+    <testcase classname="add fails on purpose" name="add fails on purpose" time="0.003">
+      <failure>Error: expect(received).toBe(expected) // Object.is equality
+
+Expected: 5
+Received: 4
+    at Object.toBe (/workspace/src/jt/math.test.js:5:54)
+    at Promise.then.completed (/workspace/src/node_modules/jest-circus/build/utils.js:298:28)
+    at new Promise (&lt;anonymous&gt;)
+    at callAsyncCircusFn (/workspace/src/node_modules/jest-circus/build/utils.js:231:10)
+    at _callCircusTest (/workspace/src/node_modules/jest-circus/build/run.js:316:40)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at _runTest (/workspace/src/node_modules/jest-circus/build/run.js:252:3)
+    at _runTestsForDescribeBlock (/workspace/src/node_modules/jest-circus/build/run.js:126:9)
+    at _runTestsForDescribeBlock (/workspace/src/node_modules/jest-circus/build/run.js:121:9)
+    at run (/workspace/src/node_modules/jest-circus/build/run.js:71:3)
+    at runAndTransformResultsToJestFormat (/workspace/src/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)
+    at jestAdapter (/workspace/src/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)
+    at runTestInternal (/workspace/src/node_modules/jest-runner/build/runTest.js:367:16)
+    at runTest (/workspace/src/node_modules/jest-runner/build/runTest.js:444:34)</failure>
+    </testcase>
+    <testcase classname="div divides" name="div divides" time="0.001">
+    </testcase>
+    <testcase classname="div skipped one" name="div skipped one" time="0">
+      <skipped/>
+    </testcase>
+    <testcase classname="div throws" name="div throws" time="0">
+      <failure>Error: division by zero
+    at Object.&lt;anonymous&gt;.exports.div (/workspace/src/jt/math.js:2:36)
+    at Object.div (/workspace/src/jt/math.test.js:10:26)
+    at Promise.then.completed (/workspace/src/node_modules/jest-circus/build/utils.js:298:28)
+    at new Promise (&lt;anonymous&gt;)
+    at callAsyncCircusFn (/workspace/src/node_modules/jest-circus/build/utils.js:231:10)
+    at _callCircusTest (/workspace/src/node_modules/jest-circus/build/run.js:316:40)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at _runTest (/workspace/src/node_modules/jest-circus/build/run.js:252:3)
+    at _runTestsForDescribeBlock (/workspace/src/node_modules/jest-circus/build/run.js:126:9)
+    at _runTestsForDescribeBlock (/workspace/src/node_modules/jest-circus/build/run.js:121:9)
+    at run (/workspace/src/node_modules/jest-circus/build/run.js:71:3)
+    at runAndTransformResultsToJestFormat (/workspace/src/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)
+    at jestAdapter (/workspace/src/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)
+    at runTestInternal (/workspace/src/node_modules/jest-runner/build/runTest.js:367:16)
+    at runTest (/workspace/src/node_modules/jest-runner/build/runTest.js:444:34)</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

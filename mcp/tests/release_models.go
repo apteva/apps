@@ -55,6 +55,10 @@ type ReleaseRecord struct {
 	RuntimeID       string            `json:"runtime_id,omitempty"`
 	Covered         []string          `json:"covered_operations,omitempty"`
 	Missing         []string          `json:"missing_operations,omitempty"`
+	// SourceDigest is the candidate source a code check tested, verified
+	// against Deploy's record and the digest Workspaces computed on import.
+	SourceDigest string          `json:"source_digest,omitempty"`
+	Source       *codeProvenance `json:"source,omitempty"`
 }
 
 type QueueOptions struct {
@@ -65,6 +69,8 @@ type QueueOptions struct {
 	// CheckNames limits a run to these checks (enabled or not). The session
 	// setup check is always added. Such runs never produce a release verdict.
 	CheckNames []string `json:"check_names,omitempty"`
+	// SourceDigest, when given, must match the source the verdict's run tested.
+	SourceDigest string `json:"source_digest,omitempty"`
 }
 
 type environmentDefinition struct {

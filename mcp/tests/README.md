@@ -675,3 +675,128 @@ also removes the local Chrome profile folder and its cookies. If Computer
 refuses because a session still holds the profile, Tests retries once; if that
 fails too, the run records a warning in `warnings` and still passes or fails on
 its checks.
+
+## Code checks: the project's own tests (0.8.0)
+
+A `code` check runs the project's test command on a source tree inside a
+locked-down Workspaces test workspace and reads its JUnit report (and optional
+lcov coverage). It needs Workspaces 0.8.0 or newer bound to Tests (and Tests
+allowed by Workspaces' `test_workspace_apps` setting when it is set); Deploy
+0.33.0 or newer to test a candidate's source; Code for Code-built candidates
+and repository sources.
+
+```json
+{"suite_id": 4, "name": "bun test", "kind": "code", "definition": {"code": {
+  "source": {"from": "candidate"},
+  "prepare": {"argv": ["bun", "install", "--frozen-lockfile"]},
+  "test": {"argv": ["bun", "test", "--reporter=junit", "--reporter-outfile=$TESTS_OUT/junit.xml",
+                    "--coverage", "--coverage-reporter=lcov", "--coverage-dir=$TESTS_OUT/coverage"],
+           "env": {"TZ": "UTC"}},
+  "results": {"junit": "junit.xml", "coverage": "coverage/lcov.info"},
+  "timeout_s": 900, "retry_flaky": true},
+  "assertions": [{"path": "/coverage/lines_pct", "op": "gte", "value": 80}]}}
+```
+
+- **Source.** `from: "candidate"` tests the exact source of the run's Deploy
+  build: Tests asks Deploy (`deploy_build_source`) where the source is, fetches
+  the Code snapshot or Deploy's kept copy, checks the sha256 and computes the
+  `workspaces-tree-v1` digest, which must equal what Deploy recorded and what
+  Workspaces computes when it imports the archive. `from: "code"` exports the
+  current state of a Code `repository` (optionally a `subdir`).
+- **Commands.** argv runs without a shell. `$TESTS_OUT` in argv and env values
+  is replaced by `/workspace/out`. `prepare` runs as the builder user (it may
+  install dependencies; network `registry_only` by default, or `none` /
+  `default`). `test` runs as the runner user, which can only write
+  `$TESTS_OUT`, always without network. `working_directory` is relative to the
+  source. Env names Workspaces sets (`HOME`, `TMPDIR`, `CI`, `TESTS_OUT`, …),
+  names that look like secrets and values that reference credentials are
+  rejected: code checks never receive suite credentials.
+- **Results.** `results.junit` and `results.coverage` are relative to
+  `$TESTS_OUT`. Bun, Vitest and Jest (jest-junit) reports are read, including
+  Bun's nested describe suites. Bun's JUnit has no failure messages; the
+  command log is saved with the run.
+- **Outcome.** The check passes when the report has cases and none failed
+  (apart from quarantined ones). It fails when cases fail, the command times
+  out, the report is missing or empty, or the command exits non-zero while the
+  report shows no failures. With `retry_flaky`, a failing test command runs
+  once more in the same workspace; cases that pass on the retry are `flaky`,
+  the check's status is `flaky` and the run fails (flaky is not a pass).
+  Source and workspace problems are `error`.
+- **Output** (assertable): `summary` (`tests`, `passed`, `failed`, `errors`,
+  `skipped`, `flaky`, `quarantined_failures`), `coverage` (`lines_pct`,
+  `functions_pct`, `branches_pct`, `delta_lines_pct` against this check's
+  previous run), `exit_code`, `attempts`, `failures` (first 20), `slowest`
+  (10), `commands` (status, exit code, seconds, `log_gap`), `source`
+  (provenance below) and `artifacts` (ids of the saved JUnit report, lcov file
+  and command log, served as plain text at `/artifacts/<id>`).
+- **Provenance.** `source` records `source_digest`, `digest_method`,
+  `build_id`, `source_kind`, the Code `repository` / `snapshot_id` /
+  `source_revision`, `lockfiles`, the dependency `cache_key`, the workspace
+  `image` and `workspace_id`.
+- The workspace is destroyed after the results are exported (or when the
+  check stops); if that fails the run records a warning and the workspace
+  expires with its TTL (check timeout plus 15 minutes, at most 2 hours).
+
+### Source-mode suites and release verdicts
+
+`target: {"mode": "source", "candidate": {"deployment_id": 3, "build": "latest_succeeded"}}`
+makes a suite that only runs code checks against a Deploy build. Code checks
+with `from: "candidate"` also work in existing-mode suites with a
+`target.candidate` (the live build); repository sources work in suites without
+a target. Isolated suites do not run code checks.
+
+A queued source-mode run is pinned to one build: `candidate` / `target.candidate`
+resolves it, or `candidate_digest` alone (what the Deploy gate sends) finds the
+build sealed with that digest. The release record carries `source_digest` and
+`source`. A source-mode verdict needs a code check that tested the candidate's
+source; Tests re-reads the build afterwards and the digest must be unchanged.
+
+`tests_release_verdict` and `tests_run` accept `source_digest`: a verdict whose
+run tested a different source is `source_mismatch` and not allowed (Deploy
+0.33.0 sends it and also blocks on a mismatch itself).
+
+`release_blocking: true` on a suite adds it to `tests_release_verdicts
+{candidate_digest, source_digest?}`, which is allowed only when every
+release-blocking suite has a passing, matching run for that candidate at its
+current revisions; each entry has the run id, state and release record.
+Release-blocking suites must test the candidate's own source (`from:
+"candidate"`) and need a verdict source (a candidate, an isolated target or a
+release configuration).
+
+### Cases, history and quarantine
+
+Every case from a code check's report is stored (up to 20,000 per check;
+messages and stack traces up to 8 KB; rows kept 30 days). A case is identified
+by `case_key` = `file :: describe > name`.
+
+- `tests_cases_list {run_id | suite_id, check_id?, status?, file?, case_key?}`
+  lists cases; `status: "failing"` selects failed and errored ones.
+- `tests_case_history {suite_id, case_key?, unstable?}` shows runs, failures,
+  flaky reruns, the last 20 outcomes (`p` passed, `f` failed, `e` error, `s`
+  skipped, `y` flaky), the last failure and quarantine state.
+- `tests_quarantine_set {suite_id, case_key, reason, days? (1–90, default 14) |
+  expires_at?}` quarantines a case that has run in the suite; `remove: true`
+  lifts it. A quarantined failure is recorded and counted in
+  `quarantined_failures` but does not fail its check. Every quarantine
+  expires. `tests_quarantine_list` lists them.
+
+### Limits
+
+- Workspaces imports at most 8 MB of compressed source (128 MB expanded,
+  20,000 files, `node_modules` and `.git` left out); larger candidates fail
+  with the compressed size.
+- Code snapshots are kept 24 hours. After that, a Code-built candidate can be
+  tested only while its repository is unchanged (it re-exports to the same
+  snapshot id); otherwise rebuild. Deploy's kept copy of a local source
+  follows Deploy's build retention, and its signed link must be reachable from
+  Tests.
+- A Deploy build that uses sibling Code dependencies records only the app
+  folder; the siblings are not in the tested source.
+- `prepare` runs as builder before the tests and could change the source; the
+  digest is checked on import, not after `prepare`.
+- Only the `bun-test` runtime profile is available.
+- Command output is read through Workspaces' 64 KB window; when output is
+  produced faster than Tests reads it, `log_gap` is set. Logs keep the last
+  128 KB per command.
+- The Tests panel and home widgets show code checks as plain results; a
+  per-case view is planned for 0.9.0.

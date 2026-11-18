@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="5" failures="2" errors="0" time="0.007016125">
+    <testsuite name="vt/math.test.ts" timestamp="2026-11-18T00:00:00.000Z" hostname="host" tests="5" failures="2" errors="0" skipped="1" time="0.007016125">
+        <testcase classname="vt/math.test.ts" name="add &gt; adds" time="0.000855333">
+        </testcase>
+        <testcase classname="vt/math.test.ts" name="add &gt; fails on purpose" time="0.004921792">
+            <failure message="expected 4 to be 5 // Object.is equality" type="AssertionError">
+AssertionError: expected 4 to be 5 // Object.is equality
+
+- Expected
++ Received
+
+- 5
++ 4
+
+ ❯ vt/math.test.ts:5:54
+            </failure>
+        </testcase>
+        <testcase classname="vt/math.test.ts" name="div &gt; divides" time="0.00008875">
+        </testcase>
+        <testcase classname="vt/math.test.ts" name="div &gt; skipped one" time="0">
+            <skipped/>
+        </testcase>
+        <testcase classname="vt/math.test.ts" name="div &gt; throws" time="0.000358916">
+            <failure message="division by zero" type="Error">
+Error: division by zero
+ ❯ div vt/math.ts:2:64
+ ❯ vt/math.test.ts:10:26
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

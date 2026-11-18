@@ -326,11 +326,11 @@ func dashboardFailures(ctx context.Context, tx *sql.Tx, where string, args []any
  SELECT r.id run_id,r.suite_id,r.suite_name,r.environment,r.created_at,t.check_id,t.name check_name,t.error,
  CASE WHEN t.kind IN ('browser','scenario') THEN coalesce(json_extract(t.output,'$.steps'),'[]') ELSE '[]' END steps
  FROM test_runs r JOIN test_results t ON t.project_id=r.project_id AND t.run_id=r.id
- WHERE ` + where + ` AND r.status='failed' AND r.cancel_requested=0 AND t.status IN ('failed','error')
+ WHERE ` + where + ` AND r.status='failed' AND r.cancel_requested=0 AND t.status IN ('failed','error','flaky')
  UNION ALL
  SELECT r.id,r.suite_id,r.suite_name,r.environment,r.created_at,0,'Suite execution',r.error,'[]'
  FROM test_runs r WHERE ` + where + ` AND r.status='failed' AND r.cancel_requested=0
- AND NOT EXISTS(SELECT 1 FROM test_results t WHERE t.project_id=r.project_id AND t.run_id=r.id AND t.status IN ('failed','error'))
+ AND NOT EXISTS(SELECT 1 FROM test_results t WHERE t.project_id=r.project_id AND t.run_id=r.id AND t.status IN ('failed','error','flaky'))
  ), ranked AS (
  SELECT *,row_number() OVER (PARTITION BY suite_id,environment,check_id,CASE WHEN ? THEN 0 ELSE run_id END ORDER BY created_at DESC,run_id DESC) rank,
  count(*) OVER (PARTITION BY suite_id,environment,check_id,CASE WHEN ? THEN 0 ELSE run_id END) occurrences FROM failures

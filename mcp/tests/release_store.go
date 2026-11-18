@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 type releaseSnapshot struct {
@@ -141,12 +144,81 @@ func (s store) verdict(suite int64, opt QueueOptions) (Verdict, error) {
 		state = "inconclusive"
 	}
 	measured := r.Release.EnvironmentRun != "" && r.Release.RuntimeID != ""
-	if r.Release.Mode == "existing" {
+	switch r.Release.Mode {
+	case "existing":
 		measured = true
+	case "source":
+		measured = r.Release.SourceDigest != ""
+	}
+	if opt.SourceDigest != "" && r.Release.SourceDigest != "" && opt.SourceDigest != r.Release.SourceDigest {
+		return Verdict{State: "source_mismatch", RunID: r.ID, Release: r.Release}, nil
 	}
 	return Verdict{
 		Allowed: r.Status == "passed" && !r.CancelRequested && !r.Release.Inconclusive && !r.Release.Partial && measured &&
 			r.Release.ObservedDigest == opt.CandidateDigest && len(r.Release.Missing) == 0,
 		State: state, RunID: r.ID, Release: r.Release,
 	}, nil
+}
+
+// suiteVerdict is one release-blocking suite's verdict for a candidate.
+type suiteVerdict struct {
+	SuiteID int64          `json:"suite_id"`
+	Name    string         `json:"name"`
+	Allowed bool           `json:"allowed"`
+	State   string         `json:"state"`
+	RunID   int64          `json:"run_id,omitempty"`
+	Release *ReleaseRecord `json:"release,omitempty"`
+	Error   string         `json:"error,omitempty"`
+}
+
+// releaseVerdicts checks a candidate against every release-blocking suite at
+// its current suite and fixture revisions.
+func (a *App) releaseVerdicts(ctx context.Context, app *sdk.AppCtx, candidate, source string) (map[string]any, error) {
+	if !digestPattern.MatchString(candidate) {
+		return nil, errors.New("candidate_digest must be a lowercase SHA-256 digest")
+	}
+	s := store{app.AppDB(), app.CurrentProject()}
+	suites, err := s.suites()
+	if err != nil {
+		return nil, err
+	}
+	out := []suiteVerdict{}
+	allowed := true
+	for _, suite := range suites {
+		if !suite.ReleaseBlocking {
+			continue
+		}
+		e := suiteVerdict{SuiteID: suite.ID, Name: suite.Name}
+		spec, err := a.releaseSpec(ctx, app, suite.ID)
+		if err != nil {
+			e.State, e.Error = "error", err.Error()
+		} else {
+			opt := QueueOptions{CandidateDigest: candidate, SourceDigest: source}
+			opt.SuiteRevision, _ = spec["suite_revision"].(string)
+			opt.FixtureRevision, _ = spec["fixture_revision"].(string)
+			v, err := s.verdict(suite.ID, opt)
+			if err != nil {
+				e.State, e.Error = "error", err.Error()
+			} else {
+				e.Allowed, e.State, e.RunID, e.Release = v.Allowed, v.State, v.RunID, v.Release
+			}
+		}
+		allowed = allowed && e.Allowed
+		out = append(out, e)
+	}
+	result := map[string]any{"candidate_digest": candidate, "suites": out}
+	if len(out) == 0 {
+		allowed = false
+		result["reason"] = "no suite is marked release_blocking"
+	}
+	result["allowed"] = allowed
+	return result, nil
+}
+
+// callerLabel names who changed a quarantine, for its audit field.
+func callerLabel(ctx context.Context) string {
+	if c := sdk.CallerFrom(ctx); c != nil && c.AgentID > 0 {
+		return fmt.Sprintf("agent %d", c.AgentID)
+	}
+	return "user"
 }
