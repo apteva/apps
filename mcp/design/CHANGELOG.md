@@ -1,5 +1,10 @@
 # Design Studio changes
 
+## 0.6.2
+
+- Wait for Shapeways to finish analysing uploaded models before reading prices. Shapeways returns its material list while processing with every material marked not printable, so quotes came back with no options. The adapter now polls until `printable` is final, and reports "still processing" or "cannot print in any material" instead of an empty quote.
+- Works with the Shapeways connector's client-credentials sign-in (integrations 0.56.2).
+
 ## 0.6.1
 
 - Explain Craftcloud's partner-access requirement instead of passing on a raw HTTP error. Craftcloud's public API has no model upload, so when the upload has no partner API URL, is refused (401/403) or hits a host without upload (404), the quote reports that Craftcloud needs partner model API access and where to set it on the connection. Other upload errors are reported as before.

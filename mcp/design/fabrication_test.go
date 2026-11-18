@@ -271,3 +271,30 @@ func TestCraftcloudUploadFailureExplainsPartnerAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestShapewaysQuoteWaitsForProcessing(t *testing.T) {
+	prev := pollInterval
+	pollInterval = 0
+	t.Cleanup(func() { pollInterval = prev })
+	gets := 0
+	call := func(_ context.Context, tool string, input map[string]any) (json.RawMessage, int, error) {
+		switch tool {
+		case "upload_model":
+			return json.RawMessage(`{"modelId":"15"}`), 200, nil
+		case "get_model":
+			gets++
+			if gets == 1 { // still processing: materials present but none printable yet
+				return json.RawMessage(`{"printable":"processing","materials":{"315":{"name":"PLA","price":6.47,"isPrintable":false}}}`), 200, nil
+			}
+			return json.RawMessage(`{"printable":"yes","materials":{"315":{"name":"PLA","price":6.47,"isPrintable":true},"9":{"name":"Brass","price":99,"isPrintable":false}}}`), 200, nil
+		}
+		return nil, 500, errors.New("unexpected tool " + tool)
+	}
+	options, err := shapewaysProvider{}.Quote(context.Background(), call, QuoteRequest{Parts: []PartFile{{PartID: "dock", Filename: "dock.stl", Quantity: 2, Body: []byte("solid")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gets < 2 || len(options) != 1 || options[0].MaterialRef != "315" || options[0].Total != 12.94 {
+		t.Fatalf("gets=%d options=%+v", gets, options)
+	}
+}
