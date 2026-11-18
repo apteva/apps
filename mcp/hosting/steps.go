@@ -145,6 +145,58 @@ type instanceInfo struct {
 	// host's agent is connected (a switched-off Mac stays "ready").
 	Connected  *bool  `json:"connected,omitempty"`
 	LastSeenAt string `json:"last_seen_at,omitempty"`
+	// ConnectMode is direct, vpn, reverse_tunnel or local (Instances 0.18+).
+	ConnectMode string `json:"connect_mode,omitempty"`
+	// PublicSSH is the public port customers use to reach a reverse-tunnel
+	// machine (Instances 0.19+).
+	PublicSSH *publicSSHInfo `json:"public_ssh,omitempty"`
+}
+
+type publicSSHInfo struct {
+	Enabled        bool     `json:"enabled"`
+	Host           string   `json:"host"`
+	Port           int      `json:"port"`
+	AllowedCIDRs   []string `json:"allowed_cidrs,omitempty"`
+	MaxConnections int      `json:"max_connections,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+// customerEndpoint is where a customer's SSH client reaches the machine.
+// Instances' own ssh_host is how the server reaches it, which for a
+// reverse tunnel is 127.0.0.1 and for a VPN machine a private VPN address.
+// issue is set (and host empty) when customers have no way in.
+func customerEndpoint(inst *instanceInfo) (host string, port int, issue string) {
+	switch inst.ConnectMode {
+	case "reverse_tunnel":
+		ps := inst.PublicSSH
+		switch {
+		case ps == nil || !ps.Enabled:
+			return "", 0, fmt.Sprintf("no public SSH: run instance_public_ssh_set(id=%d, enabled=true) in Instances", inst.ID)
+		case ps.Error != "":
+			return "", 0, "public SSH error: " + ps.Error
+		case ps.Host == "" || ps.Port <= 0:
+			return "", 0, "public SSH has no host or port yet"
+		}
+		return ps.Host, ps.Port, ""
+	case "vpn":
+		if inst.PublicIPv4 == "" {
+			return "", 0, "VPN machine has no public address; set public_host and public_port by hand"
+		}
+		return inst.PublicIPv4, inst.port(), ""
+	}
+	host = firstNonEmpty(inst.PublicIPv4, inst.SSHHost)
+	if host == "" {
+		return "", 0, "Instances reports no address for this machine"
+	}
+	if isLoopback(host) {
+		return "", 0, "Instances reaches this machine through " + host + "; set public_host and public_port by hand"
+	}
+	return host, inst.port(), ""
+}
+
+func isLoopback(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	return h == "localhost" || strings.HasPrefix(h, "127.") || h == "::1"
 }
 
 // online uses Instances' connected flag when it has one, else status ready.
@@ -154,8 +206,6 @@ func (i *instanceInfo) online() bool {
 	}
 	return i.Status == "ready"
 }
-
-func (i *instanceInfo) host() string { return firstNonEmpty(i.SSHHost, i.PublicIPv4) }
 
 func (i *instanceInfo) port() int {
 	if i.SSHPort > 0 {
@@ -440,10 +490,14 @@ func (a *App) stepWaitReady(ctx *sdk.AppCtx, env *stepEnv) error {
 		return pending("instance is " + firstNonEmpty(inst.Status, "starting"))
 	}
 	platform := firstNonEmpty(env.profile.onDemand().Platform, inst.Platform, "linux")
+	host, port, issue := customerEndpoint(inst)
+	if issue != "" {
+		return fmt.Errorf("instance %d is ready but customers cannot reach it: %s", inst.ID, issue)
+	}
 	return dbTenantMergeMetadata(ctx.AppDB(), env.tenant.ID, map[string]any{
 		"platform":    platform,
-		"access_host": inst.host(),
-		"access_port": inst.port(),
+		"access_host": host,
+		"access_port": port,
 	})
 }
 

@@ -136,6 +136,13 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			inst.Status = "destroyed"
 		}
 		return reply(map[string]any{"destroyed": true, "id": id})
+	case "instance_public_ssh_set":
+		inst, ok := p.instances[int64Arg(input, "id")]
+		if !ok {
+			return errors.New("instance not found")
+		}
+		inst.PublicSSH = &publicSSHInfo{Enabled: boolFromAny(input["enabled"], false), Host: "gw.example.com", Port: 40022}
+		return reply(map[string]any{"instance": inst.instanceInfo})
 	case "instance_upload_file":
 		return reply(map[string]any{"ok": true})
 	case "instance_metrics":
@@ -1187,4 +1194,161 @@ func TestMigrationHandlesMissingRowsAndReleasedHostnames(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-shop", "profile": "starter", "owner_email": "s@example.com", "slug": "shop"})
+}
+
+// ─── Reverse-tunnel machines (2.2.0) ─────────────────────────────────────
+
+func (p *platformStub) addTunnelInstance(id int64, public *publicSSHInfo) {
+	on := true
+	p.instances[id] = &fakeInstance{instanceInfo{ID: id, Name: fmt.Sprintf("office-%d", id), Status: "ready", Platform: "macos",
+		SSHHost: "127.0.0.1", SSHPort: 22001, ConnectMode: "reverse_tunnel", Connected: &on, PublicSSH: public}}
+}
+
+func addValidatedMachine(t *testing.T, a *App, ctx *sdk.AppCtx, instID int64, extra map[string]any) int64 {
+	t.Helper()
+	args := map[string]any{"pool_key": "macs", "instance_id": instID, "serial": "S", "management_user": "admin"}
+	for k, v := range extra {
+		args[k] = v
+	}
+	mid := int64Arg(mapFromAny(call(t, a.toolMachineAdd, ctx, args)["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": fmt.Sprint(mid)})
+	return mid
+}
+
+func TestTunnelMachineUsesPublicSSHEndpoint(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addTunnelInstance(700, &publicSSHInfo{Enabled: true, Host: "gw.example.com", Port: 40001})
+	mid := addValidatedMachine(t, a, ctx, 700, nil)
+	m := machine(t, db, mid)
+	if m.PublicHost != "gw.example.com" || m.PublicPort != 40001 || m.ConnectMode != "reverse_tunnel" || m.EndpointIssue != "" {
+		t.Fatalf("machine endpoint = %s:%d mode=%s issue=%q", m.PublicHost, m.PublicPort, m.ConnectMode, m.EndpointIssue)
+	}
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-t1", "profile": "mac-m4", "owner_email": "t@example.com", "ssh_keys": testKey})
+	tn := tenant(t, db, strArg(mapFromAny(out["tenant"]), "id"))
+	if tn.Access == nil || tn.Access.Command != fmt.Sprintf("ssh %s@gw.example.com -p 40001", tn.SSHUser) {
+		t.Fatalf("customer command = %+v", tn.Access)
+	}
+	// Instances moves the public port: machine and tenant follow on refresh.
+	stub.instances[700].PublicSSH.Port = 40007
+	_ = a.tick(ctx)
+	if got := tenant(t, db, tn.ID).Access.Command; got != fmt.Sprintf("ssh %s@gw.example.com -p 40007", tn.SSHUser) {
+		t.Fatalf("after port change: %s", got)
+	}
+	// Public SSH turned off: the customer sees why, not a dead address.
+	stub.instances[700].PublicSSH.Enabled = false
+	_ = a.tick(ctx)
+	if acc := tenant(t, db, tn.ID).Access; acc == nil || acc.Command != "" || !strings.Contains(acc.Issue, "no public SSH") {
+		t.Fatalf("access without public SSH = %+v", acc)
+	}
+}
+
+func TestTunnelMachineWithoutPublicSSHIsNotSold(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addTunnelInstance(701, &publicSSHInfo{Enabled: false})
+	mid := addValidatedMachine(t, a, ctx, 701, nil)
+	m := machine(t, db, mid)
+	if m.PublicHost != "" || !strings.Contains(m.EndpointIssue, "instance_public_ssh_set(id=701") {
+		t.Fatalf("machine = %s:%d issue=%q", m.PublicHost, m.PublicPort, m.EndpointIssue)
+	}
+	callErr(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid}, "no public SSH")
+	// Even if it were marked available by hand, it is not for sale.
+	if _, err := db.Exec(`UPDATE hosting_machines SET state='available' WHERE id=?`, mid); err != nil {
+		t.Fatal(err)
+	}
+	av := mapFromAny(call(t, a.toolAvailability, ctx, map[string]any{"profile": "mac-m4"})["availability"])
+	if av["for_sale"] != false {
+		t.Fatalf("availability = %v", av)
+	}
+	list := call(t, a.toolMachineList, ctx, map[string]any{})
+	views, _ := list["machines"].([]any)
+	if v := mapFromAny(views[0]); v["not_for_sale"] != "no public SSH" {
+		t.Fatalf("not_for_sale = %v", v["not_for_sale"])
+	}
+	callErr(t, a.toolReservationCreate, ctx, map[string]any{"profile": "mac-m4", "external_ref": "acct-n"}, "no machine available")
+
+	// enable_public_ssh on add turns it on in Instances.
+	stub.addTunnelInstance(702, &publicSSHInfo{Enabled: false})
+	m2 := addValidatedMachine(t, a, ctx, 702, map[string]any{"enable_public_ssh": true})
+	if got := machine(t, db, m2); got.PublicHost != "gw.example.com" || got.PublicPort != 40022 || stub.called("instance_public_ssh_set") != 1 {
+		t.Fatalf("after enable_public_ssh: %s:%d", got.PublicHost, got.PublicPort)
+	}
+}
+
+func TestOldInstancesTunnelAndVPNEndpoints(t *testing.T) {
+	stub := newStub()
+	a, ctx, _ := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addTunnelInstance(703, nil) // Instances 0.18: tunnel, no public SSH field
+	callErr(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 703}, "upgrade Instances to 0.19")
+	call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 703, "public_host": "office.example.com", "public_port": 2222})
+
+	vpn := &instanceInfo{ID: 9, ConnectMode: "vpn", SSHHost: "10.8.0.4", SSHPort: 22}
+	if host, _, issue := customerEndpoint(vpn); host != "" || !strings.Contains(issue, "VPN") {
+		t.Fatalf("vpn endpoint = %q issue %q", host, issue)
+	}
+	direct := &instanceInfo{ID: 9, ConnectMode: "direct", SSHHost: "10.0.0.5", PublicIPv4: "198.51.100.7", SSHPort: 2200}
+	if host, port, issue := customerEndpoint(direct); host != "198.51.100.7" || port != 2200 || issue != "" {
+		t.Fatalf("direct endpoint = %s:%d %q", host, port, issue)
+	}
+	if _, _, issue := customerEndpoint(&instanceInfo{ID: 9, SSHHost: "127.0.0.1"}); issue == "" {
+		t.Fatal("a loopback address must never be a customer endpoint")
+	}
+}
+
+func TestManualEndpointSurvivesRefresh(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addTunnelInstance(704, &publicSSHInfo{Enabled: true, Host: "gw.example.com", Port: 40004})
+	mid := addValidatedMachine(t, a, ctx, 704, nil)
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "public_host": "mac1.office.example.com", "public_port": 2201})
+	stub.instances[704].PublicSSH.Port = 40099
+	_ = a.tick(ctx)
+	if m := machine(t, db, mid); m.PublicHost != "mac1.office.example.com" || m.PublicPort != 2201 || m.EndpointSource != "manual" {
+		t.Fatalf("manual endpoint overwritten: %s:%d (%s)", m.PublicHost, m.PublicPort, m.EndpointSource)
+	}
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "public_host": ""})
+	if m := machine(t, db, mid); m.PublicHost != "gw.example.com" || m.PublicPort != 40099 || m.EndpointSource != "instances" {
+		t.Fatalf("endpoint not handed back to Instances: %s:%d (%s)", m.PublicHost, m.PublicPort, m.EndpointSource)
+	}
+}
+
+func TestTunnelMacReleaseSkipsErase(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.addTunnelInstance(705, &publicSSHInfo{Enabled: true, Host: "gw.example.com", Port: 40005})
+	mid := addValidatedMachine(t, a, ctx, 705, nil)
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-r1", "profile": "mac-m4", "owner_email": "r@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	callErr(t, a.toolTenantReinstall, ctx, map[string]any{"tenant_id": id, "confirm": id}, "reverse tunnel")
+	callErr(t, a.toolTenantResolve, ctx, map[string]any{"tenant_id": id, "action": "force_clean", "reviewed": true, "confirm": id}, "nothing to resolve")
+
+	before := len(stub.commands)
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	if tenant(t, db, id).Status != TenantReleased {
+		t.Fatalf("tenant = %s", tenant(t, db, id).Status)
+	}
+	joined := strings.Join(stub.commands[before:], "\n")
+	if !strings.Contains(joined, "'revoke'") || !strings.Contains(joined, "'verify_revoked'") {
+		t.Fatal("release must still remove the customer's access")
+	}
+	if strings.Contains(joined, "apteva-hosting/wipe") {
+		t.Fatal("a tunnel Mac must not be erased")
+	}
+	m := machine(t, db, mid)
+	if m.State != MachineQuarantined || !strings.Contains(m.StateReason, "tunnel") || m.TenantID != "" {
+		t.Fatalf("machine after release = %s (%s)", m.State, m.StateReason)
+	}
+	callErr(t, a.toolMachineClean, ctx, map[string]any{"machine_id": mid, "confirm": fmt.Sprint(mid)}, "reverse tunnel")
+	// After a manual clean the operator inspects it back on sale.
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	if machine(t, db, mid).State != MachineAvailable {
+		t.Fatal("inspect should put the hand-cleaned machine back on sale")
+	}
 }

@@ -351,7 +351,11 @@ func (a *App) finishOperation(ctx *sdk.AppCtx, op *Operation, token string) {
 			} else if containsStep(op.Steps, "verify_clean") {
 				_ = dbMachineSetState(tx, machine.ID, MachineQuarantined, "cleaned, but the machine is not validated")
 			} else {
-				_ = dbMachineSetState(tx, machine.ID, MachineQuarantined, "released; this pool has no automatic reset, clean it and run inspect")
+				reason := "released; this pool has no automatic reset, clean it and run inspect"
+				if eraseRefusedReason(machine) != "" {
+					reason = "released; tunnel Macs are not erased automatically (it would remove the tunnel), clean it by hand and run inspect"
+				}
+				_ = dbMachineSetState(tx, machine.ID, MachineQuarantined, reason)
 			}
 		}
 		event = "hosting.tenant.released"

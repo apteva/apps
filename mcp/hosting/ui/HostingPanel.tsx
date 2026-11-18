@@ -11,6 +11,7 @@ interface Access {
   user: string;
   ssh_command: string;
   granted: boolean;
+  issue?: string;
 }
 
 interface Tenant {
@@ -74,6 +75,12 @@ interface Machine {
   validated: boolean;
   tenant_id?: string;
   for_sale: boolean;
+  not_for_sale?: string;
+  connect_mode?: string;
+  last_seen_at?: string;
+  public_port: number;
+  endpoint_source?: string;
+  endpoint_issue?: string;
   operation?: Operation;
   tenant?: Tenant;
 }
@@ -169,6 +176,13 @@ const BACKEND_LABEL: Record<string, string> = {
   container: "Container",
   machine_pool: "Pool machine",
   machine_on_demand: "On-demand machine",
+};
+
+const CONNECT_LABEL: Record<string, string> = {
+  direct: "direct",
+  vpn: "VPN",
+  reverse_tunnel: "tunnel",
+  local: "local",
 };
 
 const btn = "px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover disabled:opacity-50";
@@ -428,7 +442,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                     {selected.default_hostname && (<><dt className="text-text-dim">Hostname</dt><dd className="font-mono">{selected.default_hostname}</dd></>)}
                     {selected.machine_id ? (<><dt className="text-text-dim">Machine</dt><dd>#{selected.machine_id}</dd></>) : null}
                     {selected.instance_id ? (<><dt className="text-text-dim">Instance</dt><dd>#{selected.instance_id}</dd></>) : null}
-                    {selected.access && (<><dt className="text-text-dim">SSH</dt><dd className="font-mono break-all">{selected.access.granted ? selected.access.ssh_command : "access removed"}</dd></>)}
+                    {selected.access && (<><dt className="text-text-dim">SSH</dt><dd className="font-mono break-all">{selected.access.issue ? <span className="text-red">{selected.access.issue}</span> : selected.access.granted ? selected.access.ssh_command : "access removed"}</dd></>)}
                     <dt className="text-text-dim">Created</dt><dd>{fmtDate(selected.created_at)}</dd>
                     {selected.released_at && (<><dt className="text-text-dim">Released</dt><dd>{fmtDate(selected.released_at)}</dd></>)}
                   </dl>
@@ -553,11 +567,19 @@ export default function HostingPanel(_props: NativePanelProps) {
                       <tr key={m.id} className="border-b border-border align-top">
                         <td className="py-2 pr-2">
                           <div className="font-medium">#{m.id} {m.name}</div>
-                          <div className="text-text-dim">{m.pool_key} · instance {m.instance_id} · {m.online ? "online" : "offline"}{m.validated ? " · validated" : " · not validated"}</div>
+                          <div className="text-text-dim">{m.pool_key} · instance {m.instance_id} · {CONNECT_LABEL[m.connect_mode || ""] || m.connect_mode || "direct"} · {m.online ? "online" : m.connect_mode === "reverse_tunnel" ? "tunnel down" : "offline"}{m.validated ? " · validated" : " · not validated"}</div>
+                          <div className="text-text-dim">
+                            {m.public_host ? <span className="font-mono">{m.public_host}:{m.public_port}</span> : "no customer endpoint"}
+                            {m.endpoint_source === "manual" ? " (set by hand)" : ""}
+                            {m.last_seen_at ? ` · seen ${fmtDate(m.last_seen_at)}` : ""}
+                          </div>
                         </td>
                         <td className="py-2 pr-2">
                           <Badge value={m.state} />
                           {m.state_reason && <div className="text-text-dim break-all mt-1">{m.state_reason}</div>}
+                          {!m.for_sale && m.not_for_sale && m.not_for_sale !== "assigned" && m.not_for_sale !== m.state && (
+                            <div className="text-warn break-all mt-1" title={m.endpoint_issue || ""}>Not for sale: {m.not_for_sale}</div>
+                          )}
                         </td>
                         <td className="py-2 pr-2">{m.tenant ? m.tenant.owner_email : ""}</td>
                         <td className="py-2 pr-2">{m.operation ? <span>{m.operation.kind} <Badge value={m.operation.status} /></span> : ""}</td>

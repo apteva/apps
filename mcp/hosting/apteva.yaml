@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.1.0
+version: 2.2.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
@@ -92,13 +92,13 @@ provides:
     - name: hosting_pool_set_execution
       description: "Switch command execution on or off for a pool. While off, no command runs on its machines and nothing from it is for sale."
     - name: hosting_machine_add
-      description: "Add an Instances host to a pool. It starts quarantined; run inspect, then mark it validated once its reset has been tested."
+      description: "Add an Instances host to a pool. It starts quarantined; run inspect, then validate it. The customer endpoint comes from Instances (reverse-tunnel machines use their public SSH port; enable_public_ssh turns it on) unless public_host is given."
     - name: hosting_machine_list
       description: "List pool machines with state, online status, tenant and current run."
     - name: hosting_machine_get
       description: "Fetch one pool machine with its recent runs."
     - name: hosting_machine_update
-      description: "Update a machine's profile: serial, management_user, expected_os, public_host, public_port, name. Setting validated needs confirm equal to the machine id."
+      description: "Update a machine's serial, management user, expected OS, name or customer endpoint (public_host/public_port win over Instances; an empty public_host hands it back). Setting validated needs confirm equal to the machine id."
     - name: hosting_machine_inspect
       description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives."
     - name: hosting_machine_clean

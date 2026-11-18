@@ -89,6 +89,37 @@ reinstall.
 A machine is online when Instances reports it `ready` and, on Instances
 versions that report it, `connected`. Hosting refreshes this every minute.
 
+## Customer endpoint
+
+The address a customer connects to is stored on the machine
+(`public_host`, `public_port`), separately from the address Instances uses
+to reach it. It depends on the instance's `connect_mode`:
+
+- `reverse_tunnel` (a Mac behind NAT, Instances 0.19+): Instances' public SSH
+  (`public_ssh.host`/`port`). Turn it on with
+  `instance_public_ssh_set(id, enabled=true)` in Instances, or pass
+  `enable_public_ssh: true` to `hosting_machine_add`. A tunnel instance from
+  Instances older than 0.19 is refused unless a `public_host` is given.
+- `vpn`: the instance's public IPv4. Without one the machine has no endpoint.
+- otherwise: the public IPv4, else the SSH host. A loopback address is never
+  used.
+
+A machine without an endpoint keeps an `endpoint_issue`, is never for sale
+(`not_for_sale` in the machine list says why) and cannot be inspected. Its
+tenants see `access.issue` instead of an SSH command. Hosting re-reads
+endpoints every minute, so a changed tunnel port reaches tenants' commands
+on the next refresh. Setting `public_host` with `hosting_machine_update`
+fixes the endpoint by hand (`endpoint_source: manual`) and refresh leaves it
+alone; setting it to an empty string hands it back to Instances. Hosting
+does not subscribe to `instance.public_ssh_changed`.
+
+**Tunnel Macs are never erased automatically**: erasing removes the tunnel
+and Instances' key, so the machine could not come back. Release on a tunnel
+Mac revokes the customer's access, then quarantines the machine for a
+manual clean; `hosting_machine_clean`, `hosting_tenant_reinstall` and
+`force_clean` are refused on it. After cleaning it by hand, run inspect to
+put it back on sale.
+
 Runs hold a 3-minute lease that a running step renews every minute, so a slow
 step (creating an instance, pulling an image, erasing a Mac) is never run
 twice. Starting a workload on a machine is adopted by name if an earlier
