@@ -368,7 +368,7 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 			Domain      string `json:"domain"`
 			SeenDate    string `json:"seendate"`
 			PublishedAt string `json:"publishedAt"`
-			Source struct {
+			Source      struct {
 				Name string `json:"name"`
 			} `json:"source"`
 		} `json:"articles"`

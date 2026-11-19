@@ -682,7 +682,6 @@ func (a *App) toolQuestionCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	linkQuestionTopicsAsEntities(db, pid, nq)
 	return map[string]any{"question": nq}, nil
 }
 
@@ -958,4 +957,3 @@ func (a *App) cycleWorker(c context.Context, app *sdk.AppCtx) error {
 	app.Logger().Info("intelligence cycle", "result", mustJSON(out))
 	return nil
 }
-

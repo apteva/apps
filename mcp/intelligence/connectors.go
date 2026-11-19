@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,11 +43,12 @@ func defaultSources() []IntelSource {
 			PermittedUse: "Read-only public market metadata, prices and resolutions; no trading.",
 			Licence:      "Polymarket, Kalshi and Manifold public APIs (venue terms apply)",
 			Config: map[string]any{"venues": []string{"polymarket", "kalshi", "manifold"}, "min_horizon_hours": 12, "max_horizon_days": 10,
-				"min_volume_polymarket": 20000, "min_volume_kalshi": 2000, "min_volume_manifold": 2000, "max_new_per_run": 25, "max_open": 200}},
+				"min_volume_polymarket": 20000, "min_volume_kalshi": 500, "min_volume_manifold": 1000, "max_new_per_run": 25, "max_open": 200,
+				"min_price": 0.03, "max_price": 0.97, "max_per_topic": 2, "max_per_event": 2, "max_per_template": 2, "exclude_keywords": defaultExcludedQuestionKeywords}},
 		{Slug: "news", Connector: "news", Enabled: true, IntervalSec: 1800,
 			PermittedUse: "Public news metadata (headline, outlet, link, date) for evidence; full text is not stored.",
 			Licence:      "GDELT open data with attribution; bound news APIs under their own terms",
-			Config:       map[string]any{"questions_per_run": 12, "timespan": "3d", "watch_topics": []string{}}},
+			Config:       map[string]any{"questions_per_run": 8, "timespan": "3d", "watch_topics": []string{}}},
 		{Slug: "bls", Connector: "bls", Enabled: true, IntervalSec: 21600,
 			PermittedUse: "Public statistical series.", Licence: "US Bureau of Labor Statistics, public domain",
 			Config: map[string]any{"series": []map[string]string{
@@ -54,13 +56,35 @@ func defaultSources() []IntelSource {
 				{"id": "LNS14000000", "name": "US unemployment rate", "unit": "percent"},
 				{"id": "CES0000000001", "name": "US nonfarm payrolls", "unit": "thousands"},
 			}}},
-		{Slug: "fred", Connector: "fred", Enabled: true, IntervalSec: 21600,
-			PermittedUse: "Public economic series via the operator's bound FRED connection.", Licence: "FRED terms of use",
+		{Slug: "fred", Connector: "fred", Enabled: false, IntervalSec: 21600,
+			PermittedUse: "Public economic series via the operator's bound FRED connection (bind FRED, then enable).", Licence: "FRED terms of use",
 			Config: map[string]any{"series": []map[string]string{
 				{"id": "DFF", "name": "US effective federal funds rate", "unit": "percent"},
 				{"id": "DGS10", "name": "US 10-year Treasury yield", "unit": "percent"},
 			}}},
 	}
+}
+
+// defaultExcludedQuestionKeywords keeps market questions about private
+// lives and individual conduct out of the question set (posting volume,
+// relationships, health, arrests). Matching is case-insensitive substring.
+var defaultExcludedQuestionKeywords = []string{"tweet", "post ", "posts ", "affair", "divorce", "pregnan", "dating", "girlfriend", "boyfriend",
+	"wedding", "engaged", "baby", "arrest", "indict", "sentenced", "prison", "jail", "die ", "dies", "death of", "health", "hospital", "onlyfans"}
+
+// walletAddress catches markets about individual crypto wallets.
+var walletAddress = regexp.MustCompile(`0x[0-9a-fA-F]{6,}`)
+
+func excludedQuestion(text string, keywords []string) bool {
+	if walletAddress.MatchString(text) {
+		return true
+	}
+	t := " " + strings.ToLower(text) + " "
+	for _, k := range keywords {
+		if k != "" && strings.Contains(t, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
 }
 
 // countingClient counts upstream calls for the source's cost meter.
@@ -84,6 +108,19 @@ func runDueSources(env *ingestEnv, force bool, only string) ([]map[string]any, e
 	if err != nil {
 		return nil, err
 	}
+	// Markets first: news and extraction work from the questions it creates.
+	priority := map[string]int{"prediction_markets": 0, "news": 2}
+	sort.SliceStable(sources, func(i, j int) bool {
+		pi, ok := priority[sources[i].Connector]
+		if !ok {
+			pi = 1
+		}
+		pj, ok := priority[sources[j].Connector]
+		if !ok {
+			pj = 1
+		}
+		return pi < pj
+	})
 	out := []map[string]any{}
 	for _, src := range sources {
 		if only != "" && src.Slug != only {
@@ -123,6 +160,8 @@ func runDueSources(env *ingestEnv, force bool, only string) ([]map[string]any, e
 
 type venueMarket struct {
 	Venue, ID, Question, Rule, URL, Category string
+	Event, EventTitle                        string // venue event grouping (Polymarket event slug, Kalshi event_ticker)
+	Template                                 string // questionTemplate of the venue's own question text
 	Close                                    time.Time
 	Yes                                      *float64
 	Volume                                   float64
@@ -177,6 +216,10 @@ func runPredictionMarkets(env *ingestEnv, src IntelSource) (ingestStats, error) 
 	maxNew := int(cfgFloat(cfg, "max_new_per_run", 25))
 	maxOpen := int(cfgFloat(cfg, "max_open", 200))
 
+	open, err := listQuestions(env.db, env.pid, "open", 5000)
+	if err != nil {
+		return st, err
+	}
 	listed := []venueMarket{}
 	for _, v := range venues {
 		var rows []venueMarket
@@ -193,7 +236,7 @@ func runPredictionMarkets(env *ingestEnv, src IntelSource) (ingestStats, error) 
 				rows = parseKalshiMarkets(raw)
 			}
 		case "manifold":
-			raw, ok := env.sc.call("manifold-markets", "search_markets", map[string]any{"term": "", "filter": "open", "sort": "close-date", "contractType": "BINARY", "limit": "200"})
+			raw, ok := env.sc.call("manifold-markets", "search_markets", map[string]any{"term": "", "filter": "open", "sort": "24-hour-vol", "contractType": "BINARY", "limit": "500"})
 			if ok {
 				rows = parseManifoldMarkets(raw)
 			}
@@ -206,27 +249,80 @@ func runPredictionMarkets(env *ingestEnv, src IntelSource) (ingestStats, error) 
 			listed = append(listed, m)
 		}
 	}
+	exclude := cfgStrings(cfg, "exclude_keywords")
+	if _, set := cfg["exclude_keywords"]; !set {
+		exclude = defaultExcludedQuestionKeywords
+	}
+	minPrice, maxPrice := cfgFloat(cfg, "min_price", 0.03), cfgFloat(cfg, "max_price", 0.97)
+	perTopic := int(cfgFloat(cfg, "max_per_topic", 2))
+	perEvent := int(cfgFloat(cfg, "max_per_event", 2))
+	perTemplate := int(cfgFloat(cfg, "max_per_template", 2))
+	topicCount := map[string]int{}
+	eventCount := map[string]int{}
+	templateCount := map[string]int{}
+	for _, q := range open {
+		if len(q.Topics) > 0 {
+			topicCount[strings.ToLower(q.Topics[0])]++
+		}
+		if q.EventKey != "" {
+			eventCount[q.Venue+"\x00"+q.EventKey]++
+		}
+		if q.Template != "" {
+			templateCount[q.Template]++
+		}
+	}
+	// eligibleNew applies the new-question filters; existing questions keep
+	// being priced and resolved whatever their current price.
+	eligibleNew := func(m venueMarket) bool {
+		if excludedQuestion(m.Question, exclude) || *m.Yes < minPrice || *m.Yes > maxPrice {
+			return false
+		}
+		ek := m.Venue + "\x00" + m.Event
+		if m.Event != "" && perEvent > 0 && eventCount[ek] >= perEvent {
+			return false
+		}
+		if m.Template != "" && perTemplate > 0 && templateCount[m.Template] >= perTemplate {
+			return false
+		}
+		if t := questionTopics(m.Question); len(t) > 0 && perTopic > 0 {
+			key := strings.ToLower(t[0])
+			if topicCount[key] >= perTopic {
+				return false
+			}
+			topicCount[key]++
+		}
+		if m.Event != "" {
+			eventCount[ek]++
+		}
+		if m.Template != "" {
+			templateCount[m.Template]++
+		}
+		return true
+	}
 	st.Fetched = len(listed)
 	sort.SliceStable(listed, func(i, j int) bool { return listed[i].Volume > listed[j].Volume })
 
-	open, err := listQuestions(env.db, env.pid, "open", 5000)
-	if err != nil {
-		return st, err
-	}
 	byKey := map[string]Question{}
 	for _, q := range open {
 		byKey[q.Venue+"\x00"+q.ExternalID] = q
 	}
 	created := 0
 	priced := map[int64]bool{}
+	eventTitles := map[string]string{}
 	for _, m := range listed {
 		q, known := byKey[m.Venue+"\x00"+m.ID]
 		if !known {
 			if created >= maxNew || len(byKey) >= maxOpen {
 				continue
 			}
+			if m.Venue == "kalshi" {
+				m = withKalshiEvent(env.sc, m, eventTitles)
+			}
+			if !eligibleNew(m) {
+				continue
+			}
 			nq, isNew, err := insertQuestion(env.db, env.pid, Question{Origin: "market", Venue: m.Venue, ExternalID: m.ID, URL: m.URL, Text: m.Question,
-				ResolutionRule: m.Rule, ResolutionSource: m.Venue + " market resolution (" + m.URL + ")", Category: m.Category, Deadline: m.Close})
+				ResolutionRule: m.Rule, ResolutionSource: m.Venue + " market resolution (" + m.URL + ")", Category: m.Category, Deadline: m.Close, EventKey: m.Event, Template: m.Template})
 			if err != nil {
 				return st, err
 			}
@@ -237,7 +333,6 @@ func runPredictionMarkets(env *ingestEnv, src IntelSource) (ingestStats, error) 
 			st.Inserted++
 			q = *nq
 			byKey[m.Venue+"\x00"+m.ID] = q
-			linkQuestionTopicsAsEntities(env.db, env.pid, &q)
 		}
 		if err := addQuestionPrice(env.db, q.ID, *m.Yes, env.now, m.Venue); err != nil {
 			return st, err
@@ -274,22 +369,10 @@ func runPredictionMarkets(env *ingestEnv, src IntelSource) (ingestStats, error) 
 	return st, nil
 }
 
-// linkQuestionTopicsAsEntities seeds the world model from a new question:
-// each extracted topic becomes (or matches) a concept entity linked to the
-// question. The LLM extractor later refines kinds and adds relationships.
-func linkQuestionTopicsAsEntities(db *sql.DB, pid string, q *Question) {
-	ids := append([]int64{}, q.EntityIDs...)
-	for _, t := range q.Topics {
-		e, _, err := upsertWorldEntity(db, pid, WorldEntity{Name: t, Kind: "concept"})
-		if err == nil && e != nil && !containsID(ids, e.ID) {
-			ids = append(ids, e.ID)
-		}
-	}
-	if len(ids) != len(q.EntityIDs) {
-		q.EntityIDs = ids
-		_ = setQuestionEntities(db, pid, q.ID, ids)
-	}
-}
+// Question topics are search terms only. They are deliberately not turned
+// into entities: capitalized runs are often people's names, and the world
+// model admits only typed, non-person entities (from series, operators, or
+// the extractor, which is instructed to model people only as public roles).
 
 func containsID(ids []int64, id int64) bool {
 	for _, x := range ids {
@@ -308,6 +391,73 @@ func parseTimeLoose(v string) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// withEventTitle adds a market's event title when the question alone is
+// ambiguous ("Exact Score: 2-1?", "Lewis Hamilton wins"). Questions that
+// already restate most of the event are left alone; a shared "X:" lead
+// ("… - Exact Score" + "Exact Score: 2-1?") is merged rather than doubled.
+func withEventTitle(question, event string) string {
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return question
+	}
+	if i := strings.Index(question, ":"); i > 0 && i < 40 {
+		lead := strings.TrimSpace(question[:i])
+		if strings.Contains(strings.ToLower(event), strings.ToLower(lead)) {
+			return event + ": " + strings.TrimSpace(question[i+1:])
+		}
+	}
+	lq := strings.ToLower(question)
+	words, shared := 0, 0
+	for _, w := range strings.Fields(strings.ToLower(event)) {
+		w = strings.Trim(w, ".,:;?!()-")
+		if len(w) < 3 {
+			continue
+		}
+		words++
+		if strings.Contains(lq, w) {
+			shared++
+		}
+	}
+	// Very short questions ("Chicago wins") always get their event.
+	if words == 0 || (shared*2 >= words && len(strings.Fields(question)) > 4) {
+		return question
+	}
+	return event + ": " + question
+}
+
+var templateDigits = regexp.MustCompile(`[0-9]+`)
+
+// questionTemplate collapses numbers so ladder markets ("Bitcoin above
+// $68,000 / $70,000") and repeated props ("Exact Score: Any Other Score?"
+// across many matches) share one key.
+func questionTemplate(raw string) string {
+	return templateDigits.ReplaceAllString(strings.ToLower(strings.TrimSpace(raw)), "#")
+}
+
+// withKalshiEvent fetches (once per run) the event title for a Kalshi market.
+func withKalshiEvent(sc sourceClient, m venueMarket, cache map[string]string) venueMarket {
+	if m.Event == "" {
+		return m
+	}
+	title, ok := cache[m.Event]
+	if !ok {
+		if raw, ok := sc.call("kalshi", "get_event", map[string]any{"event_ticker": m.Event}); ok {
+			var r struct {
+				Event struct {
+					Title string `json:"title"`
+				} `json:"event"`
+			}
+			if json.Unmarshal(raw, &r) == nil {
+				title = r.Event.Title
+			}
+		}
+		cache[m.Event] = title
+	}
+	m.EventTitle = title
+	m.Question = withEventTitle(m.Question, title)
+	return m
 }
 
 func parsePolymarketWindow(raw json.RawMessage) []venueMarket {
@@ -336,6 +486,10 @@ func parsePolymarketMarket(raw json.RawMessage) (venueMarket, bool) {
 		Closed        bool    `json:"closed"`
 		UMAStatus     string  `json:"umaResolutionStatus"`
 		Category      string  `json:"category"`
+		Events        []struct {
+			Slug  string `json:"slug"`
+			Title string `json:"title"`
+		} `json:"events"`
 	}
 	if json.Unmarshal(raw, &m) != nil || m.Slug == "" || m.Question == "" {
 		return venueMarket{}, false
@@ -348,6 +502,11 @@ func parsePolymarketMarket(raw json.RawMessage) (venueMarket, bool) {
 	}
 	vm := venueMarket{Venue: "polymarket", ID: m.Slug, Question: m.Question, Rule: truncate(m.Description, 4000),
 		URL: "https://polymarket.com/market/" + m.Slug, Category: strings.ToLower(m.Category), Close: parseTimeLoose(m.EndDate), Volume: m.VolumeNum}
+	vm.Template = questionTemplate(m.Question)
+	if len(m.Events) > 0 {
+		vm.Event, vm.EventTitle = m.Events[0].Slug, m.Events[0].Title
+		vm.Question = withEventTitle(m.Question, m.Events[0].Title)
+	}
 	yes := parseFloatStr(prices[0])
 	if m.Closed {
 		if strings.EqualFold(m.UMAStatus, "resolved") || yes == 1 || yes == 0 {
@@ -393,6 +552,7 @@ func kalshiPrice(cents float64, dollars string) float64 {
 func parseKalshiMarket(raw json.RawMessage) (venueMarket, bool) {
 	var m struct {
 		Ticker        string  `json:"ticker"`
+		EventTicker   string  `json:"event_ticker"`
 		Title         string  `json:"title"`
 		YesSubTitle   string  `json:"yes_sub_title"`
 		Rules         string  `json:"rules_primary"`
@@ -402,6 +562,7 @@ func parseKalshiMarket(raw json.RawMessage) (venueMarket, bool) {
 		YesBidDollars string  `json:"yes_bid_dollars"`
 		YesAskDollars string  `json:"yes_ask_dollars"`
 		Volume        float64 `json:"volume"`
+		VolumeFP      string  `json:"volume_fp"`
 		Status        string  `json:"status"`
 		Result        string  `json:"result"`
 		CloseTime     string  `json:"close_time"`
@@ -418,7 +579,10 @@ func parseKalshiMarket(raw json.RawMessage) (venueMarket, bool) {
 		text += " — " + m.YesSubTitle
 	}
 	vm := venueMarket{Venue: "kalshi", ID: m.Ticker, Question: text, Rule: truncate(m.Rules, 4000), Category: strings.ToLower(m.Category),
-		URL: "https://kalshi.com/markets/" + strings.ToLower(m.Ticker), Close: parseTimeLoose(m.CloseTime), Volume: m.Volume}
+		URL: "https://kalshi.com/markets/" + strings.ToLower(m.Ticker), Close: parseTimeLoose(m.CloseTime), Volume: m.Volume, Event: m.EventTicker, Template: questionTemplate(text)}
+	if vm.Volume == 0 {
+		vm.Volume = parseFloatStr(m.VolumeFP)
+	}
 	switch m.Status {
 	case "settled", "finalized", "determined":
 		vm.Resolved = true
@@ -471,7 +635,7 @@ func parseManifoldMarket(raw json.RawMessage) (venueMarket, bool) {
 		return venueMarket{}, false
 	}
 	vm := venueMarket{Venue: "manifold", ID: m.ID, Question: m.Question, URL: m.URL, Rule: truncate(m.TextDescription, 4000),
-		Close: time.UnixMilli(m.CloseTime).UTC(), Volume: m.Volume}
+		Close: time.UnixMilli(m.CloseTime).UTC(), Volume: m.Volume, Template: questionTemplate(m.Question)}
 	if m.IsResolved {
 		vm.Resolved = true
 		switch m.Resolution {
@@ -535,7 +699,7 @@ func truncate(s string, n int) string {
 
 func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 	st := ingestStats{}
-	perRun := int(cfgFloat(src.Config, "questions_per_run", 12))
+	perRun := int(cfgFloat(src.Config, "questions_per_run", 24))
 	timespan := fmt.Sprint(orStr(src.Config["timespan"], "3d"))
 	open, err := listQuestions(env.db, env.pid, "open", 5000)
 	if err != nil {
@@ -545,62 +709,132 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 	cursor, _ := strconv.ParseInt(src.Cursor, 10, 64)
 	sort.Slice(open, func(i, j int) bool { return open[i].ID < open[j].ID })
 	batch := []Question{}
-	for _, q := range open {
-		if q.ID > cursor && len(batch) < perRun && q.Deadline.After(env.now) {
-			batch = append(batch, q)
-		}
-	}
-	if len(batch) < perRun {
+	for _, pass := range []bool{true, false} {
 		for _, q := range open {
-			if q.ID <= cursor && len(batch) < perRun && q.Deadline.After(env.now) {
+			if (q.ID > cursor) == pass && len(batch) < perRun && q.Deadline.After(env.now) && len(q.Topics) > 0 {
 				batch = append(batch, q)
 			}
 		}
 	}
-	for _, q := range batch {
-		if len(q.Topics) == 0 {
+	var failures []string
+	record := func(it NewsItem, query string, qs []Question) {
+		matched := []Question{}
+		for _, q := range qs {
+			if topicRelevance(it.Title, q.Topics) > 0.2 {
+				matched = append(matched, q)
+			}
+		}
+		if len(matched) == 0 && len(qs) > 1 {
+			return // batched query hit, but the headline names none of the questions
+		}
+		st.Fetched++
+		refs := []string{}
+		for _, q := range matched {
+			refs = append(refs, q.Topics...)
+		}
+		ev, inserted, err := recordNewsItem(env, it, query, refs)
+		if err != nil {
+			return
+		}
+		if inserted {
+			st.Inserted++
+		} else {
+			st.Duplicates++
+		}
+		for _, q := range matched {
+			_, _ = linkQuestionEvidence(env.db, q.ID, ev, topicRelevance(it.Title, q.Topics))
+		}
+	}
+
+	// GDELT: one OR-query per chunk of questions instead of one call each;
+	// the public API allows a single request every five seconds.
+	for i := 0; i < len(batch); i += 8 {
+		chunk := batch[i:min(i+8, len(batch))]
+		terms := []string{}
+		for _, q := range chunk {
+			if t := newsTerm(q.Topics); t != "" && !containsFold(terms, t) {
+				terms = append(terms, t)
+			}
+		}
+		if len(terms) == 0 {
 			continue
 		}
-		query := newsQuery(q.Topics)
-		items := gwContextParams(env.sc, map[string]any{"topic": query, "timespan": timespan}).Items
-		for _, it := range items {
-			st.Fetched++
-			ev, inserted, err := recordNewsItem(env, it, query, q.Topics)
-			if err != nil {
-				continue
+		query := "(" + strings.Join(terms, " OR ") + ") sourcelang:english"
+		if len(terms) == 1 {
+			query = terms[0] + " sourcelang:english"
+		}
+		raw, ok := env.sc.call("gdelt", "doc_search", map[string]any{"query": query, "maxrecords": "250", "timespan": timespan})
+		if !ok {
+			reason, _ := lastGDELTError.Load().(string)
+			failures = append(failures, "gdelt: "+orStr(reason, "unavailable"))
+			break // don't hammer a limiting API; the next run retries
+		}
+		for _, it := range parseNews(raw, "gdelt") {
+			record(it, query, chunk)
+		}
+	}
+
+	// Bound news APIs (NewsAPI, GNews, Tavily…): per question, only when connected.
+	bound := env.sc.boundSlugs([]string{"tavily", "newsapi", "gnews"})
+	for _, spec := range specsFor("*", qNews) {
+		if !bound[spec.slug] {
+			continue
+		}
+		for _, q := range batch {
+			query := newsQuery(q.Topics)
+			raw, ok := env.sc.call(spec.slug, spec.tool, spec.argFn(map[string]any{"topic": query}))
+			if !ok {
+				failures = append(failures, spec.slug+" call failed")
+				break
 			}
-			if inserted {
-				st.Inserted++
-			} else {
-				st.Duplicates++
-			}
-			rel := topicRelevance(it.Title, q.Topics)
-			if rel > 0 {
-				_, _ = linkQuestionEvidence(env.db, q.ID, ev, rel)
+			for _, it := range parseNews(raw, spec.slug) {
+				record(it, query, []Question{q})
 			}
 		}
-		st.Cursor = strconv.FormatInt(q.ID, 10)
 	}
+
 	for _, topic := range cfgStrings(src.Config, "watch_topics") {
-		for _, it := range gwContextParams(env.sc, map[string]any{"topic": topic, "timespan": timespan}).Items {
-			st.Fetched++
-			if _, inserted, err := recordNewsItem(env, it, topic, []string{topic}); err == nil {
-				if inserted {
-					st.Inserted++
-				} else {
-					st.Duplicates++
-				}
-			}
+		raw, ok := env.sc.call("gdelt", "doc_search", map[string]any{"query": topic + " sourcelang:english", "maxrecords": "100", "timespan": timespan})
+		if !ok {
+			failures = append(failures, "gdelt watch topic "+topic)
+			continue
+		}
+		for _, it := range parseNews(raw, "gdelt") {
+			record(it, topic, nil)
 		}
 	}
-	if st.Cursor == "" {
-		st.Cursor = src.Cursor
+	if len(batch) > 0 {
+		st.Cursor = strconv.FormatInt(batch[len(batch)-1].ID, 10)
+	}
+	if len(failures) > 0 && st.Fetched == 0 {
+		return st, errors.New(strings.Join(failures, "; "))
 	}
 	return st, nil
 }
 
-// newsQuery quotes multi-word topics; GDELT and most news APIs AND the
-// terms. Two topics keep queries specific without starving results.
+// newsTerm is one search term for a question: its first topic as a phrase,
+// trimmed to three words ("Democratic Progressive Party").
+func newsTerm(topics []string) string {
+	if len(topics) == 0 {
+		return ""
+	}
+	t := strings.TrimSpace(topics[0])
+	words := strings.Fields(t)
+	switch {
+	case len(words) == 0:
+		return ""
+	case len(words) == 1:
+		if len(t) < 3 {
+			return ""
+		}
+		return t
+	case len(words) <= 3:
+		return `"` + t + `"`
+	}
+	return `"` + strings.Join(words[:3], " ") + `"`
+}
+
+// newsQuery quotes multi-word topics for per-question APIs.
 func newsQuery(topics []string) string {
 	parts := []string{}
 	for i, t := range topics {
@@ -627,7 +861,7 @@ func topicRelevance(title string, topics []string) float64 {
 		}
 	}
 	if hit == 0 {
-		return 0.2 // returned by the topic query but the headline doesn't name it
+		return 0
 	}
 	return math.Round(float64(hit)/float64(len(topics))*100) / 100
 }

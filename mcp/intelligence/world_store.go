@@ -611,6 +611,8 @@ type Question struct {
 	ResolutionRule   string     `json:"resolution_rule"`
 	ResolutionSource string     `json:"resolution_source"`
 	Category         string     `json:"category,omitempty"`
+	EventKey         string     `json:"event_key,omitempty"`
+	Template         string     `json:"-"`
 	Topics           []string   `json:"topics"`
 	EntityIDs        []int64    `json:"entity_ids"`
 	Deadline         time.Time  `json:"deadline"`
@@ -622,7 +624,7 @@ type Question struct {
 	CreatedAt        *time.Time `json:"created_at,omitempty"`
 }
 
-const questionCols = `id, origin, venue, external_id, url, text, resolution_rule, resolution_source, category, topics, entity_ids, deadline, status, outcome, resolved_at, resolution_note, last_evidence_at, created_at`
+const questionCols = `id, origin, venue, external_id, url, text, resolution_rule, resolution_source, category, event_key, template, topics, entity_ids, deadline, status, outcome, resolved_at, resolution_note, last_evidence_at, created_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -631,7 +633,7 @@ func scanQuestion(r rowScanner) (*Question, error) {
 	var topics, ents string
 	var deadline, resolvedAt, lastEv, created flexibleTime
 	var outcome sql.NullInt64
-	if err := r.Scan(&q.ID, &q.Origin, &q.Venue, &q.ExternalID, &q.URL, &q.Text, &q.ResolutionRule, &q.ResolutionSource, &q.Category,
+	if err := r.Scan(&q.ID, &q.Origin, &q.Venue, &q.ExternalID, &q.URL, &q.Text, &q.ResolutionRule, &q.ResolutionSource, &q.Category, &q.EventKey, &q.Template,
 		&topics, &ents, &deadline, &q.Status, &outcome, &resolvedAt, &q.ResolutionNote, &lastEv, &created); err != nil {
 		return nil, err
 	}
@@ -683,8 +685,8 @@ func insertQuestion(db *sql.DB, pid string, q Question) (*Question, bool, error)
 	if q.EntityIDs == nil {
 		q.EntityIDs = []int64{}
 	}
-	err := db.QueryRow(`INSERT INTO intel_questions (project_id, origin, venue, external_id, url, text, resolution_rule, resolution_source, category, topics, entity_ids, deadline, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, q.Origin, q.Venue, q.ExternalID, q.URL, q.Text, q.ResolutionRule, q.ResolutionSource, q.Category,
+	err := db.QueryRow(`INSERT INTO intel_questions (project_id, origin, venue, external_id, url, text, resolution_rule, resolution_source, category, event_key, template, topics, entity_ids, deadline, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, q.Origin, q.Venue, q.ExternalID, q.URL, q.Text, q.ResolutionRule, q.ResolutionSource, q.Category, q.EventKey, q.Template,
 		mustJSON(q.Topics), mustJSON(q.EntityIDs), ts(q.Deadline), ts(nowUTC())).Scan(&q.ID)
 	if err != nil {
 		return nil, false, err

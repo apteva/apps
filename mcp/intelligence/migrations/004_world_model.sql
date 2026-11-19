@@ -126,6 +126,8 @@ CREATE TABLE intel_questions (
   resolution_rule   TEXT NOT NULL DEFAULT '',
   resolution_source TEXT NOT NULL DEFAULT '',
   category          TEXT NOT NULL DEFAULT '',
+  event_key         TEXT NOT NULL DEFAULT '',     -- venue event grouping (caps questions per event)
+  template          TEXT NOT NULL DEFAULT '',     -- number-collapsed venue question (caps repeated props)
   topics            TEXT NOT NULL DEFAULT '[]',
   entity_ids        TEXT NOT NULL DEFAULT '[]',
   deadline          TIMESTAMP NOT NULL,

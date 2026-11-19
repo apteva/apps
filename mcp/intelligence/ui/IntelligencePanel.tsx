@@ -1,15 +1,16 @@
-// MarketIntelPanel — v0.1 console for the market-intel gateway.
-// Product console:
-//   Signals — cost-adjusted opportunities and audited performance
-//   Sources — which data integrations are bound (what the gateway can answer)
-//   Query   — a test harness: run enrich / probability / context and see
-//             the normalized result
+// IntelligencePanel — world model, forecasts and scenarios, plus the
+// market pack.
+//   Overview / Questions / World / Scenarios / Ledger / Connectors —
+//             the intelligence loop (WorldTabs.tsx)
+//   Research / Map — evidence search and geography
+//   Markets / Signals / Sources / Query — market pack
 //
 // Styled with the dashboard's Tailwind theme tokens (bg-bg, text-text-muted,
 // border-border, …) so it matches the trading / crm / storage panels.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import GeographyView from "./GeographyView";
+import { ConnectorsTab, LedgerTab, OverviewTab, QuestionsTab, ScenariosTab, WorldTab } from "./WorldTabs";
 
 // ─── Inlined SDK app-event hook (forward-compat; v0.2 emits signals) ──
 interface AppEventEnvelope<T = unknown> {
@@ -28,7 +29,7 @@ function useAppEvents<T = unknown>(app: string, projectId: string | null | undef
 
 interface NativePanelProps { appName: string; installId: number; projectId: string; instanceId?: number }
 
-const API = "/api/apps/market-intel";
+const API = "/api/apps/intelligence";
 
 // Static slug → domain map for grouping the Sources tab. Mirrors the
 // roles in apteva.yaml.
@@ -48,10 +49,18 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "research" | "map" | "signals" | "markets" | "sources" | "query";
+type TabId = "overview" | "questions" | "world" | "scenarios" | "ledger" | "connectors" | "research" | "map" | "markets" | "signals" | "sources" | "query";
+const TABS: { id: TabId; label: string; group: "core" | "market" }[] = [
+  { id: "overview", label: "Overview", group: "core" }, { id: "questions", label: "Questions", group: "core" }, { id: "world", label: "World", group: "core" },
+  { id: "scenarios", label: "Scenarios", group: "core" }, { id: "ledger", label: "Ledger", group: "core" }, { id: "connectors", label: "Connectors", group: "core" },
+  { id: "research", label: "Research", group: "core" }, { id: "map", label: "Map", group: "core" },
+  { id: "markets", label: "Markets", group: "market" }, { id: "signals", label: "Signals", group: "market" }, { id: "sources", label: "Integrations", group: "market" }, { id: "query", label: "Query", group: "market" },
+];
 
-export default function MarketIntelPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<TabId>("research");
+export default function IntelligencePanel({ projectId, installId }: NativePanelProps) {
+  const [tab, setTab] = useState<TabId>("overview");
+  const [question, setQuestion] = useState<number | null>(null);
+  const openQuestion = useCallback((id: number) => { setQuestion(id); setTab("questions"); }, []);
   const [error, setError] = useState<string | null>(null);
 
   const withParams = useCallback((extra: Record<string, string> = {}) =>
@@ -64,22 +73,31 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
     return res.json() as Promise<T>;
   }, [withParams]);
 
-  useAppEvents("market-intel", projectId, () => { /* v0.2: refresh on signal events */ });
+  const post = useCallback(async <T,>(path: string, body: unknown): Promise<T> => {
+    const res = await fetch(`${API}${path}?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+    return res.json() as Promise<T>;
+  }, [withParams]);
+
+  useAppEvents("intelligence", projectId, () => { /* reserved for live refresh */ });
 
   return (
     <div className="h-full flex flex-col bg-bg text-text text-sm">
       <header className="px-4 py-2 flex items-center gap-3 border-b border-border">
-        <h1 className="text-sm font-semibold m-0">Market Intelligence</h1>
-        <span className="text-xs text-text-dim">research · geography · v0.4</span>
+        <h1 className="text-sm font-semibold m-0">Intelligence</h1>
+        <span className="text-xs text-text-dim">evidence · world model · forecasts · scenarios</span>
         <span className="flex-1" />
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["research", "map", "signals", "markets", "sources", "query"] as TabId[]).map((id) => (
-          <button key={id} onClick={() => setTab(id)}
-            className={`px-3 py-2 capitalize ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
-            {id}
-          </button>
+        {TABS.map(({ id, label, group }, i) => (
+          <span key={id} className="flex items-center">
+            {i > 0 && TABS[i - 1].group !== group && <span className="mx-2 text-text-dim">|</span>}
+            <button onClick={() => { setTab(id); if (id !== "questions") setQuestion(null); }}
+              className={`px-3 py-2 ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
+              {label}
+            </button>
+          </span>
         ))}
       </nav>
 
@@ -91,6 +109,12 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
       )}
 
       <div className="flex-1 overflow-auto p-4">
+        {tab === "overview" && <OverviewTab api={api} post={post} setError={setError} openQuestion={openQuestion} />}
+        {tab === "questions" && <QuestionsTab api={api} post={post} setError={setError} selected={question} setSelected={setQuestion} />}
+        {tab === "world" && <WorldTab api={api} setError={setError} openQuestion={openQuestion} />}
+        {tab === "scenarios" && <ScenariosTab api={api} post={post} setError={setError} openQuestion={openQuestion} />}
+        {tab === "ledger" && <LedgerTab api={api} setError={setError} openQuestion={openQuestion} />}
+        {tab === "connectors" && <ConnectorsTab api={api} post={post} setError={setError} />}
         {tab === "research" && <ResearchTab api={api} setError={setError} />}
         {tab === "map" && <GeographyView api={api} />}
         {tab === "signals" && <SignalsTab api={api} projectId={projectId} setError={setError} />}

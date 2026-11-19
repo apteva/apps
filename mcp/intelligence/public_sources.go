@@ -14,10 +14,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,7 +39,17 @@ var publicSlugs = map[string]bool{
 
 func isPublicSource(slug string) bool { return publicSlugs[slug] }
 
-var publicHTTP = &http.Client{Timeout: 6 * time.Second}
+// No client-wide timeout: each call sets its own deadline via context
+// (getJSON 5s, GDELT 30s).
+var publicHTTP = &http.Client{Transport: publicTransport()}
+
+// publicTransport allows slow TLS handshakes: GDELT stalls the handshake
+// for ~10s when it is throttling a client, right at Go's default limit.
+func publicTransport() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.TLSHandshakeTimeout = 25 * time.Second
+	return t
+}
 
 // directPublicCall dispatches a (slug, tool, args) to the right public
 // HTTP endpoint. Returns (data, true) on success; (nil, false) if the
@@ -168,7 +182,24 @@ func polymarketDataAPI(tool string, args map[string]any) (json.RawMessage, bool)
 
 // ─── GDELT (public news/events) ────────────────────────────────────
 
+// GDELT allows one request per five seconds per client; spacing calls
+// here keeps every caller (gateway tools, the news connector) compliant.
+var gdeltGate = struct {
+	sync.Mutex
+	last time.Time
+}{}
+
+func gdeltWait() {
+	gdeltGate.Lock()
+	defer gdeltGate.Unlock()
+	if wait := 5500*time.Millisecond - time.Since(gdeltGate.last); wait > 0 {
+		time.Sleep(wait)
+	}
+	gdeltGate.last = time.Now()
+}
+
 func gdeltCall(tool string, args map[string]any) (json.RawMessage, bool) {
+	gdeltWait()
 	base := "https://api.gdeltproject.org/api/v2"
 	q := url.Values{}
 	q.Set("format", "json")
@@ -194,7 +225,12 @@ func gdeltCall(tool string, args map[string]any) (json.RawMessage, bool) {
 			}
 		}
 		q.Set("sort", "DateDesc")
-		return getJSON(base + "/doc/doc?" + q.Encode())
+		raw, err := fetchJSON(base+"/doc/doc?"+q.Encode(), 30*time.Second)
+		if err != nil {
+			lastGDELTError.Store(err.Error())
+			return nil, false
+		}
+		return raw, true
 	case "doc_timeline_volume":
 		q.Set("mode", "TimelineVol")
 		q.Set("timespan", orStr(args["timespan"], "30d"))
@@ -242,6 +278,12 @@ func kalshiCall(tool string, args map[string]any) (json.RawMessage, bool) {
 			return nil, false
 		}
 		return getJSON(base + "/markets/" + url.PathEscape(t))
+	case "get_event":
+		t := strArgM(args, "event_ticker")
+		if t == "" {
+			return nil, false
+		}
+		return getJSON(base + "/events/" + url.PathEscape(t))
 	case "exchange_status":
 		return getJSON(base + "/exchange/status")
 	}
@@ -280,25 +322,54 @@ func manifoldCall(tool string, args map[string]any) (json.RawMessage, bool) {
 // ─── HTTP helper ───────────────────────────────────────────────────
 
 func getJSON(u string) (json.RawMessage, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return getJSONTimeout(u, 5*time.Second)
+}
+
+// getJSONTimeout is getJSON with a caller-chosen deadline; GDELT's batched
+// full-text queries routinely take 10-20s.
+func getJSONTimeout(u string, timeout time.Duration) (json.RawMessage, bool) {
+	raw, err := fetchJSON(u, timeout)
+	return raw, err == nil
+}
+
+// fetchJSON returns why a public call failed (status code, timeout) so
+// connectors can tell operators "rate limited" from "slow".
+func fetchJSON(u string, timeout time.Duration) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	req.Header.Set("User-Agent", "Apteva-MarketIntel/0.1 (https://apteva.com)")
+	req.Header.Set("User-Agent", "Apteva-Intelligence/0.5 (https://apteva.com)")
 	req.Header.Set("Accept", "application/json")
 	resp, err := publicHTTP.Do(req)
 	if err != nil {
-		return nil, false
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("timed out after %s", timeout)
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, ue.Err // drop the (long) URL from operator-facing errors
+		}
+		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, errors.New("rate limited (HTTP 429)")
+	}
 	if resp.StatusCode/100 != 2 {
-		return nil, false
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil || len(body) == 0 {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
-	return json.RawMessage(body), true
+	if len(body) == 0 || !json.Valid(body) {
+		return nil, fmt.Errorf("non-JSON response: %s", truncate(strings.TrimSpace(string(body)), 160))
+	}
+	return json.RawMessage(body), nil
 }
+
+// lastGDELTError keeps the most recent GDELT failure for connector status.
+var lastGDELTError atomic.Value

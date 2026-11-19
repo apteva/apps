@@ -130,15 +130,17 @@ func marketFixtures(now time.Time) *fakeSources {
 	 {"question":"Will the Federal Reserve cut rates in December?","slug":"fed-cut-dec","description":"Resolves YES if the FOMC lowers the target range.","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.62\",\"0.38\"]","volumeNum":500000,"endDate":%q,"closed":false},
 	 {"question":"Thin market","slug":"thin","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.5\",\"0.5\"]","volumeNum":10,"endDate":%q},
 	 {"question":"Closes too soon","slug":"too-soon","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.5\",\"0.5\"]","volumeNum":900000,"endDate":%q},
-	 {"question":"Who wins?","slug":"multi","outcomes":"[\"A\",\"B\"]","outcomePrices":"[\"0.5\",\"0.5\"]","volumeNum":900000,"endDate":%q}]`, soon, soon, tooSoon, soon)
-	kalshi := fmt.Sprintf(`{"markets":[{"ticker":"KXCPI-26NOV","title":"Will CPI exceed 3%%?","yes_sub_title":"Above 3.0%%","rules_primary":"Resolves on BLS CPI release.","market_type":"binary","yes_bid":40,"yes_ask":44,"volume":9000,"status":"active","close_time":%q}]}`, soon)
+	 {"question":"Who wins?","slug":"multi","outcomes":"[\"A\",\"B\"]","outcomePrices":"[\"0.5\",\"0.5\"]","volumeNum":900000,"endDate":%q},
+	 {"question":"Will a CEO post 300-319 tweets this week?","slug":"tweets","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.4\",\"0.6\"]","volumeNum":900000,"endDate":%q},
+	 {"question":"Will the IPO happen by Friday?","slug":"near-certain","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.995\",\"0.005\"]","volumeNum":900000,"endDate":%q}]`, soon, soon, tooSoon, soon, soon, soon)
+	kalshi := fmt.Sprintf(`{"markets":[{"ticker":"KXCPI-26NOV","title":"Will CPI exceed 3%%?","yes_sub_title":"Above 3.0%%","rules_primary":"Resolves on BLS CPI release.","market_type":"binary","yes_bid_dollars":"0.4000","yes_ask_dollars":"0.4400","volume_fp":"900.00","status":"active","close_time":%q}]}`, soon)
 	manifold := fmt.Sprintf(`[{"id":"mf1","question":"Will SpaceX launch Starship again?","url":"https://manifold.markets/x/starship","probability":0.7,"volume":5000,"outcomeType":"BINARY","isResolved":false,"closeTime":%d}]`, now.Add(96*time.Hour).UnixMilli())
 	return &fakeSources{responses: map[string]string{
-		"polymarket/markets_window":        poly,
-		"kalshi/list_markets":              kalshi,
-		"manifold-markets/search_markets":  manifold,
-		"gdelt/doc_search":                 `{"articles":[{"title":"Federal Reserve officials signal December cut","url":"https://news.example/fed","domain":"news.example","seendate":"20261118T120000Z"},{"title":"Unrelated sports result","url":"https://news.example/sport","domain":"news.example"}]}`,
-		"bls/get_series_single":            `{"Results":{"series":[{"data":[{"year":"2026","period":"M10","value":"321.5"},{"year":"2026","period":"M09","value":"320.9"},{"year":"2026","period":"M13","value":"1"}]}]}}`,
+		"polymarket/markets_window":       poly,
+		"kalshi/list_markets":             kalshi,
+		"manifold-markets/search_markets": manifold,
+		"gdelt/doc_search":                `{"articles":[{"title":"Federal Reserve officials signal December cut","url":"https://news.example/fed","domain":"news.example","seendate":"20261118T120000Z"},{"title":"Unrelated sports result","url":"https://news.example/sport","domain":"news.example"}]}`,
+		"bls/get_series_single":           `{"Results":{"series":[{"data":[{"year":"2026","period":"M10","value":"321.5"},{"year":"2026","period":"M09","value":"320.9"},{"year":"2026","period":"M13","value":"1"}]}]}}`,
 	}}
 }
 
@@ -170,7 +172,7 @@ func TestPredictionMarketImportPricesAndResolution(t *testing.T) {
 		for _, q := range qs {
 			names = append(names, q.ExternalID)
 		}
-		t.Fatalf("want fed-cut-dec, KXCPI and mf1 (thin/too-soon/multi filtered), got %v", names)
+		t.Fatalf("want fed-cut-dec, KXCPI and mf1 (thin/too-soon/multi/personal/near-certain filtered), got %v", names)
 	}
 	var fed Question
 	for _, q := range qs {
@@ -178,8 +180,13 @@ func TestPredictionMarketImportPricesAndResolution(t *testing.T) {
 			fed = q
 		}
 	}
-	if fed.ResolutionRule == "" || len(fed.Topics) == 0 || len(fed.EntityIDs) == 0 {
-		t.Fatalf("question should carry rule, topics and seeded entities: %+v", fed)
+	if fed.ResolutionRule == "" || len(fed.Topics) == 0 || len(fed.EntityIDs) != 0 {
+		t.Fatalf("question should carry rule and topics; topics must not become entities: %+v", fed)
+	}
+	var ents int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&ents)
+	if ents != 0 {
+		t.Fatalf("market import must not create entities from question text, got %d", ents)
 	}
 	if p, _ := priceAt(db, fed.ID, now); p == nil || *p != 0.62 {
 		t.Fatalf("price not recorded: %v", p)
@@ -234,6 +241,15 @@ func TestNewsLinksEvidenceToQuestions(t *testing.T) {
 	ev, _ := searchEvidence(db, EvidenceQuery{ProjectID: "p", IDs: ids[:1], Limit: 1})
 	if !strings.Contains(ev[0]["title"].(string), "Federal Reserve") || ev[0]["published_time"] != "2026-11-18T12:00:00Z" {
 		t.Fatalf("most relevant evidence should be the Fed headline with GDELT date, got %v", ev[0])
+	}
+	gdelt := 0
+	for _, c := range fs.calls {
+		if c == "gdelt/doc_search" {
+			gdelt++
+		}
+	}
+	if gdelt != 1 {
+		t.Fatalf("questions should share one batched GDELT query, got %d calls", gdelt)
 	}
 	// Re-running finds the same articles: duplicates, not new rows.
 	runs, _ = runDueSources(env, true, "news")
@@ -475,5 +491,76 @@ func TestExtractionRecordsClaimsAndReportedLinks(t *testing.T) {
 	_, _ = extractClaims(env, 1)
 	if len(env.llm.(*fakeLLM).prompts) != 0 {
 		t.Fatal("extraction should not re-process evidence")
+	}
+}
+
+func TestMarketEventContextCapAndWalletExclusion(t *testing.T) {
+	db := openTestDB(t)
+	now := nowUTC()
+	soon := ts(now.Add(72 * time.Hour))
+	mk := func(slug, q string) string {
+		return fmt.Sprintf(`{"question":%q,"slug":%q,"outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.4\",\"0.6\"]","volumeNum":900000,"endDate":%q,"events":[{"slug":"bra-arg","title":"Brazil vs. Argentina"}]}`, q, slug, soon)
+	}
+	poly := "[" + mk("s1", "Exact Score: 1-0?") + "," + mk("s2", "Exact Score: 2-1?") + "," + mk("s3", "Exact Score: Any Other Score?") + "," +
+		fmt.Sprintf(`{"question":"Will 0xAbCdEf1234 sell before Friday?","slug":"wallet","outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.4\",\"0.6\"]","volumeNum":900000,"endDate":%q}`, soon) + "]"
+	kalshi := fmt.Sprintf(`{"markets":[{"ticker":"KXF1-HAM","event_ticker":"KXF1-26LV","title":"Lewis Hamilton wins","market_type":"binary","yes_bid_dollars":"0.10","yes_ask_dollars":"0.12","volume_fp":"900","status":"active","close_time":%q}]}`, soon)
+	fs := &fakeSources{responses: map[string]string{
+		"polymarket/markets_window": poly,
+		"kalshi/list_markets":       kalshi,
+		"kalshi/get_event":          `{"event":{"title":"Las Vegas Grand Prix winner"}}`,
+	}}
+	env := &ingestEnv{db: db, pid: "p", sc: fs, now: now}
+	setupSources(t, env)
+	if _, err := runDueSources(env, true, "prediction-markets"); err != nil {
+		t.Fatal(err)
+	}
+	qs, _ := listQuestions(db, "p", "open", 100)
+	texts := []string{}
+	perEvent := 0
+	for _, q := range qs {
+		texts = append(texts, q.Text)
+		if q.EventKey == "bra-arg" {
+			perEvent++
+			if !strings.HasPrefix(q.Text, "Brazil vs. Argentina: Exact Score: ") {
+				t.Fatalf("polymarket question should carry its event title: %q", q.Text)
+			}
+		}
+		if strings.Contains(q.Text, "0x") {
+			t.Fatalf("wallet-address market should be excluded: %q", q.Text)
+		}
+	}
+	if perEvent != 2 {
+		t.Fatalf("max_per_event 2 should cap the event, got %d: %v", perEvent, texts)
+	}
+	if !containsString(texts, "Las Vegas Grand Prix winner: Lewis Hamilton wins") {
+		t.Fatalf("kalshi question should carry its event title: %v", texts)
+	}
+}
+
+func containsString(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWithEventTitle(t *testing.T) {
+	cases := map[[2]string]string{
+		{"Exact Score: Any Other Score?", "Lazio vs. Lecce - Exact Score"}:                            "Lazio vs. Lecce - Exact Score: Any Other Score?",
+		{"Will Bitcoin reach $70,000 November 16-22?", "What price will Bitcoin hit November 16-22?"}: "Will Bitcoin reach $70,000 November 16-22?",
+		{"Will Puma Shen win the next Taipei Mayor election?", "Taipei Mayor Election Winner"}:        "Will Puma Shen win the next Taipei Mayor election?",
+		{"Lewis Hamilton wins", "Las Vegas Grand Prix winner"}:                                        "Las Vegas Grand Prix winner: Lewis Hamilton wins",
+		{"Main Race: Lando Norris wins", "Las Vegas Grand Prix Main Race Winner"}:                     "Las Vegas Grand Prix Main Race Winner: Lando Norris wins",
+		{"Chicago wins", "Chicago at Denver"}:                                                         "Chicago at Denver: Chicago wins",
+	}
+	for in, want := range cases {
+		if got := withEventTitle(in[0], in[1]); got != want {
+			t.Errorf("withEventTitle(%q, %q) = %q, want %q", in[0], in[1], got, want)
+		}
+	}
+	if questionTemplate("Bitcoin above $68,000?") != questionTemplate("Bitcoin above $70,000?") {
+		t.Error("ladder markets should share a template")
 	}
 }

@@ -1,17 +1,100 @@
-# Intelligence Platform / Market Intelligence
+# Intelligence
 
-Version 0.3 introduces the generic intelligence core. The market and trading
-features remain a domain pack, while the core stores source-attributed
-evidence and supports date-aware search, timelines, and point-in-time replay.
-This keeps historical analysis and backtesting reproducible: a query can ask
-what happened in a period, what was published in a period, or what was known
-at a specific cutoff.
+Intelligence ingests lawful public data, keeps it as source-attributed
+evidence, builds a time-aware world model on top of it, records calibrated
+forecasts on concrete questions before their outcomes are known, scores those
+forecasts against prediction markets, and runs explicit "what if" scenarios.
+Market data and trading signals remain inside the app as a domain pack.
 
-The app is read-only with respect to external systems. `evidence_record` writes
-an immutable, project-scoped evidence record to the app database; duplicate
-content is idempotent and corrections are represented with a new observation.
+Version 0.5.0 renames the app from `market-intel` to `intelligence`.
 
-## Generic intelligence tools
+## Three layers, kept apart
+
+| Layer | What it holds | Tables |
+|---|---|---|
+| Observed | What a source said, and when the app learned it | `intel_sources`, `intel_ingest_runs`, `intelligence_evidence`, `intel_claims` |
+| Estimated | The app's current model of the world | `entities`, `intel_relationships`, `intel_state_values` |
+| Futures | Questions, market prices, forecasts, outcomes, scenarios | `intel_questions`, `intel_question_prices`, `intel_forecasts`, `intel_scenarios` |
+
+Each evidence row has two clocks: when the event was observed (`observed_at`)
+and when the app ingested it (`ingested_at`). Forecasts and replays use the
+ingested clock, so a forecast can never see evidence that arrived after it
+was made. Duplicate content returns the existing row and never overwrites it.
+
+## Connectors
+
+The `intelligence_cycle` worker runs due connectors every five minutes, then
+claim extraction and forecast updates.
+
+- **prediction-markets** (15 min): Polymarket, Kalshi and Manifold binary
+  markets closing in 12h to 10 days, filtered by volume. New questions must be
+  priced between 0.03 and 0.97. They are capped per topic, per venue event and
+  per question template, so a ladder or a repeated sports prop cannot flood the
+  set. Generic market titles get their event name added in front. Markets about
+  private lives or individual wallets are excluded. Open questions are
+  re-priced every run and resolved from the venue's final outcome.
+- **news** (30 min): one batched GDELT query covers up to eight questions.
+  GDELT allows one request every five seconds per IP and slows down clients
+  that exceed it, so failures are reported and retried on the next run.
+  Connected news integrations (NewsAPI, GNews, Tavily) are queried for each
+  question.
+- **bls**: CPI, unemployment and payrolls become indicator entities with
+  state values. **fred** is off by default and needs the FRED integration.
+
+Use `sources_list`, `source_configure` and `ingest_now` to inspect and tune
+them.
+
+## World model
+
+- Entities have a kind. There is no `person` kind: people appear only as
+  `public_role` entities. Question text is used only for search terms and
+  never becomes an entity.
+- Relationships need evidence or claim ids when their status is `observed` or
+  `reported`. Otherwise they are `inferred` or `assumed`.
+- The LLM extractor (through the `llm` app; config `llm_model`, `none`
+  disables it) turns headlines into claims and reported relationships. Each
+  one cites its evidence.
+
+## Forecasts and the ledger
+
+Forecast model v1, "market-prior + evidence-shift":
+
+- **Prior:** the market price.
+- **Shift:** the LLM proposes a direction and a strength from 0 to 3. It must
+  cite evidence ids from the frozen evidence set. Each point of strength
+  shifts the forecast 0.2 log-odds, up to 0.6 in total.
+- **Abstain:** with no market price and no evidence, the forecast abstains.
+- **Revisions:** a forecast is first made when a question is created. It is
+  revised when new evidence is linked or the market moves 0.05 or more.
+- **Replay:** each forecast stores a snapshot hash. `replay` with
+  `forecast_id` re-checks it.
+
+For each question, the `ledger` scores one forecast: the latest one made at
+least 24h before the deadline. If none qualifies, it scores the latest one
+made before resolution. It reports:
+
+- Brier score and log loss, alongside the market and a 0.5 baseline;
+- skill against the market;
+- calibration;
+- coverage;
+- breakdowns by horizon and by venue.
+
+## Scenarios
+
+`scenario_run` applies the shocks you state to a chosen time. They propagate
+through typed relationships using explicit rules (factor and direction). Each
+link is weighted by its evidence status. The output is labelled
+`hypothetical`, shows every assumption chain, and lists the open questions
+exposed to the shocks. Links with no rule are reported, not guessed.
+
+## Scope
+
+The app is for decision support from lawful data only. It does not build
+profiles of private individuals or make consequential decisions about them.
+It does not do covert surveillance or manipulation. It does not trade
+autonomously.
+
+## Evidence tools
 
 - `evidence_record`: record a document, claim, event, measurement, or other
   source observation with event, publication, validity, and observation times.
@@ -79,7 +162,6 @@ for the jurisdictions where the feed will be sold.
 ## Verification
 
 ```sh
-env GOCACHE=/private/tmp/codex-go-build go test ./...
-env RUN_MARKET_INTEL_LIVE=1 GOCACHE=/private/tmp/codex-go-build \
-  go test -run 'Test(BinanceProviderLive|SignalPipelineLive)$' -v
+GOWORK=off go test ./...
+RUN_MARKET_INTEL_LIVE=1 GOWORK=off go test -run 'Test(BinanceProviderLive|SignalPipelineLive)$' -v
 ```

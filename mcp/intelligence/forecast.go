@@ -567,10 +567,10 @@ func summarize(s []scoredForecast) map[string]any {
 
 func calibration(s []scoredForecast) []map[string]any {
 	type bin struct {
-		n       int
-		sumP    float64
-		sumOut  int
-		lo, hi  float64
+		n      int
+		sumP   float64
+		sumOut int
+		lo, hi float64
 	}
 	bins := make([]bin, 10)
 	for i := range bins {
