@@ -63,8 +63,9 @@ also:
 
 - requires `revision` (0 for the first policy) and refuses unknown fields,
   because it replaces the whole policy;
-- accepts `issuer_install_id` as a number, which is what
-  `{"$runtime_install_id": "auth"}` gives in a seed;
+- accepts `issuer_install_id`, `subject_id` and `organization_id` as numbers,
+  which is what `{"$runtime_install_id": "auth"}` and a `{"$ref"}` to an Auth
+  user or organization id give in a seed;
 - returns errors as tool errors, so a refused write fails the seed.
 
 An `apteva-auth` provider sent without `url`, through the tool or the route,

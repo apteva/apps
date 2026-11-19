@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.24.0
+version: 0.24.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -424,7 +424,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.24.0
+    ref: telephony/v0.24.1
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -954,7 +954,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "telephony_flows_publish", Description: "Validate and publish an immutable routing-flow version.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsPublish},
 		{Name: "telephony_flows_simulate", Description: "Simulate a draft routing flow without placing a call.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "caller": map[string]any{"type": "string"}, "called": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsSimulate},
 		{Name: "telephony_access_policy_get", Description: "Platform only: agents, bound apps and application users are refused. Read the project's communication access policy (identity providers, users, groups, delegations) and its revision.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolAccessPolicyGet},
-		{Name: "telephony_access_policy_set", Description: "Platform only: agents, bound apps and application users are refused. Replace the project's communication access policy, as PUT /access/policy does, with the same validation. Pass revision 0 for the first policy, otherwise the revision from telephony_access_policy_get; a stale revision is refused with 'policy revision changed'. Unknown fields are refused. Omitted delegations are kept. Browser destinations named in grants must already exist. issuer_install_id may be a number. An apteva-auth provider without url uses that Auth install's /me through the platform gateway.", InputSchema: schemaObject(map[string]any{"revision": map[string]any{"type": "integer", "minimum": 0}, "providers": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "users": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "groups": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "delegations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"revision"}), HandlerCtx: a.toolAccessPolicySet},
+		{Name: "telephony_access_policy_set", Description: "Platform only: agents, bound apps and application users are refused. Replace the project's communication access policy, as PUT /access/policy does, with the same validation. Pass revision 0 for the first policy, otherwise the revision from telephony_access_policy_get; a stale revision is refused with 'policy revision changed'. Unknown fields are refused. Omitted delegations are kept. Browser destinations named in grants must already exist. issuer_install_id, subject_id and organization_id may be numbers. An apteva-auth provider without url uses that Auth install's /me through the platform gateway.", InputSchema: schemaObject(map[string]any{"revision": map[string]any{"type": "integer", "minimum": 0}, "providers": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "users": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "groups": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "delegations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"revision"}), HandlerCtx: a.toolAccessPolicySet},
 		{Name: "telephony_destinations_create", Description: "Create a browser, agent, AI, PSTN, SIP, or voicemail routing destination.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"browser", "agent", "ai", "pstn", "sip", "voicemail"}}, "config": map[string]any{"type": "object"}}, []string{"name", "kind"}), HandlerCtx: a.toolDestinationsCreate},
 		{Name: "telephony_destinations_list", Description: "List reusable routing destinations. Bound apps receive only delegated browser resources, with stable-ID pagination.", InputSchema: schemaObject(map[string]any{"kind": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "cursor": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolDestinationsList},
 		{Name: "telephony_ring_groups_create", Description: "Create a ring group from reusable destinations.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string", "enum": []string{"simultaneous", "sequential", "round_robin", "priority"}}, "timeout_sec": map[string]any{"type": "integer"}, "members": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"name", "members"}), HandlerCtx: a.toolRingGroupsCreate},

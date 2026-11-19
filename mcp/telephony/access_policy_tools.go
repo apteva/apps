@@ -160,8 +160,9 @@ func (a *App) toolAccessPolicySet(c context.Context, ctx *sdk.AppCtx, args map[s
 
 // policyFromToolArgs reads a whole policy from tool arguments. Unknown fields
 // are refused: the write replaces the policy, so a misspelled "users" would
-// otherwise remove every user. issuer_install_id may be a number, which is
-// what {"$runtime_install_id": ...} resolves to in Environments seeds.
+// otherwise remove every user. Identity IDs may be numbers: in Environments
+// seeds {"$runtime_install_id": ...} resolves to one, and so does a {"$ref"}
+// to an Auth user or organization id.
 func policyFromToolArgs(args map[string]any) (phonePolicy, error) {
 	var p phonePolicy
 	if _, ok := args["revision"]; !ok {
@@ -170,7 +171,7 @@ func policyFromToolArgs(args map[string]any) (phonePolicy, error) {
 	body := make(map[string]any, len(args))
 	for key, value := range args {
 		if !strings.HasPrefix(key, "_") {
-			body[key] = installIDsAsStrings(value)
+			body[key] = identityIDsAsStrings(value)
 		}
 	}
 	raw, err := json.Marshal(body)
@@ -185,26 +186,31 @@ func policyFromToolArgs(args map[string]any) (phonePolicy, error) {
 	return p, nil
 }
 
-// installIDsAsStrings rewrites whole-number issuer_install_id values as the
-// decimal strings the policy stores.
-func installIDsAsStrings(value any) any {
+// identityIDKeys are the identity fields the policy stores as decimal strings.
+// Auth's /me returns numeric ids, which Telephony reads the same way
+// (identityScalar).
+var identityIDKeys = map[string]bool{"issuer_install_id": true, "subject_id": true, "organization_id": true}
+
+// identityIDsAsStrings rewrites whole-number identity ids as the decimal
+// strings the policy stores.
+func identityIDsAsStrings(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if key == "issuer_install_id" {
+			if identityIDKeys[key] {
 				if id, ok := wholeNumberString(item); ok {
 					out[key] = id
 					continue
 				}
 			}
-			out[key] = installIDsAsStrings(item)
+			out[key] = identityIDsAsStrings(item)
 		}
 		return out
 	case []any:
 		out := make([]any, len(typed))
 		for i, item := range typed {
-			out[i] = installIDsAsStrings(item)
+			out[i] = identityIDsAsStrings(item)
 		}
 		return out
 	}

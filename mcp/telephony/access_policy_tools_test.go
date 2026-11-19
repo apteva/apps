@@ -40,7 +40,7 @@ func toolArgs(t *testing.T, raw string) map[string]any {
 
 const accessToolPolicy = `{"revision": %REV%,
  "providers": [{"id": "flexylead-auth", "issuer_app": "auth", "issuer_install_id": 11, "format": "apteva-auth", "actions": ["call.read", "call.answer", "call.attach", "call.hangup"]}],
- "users": [{"identity": {"issuer_app": "auth", "issuer_install_id": 11, "subject_type": "user", "subject_id": "42", "organization_id": "7"},
+ "users": [{"identity": {"issuer_app": "auth", "issuer_install_id": 11, "subject_type": "user", "subject_id": 42, "organization_id": 7},
             "enabled": true, "role": "user", "destinations": ["adviser-42"]}]}`
 
 func accessToolArgs(t *testing.T, revision string) map[string]any {
@@ -48,7 +48,8 @@ func accessToolArgs(t *testing.T, revision string) map[string]any {
 }
 
 // A platform caller sets the policy the way an Environments seed would: the
-// Auth install number arrives as a number and the provider has no URL. The
+// Auth install, user and organization ids arrive as numbers ($runtime_install_id
+// and $ref give numbers) and the provider has no URL. The
 // result is what PUT /access/policy would store, and it applies at once.
 func TestAccessPolicyToolsSetWhatTheOperatorRouteSets(t *testing.T) {
 	ctx := softphoneTestCtx(t)
@@ -126,6 +127,7 @@ func TestAccessPolicySetRefusesUnclearInput(t *testing.T) {
 		{`{"revision": 0, "users": [{"identity": {"issuer_app": "auth", "issuer_install_id": 11, "subject_type": "user", "subject_id": "42"}, "enabled": true, "role": "user", "destinatons": []}]}`, "unknown field"},
 		{`{"revision": 0, "providers": [{"id": "p", "issuer_app": "../x", "issuer_install_id": 11, "format": "apteva-auth"}]}`, "provider url required"},
 		{`{"revision": 0, "providers": [{"id": "p", "issuer_app": "auth", "issuer_install_id": 1.5, "format": "apteva-auth"}]}`, "invalid policy"},
+		{`{"revision": 0, "users": [{"identity": {"issuer_app": "auth", "issuer_install_id": 11, "subject_type": "user", "subject_id": 1.5}, "enabled": true, "role": "user"}]}`, "invalid policy"},
 		{`{"revision": 0, "providers": [{"id": "p", "issuer_app": "auth", "issuer_install_id": 11, "format": "userinfo"}]}`, "identity provider"},
 	} {
 		if _, err := callAccessTool(t, app, ctx, nil, "telephony_access_policy_set", toolArgs(t, tc.args)); err == nil || !strings.Contains(err.Error(), tc.want) {
