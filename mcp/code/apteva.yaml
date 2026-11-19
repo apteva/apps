@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.20.0
+version: 0.20.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.20.1 makes a local-only branch delete ask origin whether it still has
+  the branch instead of trusting the last fetch.
   v0.20.0 adds repos_git_branch_delete: delete a Git branch locally, on
   origin, or both. Unmerged work is refused unless forced, origin's default
   branch and the checked-out branch are never deleted, the origin deletion is
@@ -427,7 +429,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.20.0
+    ref: code/v0.20.1
     entry: mcp/code
   port: 8080
   health_check: /health

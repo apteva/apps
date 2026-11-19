@@ -158,13 +158,30 @@ func (s *gitService) DeleteBranch(ctx *sdk.AppCtx, repo *Repo, in GitBranchDelet
 		ref := remote.Name + "/" + defaultBranch
 		bases = append(bases, [2]string{ref, s.engine.refCommit(s.context(), workTree, gitDir, "refs/remotes/"+ref)})
 	}
-	unmerged := []string{}
+	unmerged, originNote := []string{}, ""
 	if localSHA != "" {
 		localBases := bases
-		if remote != nil && remoteSHA == "" && !wantRemote {
-			// Deleting only the local copy is safe when origin still has the commits.
+		if remote != nil && !wantRemote {
+			// Deleting only the local copy is safe when origin still has the
+			// commits. Ask origin itself: the tracking ref is only as fresh as
+			// the last fetch and may name a branch deleted on origin since.
 			ref := remote.Name + "/" + name
-			localBases = append(append([][2]string{}, bases...), [2]string{ref, s.engine.refCommit(s.context(), workTree, gitDir, "refs/remotes/"+ref)})
+			liveSHA, err := "", error(nil)
+			fetchAuth, authErr := gitAuthForRemote(ctx, remote.FetchURL, remote.ConnectionID)
+			if authErr == nil {
+				liveSHA, err = s.remoteBranchSHA(workTree, gitDir, remote.Name, name, fetchAuth)
+			} else {
+				err = authErr
+			}
+			switch {
+			case err != nil:
+				originNote = " (origin could not be reached to confirm it still has the branch)"
+			case liveSHA == "":
+				// Gone on origin: drop the stale tracking ref so status and branch lists stop showing it.
+				_, _ = s.engine.run(s.context(), workTree, gitDir, nil, "update-ref", "-d", "refs/remotes/"+ref)
+			default:
+				localBases = append(append([][2]string{}, bases...), [2]string{ref, liveSHA})
+			}
 		}
 		result.Local = &GitDeletedBranch{SHA: localSHA, MergedInto: s.mergedInto(workTree, gitDir, localSHA, localBases)}
 		if result.Local.MergedInto == "" {
@@ -192,8 +209,8 @@ func (s *gitService) DeleteBranch(ctx *sdk.AppCtx, repo *Repo, in GitBranchDelet
 		if len(unmerged) > 1 {
 			verb = "have"
 		}
-		return nil, fmt.Errorf("%s of %s %s commits not merged into %s; pass force=true to delete it anyway (the result returns the tip so it can be recreated)",
-			strings.Join(unmerged, " and "), name, verb, target)
+		return nil, fmt.Errorf("%s of %s %s commits not merged into %s%s; pass force=true to delete it anyway (the result returns the tip so it can be recreated)",
+			strings.Join(unmerged, " and "), name, verb, target, originNote)
 	}
 
 	// Remote first: if origin refuses, the local branch is untouched.

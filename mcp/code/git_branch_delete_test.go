@@ -151,6 +151,50 @@ func TestGitBranchDelete_LocalMergedUnmergedAndPushed(t *testing.T) {
 	if f.localHas(t, "refs/heads/feature") != feature {
 		t.Fatal("recreate from returned SHA failed")
 	}
+
+	// The branch is then deleted on origin by someone else. The tracking ref
+	// still says origin/feature, but origin is asked directly: the local copy
+	// is now the only one, so it is kept.
+	testGit(t, f.seed, "push", "origin", "--delete", "feature")
+	if f.localHas(t, "refs/remotes/origin/feature") != feature {
+		t.Fatal("fixture: tracking ref should still be stale here")
+	}
+	_, err = f.del("feature", "local", false)
+	wantErr(t, err, "the local branch of feature has commits not merged into main")
+	if f.localHas(t, "refs/heads/feature") != feature {
+		t.Fatal("stale tracking ref let unmerged work be deleted")
+	}
+	if f.localHas(t, "refs/remotes/origin/feature") != "" {
+		t.Fatal("stale tracking ref not dropped after origin said the branch is gone")
+	}
+	got, err = f.del("feature", "local", true)
+	if err != nil || got.Local.SHA != feature || got.Local.MergedInto != "" {
+		t.Fatalf("forced delete=%+v err=%v", got, err)
+	}
+}
+
+func TestGitBranchDelete_FetchDropsBranchesDeletedOnOrigin(t *testing.T) {
+	f := newBranchDeleteFixture(t)
+	testGit(t, f.seed, "push", "origin", "main:gone")
+	if _, err := f.service.Fetch(f.ctx, f.repo, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if f.localHas(t, "refs/remotes/origin/gone") == "" {
+		t.Fatal("fetch did not bring origin/gone")
+	}
+	testGit(t, f.seed, "push", "origin", "--delete", "gone")
+	if _, err := f.service.Fetch(f.ctx, f.repo, "test"); err != nil {
+		t.Fatal(err)
+	}
+	branches, err := f.service.Branches(f.ctx, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range branches {
+		if b.Name == "origin/gone" {
+			t.Fatal("fetch kept a branch deleted on origin")
+		}
+	}
 }
 
 func TestGitBranchDelete_RemoteAndBoth(t *testing.T) {

@@ -1,3 +1,28 @@
+# Apteva Code 0.20.1
+
+Fixes the safety check of `repos_git_branch_delete` for local-only deletes.
+
+## Fixes
+
+- Deleting only the local copy of a branch counted as safe when the
+  repository's `origin/<branch>` tracking ref contained its commits. That ref
+  is only as fresh as the last fetch, so a branch deleted on origin since
+  could let unmerged work be deleted without `force`. Origin is now asked
+  directly (`ls-remote`):
+  - still there and containing the commits: deleted, `merged_into` names it;
+  - gone: the stale tracking ref is dropped and the delete is refused
+    unless the work is merged elsewhere or `force=true`;
+  - unreachable: refused unless merged elsewhere or forced, and the error
+    says origin could not be reached.
+
+## Validation
+
+- `TestGitBranchDelete_LocalMergedUnmergedAndPushed` now deletes the branch
+  on origin behind the repository's back and checks the stale tracking ref
+  no longer lets unmerged work go.
+- `TestGitBranchDelete_FetchDropsBranchesDeletedOnOrigin`: fetch prunes
+  branches deleted on origin from the branch list.
+
 # Apteva Code 0.20.0
 
 Adds branch deletion for Git-backed repositories. Existing tools keep their

@@ -182,7 +182,8 @@ shows `git_backed: true`:
   refused; pass `force=true` only when the user wants it gone. The result
   returns each deleted tip so `repos_git_branch_create start_point=<sha>` can
   bring it back. The checked-out branch and origin's default branch are never
-  deleted.
+  deleted. `origin/...` entries in `repos_git_branches` are only as fresh as
+  the last `repos_git_fetch`; the delete itself always checks origin live.
 
 ## Revisions are optional during ordinary work
 
