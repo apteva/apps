@@ -1,3 +1,22 @@
+# Apteva Code 0.21.1
+
+Fixes the Git & runs tab opening on Runs.
+
+## Fixes
+
+- The Git & runs tab opened on Runs for Git-backed repositories when the
+  repository's Git status arrived after the tab (always the case on a real
+  server), hiding Pull requests until another section was clicked. The
+  section is now derived from the Git status, so it opens on Pull requests.
+- Activity keeps operation names on one line.
+
+## Validation
+
+- `ui/tests/git-view.spec.ts`: new case with Git status delayed 600 ms.
+- Live check: the real panel source with the dashboard's CSS against the
+  local server's apteva-apps data (pull requests, branches, tags, runs,
+  activity), no console errors.
+
 # Apteva Code 0.21.0
 
 Adds human review for GitHub merges and makes agent activity visible in the

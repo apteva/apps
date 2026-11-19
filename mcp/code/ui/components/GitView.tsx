@@ -58,9 +58,12 @@ function Btn({ onClick, disabled, danger, children, title }: { onClick: () => vo
 
 export function GitView({ slug, api, refreshTick, gitBacked, defaultBranch }: { slug: string; api: API; refreshTick: number; gitBacked: boolean; defaultBranch?: string }) {
   // A repository without a Git remote still has command runs.
+  // The repository's Git status can arrive after this view mounts, so the
+  // section is derived: Runs only until it is known to be Git-backed, then
+  // the person's pick (Pull requests by default).
   const sections = gitBacked ? SECTIONS : SECTIONS.filter((s) => s.id === "runs");
-  const [section, setSection] = useState<Section>(gitBacked ? "pulls" : "runs");
-  useEffect(() => { if (!gitBacked) setSection("runs"); }, [gitBacked]);
+  const [picked, setSection] = useState<Section | null>(null);
+  const section: Section = gitBacked ? (picked ?? "pulls") : "runs";
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
@@ -275,7 +278,7 @@ export function GitView({ slug, api, refreshTick, gitBacked, defaultBranch }: { 
                 {ops.map((o) => (
                   <tr key={o.id} className="border-t border-border align-top">
                     <td className="py-1.5 text-xs text-text-muted whitespace-nowrap pr-2">{when(o.created_at)}</td>
-                    <td className="font-mono text-xs pr-2">{o.operation.replace(/_/g, " ")}</td>
+                    <td className="font-mono text-xs pr-2 whitespace-nowrap">{o.operation.replace(/_/g, " ")}</td>
                     <td className="text-xs pr-2 whitespace-nowrap">{who(o.actor)}</td>
                     <td className="font-mono text-xs text-text-muted pr-2 whitespace-nowrap">{short(o.from_sha)}{o.from_sha && o.to_sha && o.from_sha !== o.to_sha ? " → " : ""}{o.from_sha !== o.to_sha ? short(o.to_sha) : ""}</td>
                     <td className="text-xs">{o.status === "ok" ? <Pill tone="green">ok</Pill> : <span className="text-red">{o.error || o.status}</span>}</td>

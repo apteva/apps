@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.21.0
+version: 0.21.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.21.1 opens the Git & runs tab on Pull requests when the repository's
+  Git status arrives after the tab.
   v0.21.0 adds human review for GitHub merges: an agent can merge a pull
   request only after a person approved its current head (action=approve,
   people only), and the merge is pinned to that head. Pull request actions
@@ -438,7 +440,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.21.0
+    ref: code/v0.21.1
     entry: mcp/code
   port: 8080
   health_check: /health

@@ -4,7 +4,7 @@ import {test,expect,type Page} from '@playwright/test';
 // merge, branch deletion, tags, command runs and the operation log.
 const pull={number:42,url:'https://github.com/apteva/apps/pull/42',state:'open',title:'Release places 0.2.0',head:'feat/places',head_sha:'abc123def456',base:'main',draft:true,merged:false,mergeable:true,author:'marco',created_at:'2026-11-19T10:00:00Z'};
 
-async function fixture(page:Page,opts:{gitBacked?:boolean}={}){
+async function fixture(page:Page,opts:{gitBacked?:boolean;statusDelayMs?:number}={}){
  const posts:Array<{path:string;body:any}>=[];
  let approved=false;
  await page.route('**/api/**',async route=>{
@@ -20,7 +20,7 @@ async function fixture(page:Page,opts:{gitBacked?:boolean}={}){
   if(path==='/api/auth/me')json={user_id:1,email:'test@example.invalid'};
   else if(path.endsWith('/repos'))json={repositories:[{id:1,slug:'apps',name:'Apps',framework:'blank'}]};
   else if(path.endsWith('/tree'))json={files:[]};
-  else if(path.endsWith('/git/status'))json=opts.gitBacked===false?{git_backed:false,changes:[]}:{git_backed:true,branch:'main',ahead:0,behind:0,dirty:false,conflicted:false,changes:[],remote:{fetch_url:'https://github.com/apteva/apps.git',default_branch:'main'}};
+  else if(path.endsWith('/git/status')){if(opts.statusDelayMs)await new Promise(r=>setTimeout(r,opts.statusDelayMs));json=opts.gitBacked===false?{git_backed:false,changes:[]}:{git_backed:true,branch:'main',ahead:0,behind:0,dirty:false,conflicted:false,changes:[],remote:{fetch_url:'https://github.com/apteva/apps.git',default_branch:'main'}};}
   else if(path.endsWith('/status'))json={dev_run:null};
   else if(path.endsWith('/git/pull-requests'))json={pull_requests:[{...pull,approved_by:approved?['user:1']:undefined}],count:1};
   else if(path.endsWith('/git/branches'))json={branches:[{name:'main',current:true,remote:false,sha:'aaa111'},{name:'wip',current:false,remote:false,sha:'bbb222'},{name:'origin/main',current:false,remote:true,sha:'aaa111'},{name:'origin/feat/places',current:false,remote:true,sha:'abc123def456'}],count:4};
@@ -86,4 +86,10 @@ test('a repository without Git shows only its runs',async({page})=>{
  await fixture(page,{gitBacked:false});
  await expect(page.getByText('go test ./...')).toBeVisible();
  await expect(page.getByRole('button',{name:'Pull requests'})).toHaveCount(0);
+});
+
+test('the Git tab opens on pull requests even when Git status arrives late',async({page})=>{
+ await fixture(page,{statusDelayMs:600});
+ await expect(page.getByText('#42 Release places 0.2.0')).toBeVisible();
+ await expect(page.getByRole('button',{name:'Pull requests'})).toBeVisible();
 });
