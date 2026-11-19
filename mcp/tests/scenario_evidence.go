@@ -69,6 +69,13 @@ func sanitizeStep(result *StepResult, output any, selected []string, release *re
 			}
 		}
 	}
+	if result.Kind == "integration_trigger" || result.Kind == "integration_state" {
+		// Simulated providers hold no real data; keep asserted values unless a
+		// path segment looks sensitive.
+		for _, assertion := range result.Assertions {
+			selected = append(selected[:len(selected):len(selected)], assertion.Path)
+		}
+	}
 	for _, path := range selected {
 		if path == "/body" {
 			continue

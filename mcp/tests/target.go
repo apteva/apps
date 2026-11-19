@@ -47,6 +47,8 @@ type GeneratedEnvironment struct {
 	TTLSeconds     int                 `json:"ttl_seconds,omitempty"`
 	CandidateProbe *ToolProbe          `json:"candidate_probe,omitempty"`
 	ReadTools      map[string][]string `json:"read_tools,omitempty"`
+	// Integrations bind simulated providers to app roles (Environments 0.12.0+).
+	Integrations []SimulatedIntegration `json:"integrations,omitempty"`
 	// Pinned is filled by Tests when the suite is saved.
 	Pinned *PinnedEnvironment `json:"pinned,omitempty"`
 }
@@ -194,6 +196,9 @@ func (e *GeneratedEnvironment) validate() error {
 	}
 	if len(e.Seeds) > 64 {
 		return errors.New("at most 64 environment seeds")
+	}
+	if err := e.validateIntegrations(); err != nil {
+		return err
 	}
 	if e.CandidateProbe != nil && !validProbe(*e.CandidateProbe) {
 		return errors.New("invalid candidate_probe")
@@ -631,6 +636,9 @@ func generatedSpec(t *TargetConfig, installs map[string]int64) (map[string]any, 
 	}
 	if len(env.Seeds) > 0 {
 		spec["seeds"] = env.Seeds
+	}
+	if len(env.Integrations) > 0 {
+		spec["integration_bindings"] = env.bindingSpec()
 	}
 	if env.Data != nil && env.Data.SnapshotID != "" {
 		spec["snapshot_id"] = env.Data.SnapshotID

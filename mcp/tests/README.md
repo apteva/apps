@@ -800,3 +800,77 @@ by `case_key` = `file :: describe > name`.
   128 KB per command.
 - The Tests panel and home widgets show code checks as plain results; a
   per-case view is planned for 0.9.0.
+
+## Integration simulation (0.9.0)
+
+Isolated runs can drive a simulated provider, such as a fake Telnyx, through
+Environments 0.12.0 or newer. The provider is bound with `simulate: true`, so
+the apps under test talk to the simulation and no live connection is bound.
+
+**Binding.** In a suite target, declare the simulation under
+`target.environment.integrations`. Tests adds it to the generated
+environment's `integration_bindings`, so the pinned spec digest (and therefore
+the verdict) covers it:
+
+```json
+{"mode": "isolated",
+ "targets": {"api": {"app": "telephony", "path": "/api"}},
+ "environment": {"apps": ["telephony"],
+   "integrations": [{"app": "telephony", "role": "carrier", "slug": "telnyx", "simulate": true,
+                     "seed": {"phone_numbers": [{"phone_number": "+33100000001"}]}}],
+   "seeds": ["… route setup, see below …"]}}
+```
+
+Hand-written release suites put the same binding in their Environments
+definition. Tests can't check it when the suite is saved; a missing binding
+fails the step at run time.
+
+**`integration_trigger`** fires a provider-side event and waits for the
+webhooks it caused. Its output is `{result, deliveries}`. It cannot poll, and
+it is not allowed in `parallel` groups, because provider events are ordered.
+
+```json
+{"id": "incoming", "kind": "integration_trigger", "slug": "telnyx", "trigger": "incoming_call",
+ "input": {"to": "+33100000001", "from": "{{caller}}"}, "timeout_ms": 15000,
+ "capture": {"call_id": "/result/call_control_id"},
+ "assertions": [{"path": "/deliveries/0/status", "op": "equals", "value": 204}]}
+```
+
+Later steps use `{{call_id}}`, for example a `caller_hangup` or `dtmf` trigger
+on the same call. Each trigger step records its deliveries (event, app, target
+path, state, status, attempts, error) in the step result. When the step fails
+and a delivery failed, the error names it, for example "telephony returned 500
+to call.initiated". `app` and `role` pick the binding when a run simulates the
+same slug more than once.
+
+**`integration_state`** reads the simulation's collections and every webhook
+delivery so far. Its output is `{collections, deliveries}`. With
+`poll_every_ms` it re-reads until the assertions pass:
+
+```json
+{"id": "answered", "kind": "integration_state", "slug": "telnyx", "timeout_ms": 20000, "poll_every_ms": 250,
+ "assertions": [{"path": "/collections/calls/0/state", "op": "equals", "value": "answered"}]}
+```
+
+These steps are a separate kind from `app_tool`: the simulated provider is not
+one of the apps under test, so the read-tool allowlist stays strict. Both kinds
+are allowed only in isolated suites (generated targets with a matching
+simulated integration, or hand-written release suites).
+
+**Errors.**
+- A trigger the simulation refuses (provider 422, for example a number that is
+  not provisioned or a missing route) fails with the simulation's reason.
+- An action the simulation does not implement (501) is reported as
+  unsupported.
+- An Environments version older than 0.12.0 is named in the error.
+
+**Setup and limits.**
+- Routes and other app setup belong in the environment's seed plan, which runs
+  before the checks. Write tools are not allowed as `app_tool` steps.
+- Telephony currently requires an agent to own an inbound route, and seed
+  plans cannot create agents. So a Telephony inbound-call scenario needs that
+  resolved outside Tests first.
+- The Telnyx simulation does not cover media streams, dial, transfer or SMS
+  (501).
+- Whether a browser's WebRTC connection works on an isolated run's blocked
+  network is untested.
