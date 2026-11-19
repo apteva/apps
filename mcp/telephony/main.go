@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.22.0
+version: 0.23.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -422,7 +422,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.22.0
+    ref: telephony/v0.23.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -851,10 +851,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_create",
-			Description: "Create an inbound route from a carrier phone number to an agent. Agents own the routes they create. Platform callers (API key, panel session) must pass agent_id naming the owning agent in this project. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, agent_id? (required for non-agent callers), hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
+			Description: "Create an inbound route from a carrier phone number to an agent. Agents own the routes they create. Platform callers (API key, panel session) pass agent_id naming the owning agent in this project, or omit it with answer_mode human_browser for a number only people answer; such a number never involves an agent and cannot switch to agent or realtime_immediate answering. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, agent_id? (required for non-agent callers), hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
 				"phone_number":          map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
-				"agent_id":              map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
+				"agent_id":              map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session), unless answer_mode is human_browser; agents own the routes they create and may omit it."},
 				"phone_number_id":       map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
 				"phone_number_sid":      map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
 				"hold_prompt":           map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
@@ -1994,8 +1994,8 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 // agentID. The MCP tool and the panel HTTP endpoint share it so every caller
 // type gets identical validation. The returned string is the follow-up step.
 func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string]any) (*routeRow, string, error) {
-	if agentID <= 0 {
-		return nil, "", errors.New("agent_id required")
+	if err := requireRouteAgentFor(routeAnswerModeArg(args), agentID); err != nil {
+		return nil, "", err
 	}
 	bound := ctx.IntegrationFor("carrier")
 	if selected := int64(intArg(args, "carrier_connection_id", 0)); selected > 0 {
@@ -2140,6 +2140,9 @@ func (a *App) toolRoutesSetAnswerMode(callerCtx context.Context, ctx *sdk.AppCtx
 		strArg(args, "answer_mode", ""), directive, voice, greeting,
 	)
 	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if err := requireRouteAgentFor(mode, route.AgentID); err != nil {
 		return mcpError(err.Error()), nil
 	}
 	if err := a.db().updateRouteAnswerMode(route.ID, mode, directive, voice, greeting); err != nil {
@@ -4471,6 +4474,24 @@ func inboundPeerKind(answerMode string) string {
 		return peerKindHuman
 	}
 	return peerKindRealtime
+}
+
+// routeAnswerModeArg is the answer_mode a route request asks for, agent when omitted.
+func routeAnswerModeArg(args map[string]any) string {
+	return strings.ToLower(strings.TrimSpace(strArg(args, "answer_mode", answerModeAgent)))
+}
+
+// requireRouteAgentFor keeps a number with no agent (agent_id 0) on people:
+// agent answering would notify nobody, and realtime answering has no agent to
+// run the call in.
+func requireRouteAgentFor(mode string, agentID int64) error {
+	if agentID < 0 {
+		return errors.New("agent_id must be a positive agent id")
+	}
+	if agentID == 0 && mode != answerModeHumanBrowser {
+		return errors.New("agent_id required: a number with no agent can only use answer_mode human_browser; agent and realtime_immediate answering need an agent_id")
+	}
+	return nil
 }
 
 func normalizeRouteAnswerConfig(mode, directive, voice, greeting string) (string, string, string, string, error) {

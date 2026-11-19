@@ -67,7 +67,10 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	}); err != nil {
 		return nil, false, err
 	}
-	if !isSuppressedHandlingReason(call.HandlingReason) && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
+	// The incoming-call event goes to the call's agent. A call with no agent
+	// (a number only people answer) has nobody to tell, and the platform
+	// refuses agent 0, so no event is queued.
+	if call.AgentID > 0 && !isSuppressedHandlingReason(call.HandlingReason) && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {

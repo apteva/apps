@@ -1833,7 +1833,7 @@ func writeRoutingProgressTx(tx *sql.Tx, callID, project string, plan *inboundRou
 	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,routing_resolution=CASE WHEN ?<>'' THEN ? ELSE routing_resolution END,callback_on_ai=CASE WHEN ? THEN 1 ELSE callback_on_ai END,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, plan.RoutingResolution, plan.RoutingResolution, plan.CallbackOnAI, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
 		return err
 	}
-	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" {
+	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" && plan.AgentID > 0 {
 		message := fmt.Sprintf("Incoming routed phone call. call_id=%s. Answer with telephony_answer_call or decline with telephony_reject_call.", callID)
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox(call_id,project_id,agent_id,message,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET agent_id=excluded.agent_id,message=excluded.message,delivered_at='',lease_token='',next_attempt_at=excluded.next_attempt_at WHERE inbound_event_outbox.agent_id<>excluded.agent_id`, callID, project, plan.AgentID, message, time.Now().UTC().Format(time.RFC3339)); err != nil {
 			return err

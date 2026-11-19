@@ -63,7 +63,9 @@ func agentIDArg(args map[string]any) int64 {
 
 // resolveRouteOwner decides which agent a new inbound route belongs to.
 // Agents own what they create and cannot hand routes to other agents.
-// Platform principals carry no agent id and must name the owner explicitly.
+// Platform principals carry no agent id and name the owner explicitly, or
+// create a number only people answer (answer_mode human_browser) with no
+// agent at all; 0 means no agent.
 func (a *App) resolveRouteOwner(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (int64, error) {
 	requested := agentIDArg(args)
 	if callerID := callerAgentID(callerCtx); callerID != 0 {
@@ -72,8 +74,14 @@ func (a *App) resolveRouteOwner(callerCtx context.Context, ctx *sdk.AppCtx, args
 		}
 		return callerID, nil
 	}
-	if requested <= 0 {
-		return 0, errors.New("agent_id required: the caller is not an agent, so name the agent that should own this route")
+	if requested < 0 {
+		return 0, errors.New("agent_id must be a positive agent id")
+	}
+	if requested == 0 {
+		if routeAnswerModeArg(args) == answerModeHumanBrowser {
+			return 0, nil
+		}
+		return 0, errors.New("agent_id required: the caller is not an agent, so name the agent that should own this route, or use answer_mode human_browser for a number that only people answer")
 	}
 	if err := a.validateProjectAgent(ctx, requested); err != nil {
 		return 0, err
@@ -122,11 +130,10 @@ func (a *App) projectAgents(ctx *sdk.AppCtx) (map[string]any, error) {
 // an error, because the route row is real and the panel must show it.
 func (a *App) createRouteFromPanel(ctx *sdk.AppCtx, body map[string]any) (map[string]any, error) {
 	agentID := agentIDArg(body)
-	if agentID <= 0 {
-		return nil, errors.New("agent_id required")
-	}
-	if err := a.validateProjectAgent(ctx, agentID); err != nil {
-		return nil, err
+	if agentID > 0 {
+		if err := a.validateProjectAgent(ctx, agentID); err != nil {
+			return nil, err
+		}
 	}
 	route, next, err := a.createInboundRoute(ctx, agentID, body)
 	if err != nil {

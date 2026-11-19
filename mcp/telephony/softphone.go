@@ -1728,6 +1728,9 @@ func (a *App) setRouteAnswerMode(ctx *sdk.AppCtx, routeID, mode, directive, voic
 	if err != nil {
 		return nil, err
 	}
+	if err := requireRouteAgentFor(normalizedMode, route.AgentID); err != nil {
+		return nil, err
+	}
 	if err := a.db().updateRouteAnswerMode(routeID, normalizedMode, normalizedDirective, normalizedVoice, normalizedGreeting); err != nil {
 		return nil, fmt.Errorf("persist answer mode: %w", err)
 	}

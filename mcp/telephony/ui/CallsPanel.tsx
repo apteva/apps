@@ -2289,9 +2289,11 @@ function NumbersView({ projectId }: NativePanelProps) {
   // still needs carrier configuration.
   const createRoute = async (number: ConnectedNumber) => {
     const draft = routeDraft(number);
-    const agentId = Number(draft.agent_id);
-    if (!Number.isInteger(agentId) || agentId <= 0) {
-      setTransportStatus("Choose the agent that should own this number");
+    const agentId = draft.agent_id.trim() === "" ? 0 : Number(draft.agent_id);
+    // A number that rings in the browser may have no agent at all.
+    const agentless = agentId === 0 && draft.answer_mode === "human_browser";
+    if (!agentless && (!Number.isInteger(agentId) || agentId <= 0)) {
+      setTransportStatus("Choose the agent that should own this number, or ring it in the browser with no agent");
       return;
     }
     setRouteSaving(number.phone_number);
@@ -2302,13 +2304,13 @@ function NumbersView({ projectId }: NativePanelProps) {
         carrier_connection_id: number.carrier_connection_id,
         inbound_transport: number.provider === "didww" ? "sip_direct" : "programmable_websocket",
         phone_number_id: number.provider_number_id || "",
-        agent_id: agentId,
+        ...(agentless ? {} : { agent_id: agentId }),
         answer_mode: draft.answer_mode,
         configure: true,
       });
       setTransportStatus(result.warning
         ? `${number.phone_number} routed, but ${result.warning}`
-        : `${number.phone_number} now routes to agent ${agentId}`);
+        : agentless ? `${number.phone_number} now rings in the browser` : `${number.phone_number} now routes to agent ${agentId}`);
     } catch (e) {
       setTransportStatus((e as Error).message || "Could not create the inbound route");
     } finally {
@@ -2481,6 +2483,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                               disabled={routeSaving === number.phone_number}
                               className="h-8 min-w-0 rounded border border-border bg-bg px-2 text-xs"
                             >
+                              {routeDraft(number).answer_mode === "human_browser" && <option value="">No agent</option>}
                               {agents.map((agent) => (
                                 <option key={agent.id} value={String(agent.id)}>{agent.name || `Agent ${agent.id}`}</option>
                               ))}
@@ -2522,8 +2525,12 @@ function NumbersView({ projectId }: NativePanelProps) {
                     <div className="min-w-0">
                       {number.route ? (
                         <>
-                          <div className="truncate">{number.route.agent_name || `Agent ${number.route.agent_id}`}</div>
-                          <div className="truncate text-xs text-text-dim">ID {number.route.agent_id}</div>
+                          {number.route.agent_id ? (
+                            <>
+                              <div className="truncate">{number.route.agent_name || `Agent ${number.route.agent_id}`}</div>
+                              <div className="truncate text-xs text-text-dim">ID {number.route.agent_id}</div>
+                            </>
+                          ) : <div className="truncate text-text-muted">No agent</div>}
                         </>
                       ) : <span className="text-xs text-text-muted">-</span>}
                     </div>
