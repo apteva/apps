@@ -718,10 +718,12 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 		if err != nil {
 			return nil, err
 		}
-		return a.runWorkspaceCommand(callCtx, ctx, prep, repoCommandInput{
+		res, err := a.runWorkspaceCommand(callCtx, ctx, prep, repoCommandInput{
 			Command: strArg(args, "command"), EnvJSON: strArg(args, "env_json"),
 			TimeoutSeconds: intArg(args, "timeout_seconds", 300), TailLines: intArg(args, "tail", 200),
 		})
+		recordCommandRun(ctx, repo, "workspace", strArg(args, "command"), strArg(args, "actor"), res, err)
+		return res, err
 	}
 	if strArg(args, "image") != "" {
 		return nil, errors.New("image requires runtime=workspace")
@@ -743,6 +745,7 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 		TimeoutSeconds: intArg(args, "timeout_seconds", 300),
 		TailLines:      intArg(args, "tail", 200),
 	})
+	recordCommandRun(ctx, repo, "local", strArg(args, "command"), strArg(args, "actor"), res, err)
 	if err != nil {
 		return nil, err
 	}

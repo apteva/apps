@@ -176,7 +176,11 @@ shows `git_backed: true`:
 - `repos_git_pull_request action=create title=...` opens a GitHub pull
   request from the pushed branch into the default branch (`base` to change
   it); calling it again returns the open one (`existing: true`), so retries
-  are safe. Use `list`, `get`, `merge` (with `expected_head_sha` when merging what
+  are safe. Merging needs a person's approval of the pull request's current
+  head (`approved_by` in `list`/`get`): if `merge` says it needs approval,
+  tell the user to approve it in the Code panel (Git & runs tab) and stop;
+  you cannot approve it yourself, and pushing new commits clears earlier
+  approvals. Use `list`, `get`, `merge` (with `expected_head_sha` when merging what
   you reviewed) and `close` for the rest. Merge only when the user asked for it.
 - `repos_git_branch_delete name=... where=local|remote|both` removes a branch
   once its work is merged or released (default `local`). Unmerged work is

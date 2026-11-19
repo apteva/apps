@@ -1,5 +1,15 @@
 # Apteva Code
 
+## v0.21.0 — merge review and the Git & runs tab
+
+An agent can merge a GitHub pull request only after a person approved its
+current head (`repos_git_pull_request action=approve`, people only, or the
+Approve button in the panel); the merge is pinned to that head and a new push
+clears earlier approvals. Every `repos_run_command` run is kept with its
+output, pull request actions join the Git operation log, and the Code panel's
+new Git & runs tab shows pull requests, branches, tags, runs and activity.
+Details in RELEASE-NOTES.md.
+
 ## v0.20.0 — branch deletion
 
 `repos_git_branch_delete` deletes a Git branch locally, on origin, or both

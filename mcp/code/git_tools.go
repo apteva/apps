@@ -98,10 +98,12 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			Name: "repos_git_pull_request",
 			Description: "GitHub pull requests for a Git-backed repository whose origin is on github.com, through its GitHub connection. " +
 				"action=create opens one from head (default the checked-out branch, which must already be pushed) into base (default the remote's default branch): title, body?, draft?; if one is already open for that head and base it is returned with existing=true, so retrying is safe. " +
-				"action=list (state? open|closed|all, head?, base?, limit?), action=get (number), action=merge (number, method? merge|squash|rebase, expected_head_sha?, commit_title?, commit_message?), action=close (number). Args: slug, action, ...",
+				"action=list (state? open|closed|all, head?, base?, limit?), action=get (number), action=merge (number, method? merge|squash|rebase, expected_head_sha?, commit_title?, commit_message?), action=close (number). " +
+				"Merging needs a person's approval of the pull request's current head (approved_by in list/get): an agent's merge is refused until a person approves it in the Code panel, and is pinned to the approved head. " +
+				"action=approve (number, expected_head_sha?) is for people only; agents cannot approve. Args: slug, action, ...",
 			InputSchema: schemaObject(map[string]any{
 				"slug":              map[string]any{"type": "string"},
-				"action":            map[string]any{"type": "string", "enum": []string{"create", "list", "get", "merge", "close"}},
+				"action":            map[string]any{"type": "string", "enum": []string{"create", "list", "get", "approve", "merge", "close"}},
 				"number":            map[string]any{"type": "integer"},
 				"title":             map[string]any{"type": "string"},
 				"body":              map[string]any{"type": "string"},
@@ -332,6 +334,7 @@ func pullRequestInputFromArgs(args map[string]any) PullRequestInput {
 		State: strArg(args, "state"), Limit: intArg(args, "limit", 0),
 		Method: strArg(args, "method"), ExpectedHeadSHA: strArg(args, "expected_head_sha"),
 		CommitTitle: strArg(args, "commit_title"), CommitMessage: strArg(args, "commit_message"),
+		Actor: strArg(args, "actor"),
 	}
 }
 

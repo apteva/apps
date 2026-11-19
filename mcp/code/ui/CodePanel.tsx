@@ -1,4 +1,5 @@
 import { AutoSyncControls } from "./components/AutoSyncControls";
+import { GitView } from "./components/GitView";
 import { encodeFilePath, containsPath, RequestGate } from "./components/editorState";
 import { useDebouncedRefresh } from "./components/codeCards";
 // CodePanel — native React panel for the code app. Three-pane:
@@ -437,9 +438,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
-  const [activeView, setActiveView] = useState<"code" | "issues">(
+  const [activeView, setActiveView] = useState<"code" | "issues" | "git">(
     initialLink.view === "issues" ? "issues" : "code",
   );
+  // Bumped by repo.git.* / repo.command.finished events for the selected
+  // repository so the Git & runs view reloads.
+  const [gitTick, setGitTick] = useState(0);
   // Lifted from DevBar so the main content area can render the live
   // device view for remote (Simulator-app) dev runs.
   const [devRun, setDevRun] = useState<DevRunWire | null>(null);
@@ -682,6 +686,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   // mutation, REST-driven or MCP-driven).
   useAppEvents<FileEventData>("code", projectId, (ev) => {
     const openFile=fileRef.current;
+    if (selectedSlug && ev.data?.slug === selectedSlug && (ev.topic.startsWith("repo.git.") || ev.topic === "repo.command.finished")) {
+      setGitTick((t) => t + 1);
+    }
     switch (ev.topic) {
       case "repo.added":
       case "repo.updated":
@@ -1026,11 +1033,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             activeView === "issues" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
           }`}
         >Issues</button>
+        <button
+          type="button"
+          onClick={() => {
+            setShowDevLogs(false);
+            setActiveView("git");
+          }}
+          className={`py-2 text-sm border-b-2 ${
+            activeView === "git" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
+          }`}
+        >Git &amp; runs</button>
       </nav>
 
       <div className="flex-1 min-h-0 flex">
       {/* Repo list */}
-      {activeView === "code" && (
+      {activeView !== "issues" && (
       <aside className="w-64 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
           <input
@@ -1138,6 +1155,17 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       ) : !selectedSlug ? (
         <main className="flex-1 overflow-hidden flex items-center justify-center text-text-muted text-sm">
           Select a repository.
+        </main>
+      ) : activeView === "git" ? (
+        <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+          <GitView
+            key={`${projectId}:${selectedSlug}`}
+            slug={selectedSlug}
+            api={api}
+            refreshTick={gitTick}
+            gitBacked={!!gitStatus?.git_backed}
+            defaultBranch={gitStatus?.remote?.default_branch}
+          />
         </main>
       ) : (
         <main className="flex-1 min-w-0 overflow-hidden flex flex-col">

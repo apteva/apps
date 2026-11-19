@@ -38,6 +38,9 @@ type GitPullRequest struct {
 	UpdatedAt      string `json:"updated_at,omitempty"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
+	// ApprovedBy lists the people who approved this pull request at its
+	// current head in Code; approvals of earlier heads are not counted.
+	ApprovedBy []string `json:"approved_by,omitempty"`
 }
 
 type PullRequestInput struct {
@@ -54,6 +57,9 @@ type PullRequestInput struct {
 	ExpectedHeadSHA string
 	CommitTitle     string
 	CommitMessage   string
+	// Actor is the verified caller (set by the MCP wrapper or the REST
+	// handler, never by the client); it decides who may approve and merge.
+	Actor string
 }
 
 type PullRequestResult struct {
@@ -148,7 +154,7 @@ func (s *gitService) PullRequest(ctx *sdk.AppCtx, repo *Repo, in PullRequestInpu
 	if strings.EqualFold(strings.TrimSpace(in.Action), "create") && strings.TrimSpace(in.Base) == "" {
 		in.Base = firstNonEmpty(remote.DefaultBranch, "main")
 	}
-	return runPullRequest(ctx.PlatformAPI(), conn, target, in, branchState)
+	return reviewedPullRequest(ctx.AppDB(), repo.ID, ctx.PlatformAPI(), conn, target, in, branchState, mergeApprovalRequired())
 }
 
 // runPullRequest performs one action against GitHub. branchState returns the

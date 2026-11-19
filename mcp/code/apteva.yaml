@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.20.2
+version: 0.21.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,12 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.21.0 adds human review for GitHub merges: an agent can merge a pull
+  request only after a person approved its current head (action=approve,
+  people only), and the merge is pinned to that head. Pull request actions
+  join the Git operation log, every repos_run_command run is kept with its
+  output, and the Code panel gains a Git & runs tab (pull requests, branches,
+  tags, runs, activity).
   v0.20.2 makes repos_git_pull_request create safe to retry: an open pull
   request from the same head into the same base is returned (existing=true)
   instead of GitHub's duplicate error.
@@ -432,7 +438,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.20.2
+    ref: code/v0.21.0
     entry: mcp/code
   port: 8080
   health_check: /health
@@ -456,6 +462,11 @@ config_schema:
     default: ""
     label: Dev preview base hostname
     description: Optional ingress domain; preview hostnames include the repository identity.
+  - name: git_merge_approval
+    type: text
+    default: "required"
+    label: Pull request merge approval
+    description: '"required": an agent can merge a GitHub pull request only after a person approved its current head in Code. "off" lets agents merge without approval.'
   - name: max_file_size_mb
     type: text
     default: "10"

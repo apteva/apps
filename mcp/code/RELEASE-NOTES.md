@@ -1,3 +1,57 @@
+# Apteva Code 0.21.0
+
+Adds human review for GitHub merges and makes agent activity visible in the
+Code panel. Agents that merged pull requests directly now need a person's
+approval first (set `git_merge_approval` to `off` to keep the old behaviour).
+
+## Changes
+
+- **Human review for GitHub merges.** `repos_git_pull_request` gains
+  `action=approve` (number, `expected_head_sha?`), for people only: agents
+  and unidentified callers are refused. An agent's `merge` is refused until a
+  person has approved the pull request's current head, and is then pinned to
+  that head (GitHub refuses it if commits were pushed since). A new push
+  makes earlier approvals stale. A person merging is their own review and is
+  recorded as an approval. `list`/`get` show `approved_by` for the current
+  head. The install setting `git_merge_approval` (default `required`) can be
+  set to `off`. Approvals are stored in `repo_git_pr_approvals`
+  (migration 019).
+- **Pull request actions are logged.** `pr_create`, `pr_approve`, `pr_merge`
+  (including refused merges) and `pr_close` join the repository's Git
+  operation log with the verified caller.
+- **Command runs are kept.** Every `repos_run_command` call (local or
+  workspace) is stored with its command, exit code, duration, workspace,
+  caller and the last 64 KiB of output; the newest 200 per repository are
+  kept and `repo.command.finished` is emitted.
+- **REST:** `GET /api/repos/<slug>/git/operations?limit=`,
+  `GET /api/repos/<slug>/runs?limit=` and `GET /api/repos/<slug>/runs/<id>`
+  (full output tail).
+- **Code panel: Git & runs tab.** For the selected repository:
+  - Pull requests (open/closed/all) with approval state, Approve, Merge
+    (method choice, confirmation, pinned to the shown head) and Close.
+  - Branches with delete (asks first; offers Force after an "unmerged"
+    refusal; no delete for the checked-out or default branch).
+  - Tags with publish state, Tag HEAD, Push and local Delete.
+  - Runs with pass/fail, duration, caller and expandable output.
+  - Activity: the Git operation log, refusals included.
+  - Repositories without Git show Runs only. The view reloads on
+    `repo.git.*` and `repo.command.finished` events.
+
+## Validation
+
+- `TestPullRequestReview_PersonApprovesAgentMerges`: agent merge refused
+  before approval, agents cannot approve, approval of an outdated head
+  refused, approved merge pinned to the head, stale approval after a push,
+  person merge recorded as approval, gate off, operation log contents.
+- `TestCommandRuns_RecordedAndCapped`: stored fields, 2 KB list preview vs
+  64 KiB full tail, retention of 200.
+- `TestSidecar_GitRelease_*`: operation log and runs routes through the real
+  sidecar.
+- Browser (`ui/tests/git-view.spec.ts`, Chromium, scripted backend): approve
+  then merge sends `expected_head_sha`, runs expand to output, activity
+  shows refusals, branch delete then force, tags publish state, non-Git
+  repository shows only Runs.
+
 # Apteva Code 0.20.2
 
 Makes pull request creation safe to retry.

@@ -91,6 +91,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoIssueItem(w, r, slug, strings.TrimPrefix(tail, "issues/"))
 	case strings.HasPrefix(tail, "dev/") || tail == "dev":
 		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
+	case tail == "runs" || strings.HasPrefix(tail, "runs/"):
+		a.httpRepoRuns(w, r, slug, strings.TrimPrefix(strings.TrimPrefix(tail, "runs"), "/"))
 	case strings.HasPrefix(tail, "git/") || tail == "git":
 		a.httpRepoGit(w, r, slug, strings.TrimPrefix(tail, "git/"))
 	case strings.HasPrefix(tail, "version/") || tail == "version":

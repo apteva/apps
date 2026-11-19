@@ -168,6 +168,32 @@ func TestSidecar_GitRelease_TagsReleaseBranchAndPullRequestGuard(t *testing.T) {
 	if err := nativeMCPError(sc, "repos_git_pull_request", map[string]any{"slug": "apps", "action": "list"}); err == nil || !strings.Contains(err.Error(), "github.com remotes only") {
 		t.Fatalf("pull request on a non-GitHub origin: %v", err)
 	}
+	// The panel's activity log: every Git operation above, newest first.
+	var opsREST struct {
+		Operations []GitOperation `json:"operations"`
+	}
+	if resp := sc.GET("/api/repos/apps/git/operations", &opsREST); resp.Status != 200 || len(opsREST.Operations) < 8 {
+		t.Fatalf("REST operations status=%d %+v", resp.Status, opsREST)
+	}
+	seen := map[string]bool{}
+	for _, op := range opsREST.Operations {
+		seen[op.Operation+"/"+op.Status] = true
+	}
+	for _, want := range []string{"commit/ok", "tag_create/ok", "tag_push/ok", "tag_push/error", "push/ok", "push/error", "branch_delete/ok"} {
+		if !seen[want] {
+			t.Fatalf("operation log misses %s: %v", want, seen)
+		}
+	}
+	var runsREST struct {
+		Runs  []CommandRun `json:"runs"`
+		Count int          `json:"count"`
+	}
+	if resp := sc.GET("/api/repos/apps/runs", &runsREST); resp.Status != 200 || runsREST.Count != 0 {
+		t.Fatalf("REST runs status=%d %+v", resp.Status, runsREST)
+	}
+	if resp := sc.GET("/api/repos/apps/runs/999", nil); resp.Status != 404 {
+		t.Fatalf("REST missing run status=%d", resp.Status)
+	}
 	var tagsREST map[string]any
 	if resp := sc.GET("/api/repos/apps/git/tags", &tagsREST); resp.Status != 200 || tagsREST["count"].(float64) != 1 {
 		t.Fatalf("REST tags status=%d %v", resp.Status, tagsREST)

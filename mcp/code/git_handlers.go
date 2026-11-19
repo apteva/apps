@@ -325,6 +325,18 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		httpJSON(w, result)
+	case "operations":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		ops, err := dbGitOperations(globalCtx.AppDB(), repo.ID, limit)
+		if err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
+		httpJSON(w, map[string]any{"operations": ops, "count": len(ops)})
 	case "pull-requests":
 		// GET lists (?state=&head=&base=&limit=); POST takes the repos_git_pull_request arguments.
 		var in PullRequestInput
@@ -343,6 +355,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 				return
 			}
 			in = pullRequestInputFromArgs(args)
+			in.Actor = httpActor(r) // never the body's
 		default:
 			httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
 			return
