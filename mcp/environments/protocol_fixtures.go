@@ -22,6 +22,10 @@ func protocolFixtureCatalog() []ProtocolFixtureCatalogItem {
 		Version:     "1.0.0",
 		Protocol:    "Twilio Voice and Media Streams",
 		TargetApp:   "telephony",
+		// Kept for stored environments. New specs bind the carrier
+		// integration with simulate:true instead (0.12.0).
+		Deprecated:  true,
+		Replacement: `integration_bindings: [{"app": "telephony", "role": "<carrier role>", "slug": "telnyx", "simulate": true}]`,
 	}}
 }
 

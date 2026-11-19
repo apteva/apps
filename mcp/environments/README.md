@@ -335,3 +335,85 @@ The run reports `environment_id`, `spec_version` and `spec_digest` in the
 run is not the definition's active run: it does not appear as `active_run`, is
 not reconciled or stopped by the definition's lifecycle, and is stopped with
 `environment_run_stop` like an inline run. Inline-spec runs omit the pin fields.
+
+## Simulated integrations (0.12.0)
+
+An integration binding can run the integration's own simulation from the
+integrations catalog (its `mock` section) instead of a dead fake connection.
+Apps in the run call the fake provider through their usual tools; it keeps
+provider state and sends signed webhooks back to the apps. This needs Apteva
+0.100.16 or later. On an older server a `simulate` binding is created as an
+ordinary fake connection, and the trigger and state tools fail.
+
+```json
+"integration_bindings": [
+  {"app": "telephony", "role": "carrier", "slug": "telnyx", "simulate": true,
+   "seed": {"phone_numbers": [{"phone_number": "+15550100001"}]}}
+]
+```
+
+- `seed` pre-loads simulation collections and requires `simulate`.
+- Environments rejects `seed` without `simulate`, a `simulate` binding without
+  `slug`, two simulated bindings for the same slug, app and role, and a
+  simulated `carrier` binding for an app that also has the deprecated
+  `telephony-carrier` protocol fixture. When the run starts, the platform
+  rejects an integration with no simulation and unknown seed collections.
+- `simulate` and `seed` are part of the stored spec, so they change
+  `spec_digest`.
+- `environment_catalog` cannot yet say which integrations have a simulation or
+  which triggers each one has. Those come from the integration's catalog entry.
+
+`environment_integration_trigger` causes a provider-side event:
+
+```json
+{"run_id":"run_1","slug":"telnyx","trigger":"incoming_call",
+ "input":{"to":"+15550100001","from":"+15550100999"},"wait":true,"timeout_ms":10000}
+```
+
+It returns the provider's `result` and each webhook `delivery` (event, app,
+target path, state, attempts, HTTP status, error). `app` and `role` are needed
+only when the run simulates the same integration for more than one binding.
+`wait` waits for the webhooks this trigger emitted, not for the ones the apps
+cause in reaction. An event the simulation rejects, such as a call to a number
+it does not hold, is a tool error carrying the provider's response body.
+
+`environment_integration_state` returns the simulation's `collections` (for
+example `calls`, `phone_numbers`) and every webhook delivery so far.
+
+### `integration_state` assertions
+
+```json
+{"run_id":"run_1","type":"integration_state","slug":"telnyx",
+ "collection":"calls","where":{"to":"+15550100001"},
+ "require":{"state":"answered"},"timeout_ms":15000}
+```
+
+```json
+{"run_id":"run_1","type":"integration_state","slug":"telnyx","deliveries":true,
+ "where":{"app":"telephony"},
+ "require":{"state":"delivered","status":{"gte":200,"lt":300}},"match":"all"}
+```
+
+- Give exactly one of `collection` or `deliveries: true`.
+- `where` selects records and `require` is checked on each selected record.
+  Keys are dotted paths. A value is either a literal compared for equality or
+  an object of operators: `eq`, `ne`, `in` (list), `gt`, `gte`, `lt`, `lte`,
+  `exists` (bool), `contains` (substring). An object whose keys are not all
+  operators is compared as a literal.
+- `match`: `any` (default) passes when at least `min_count` (default 1)
+  selected records satisfy `require`; `all` needs at least `min_count`
+  selected records and every one satisfying it; `none` passes when no
+  selected record satisfies it.
+- `timeout_ms` (up to 60000) polls the state every 250 ms until the assertion
+  passes. Without it the state is checked once.
+- `actual` reports `total`, `selected`, `satisfied` and up to five `samples`:
+  the selected records for `any`, the violating ones for `all` and `none`.
+
+### Deprecated: `telephony-carrier` protocol fixture
+
+The `telephony-carrier` pack adds a hand-written "Simulated Twilio carrier"
+binding. It keeps working for stored environments, and `environment_catalog`
+marks it `deprecated`. New specs should bind the carrier integration with
+`simulate: true`. The pack will be removed once no stored environment uses it.
+`environment_voice_call` (a simulated caller talking to a realtime agent) is
+separate and unchanged.

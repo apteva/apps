@@ -464,6 +464,8 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 		return AssertionResult{}, errors.New("min_calls must not be negative")
 	}
 	switch a.Type {
+	case "integration_state":
+		return s.assertIntegrationState(runtimeID, a)
 	case "app_state":
 		var actual any
 		if err := s.runtime().CallRuntimeAppResult(runtimeID, a.App, a.Tool, a.Input, &actual); err != nil {
@@ -648,6 +650,9 @@ func validateSpec(spec EnvironmentSpec) error {
 	}
 	if len(spec.MCPServerIDs) > 16 {
 		return errors.New("mcp_server_ids may contain at most 16 entries")
+	}
+	if err := validateIntegrationBindings(spec); err != nil {
+		return err
 	}
 	for i, seed := range spec.Seeds {
 		if err := validateSeedRefs(seed.Input, i, spec.Targets); err != nil {

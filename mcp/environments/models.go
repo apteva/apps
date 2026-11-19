@@ -134,6 +134,8 @@ type ProtocolFixtureCatalogItem struct {
 	Version     string `json:"version"`
 	Protocol    string `json:"protocol"`
 	TargetApp   string `json:"target_app"`
+	Deprecated  bool   `json:"deprecated,omitempty"`
+	Replacement string `json:"replacement,omitempty"`
 }
 
 type ProtocolFixtureInstance struct {
@@ -372,6 +374,16 @@ type Assertion struct {
 	AgentAlias string         `json:"agent_alias,omitempty"`
 	EventType  string         `json:"event_type,omitempty"`
 	Fixture    string         `json:"fixture,omitempty"`
+	// integration_state (0.12.0): App and Role select the simulated binding.
+	Slug       string         `json:"slug,omitempty"`
+	Role       string         `json:"role,omitempty"`
+	Collection string         `json:"collection,omitempty"`
+	Deliveries bool           `json:"deliveries,omitempty"`
+	Where      map[string]any `json:"where,omitempty"`
+	Require    map[string]any `json:"require,omitempty"`
+	Match      string         `json:"match,omitempty"`
+	MinCount   int            `json:"min_count,omitempty"`
+	TimeoutMS  int            `json:"timeout_ms,omitempty"`
 }
 
 type AssertionResult struct {
