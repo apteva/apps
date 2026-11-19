@@ -35,7 +35,7 @@ func TestGwProbability_OddsDevig(t *testing.T) {
 			{"key":"pinnacle","markets":[{"key":"h2h","outcomes":[
 				{"name":"Carlos Alcaraz","price":1.85},{"name":"Jannik Sinner","price":2.05}]}]},
 			{"key":"betfair","markets":[{"key":"h2h","outcomes":[
-				{"name":"Carlos Alcaraz","price":1.83},{"name":"Jannik Sinner","price":2.08}]}]}
+				{"name":"Jannik Sinner","price":2.08},{"name":"Carlos Alcaraz","price":1.83}]}]}
 		]}]`
 	sc := &mockSource{responses: map[string]json.RawMessage{
 		"the-odds-api:get_odds": json.RawMessage(oddsResp),
@@ -88,8 +88,8 @@ func TestGwContext_MergesAndDedups(t *testing.T) {
 
 func TestGwStats_FansAndRecordsProvenance(t *testing.T) {
 	sc := &mockSource{responses: map[string]json.RawMessage{
-		"api-sports:tennis_rankings":   json.RawMessage(`{"Alcaraz":{"rank":2}}`),
-		"tennis-abstract:recent_form":  json.RawMessage(`{"win_rate":0.9}`),
+		"api-sports:tennis_rankings":  json.RawMessage(`{"Alcaraz":{"rank":2}}`),
+		"tennis-abstract:recent_form": json.RawMessage(`{"win_rate":0.9}`),
 	}}
 	res := gwStats(sc, "Carlos Alcaraz", "tennis")
 	if _, ok := res.Data["ranking"]; !ok {
