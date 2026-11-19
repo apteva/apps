@@ -227,7 +227,7 @@ var samplePull = map[string]any{
 func TestPullRequests_ActionsThroughTheConnection(t *testing.T) {
 	target := githubRepo{Owner: "apteva", Name: "apps"}
 	pushedState := func(string) (string, string) { return "local1", "local1" }
-	gh := &fakeGitHub{replies: map[string]*sdk.ExecuteResult{"create_pull": ghReply(201, samplePull)}}
+	gh := &fakeGitHub{replies: map[string]*sdk.ExecuteResult{"create_pull": ghReply(201, samplePull), "list_pulls": ghReply(200, []any{})}}
 	res, err := runPullRequest(gh, 134, target, PullRequestInput{Action: "create", Title: "Release places 0.2.0", Head: "feat/places", Base: "main", Body: "notes", Draft: true}, pushedState)
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +236,14 @@ func TestPullRequests_ActionsThroughTheConnection(t *testing.T) {
 	if pr.Number != 42 || pr.URL == "" || pr.Head != "feat/places" || pr.HeadSHA != "abc123" || pr.Base != "main" || pr.Author != "marco" || pr.Mergeable == nil || !*pr.Mergeable || res.UnpushedCommits {
 		t.Fatalf("create result=%+v pr=%+v", res, pr)
 	}
-	in := gh.inputs[0]
+	// Create first looks for an open pull request from the same head into the same base.
+	if gh.calls[0] != "list_pulls" || gh.calls[1] != "create_pull" || res.Existing {
+		t.Fatalf("create calls=%v existing=%v", gh.calls, res.Existing)
+	}
+	if look := gh.inputs[0]; look["head"] != "apteva:feat/places" || look["base"] != "main" || look["state"] != "open" {
+		t.Fatalf("lookup input=%v", look)
+	}
+	in := gh.inputs[1]
 	if in["owner"] != "apteva" || in["repo"] != "apps" || in["head"] != "feat/places" || in["base"] != "main" || in["draft"] != true || in["body"] != "notes" {
 		t.Fatalf("create input=%v", in)
 	}
@@ -300,7 +307,28 @@ func TestPullRequests_ActionsThroughTheConnection(t *testing.T) {
 		t.Fatalf("close=%+v err=%v", res, err)
 	}
 
-	// GitHub's validation message comes back readable.
+	// A repeated create returns the open pull request instead of failing.
+	gh.replies["list_pulls"] = ghReply(200, []any{samplePull})
+	before := len(gh.calls)
+	res, err = runPullRequest(gh, 134, target, PullRequestInput{Action: "create", Title: "Release places 0.2.0", Head: "feat/places", Base: "main"}, pushedState)
+	if err != nil || !res.Existing || res.PullRequest.Number != 42 || len(gh.calls) != before+1 || gh.calls[before] != "list_pulls" {
+		t.Fatalf("repeated create=%+v err=%v calls=%v", res, err, gh.calls[before:])
+	}
+	// An open pull request from the same head into another base is not a duplicate.
+	otherBase := map[string]any{}
+	for k, v := range samplePull {
+		otherBase[k] = v
+	}
+	otherBase["base"] = map[string]any{"ref": "release/places"}
+	gh.replies["list_pulls"] = ghReply(200, []any{otherBase})
+	res, err = runPullRequest(gh, 134, target, PullRequestInput{Action: "create", Title: "x", Head: "feat/places", Base: "main"}, pushedState)
+	if err != nil || res.Existing || gh.calls[len(gh.calls)-1] != "create_pull" {
+		t.Fatalf("other base create=%+v err=%v", res, err)
+	}
+
+	// GitHub's validation message comes back readable when no open pull
+	// request explains it.
+	gh.replies["list_pulls"] = ghReply(200, []any{})
 	gh.replies["create_pull"] = ghReply(422, map[string]any{"message": "Validation Failed",
 		"errors": []any{map[string]any{"message": "A pull request already exists for apteva:feat/places."}}})
 	_, err = runPullRequest(gh, 134, target, PullRequestInput{Action: "create", Title: "x", Head: "feat/places", Base: "main"}, pushedState)
@@ -310,6 +338,40 @@ func TestPullRequests_ActionsThroughTheConnection(t *testing.T) {
 	gh.replies["get_pull"] = ghReply(401, map[string]any{"message": "Bad credentials"})
 	if _, err := runPullRequest(gh, 134, target, PullRequestInput{Action: "get", Number: 42}, nil); err == nil || !strings.Contains(err.Error(), "Bad credentials") {
 		t.Fatalf("401: %v", err)
+	}
+}
+
+// sequencedGitHub answers each tool from a queue, for check-then-create races.
+type sequencedGitHub struct {
+	calls   []string
+	replies map[string][]*sdk.ExecuteResult
+}
+
+func (f *sequencedGitHub) ExecuteIntegrationTool(conn int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	f.calls = append(f.calls, tool)
+	queue := f.replies[tool]
+	if len(queue) == 0 {
+		return nil, errors.New("unexpected tool " + tool)
+	}
+	f.replies[tool] = queue[1:]
+	return queue[0], nil
+}
+
+func TestPullRequests_CreateRaceReturnsTheOtherAttempt(t *testing.T) {
+	gh := &sequencedGitHub{replies: map[string][]*sdk.ExecuteResult{
+		// Nothing open at the check; another attempt opens #42 before this create lands.
+		"list_pulls": {ghReply(200, []any{}), ghReply(200, []any{samplePull})},
+		"create_pull": {ghReply(422, map[string]any{"message": "Validation Failed",
+			"errors": []any{map[string]any{"message": "A pull request already exists for apteva:feat/places."}}})},
+	}}
+	res, err := runPullRequest(gh, 134, githubRepo{Owner: "apteva", Name: "apps"},
+		PullRequestInput{Action: "create", Title: "x", Head: "feat/places", Base: "main"},
+		func(string) (string, string) { return "local1", "local1" })
+	if err != nil || !res.Existing || res.PullRequest.Number != 42 {
+		t.Fatalf("race create=%+v err=%v", res, err)
+	}
+	if strings.Join(gh.calls, ",") != "list_pulls,create_pull,list_pulls" {
+		t.Fatalf("calls=%v", gh.calls)
 	}
 }
 

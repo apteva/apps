@@ -67,6 +67,10 @@ type PullRequestResult struct {
 	// UnpushedCommits is true on create when the local head branch has
 	// commits origin does not have yet; the request shows origin's state.
 	UnpushedCommits bool `json:"unpushed_commits,omitempty"`
+	// Existing is true on create when an open pull request from the same head
+	// into the same base was already there and is returned unchanged, so a
+	// retried create never fails or opens a second one.
+	Existing bool `json:"existing,omitempty"`
 }
 
 type githubRepo struct{ Owner, Name string }
@@ -187,10 +191,43 @@ func runPullRequest(exec pullRequestExecutor, conn int64, target githubRepo, in 
 			return nil, fmt.Errorf("branch %s is not on origin; push it first with repos_git_push", head)
 		}
 		result.UnpushedCommits = local != "" && local != pushed
+		base := strings.TrimSpace(in.Base)
+		openPull := func() (*GitPullRequest, error) {
+			var pulls []githubPull
+			args := map[string]any{"state": "open", "head": target.Owner + ":" + head, "per_page": 100}
+			if base != "" {
+				args["base"] = base
+			}
+			if err := callGitHub(exec, conn, "list_pulls", with(args), &pulls); err != nil {
+				return nil, err
+			}
+			for i := range pulls {
+				if view := pulls[i].view(); view.Head == head && (base == "" || view.Base == base) {
+					return view, nil
+				}
+			}
+			return nil, nil
+		}
+		// A retried create returns the pull request the first attempt opened.
+		existing, err := openPull()
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			result.PullRequest, result.Existing = existing, true
+			break
+		}
 		var pr githubPull
 		if err := callGitHub(exec, conn, "create_pull", with(map[string]any{
-			"title": title, "head": head, "base": strings.TrimSpace(in.Base), "body": in.Body, "draft": in.Draft,
+			"title": title, "head": head, "base": base, "body": in.Body, "draft": in.Draft,
 		}), &pr); err != nil {
+			// Opened concurrently between the check and the create.
+			if strings.Contains(err.Error(), "already exists") {
+				if existing, lookupErr := openPull(); lookupErr == nil && existing != nil {
+					result.PullRequest, result.Existing = existing, true
+					break
+				}
+			}
 			return nil, err
 		}
 		result.PullRequest = pr.view()

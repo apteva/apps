@@ -1,3 +1,26 @@
+# Apteva Code 0.20.2
+
+Makes pull request creation safe to retry.
+
+## Fixes
+
+- `repos_git_pull_request action=create` (and REST `POST .../git/pull-requests`)
+  failed with GitHub's 422 "A pull request already exists" when called again
+  for the same branch, so an agent retrying after a timeout got an error
+  instead of its pull request. Create now looks for an open pull request from
+  the same head into the same base first and returns it unchanged with
+  `existing: true`. If one is opened concurrently between that check and the
+  create, the 422 is answered the same way. An open pull request into a
+  different base is not treated as a duplicate.
+
+## Validation
+
+- `TestPullRequests_ActionsThroughTheConnection`: lookup before create,
+  repeated create returns #42 without a create call, other base still creates,
+  other 422s stay readable.
+- `TestPullRequests_CreateRaceReturnsTheOtherAttempt`: empty check, 422 on
+  create, then the concurrently opened pull request is returned.
+
 # Apteva Code 0.20.1
 
 Fixes the safety check of `repos_git_branch_delete` for local-only deletes.
