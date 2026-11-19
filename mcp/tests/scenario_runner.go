@@ -280,6 +280,8 @@ func (a *App) scenarioStepOutput(ctx context.Context, step Step, values map[stri
 		}
 		input, _ := value.(map[string]any)
 		return app.release.invoke(ctx, step.App, step.Tool, input)
+	case "integration_trigger", "integration_state":
+		return integrationStep(ctx, step, values, app, result)
 	default:
 		return nil, errors.New("unknown scenario step")
 	}
@@ -332,6 +334,15 @@ func (a *App) runStep(ctx context.Context, step Step, values map[string]any, app
 			}
 		}
 		sanitizeStep(&result, output, step.Evidence, app.release)
+		if result.Status == "failed" && result.Error == "" {
+			// Name the app's own webhook failure instead of only "assertion failed".
+			for _, d := range result.Deliveries {
+				if d.failed() {
+					result.Error = describeDelivery(d)
+					break
+				}
+			}
+		}
 		if result.Status == "passed" {
 			result.coverageQualified = len(step.Schema) > 0
 			for _, assertion := range assertions {

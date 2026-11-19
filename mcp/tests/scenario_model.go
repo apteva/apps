@@ -36,26 +36,34 @@ type Step struct {
 	Capture     map[string]string    `json:"capture,omitempty"`
 	Evidence    []string             `json:"evidence,omitempty"`
 	Parallel    []Step               `json:"parallel,omitempty"`
+	// Simulated integrations (Environments 0.12.0+): Slug names a simulate:true
+	// binding, Trigger the provider-side event; App and Role pick the binding
+	// when the run simulates the slug more than once.
+	Slug    string `json:"slug,omitempty"`
+	Trigger string `json:"trigger,omitempty"`
+	Role    string `json:"role,omitempty"`
 }
 
 type StepResult struct {
-	ID                string            `json:"id"`
-	Kind              string            `json:"kind,omitempty"`
-	Status            string            `json:"status"`
-	Error             string            `json:"error,omitempty"`
-	DurationMS        int64             `json:"duration_ms"`
-	Attempts          int               `json:"attempts,omitempty"`
-	Method            string            `json:"method,omitempty"`
-	Path              string            `json:"path,omitempty"`
-	OperationID       string            `json:"operation_id,omitempty"`
-	HTTPStatus        int               `json:"http_status,omitempty"`
-	Correlation       string            `json:"correlation_id,omitempty"`
-	Assertions        []AssertionResult `json:"assertions,omitempty"`
-	Evidence          map[string]any    `json:"evidence,omitempty"`
-	Parallel          []StepResult      `json:"parallel,omitempty"`
-	ArtifactID        int64             `json:"artifact_id,omitempty"`
-	Diagnostics       any               `json:"diagnostics,omitempty"`
-	ActionDispatched  bool              `json:"action_dispatched,omitempty"`
+	ID               string            `json:"id"`
+	Kind             string            `json:"kind,omitempty"`
+	Status           string            `json:"status"`
+	Error            string            `json:"error,omitempty"`
+	DurationMS       int64             `json:"duration_ms"`
+	Attempts         int               `json:"attempts,omitempty"`
+	Method           string            `json:"method,omitempty"`
+	Path             string            `json:"path,omitempty"`
+	OperationID      string            `json:"operation_id,omitempty"`
+	HTTPStatus       int               `json:"http_status,omitempty"`
+	Correlation      string            `json:"correlation_id,omitempty"`
+	Assertions       []AssertionResult `json:"assertions,omitempty"`
+	Evidence         map[string]any    `json:"evidence,omitempty"`
+	Parallel         []StepResult      `json:"parallel,omitempty"`
+	ArtifactID       int64             `json:"artifact_id,omitempty"`
+	Diagnostics      any               `json:"diagnostics,omitempty"`
+	ActionDispatched bool              `json:"action_dispatched,omitempty"`
+	// Deliveries are the webhooks an integration_trigger step caused.
+	Deliveries        []deliverySummary `json:"deliveries,omitempty"`
 	coverageQualified bool
 }
 
@@ -81,6 +89,9 @@ func validateSteps(steps []Step) error {
 		for j := range s.Parallel {
 			if s.Parallel[j].Kind == "browser" {
 				return errors.New("browser steps must execute sequentially")
+			}
+			if s.Parallel[j].Kind == "integration_trigger" {
+				return errors.New("integration_trigger steps must execute sequentially; provider events are ordered")
 			}
 			if err := validateStep(&s.Parallel[j], ids, names); err != nil {
 				return err
@@ -152,6 +163,23 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 	case "app_tool":
 		if !slugPattern.MatchString(s.App) || !slugPattern.MatchString(s.Tool) {
 			return fmt.Errorf("app-tool step %s requires an app and a tool", s.ID)
+		}
+	case "integration_trigger", "integration_state":
+		if !slugPattern.MatchString(s.Slug) || s.App != "" && !slugPattern.MatchString(s.App) || s.Role != "" && !slugPattern.MatchString(s.Role) {
+			return fmt.Errorf("%s step %s needs an integration slug; app and role are optional names", s.Kind, s.ID)
+		}
+		if s.Tool != "" || s.Path != "" || s.Function != "" || s.Target != "" || s.Identity != "" {
+			return fmt.Errorf("%s step %s takes slug, trigger, app, role and input only", s.Kind, s.ID)
+		}
+		if s.Kind == "integration_trigger" {
+			if !slugPattern.MatchString(s.Trigger) {
+				return fmt.Errorf("integration_trigger step %s needs a trigger, for example incoming_call", s.ID)
+			}
+			if s.PollEveryMS > 0 {
+				return fmt.Errorf("integration_trigger step %s fires once and cannot poll; poll with an integration_state step", s.ID)
+			}
+		} else if s.Trigger != "" || len(s.Input) > 0 {
+			return fmt.Errorf("integration_state step %s reads state; it takes no trigger or input", s.ID)
 		}
 	default:
 		return fmt.Errorf("invalid kind in step %s", s.ID)
@@ -240,6 +268,9 @@ func validateScenarioBinding(c Check, suite Suite) error {
 				}
 				if step.Kind == "app_tool" || (step.Identity != "" && step.Identity != "anonymous") {
 					return errors.New("app-tool steps and named identities require a release environment")
+				}
+				if step.Kind == "integration_trigger" || step.Kind == "integration_state" {
+					return fmt.Errorf("step %s: simulated integrations exist only in isolated release suites", step.ID)
 				}
 				if step.Kind == "http" {
 					u, err := url.Parse(step.Path)
@@ -359,6 +390,13 @@ func validateTargetStep(step Step, target *TargetConfig) error {
 	case "app_tool":
 		if target.Mode != "isolated" || !target.allowsRead(step.App, step.Tool) {
 			return fmt.Errorf("step %s is outside the environment read-tool allowlist", step.ID)
+		}
+	case "integration_trigger", "integration_state":
+		if target.Mode != "isolated" || target.Environment == nil {
+			return fmt.Errorf("step %s: simulated integrations exist only in isolated runs", step.ID)
+		}
+		if !target.Environment.simulates(step.Slug, step.App, step.Role) {
+			return fmt.Errorf("step %s: the environment does not simulate %q; add it to target.environment.integrations with simulate:true", step.ID, step.Slug)
 		}
 	}
 	return nil
