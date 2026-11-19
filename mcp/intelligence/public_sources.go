@@ -109,6 +109,21 @@ func polymarketGamma(tool string, args map[string]any) (json.RawMessage, bool) {
 			q.Set("limit", "20")
 		}
 		return getJSON(base + "/markets?" + q.Encode())
+	case "markets_window":
+		// Open markets closing inside [end_date_min, end_date_max], most
+		// traded first. Used by the question importer.
+		q := url.Values{}
+		q.Set("closed", "false")
+		q.Set("active", "true")
+		q.Set("order", "volumeNum")
+		q.Set("ascending", "false")
+		q.Set("limit", orStr(args["limit"], "100"))
+		for _, k := range []string{"end_date_min", "end_date_max", "offset"} {
+			if v := strArgM(args, k); v != "" {
+				q.Set(k, v)
+			}
+		}
+		return getJSON(base + "/markets?" + q.Encode())
 	case "search":
 		q := url.Values{}
 		q.Set("limit", "20")
@@ -166,6 +181,19 @@ func gdeltCall(tool string, args map[string]any) (json.RawMessage, bool) {
 	case "doc_search":
 		q.Set("mode", "ArtList")
 		q.Set("maxrecords", orStr(args["maxrecords"], "8"))
+		if v := strArgM(args, "timespan"); v != "" {
+			q.Set("timespan", v)
+		}
+		// GDELT wants YYYYMMDDHHMMSS; accept RFC3339 / YYYY-MM-DD too.
+		for _, k := range []string{"startdatetime", "enddatetime"} {
+			if v := strArgM(args, k); v != "" {
+				if t, err := parseOptionalTime(v); err == nil && t != nil {
+					v = t.UTC().Format("20060102150405")
+				}
+				q.Set(k, v)
+			}
+		}
+		q.Set("sort", "DateDesc")
 		return getJSON(base + "/doc/doc?" + q.Encode())
 	case "doc_timeline_volume":
 		q.Set("mode", "TimelineVol")
@@ -198,7 +226,7 @@ func wikipediaCall(tool string, args map[string]any) (json.RawMessage, bool) {
 func kalshiCall(tool string, args map[string]any) (json.RawMessage, bool) {
 	base := "https://api.elections.kalshi.com/trade-api/v2"
 	q := url.Values{}
-	for _, k := range []string{"series_ticker", "event_ticker", "ticker", "status", "limit", "cursor"} {
+	for _, k := range []string{"series_ticker", "event_ticker", "ticker", "status", "limit", "cursor", "min_close_ts", "max_close_ts", "mve_filter"} {
 		if v := strArgM(args, k); v != "" {
 			q.Set(k, v)
 		}
@@ -229,6 +257,11 @@ func manifoldCall(tool string, args map[string]any) (json.RawMessage, bool) {
 		q := url.Values{}
 		q.Set("term", orStr(args["term"], strArgM(args, "topic")))
 		q.Set("limit", orStr(args["limit"], "20"))
+		for _, k := range []string{"filter", "sort", "contractType"} {
+			if v := strArgM(args, k); v != "" {
+				q.Set(k, v)
+			}
+		}
 		return getJSON(base + "/search-markets?" + q.Encode())
 	case "list_markets":
 		q := url.Values{}

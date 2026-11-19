@@ -18,10 +18,10 @@ import (
 )
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
-		{Name: "search", Description: "Generic bitemporal intelligence search across recorded evidence. Args: query?, kind?, source?, entity?, event_from?, event_to?, published_from?, published_to?, as_of?, limit?. Dates accept RFC3339 or YYYY-MM-DD; as_of returns only facts known and valid at that time.",
+	return append(a.worldTools(), []sdk.Tool{
+		{Name: "search", Description: "Generic bitemporal intelligence search across recorded evidence. Args: query?, kind?, source?, entity?, event_from?, event_to?, published_from?, published_to?, as_of?, knowledge? (observed|ingested), limit?. Dates accept RFC3339 or YYYY-MM-DD; as_of returns only facts known and valid at that time — knowledge=ingested uses the server's arrival time, which callers cannot backdate.",
 			InputSchema: schemaObject(map[string]any{
-				"query": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"},
+				"query": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "knowledge": map[string]any{"type": "string"},
 				"event_from": map[string]any{"type": "string"}, "event_to": map[string]any{"type": "string"}, "published_from": map[string]any{"type": "string"}, "published_to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
 			}, nil), Handler: a.toolSearch},
 		{Name: "evidence_record", Description: "Record an immutable, source-attributed evidence item for later search, timelines, monitoring, and point-in-time replay. Duplicate content is idempotent.",
@@ -30,8 +30,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"source"}), Handler: a.toolEvidenceRecord},
 		{Name: "timeline", Description: "Return a chronological evidence timeline for a topic or entity, with optional point-in-time cutoff. Alias for search ordered by temporal evidence.",
 			InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolTimeline},
-		{Name: "replay", Description: "Build a deterministic point-in-time evidence snapshot for analysis or backtesting. Returns the matched records plus the cutoff and stable snapshot hash.",
-			InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"as_of"}), Handler: a.toolReplay},
+		{Name: "replay", Description: "Point-in-time evidence snapshot. With forecast_id: re-assemble exactly what that forecast saw and verify its snapshot hash. Otherwise: records known and valid at as_of (knowledge=ingested for look-ahead-safe server time) plus a stable snapshot hash.",
+			InputSchema: schemaObject(map[string]any{"forecast_id": map[string]any{"type": "integer"}, "query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "knowledge": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolReplay},
 		{Name: "enrich", Description: "Everything relevant to a prediction market in one normalized blob: cross-venue prices, ground-truth probability, entities, their stats + H2H, news, computed edge. Args: market (id/slug), entity_a + entity_b (optional — the outcome principals, e.g. two players), domain (optional — tennis/sports/macro/crypto), sport (optional — the-odds-api sport_key), topic (optional — news query override).",
 			InputSchema: schemaObject(map[string]any{
 				"market":   map[string]any{"type": "string"},
@@ -96,11 +96,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "signal_scan_now", Description: "Run provider discovery and signal generation now.", InputSchema: schemaObject(nil, nil), Handler: a.toolSignalScan},
 		{Name: "signal_backtest", Description: "Walk-forward replay with no look-ahead. Args: symbol (Binance form, e.g. BTCUSDT), interval?, strategy?, limit?.",
 			InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}, "interval": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"symbol"}), Handler: a.toolSignalBacktest},
-	}
+	}...)
 }
 
 func evidenceQueryFromArgs(args map[string]any, projectID string) (EvidenceQuery, error) {
-	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50}
+	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50, Knowledge: strArg(args, "knowledge")}
+	if q.Knowledge != "" && q.Knowledge != "observed" && q.Knowledge != "ingested" {
+		return q, errors.New("knowledge must be observed or ingested")
+	}
 	if raw, ok := args["offset"]; ok {
 		n, err := strconv.Atoi(fmt.Sprint(raw))
 		if err != nil || n < 0 {
@@ -170,12 +173,15 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if id := intArgAny(args, "forecast_id"); id > 0 {
+		return replayForecast(ctx.AppDB(), pid, id)
+	}
 	q, err := evidenceQueryFromArgs(args, pid)
 	if err != nil {
 		return nil, err
 	}
 	if q.AsOf == nil {
-		return nil, errors.New("as_of is required")
+		return nil, errors.New("as_of (or forecast_id) is required")
 	}
 	rows, err := searchEvidence(ctx.AppDB(), q)
 	if err != nil {
@@ -183,7 +189,9 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	b, _ := json.Marshal(rows)
 	sum := sha256.Sum256(b)
-	return map[string]any{"snapshot": hex.EncodeToString(sum[:]), "as_of": q.AsOf.UTC().Format(time.RFC3339), "records": rows, "count": len(rows), "lookahead_safe": true}, nil
+	return map[string]any{"snapshot": hex.EncodeToString(sum[:]), "as_of": q.AsOf.UTC().Format(time.RFC3339), "records": rows, "count": len(rows),
+		"knowledge": fallback(q.Knowledge, "observed"), "lookahead_safe": q.Knowledge == "ingested",
+		"note": "observed knowledge trusts source-supplied observation times; use knowledge=ingested for look-ahead-safe replay"}, nil
 }
 
 func (a *App) toolEvidenceRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {

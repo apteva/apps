@@ -1,9 +1,9 @@
-module github.com/apteva/apps/mcp/market-intel
+module github.com/apteva/apps/mcp/intelligence
 
-go 1.25.0
+go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.26.0
+	github.com/apteva/app-sdk v0.117.0
 	modernc.org/sqlite v1.50.0
 )
 

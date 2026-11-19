@@ -142,6 +142,9 @@ var registry = map[string]map[queryType][]sourceSpec{
 				if p["to"] != nil {
 					a["enddatetime"] = p["to"]
 				}
+				if p["timespan"] != nil {
+					a["timespan"] = p["timespan"]
+				}
 				return a
 			}},
 			{slug: "sec-edgar", tool: "ticker_to_cik", argFn: func(p map[string]any) map[string]any {

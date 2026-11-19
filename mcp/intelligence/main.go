@@ -1,10 +1,11 @@
-// market-intel combines a cross-source research gateway with an audited,
-// provider-neutral signal pipeline. Signals are read-only recommendations;
-// execution authority remains in the trading app.
+// Intelligence keeps a continuously updated, source-attributed model of a
+// part of the world — evidence, entities, relationships, measured state —
+// and uses it for recorded, scored probabilistic forecasts and hypothetical
+// scenarios. The market pack (cross-source gateway, devig, signals,
+// backtests) ships inside the same app.
 //
-// Read-only by design — market-intel reads prices, depth, stats, and
-// history; the agent decides; the trading app executes. No order-placing
-// authority lives here.
+// Decision support only: it never trades, profiles private individuals, or
+// takes actions on anyone's behalf.
 
 package main
 
@@ -22,110 +23,284 @@ import (
 )
 
 const manifestYAML = `schema: apteva-app/v1
-name: market-intel
-display_name: Market Intelligence
-version: 0.4.1
-description: Generic temporal intelligence platform with market and trading domain packs.
+
+name: intelligence
+display_name: Intelligence
+version: 0.5.0
+description: |
+  A continuously updated, source-attributed model of a part of the world,
+  used for recorded and scored probabilistic forecasts and hypothetical
+  scenarios.
+
+    Observe   — scheduled connectors (prediction markets, news via GDELT
+                and bound news APIs, BLS and FRED series) record evidence
+                with source, publication and server-ingestion times.
+                Duplicates are detected by content; nothing is overwritten.
+    Model     — typed entities, time-bounded relationships marked observed,
+                reported, inferred or assumed, extracted claims kept apart
+                from accepted state, and measured state series.
+    Forecast  — resolvable questions (imported from prediction markets or
+                written by operators) get immutable, versioned forecasts:
+                market prior plus a capped, evidence-cited adjustment, with
+                abstention when inputs are missing. Every forecast stores
+                its evidence cutoff and snapshot hash and can be replayed.
+    Score     — resolved questions are scored once each against the market
+                and a uniform baseline (Brier, log loss, calibration).
+    Simulate  — scenarios propagate stated shocks through relationships and
+                show exposure with the full assumption chain. Hypothetical,
+                never presented as a forecast.
+
+  The market pack (cross-venue gateway, de-vig, signals, backtests) is
+  included. Decision support only: no trading, no profiling of private
+  individuals, no autonomous actions.
+
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/intelligence
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [intelligence, forecasting, world-model, scenarios, evidence, prediction-markets, macro, news]
+
 scopes: [project, global]
+min_apteva_version: "0.10.0"
+
 requires:
   permissions:
     - db.write.app
     - platform.instances.read
-    - net.egress
-    - platform.connections.execute
+    - platform.apps.call             # llm app for extraction + assessment
+    - net.egress                     # public sources (markets, GDELT, BLS)
+    - platform.connections.execute   # bound data integrations
     - platform.connections.read
   integrations:
+    # Every data source is OPTIONAL. The gateway degrades gracefully:
+    # an unbound source is simply absent from the enrichment blob, and
+    # query types that depend only on it return empty. Bind what you
+    # want the agents to see.
     - role: prediction_market_polymarket
       kind: integration
       required: false
       compatible_slugs: [polymarket, polymarket-data, polymarket-clob]
+      label: "Polymarket (gamma + data + CLOB read)"
+      hint: "Anchor venue. gamma (prices/metadata) + data-api (holders/OI) are PUBLIC — market-intel reads them directly, no key or binding needed. Bind only if you want order-book depth via the signed CLOB."
     - role: prediction_market_other
       kind: integration
       required: false
       compatible_slugs: [kalshi, manifold-markets]
+      label: "Other prediction markets (cross-venue comparison)"
     - role: sports_data
       kind: integration
       required: false
       compatible_slugs: [the-odds-api, the-sports-db, api-sports, tennis-abstract]
+      label: "Sports odds + stats + history"
     - role: macro_data
       kind: integration
       required: false
       compatible_slugs: [fred, bls, eia, finnhub]
+      label: "Macro indicators + economic calendar"
     - role: news_data
       kind: integration
       required: false
       compatible_slugs: [tavily, perplexity, exa, newsapi, gnews, gdelt, sec-edgar, wikipedia]
+      label: "News + events + sentiment"
     - role: crypto_data
       kind: integration
       required: false
       compatible_slugs: [coingecko, etherscan, polygonscan, whale-alert, defillama]
+      label: "Crypto prices + on-chain"
     - role: market_data_paid
       kind: integration
       required: false
       compatible_slugs: [alpaca-market-data, finnhub, alpha-vantage, yahoo-finance]
+      label: "Paid or premium normalized market data"
+      hint: "Optional. Configure the provider slug and normalized universe/bars tool names below."
     - role: llm
       kind: integration
       required: false
       compatible_slugs: [anthropic-api, openai-api]
+      label: "LLM for entity resolution + market matching"
   apps:
+    # Optional: extraction and evidence assessment route through the llm
+    # app. Without it, forecasts equal their prior and no claims are made.
+    - name: llm
+      optional: true
+      version: ">=0.3.0"
     - name: trading
       optional: true
+
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: overview
+      description: "What changed: new evidence, forecast moves with reasons, questions closing soon, resolutions, source health."
+    - name: sources_list
+      description: "Ingestion connectors with permitted use, licence, freshness, cost meter and recent runs."
+    - name: source_configure
+      description: "Enable, disable, reschedule or reconfigure an ingestion connector."
+    - name: ingest_now
+      description: "Run connectors now, then claim extraction and forecast updates."
+    - name: entities_search
+      description: "Search world-model entities by name, alias and kind."
+    - name: entity_get
+      description: "An entity with relationships, claims, measured state, evidence and linked questions."
+    - name: entity_upsert
+      description: "Create or merge a typed entity (private individuals are out of scope)."
+    - name: relationship_assert
+      description: "Record a typed, time-bounded relationship with its evidence status."
+    - name: relationship_retract
+      description: "Retract a relationship from now on, keeping history."
+    - name: graph_neighbors
+      description: "Entities and relationships around an entity at a point in time."
+    - name: claims_list
+      description: "Claims extracted from evidence, by evidence, entity or review status."
+    - name: claim_review
+      description: "Accept or reject an extracted claim."
+    - name: question_create
+      description: "Create a resolvable question with a frozen resolution rule and deadline."
+    - name: questions_list
+      description: "Questions with latest forecast and market price."
+    - name: question_get
+      description: "A question with every forecast revision, price series and linked evidence."
+    - name: forecast_now
+      description: "Record a new forecast revision from evidence ingested up to now."
+    - name: question_resolve
+      description: "Resolve a manual question or void any question."
+    - name: ledger
+      description: "Scored forecasts vs market and uniform baselines, calibration and coverage."
+    - name: scenario_run
+      description: "Hypothetical shock propagation through typed relationships, with assumption chains."
+    - name: scenarios_list
+      description: "Saved scenario runs."
     - name: search
-      description: "Generic bitemporal search across recorded evidence with date and as-of filters."
+      description: "Generic bitemporal search across recorded evidence with event, publication and as-of filters."
     - name: evidence_record
       description: "Record immutable source-attributed evidence."
     - name: timeline
       description: "Chronological evidence timeline for a topic or entity."
     - name: replay
-      description: "Deterministic point-in-time snapshot for analysis and backtesting."
+      description: "Point-in-time evidence snapshot, or verified re-assembly of a recorded forecast's inputs."
     - name: markets
       description: "Live volume-ranked markets across public prediction venues (Polymarket, Kalshi, Manifold)."
     - name: enrich
       description: "Everything relevant to a prediction market in one normalized blob."
     - name: stats
-      description: "Normalized profile for an entity (player/team/ticker/crypto)."
+      description: "Normalized profile for an entity (team, ticker, crypto asset) across sources."
     - name: history
       description: "Head-to-head between two entities, or one entity's time series."
     - name: context
-      description: "Deduped news + sentiment + event-volume for a topic or entity."
+      description: "Deduped news and event coverage for a topic or entity."
     - name: probability
-      description: "Best ground-truth probability for an event."
+      description: "Best ground-truth probability for an event (odds de-vig, cross-venue)."
     - name: resolve_entity
-      description: "Resolve a name to a canonical entity id across sources."
+      description: "Resolve a name to a canonical entity across sources."
     - name: sources_status
-      description: "Which data sources are bound + healthy right now, by domain."
+      description: "Which data integrations are bound and reachable right now."
     - name: signals_list
-      description: "List normalized, cost-adjusted trading signals with provenance and outcomes."
+      description: "Market pack: auditable, cost-adjusted trading signals with outcomes."
     - name: signal_feeds
-      description: "List signal products/feeds and their quality gates."
+      description: "Market pack: signal products and quality gates."
     - name: signal_metrics
-      description: "Audited performance metrics from matured signals."
+      description: "Market pack: audited performance of matured signals."
     - name: signal_scan_now
-      description: "Run signal discovery now."
+      description: "Market pack: run signal discovery now."
     - name: signal_backtest
-      description: "Walk-forward historical replay with explicit cost assumptions."
+      description: "Market pack: walk-forward replay with explicit cost assumptions."
   ui_panels:
     - slot: project.page
-      label: Market Intel
+      label: Intelligence
       icon: activity
-      entry: /ui/MarketIntelPanel.mjs
+      entry: /ui/IntelligencePanel.mjs
+
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: market-intel/v0.4.1
-    entry: mcp/market-intel
+    ref: intelligence/v0.5.0
+    entry: mcp/intelligence
   port: 8080
   health_check: /health
+
 db:
   driver: sqlite
-  path: /data/market-intel.db
+  path: /data/intelligence.db
   migrations: migrations/
+
+config_schema:
+  - name: llm_model
+    type: text
+    default: "anthropic/claude-haiku-5-5"
+    label: Model for extraction and evidence assessment
+    description: |
+      Provider-prefixed model routed through the llm app. Used only to
+      extract claims from headlines and to propose evidence-cited forecast
+      adjustments; probabilities are computed by a fixed, versioned rule.
+      Set to "none" to run without an LLM (forecasts then equal the prior).
+  - name: llm_daily_calls
+    type: text
+    default: "300"
+    label: Daily LLM call budget
+  - name: forecast_llm_per_cycle
+    type: text
+    default: "20"
+    label: Forecast assessments per cycle
+  - name: extraction_batches_per_cycle
+    type: text
+    default: "3"
+    label: Extraction batches per cycle (10 headlines each)
+  - name: signal_scanning
+    type: text
+    default: "false"
+    label: Market pack — scheduled trading-signal scans
+    description: When true, scans Binance/paid providers every five minutes for cost-adjusted signals. Off by default.
+  - name: cache_ttl_seconds
+    type: text
+    default: "60"
+    label: Source cache TTL (seconds)
+    description: How long to cache a source response before re-fetching. Protects tight free tiers.
+  - name: scan_universe_limit
+    type: text
+    default: "20"
+    label: Instruments per scan
+    description: Highest-liquidity Binance USDT spot pairs scanned every five minutes.
+  - name: min_quote_volume_24h
+    type: text
+    default: "2000000"
+    label: Minimum 24h quote volume
+    description: Reject illiquid instruments below this quote-volume threshold.
+  - name: max_spread_bps
+    type: text
+    default: "35"
+    label: Maximum spread (bps)
+    description: Reject signals whose live executable spread exceeds this value.
+  - name: round_trip_fee_bps
+    type: text
+    default: "20"
+    label: Estimated round-trip fees (bps)
+    description: Included in every published signal's net-edge calculation.
+  - name: slippage_bps
+    type: text
+    default: "5"
+    label: Base slippage estimate (bps)
+    description: Added to spread and fees before a signal can pass its net-edge gate.
+  - name: paid_provider_slug
+    type: text
+    default: ""
+    label: Paid market-data integration slug
+    description: Optional normalized provider integration; credentials remain in the bound connection.
+  - name: paid_provider_venue
+    type: text
+    default: ""
+    label: Paid provider venue
+  - name: paid_provider_universe_tool
+    type: text
+    default: "list_instruments"
+    label: Paid provider universe tool
+  - name: paid_provider_bars_tool
+    type: text
+    default: "get_bars"
+    label: Paid provider bars tool
+
+
 upgrade_policy: auto-patch
 `
 
@@ -146,14 +321,17 @@ func (a *App) Manifest() sdk.Manifest {
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
-		return errors.New("market-intel requires a db block")
+		return errors.New("intelligence requires a db block")
 	}
 	ctx.AppDB().SetMaxOpenConns(1)
 	globalCtx = ctx
-	ctx.Logger().Info("market-intel mounted",
+	ctx.Logger().Info("intelligence mounted",
 		"project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	if pid := scanProjectID(); pid != "" {
 		if _, err := ensureDefaultFeed(ctx.AppDB(), pid); err != nil {
+			return err
+		}
+		if err := ensureDefaultSources(ctx, pid); err != nil {
 			return err
 		}
 	}
@@ -165,21 +343,28 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "signal_scan", Schedule: "@every 5m", Run: func(ctx context.Context, app *sdk.AppCtx) error {
-		pid := scanProjectID()
-		if pid == "" {
-			app.Logger().Info("signal scan skipped for global install without project context")
-			return nil
-		}
-		_, err := a.runSignalScan(ctx, app, pid)
-		return err
-	}}}
+	return []sdk.Worker{
+		{Name: "intelligence_cycle", Schedule: "@every 5m", Run: a.cycleWorker},
+		{Name: "signal_scan", Schedule: "@every 5m", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+			// Market pack: trading-signal discovery is opt-in.
+			if !configBool(app, "signal_scanning", false) {
+				return nil
+			}
+			pid := scanProjectID()
+			if pid == "" {
+				app.Logger().Info("signal scan skipped for global install without project context")
+				return nil
+			}
+			_, err := a.runSignalScan(ctx, app, pid)
+			return err
+		}},
+	}
 }
 
 // ─── HTTP routes (panel + REST mirror) ─────────────────────────────
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	return append(a.worldRoutes(), []sdk.Route{
 		{Pattern: "/sources", Handler: a.handleHTTPSources},
 		{Pattern: "/markets", Handler: a.handleHTTPMarkets},
 		{Pattern: "/search", Handler: a.handleHTTPSearch},
@@ -192,12 +377,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/signal-feeds", Handler: a.handleHTTPFeeds},
 		{Pattern: "/signal-metrics", Handler: a.handleHTTPMetrics},
 		{Pattern: "/signal-scan", Handler: a.handleHTTPScan},
-	}
+	}...)
 }
 
 func intelligenceArgs(r *http.Request) map[string]any {
 	args := map[string]any{"_project_id": r.URL.Query().Get("project_id")}
-	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset"} {
+	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset", "knowledge", "forecast_id"} {
 		if v := r.URL.Query().Get(key); v != "" {
 			args[key] = v
 		}

@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -11,18 +13,8 @@ import (
 )
 
 func TestEvidenceSearchIsBitemporalAndIdempotent(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	migration, err := os.ReadFile("migrations/003_intelligence_core.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
-	}
+	db := openTestDB(t)
+	var err error
 	known := time.Date(2025, 1, 10, 0, 0, 0, 0, time.UTC)
 	e := Evidence{Kind: "claim", Title: "Battery rule", Body: "New tariff announced", Source: "regulator", SourceRef: "r-1", EntityRefs: []string{"acme"}, EventTime: ptrTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)), ObservedAt: &known, Payload: json.RawMessage(`{"status":"new"}`)}
 	if _, err = recordEvidence(db, e, "p"); err != nil {
@@ -48,3 +40,29 @@ func TestEvidenceSearchIsBitemporalAndIdempotent(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// openTestDB applies every migration in order to a fresh in-memory DB.
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(b)); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+	}
+	return db
+}

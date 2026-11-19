@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ─── probability ───────────────────────────────────────────────────
@@ -362,9 +363,11 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 			URL   string `json:"url"`
 		} `json:"results"`
 		Articles []struct {
-			Title  string `json:"title"`
-			URL    string `json:"url"`
-			Domain string `json:"domain"`
+			Title       string `json:"title"`
+			URL         string `json:"url"`
+			Domain      string `json:"domain"`
+			SeenDate    string `json:"seendate"`
+			PublishedAt string `json:"publishedAt"`
 			Source struct {
 				Name string `json:"name"`
 			} `json:"source"`
@@ -388,7 +391,7 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 		if src == "" {
 			src = slug
 		}
-		out = append(out, NewsItem{Title: a.Title, URL: a.URL, Source: src})
+		out = append(out, NewsItem{Title: a.Title, URL: a.URL, Source: src, Date: normalizeNewsDate(orString(a.PublishedAt, a.SeenDate))})
 	}
 	return out
 }
@@ -567,6 +570,18 @@ func gwSourcesStatus(sc sourceClient) map[string]any {
 func strArgM(m map[string]any, k string) string {
 	if s, ok := m[k].(string); ok {
 		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// normalizeNewsDate turns GDELT's 20261119T120000Z and RFC3339 variants
+// into RFC3339; unknown shapes return "".
+func normalizeNewsDate(v string) string {
+	v = strings.TrimSpace(v)
+	for _, layout := range []string{"20060102T150405Z", time.RFC3339, "2006-01-02T15:04:05Z07:00", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
 	}
 	return ""
 }

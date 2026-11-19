@@ -21,6 +21,8 @@ type Evidence struct {
 	EventTime, PublishedTime, ObservedAt, ValidFrom, ValidTo *time.Time
 	SupersedesID                                             *int64 `json:"supersedes_id,omitempty"`
 	ContentHash                                              string `json:"content_hash"`
+	IngestedAt                                               *time.Time
+	OriginKey                                                string `json:"origin_key"`
 }
 
 func (e Evidence) Map() map[string]any {
@@ -29,13 +31,20 @@ func (e Evidence) Map() map[string]any {
 		"payload": e.Payload, "entity_refs": e.EntityRefs, "source": e.Source, "source_ref": e.SourceRef,
 		"event_time": timeString(e.EventTime), "published_time": timeString(e.PublishedTime),
 		"observed_at": timeString(e.ObservedAt), "valid_from": timeString(e.ValidFrom), "valid_to": timeString(e.ValidTo),
-		"supersedes_id": e.SupersedesID, "content_hash": e.ContentHash}
+		"supersedes_id": e.SupersedesID, "content_hash": e.ContentHash,
+		"ingested_at": timeString(e.IngestedAt), "origin_key": e.OriginKey}
 }
 
 type EvidenceQuery struct {
 	ProjectID, Text, Kind, Source, Entity                string
 	EventFrom, EventTo, PublishedFrom, PublishedTo, AsOf *time.Time
 	Limit, Offset                                        int
+	// Knowledge selects which clock as_of filters on. "observed" (default)
+	// trusts the source-supplied observation time, which historical imports
+	// may set; "ingested" uses the server's own arrival time and is what
+	// forecasts use, so they can never see evidence that arrived later.
+	Knowledge string
+	IDs       []int64
 }
 
 func parseOptionalTime(value string) (*time.Time, error) {
@@ -61,18 +70,49 @@ func timeString(t *time.Time) any {
 	return t.UTC().Format(time.RFC3339)
 }
 
-func evidenceHash(projectID, kind, title, body, source, sourceRef string, payload json.RawMessage, observed *time.Time) string {
+// evidenceHash identifies content, not the moment it was seen: the same
+// report fetched twice is one record. Observation and ingestion times are
+// deliberately excluded (including them made every re-fetch a new row).
+func evidenceHash(projectID string, e Evidence) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", projectID, kind, title, body, source, sourceRef, payload, observed.UTC().Format(time.RFC3339Nano))
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%v\x00%v\x00%v\x00%v\x00%v",
+		projectID, fallback(e.Kind, "document"), e.Title, e.Body, e.Source, e.SourceRef, e.Payload,
+		timeString(e.EventTime), timeString(e.PublishedTime), timeString(e.ValidFrom), timeString(e.ValidTo), ptrInt64(e.SupersedesID))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func ptrInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// originKey groups syndicated copies of one story: same normalized title
+// regardless of outlet. Empty titles get no origin.
+func originKey(title string) string {
+	n := normTitle(title)
+	if n == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(n))
+	return hex.EncodeToString(sum[:8])
+}
+
 func recordEvidence(db *sql.DB, e Evidence, projectID string) (map[string]any, error) {
+	out, _, err := recordEvidenceDetailed(db, e, projectID)
+	return out, err
+}
+
+// recordEvidenceDetailed also reports whether the row was new. Existing
+// rows are never rewritten: evidence is append-only, and a correction is a
+// new row with supersedes_id.
+func recordEvidenceDetailed(db *sql.DB, e Evidence, projectID string) (map[string]any, bool, error) {
 	if db == nil {
-		return nil, errors.New("database unavailable")
+		return nil, false, errors.New("database unavailable")
 	}
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(e.Source) == "" {
-		return nil, errors.New("project_id and source are required")
+		return nil, false, errors.New("project_id and source are required")
 	}
 	if e.ObservedAt == nil {
 		now := time.Now().UTC()
@@ -82,26 +122,47 @@ func recordEvidence(db *sql.DB, e Evidence, projectID string) (map[string]any, e
 		e.Payload = json.RawMessage(`{}`)
 	}
 	if !json.Valid(e.Payload) {
-		return nil, errors.New("payload must be valid JSON")
+		return nil, false, errors.New("payload must be valid JSON")
 	}
 	if _, err := evidenceLocations(e.Payload); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if e.ContentHash == "" {
-		e.ContentHash = evidenceHash(projectID, e.Kind, e.Title, e.Body, e.Source, e.SourceRef, e.Payload, e.ObservedAt)
+		e.ContentHash = evidenceHash(projectID, e)
 	}
+	if e.OriginKey == "" {
+		e.OriginKey = originKey(e.Title)
+	}
+	var existing int64
+	if err := db.QueryRow(`SELECT id FROM intelligence_evidence WHERE project_id = ? AND content_hash = ?`, projectID, e.ContentHash).Scan(&existing); err == nil {
+		rows, err := searchEvidence(db, EvidenceQuery{ProjectID: projectID, IDs: []int64{existing}, Limit: 1})
+		if err != nil || len(rows) == 0 {
+			return map[string]any{"id": existing, "content_hash": e.ContentHash, "duplicate": true}, false, err
+		}
+		rows[0]["duplicate"] = true
+		return rows[0], false, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	now := time.Now().UTC()
+	e.IngestedAt = &now
 	refs, _ := json.Marshal(e.EntityRefs)
+	if e.EntityRefs == nil {
+		refs = []byte("[]")
+	}
 	var id int64
 	err := db.QueryRow(`INSERT INTO intelligence_evidence
- (project_id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,content_hash) DO UPDATE SET title=excluded.title, body=excluded.body, payload=excluded.payload RETURNING id`,
+ (project_id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
 		projectID, fallback(e.Kind, "document"), e.Title, e.Body, string(e.Payload), string(refs), e.Source, e.SourceRef,
-		timeString(e.EventTime), timeString(e.PublishedTime), e.ObservedAt.UTC(), timeString(e.ValidFrom), timeString(e.ValidTo), e.SupersedesID, e.ContentHash).Scan(&id)
+		timeString(e.EventTime), timeString(e.PublishedTime), timeString(e.ObservedAt), timeString(e.ValidFrom), timeString(e.ValidTo), e.SupersedesID, e.ContentHash,
+		timeString(e.IngestedAt), e.OriginKey).Scan(&id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	e.ID = id
-	return e.Map(), nil
+	e.Kind = fallback(e.Kind, "document")
+	return e.Map(), true, nil
 }
 
 func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
@@ -119,6 +180,14 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 	}
 	where := []string{"project_id = ?"}
 	args := []any{q.ProjectID}
+	if len(q.IDs) > 0 {
+		marks := make([]string, len(q.IDs))
+		for i, id := range q.IDs {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		where = append(where, "id IN ("+strings.Join(marks, ",")+")")
+	}
 	if q.Text != "" {
 		// Treat a query as a small AND-of-terms search. This is more useful for
 		// research than requiring the exact phrase, while keeping the storage
@@ -143,25 +212,30 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 	}
 	if q.EventFrom != nil {
 		where = append(where, "event_time >= ?")
-		args = append(args, q.EventFrom.UTC())
+		args = append(args, timeString(q.EventFrom))
 	}
 	if q.EventTo != nil {
 		where = append(where, "event_time < ?")
-		args = append(args, q.EventTo.UTC())
+		args = append(args, timeString(q.EventTo))
 	}
 	if q.PublishedFrom != nil {
 		where = append(where, "published_time >= ?")
-		args = append(args, q.PublishedFrom.UTC())
+		args = append(args, timeString(q.PublishedFrom))
 	}
 	if q.PublishedTo != nil {
 		where = append(where, "published_time < ?")
-		args = append(args, q.PublishedTo.UTC())
+		args = append(args, timeString(q.PublishedTo))
 	}
 	if q.AsOf != nil {
-		where = append(where, "observed_at <= ? AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)")
-		args = append(args, q.AsOf.UTC(), q.AsOf.UTC(), q.AsOf.UTC())
+		clock := "observed_at"
+		if q.Knowledge == "ingested" {
+			clock = "COALESCE(ingested_at, observed_at)"
+		}
+		asOf := timeString(q.AsOf)
+		where = append(where, clock+" <= ? AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)")
+		args = append(args, asOf, asOf, asOf)
 	}
-	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
+	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
 	if err != nil {
 		return nil, err
 	}
@@ -173,9 +247,9 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		// SQLite may return DATETIME values as either time.Time or strings
 		// depending on the driver/schema affinity. Scan as flexible values so
 		// historical databases created by older releases remain readable.
-		var event, published, observed, from, to flexibleTime
+		var event, published, observed, from, to, ingested flexibleTime
 		var supersedes sql.NullInt64
-		if err := rows.Scan(&e.ID, &e.Kind, &e.Title, &e.Body, &payload, &refs, &e.Source, &e.SourceRef, &event, &published, &observed, &from, &to, &supersedes, &e.ContentHash); err != nil {
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Title, &e.Body, &payload, &refs, &e.Source, &e.SourceRef, &event, &published, &observed, &from, &to, &supersedes, &e.ContentHash, &ingested, &e.OriginKey); err != nil {
 			return nil, err
 		}
 		e.Payload = json.RawMessage(payload)
@@ -185,6 +259,7 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		e.ObservedAt = observed.Time()
 		e.ValidFrom = from.Time()
 		e.ValidTo = to.Time()
+		e.IngestedAt = ingested.Time()
 		if supersedes.Valid {
 			v := supersedes.Int64
 			e.SupersedesID = &v
