@@ -405,6 +405,7 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 		http.NotFound(w, r)
 	}
 }
+
 // autoAnswerLease is how long one check-in keeps a browser designated.
 const autoAnswerLease = 30 * time.Second
 

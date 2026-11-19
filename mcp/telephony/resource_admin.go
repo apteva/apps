@@ -476,7 +476,7 @@ func (a *App) administrativeToolBoundary(name string, next func(context.Context,
 				}
 				return result, nil
 			}
-			for _, prefix := range []string{"telephony_destinations_", "telephony_flows_", "telephony_ring_groups_", "telephony_routes_", "telephony_outbound_policy"} {
+			for _, prefix := range []string{"telephony_destinations_", "telephony_flows_", "telephony_ring_groups_", "telephony_routes_", "telephony_outbound_policy", "telephony_access_"} {
 				if strings.HasPrefix(name, prefix) {
 					return adminFailure(adminError("forbidden", "bound services must use scoped resource administration")), nil
 				}

@@ -55,6 +55,27 @@ Use authenticated operator HTTP requests against the selected installation:
 - `GET /softphone/access` (or `/user/softphone/access?auth_provider=...`): the
   authenticated user's effective destinations, numbers, identity, and supervisor flag.
 
+Platform callers (an API key, the panel, or an Environments seed) can do the
+same over MCP with `telephony_access_policy_get` and
+`telephony_access_policy_set`. Both share the route's validation, revision check
+and storage. Agents, bound apps and application users are refused. The set tool
+also:
+
+- requires `revision` (0 for the first policy) and refuses unknown fields,
+  because it replaces the whole policy;
+- accepts `issuer_install_id` as a number, which is what
+  `{"$runtime_install_id": "auth"}` gives in a seed;
+- returns errors as tool errors, so a refused write fails the seed.
+
+An `apteva-auth` provider sent without `url`, through the tool or the route,
+gets that Auth install's `/me` through the platform gateway:
+`<APTEVA_GATEWAY_URL>/api/apps/<issuer_app>/_install/<issuer_install_id>/me?project_id=<project>`.
+
+Grants can name only browser destinations that already exist. Create the
+destination before the policy, then the number and its flow. A run started
+from a snapshot may already have a policy; read it first and pass its
+revision, for example `{"$ref": "1.revision"}`.
+
 Example policy (substitute actual project, installation, organization, user,
 connected phone-number and browser-destination values):
 

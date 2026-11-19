@@ -930,43 +930,13 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid policy", 400)
 			return
 		}
-		if p.Delegations == nil {
-			existing, e := a.phonePolicy(project)
-			if e != nil {
-				http.Error(w, "policy unavailable", 503)
-				return
-			}
-			p.Delegations = existing.Delegations
-		}
-		if e := a.validatePhonePolicy(project, p); e != nil {
-			http.Error(w, e.Error(), 400)
+		saved, e := a.writePhonePolicy(project, p)
+		var refused *policyWriteError
+		if errors.As(e, &refused) {
+			http.Error(w, refused.message, refused.status)
 			return
 		}
-		raw, _ := json.Marshal(p)
-		var res sql.Result
-		var e error
-		if p.Revision == 0 {
-			res, e = a.db().db.Exec(`INSERT INTO telephony_access_policies(project_id,revision,policy_json) VALUES(?,1,?) ON CONFLICT(project_id) DO NOTHING`, project, string(raw))
-		} else {
-			res, e = a.db().db.Exec(`UPDATE telephony_access_policies SET revision=revision+1,policy_json=? WHERE project_id=? AND revision=?`, string(raw), project, p.Revision)
-		}
-		if e != nil {
-			http.Error(w, "policy unavailable", 500)
-			return
-		}
-		n, e := res.RowsAffected()
-		if e != nil {
-			http.Error(w, "policy unavailable", 500)
-			return
-		}
-		if n != 1 {
-			http.Error(w, "policy revision changed", 409)
-			return
-		}
-		a.routingCommitted(project)
-		a.revokeCallListeners(project)
-		p.Revision++
-		writeJSON(w, p)
+		writeJSON(w, saved)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/access/assign/") && r.Method == "POST" {
