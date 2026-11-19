@@ -375,7 +375,7 @@ func TestRecoveryGitRemoteLifecycle(t *testing.T) {
 	if _, err := g.run(ctx, w, d, nil, "remote", "add", "origin", remote); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.push(ctx, w, d, "origin", "main", true, nil); err != nil {
+	if err := g.pushBranch(ctx, w, d, "origin", "main", "main", true, nil); err != nil {
 		t.Fatal(err)
 	}
 	initialSHA, err := g.run(ctx, w, d, nil, "rev-parse", "HEAD")
@@ -425,7 +425,7 @@ func TestRecoveryGitRemoteLifecycle(t *testing.T) {
 	if _, err := g.commit(ctx, w, d, "upstream", []string{"a"}, "Test", "test@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.push(ctx, w, d, "origin", "main", false, nil); err != nil {
+	if err := g.pushBranch(ctx, w, d, "origin", "main", "main", false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.fetch(ctx, cw, cd, remote, "origin", nil); err != nil {
@@ -448,7 +448,7 @@ func TestRecoveryGitRemoteLifecycle(t *testing.T) {
 	if _, err := g.commit(ctx, cw, cd, "feature", []string{"b"}, "Test", "test@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.push(ctx, cw, cd, "origin", "feature", true, nil); err != nil {
+	if err := g.pushBranch(ctx, cw, cd, "origin", "feature", "feature", true, nil); err != nil {
 		t.Fatal(err)
 	}
 	remoteBody, err := g.run(ctx, "", bare, nil, "show", "refs/heads/feature:b")

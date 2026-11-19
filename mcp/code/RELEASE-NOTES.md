@@ -1,3 +1,69 @@
+# Apteva Code 0.19.0
+
+Adds what was missing to release from Code: Git tags, pushing to a release
+branch, and GitHub pull requests. Existing tools keep their arguments and
+output; `repos_git_push` only gains optional arguments and a `pushed` field.
+
+## Changes
+
+- **`repos_git_tag`** (new), for Git-backed repositories:
+  - `create`: an annotated tag on HEAD or `target` (commit, branch or tag),
+    with an optional `message`. Names are checked with Git's ref rules.
+  - `list`: local tags, newest first, with the commit each points at.
+    `compare_remote=true` adds `on_remote`: `same`, `different` or `absent`.
+  - `push`: publishes one tag to origin. If origin already has the name on
+    another commit, the push is refused (409 on REST): published tags are
+    never moved. Pushing the same tag again is a no-op.
+  - `delete`: removes a local tag only; origin is never changed.
+- **`repos_git_push`** gains `source` (a local branch other than the
+  checked-out one) and `remote_branch` (another branch name on origin), for
+  example `remote_branch=release/x` to advance a release branch from main.
+  - Only new branches and fast-forwards are accepted. A rewind or a diverged
+    history returns a clear error (409 on REST); force push is still not
+    available.
+  - The response's new `pushed` field gives the source, remote branch and
+    commit. Upstream tracking is only set when pushing the checked-out branch
+    to its own name, as before.
+- **`repos_git_pull_request`** (new), for repositories whose origin is on
+  github.com, through the repository's GitHub connection (or the install's
+  bound GitHub connection). The token stays on the platform.
+  - `create`: from `head` (default the checked-out branch) into `base`
+    (default the remote's default branch), with `title`, `body`, `draft`. The
+    head branch must already be on origin; `unpushed_commits` says when the
+    local branch is ahead of it.
+  - `list` (`state`, `head`, `base`, `limit`), `get` (`number`).
+  - `merge` (`number`, `method` merge|squash|rebase, `expected_head_sha` to
+    merge only what was reviewed, `commit_title`, `commit_message`).
+  - `close` (`number`).
+  - GitHub's error messages are returned as-is (for example a 422 "A pull
+    request already exists").
+- **REST**: `GET|POST /api/repos/<slug>/git/tags`,
+  `GET|POST /api/repos/<slug>/git/pull-requests`, and `source` /
+  `remote_branch` on `POST /api/repos/<slug>/git/push`.
+- **Private Git servers**: `GIT_SSL_CAINFO` in the sidecar's environment is
+  now passed to Git, so a self-hosted server with a private certificate
+  authority can be trusted.
+
+## Upgrade and rollback
+
+No migration. Tags and branches are ordinary Git refs, so rolling back to
+0.18.1 keeps them; only the new tools and arguments disappear.
+
+## Validation
+
+- Tier 1: tag creation (name rules, duplicates, missing targets, a backport
+  tag on an older commit), listing, push, re-push, and refusal to move a
+  published tag; pushes to a new release branch, a fast-forward, a branch
+  that is not checked out, and refused rewinds and diverged histories,
+  against a Git server over HTTP. Pull requests against a fake GitHub:
+  every action's inputs and outputs, validation before any call, an unpushed
+  head, a 422 and a 401. The full suite passes with `-race`.
+- Tier 2: the real sidecar against a local Git server over HTTPS: import,
+  commit, tag, compare with origin, push, refusal to move the tag (MCP and
+  REST), main pushed to a release branch without moving main, a refused
+  rewind (MCP and REST), and the pull-request guard for a non-GitHub origin.
+  The integration suite passes.
+
 # Apteva Code 0.18.1
 
 Fixes Git imports of repositories that hold files above the editing limit.

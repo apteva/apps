@@ -108,7 +108,7 @@ func (g *gitEngine) run(ctx context.Context, workTree, gitDir string, auth *gitA
 }
 
 func safeGitEnvironment() []string {
-	allowed := []string{"PATH=", "TMPDIR=", "TMP=", "TEMP=", "LANG=", "LC_", "SSL_CERT_FILE=", "SSL_CERT_DIR=", "HTTP_PROXY=", "HTTPS_PROXY=", "NO_PROXY="}
+	allowed := []string{"PATH=", "TMPDIR=", "TMP=", "TEMP=", "LANG=", "LC_", "SSL_CERT_FILE=", "SSL_CERT_DIR=", "GIT_SSL_CAINFO=", "HTTP_PROXY=", "HTTPS_PROXY=", "NO_PROXY="}
 	env := []string{}
 	for _, item := range os.Environ() {
 		for _, prefix := range allowed {
@@ -300,6 +300,8 @@ type GitStatus struct {
 	Conflicted bool        `json:"conflicted"`
 	Changes    []GitChange `json:"changes"`
 	Remote     *GitRemote  `json:"remote,omitempty"`
+	// Pushed is set on the response of a push and says what was sent.
+	Pushed *GitPushInfo `json:"pushed,omitempty"`
 }
 
 func (g *gitEngine) status(ctx context.Context, workTree, gitDir string) (*GitStatus, error) {
@@ -468,22 +470,6 @@ func (g *gitEngine) commit(ctx context.Context, workTree, gitDir, message string
 	}
 	success = true
 	return g.head(ctx, workTree, gitDir), nil
-}
-
-func (g *gitEngine) push(ctx context.Context, workTree, gitDir, remoteName, branch string, setUpstream bool, auth *gitAuth) error {
-	if branch == "" {
-		return errors.New("cannot push a detached HEAD")
-	}
-	if remoteName == "" {
-		remoteName = "origin"
-	}
-	args := []string{"push"}
-	if setUpstream {
-		args = append(args, "--set-upstream")
-	}
-	args = append(args, remoteName, "HEAD:refs/heads/"+branch)
-	_, err := g.run(ctx, workTree, gitDir, auth, args...)
-	return err
 }
 
 func (g *gitEngine) updateRemoteTracking(ctx context.Context, workTree, gitDir, remoteName, branch string) {

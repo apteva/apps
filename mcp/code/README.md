@@ -1,5 +1,15 @@
 # Apteva Code
 
+## v0.19.0 — tags, release branches and pull requests
+
+Git-backed repositories can now be released from Code. `repos_git_tag`
+creates, lists, pushes and deletes annotated tags and never moves a
+published tag; `repos_git_push` takes `source` and `remote_branch` to push
+any local branch to another branch on origin, fast-forward only;
+`repos_git_pull_request` creates, lists, gets, merges and closes GitHub pull
+requests through the repository's GitHub connection. Details in
+RELEASE-NOTES.md.
+
 ## v0.18.1 — large files in Git imports
 
 Git imports of repositories with files above the editing limit no longer

@@ -161,6 +161,23 @@ is not Git-backed`, stop that Git path; do not retry enable/disable or attach a
 remote to make a native preview run. If a tool was selected incorrectly,
 discover the actual tool by its name and schema before calling it again.
 
+### Releasing a Git-backed repository
+
+Only when the user asks to release or publish to Git, and `repos_git_status`
+shows `git_backed: true`:
+
+- `repos_git_tag action=create name=<app>/vX.Y.Z` tags HEAD (or `target`);
+  `action=push` publishes it. A tag already on origin is never moved: if the
+  push is refused, choose a new version instead of retrying.
+- `repos_git_push` pushes the checked-out branch by default. To advance a
+  release branch, pass `remote_branch` (and `source` for a branch that is not
+  checked out). Only fast-forwards are accepted; if refused, fetch and
+  integrate first. There is no force push.
+- `repos_git_pull_request action=create title=...` opens a GitHub pull
+  request from the pushed branch into the default branch (`base` to change
+  it). Use `list`, `get`, `merge` (with `expected_head_sha` when merging what
+  you reviewed) and `close` for the rest. Merge only when the user asked for it.
+
 ## Revisions are optional during ordinary work
 
 Editing and running use the working tree without requiring a checkpoint or Git

@@ -343,25 +343,7 @@ func (s *gitService) Pull(ctx *sdk.AppCtx, repo *Repo, actor string) (*GitStatus
 }
 
 func (s *gitService) Push(ctx *sdk.AppCtx, repo *Repo, actor string, setUpstream bool) (*GitStatus, error) {
-	return s.networkOperation(ctx, repo, "push", actor, func(workTree, gitDir string, remote *GitRemote, auth *gitAuth) error {
-		status, err := s.engine.status(s.context(), workTree, gitDir)
-		if err != nil {
-			return err
-		}
-		if status.Conflicted {
-			return errors.New("repository has unresolved conflicts")
-		}
-		pushURL := firstNonEmpty(remote.PushURL, remote.FetchURL)
-		pushAuth, err := gitAuthForRemote(ctx, pushURL, remote.ConnectionID)
-		if err != nil {
-			return err
-		}
-		if err := s.engine.push(s.context(), workTree, gitDir, remote.Name, status.Branch, setUpstream || status.Upstream == "", pushAuth); err != nil {
-			return err
-		}
-		s.engine.updateRemoteTracking(s.context(), workTree, gitDir, remote.Name, status.Branch)
-		return nil
-	})
+	return s.PushBranch(ctx, repo, GitPushInput{Actor: actor, SetUpstream: setUpstream})
 }
 
 func (s *gitService) networkOperation(ctx *sdk.AppCtx, repo *Repo, operation, actor string, fn func(string, string, *GitRemote, *gitAuth) error) (*GitStatus, error) {

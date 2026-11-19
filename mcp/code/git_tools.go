@@ -64,13 +64,58 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			HandlerCtx: a.toolGitCommit,
 		},
 		{
-			Name:        "repos_git_push",
-			Description: "Push the current branch to origin. Non-fast-forward pushes fail; force push is not exposed. Args: slug, set_upstream?, actor?.",
+			Name: "repos_git_push",
+			Description: "Push a local branch to origin; by default the checked-out branch to the same name. " +
+				"source names another local branch and remote_branch another branch on origin, for example source=main remote_branch=release/x to advance a release branch. " +
+				"Only new branches and fast-forwards are accepted; force push is not exposed. The response's pushed field says what was sent. Args: slug, source?, remote_branch?, set_upstream?, actor?.",
 			InputSchema: schemaObject(map[string]any{
 				"slug": map[string]any{"type": "string"}, "set_upstream": map[string]any{"type": "boolean"},
-				"actor": map[string]any{"type": "string"},
+				"source":        map[string]any{"type": "string", "description": "Local branch to push (default: the checked-out branch)."},
+				"remote_branch": map[string]any{"type": "string", "description": "Branch name on origin (default: same as source)."},
+				"actor":         map[string]any{"type": "string"},
 			}, []string{"slug"}),
 			HandlerCtx: a.toolGitPush,
+		},
+		{
+			Name: "repos_git_tag",
+			Description: "Manage Git tags of a Git-backed repository. action=create makes an annotated tag (name, target? default HEAD, message?); " +
+				"action=list lists local tags newest first (limit?, compare_remote? adds on_remote: same|different|absent); " +
+				"action=push publishes one tag to origin (refused if origin already has that name; tags are never moved); " +
+				"action=delete removes a local tag only. Args: slug, action, name?, target?, message?, limit?, compare_remote?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":           map[string]any{"type": "string"},
+				"action":         map[string]any{"type": "string", "enum": []string{"create", "list", "push", "delete"}},
+				"name":           map[string]any{"type": "string", "description": "Tag name, for example code/v0.19.0."},
+				"target":         map[string]any{"type": "string", "description": "Commit, branch or tag to tag (create; default HEAD)."},
+				"message":        map[string]any{"type": "string"},
+				"limit":          map[string]any{"type": "integer"},
+				"compare_remote": map[string]any{"type": "boolean"},
+				"actor":          map[string]any{"type": "string"},
+			}, []string{"slug", "action"}),
+			HandlerCtx: a.toolGitTag,
+		},
+		{
+			Name: "repos_git_pull_request",
+			Description: "GitHub pull requests for a Git-backed repository whose origin is on github.com, through its GitHub connection. " +
+				"action=create opens one from head (default the checked-out branch, which must already be pushed) into base (default the remote's default branch): title, body?, draft?. " +
+				"action=list (state? open|closed|all, head?, base?, limit?), action=get (number), action=merge (number, method? merge|squash|rebase, expected_head_sha?, commit_title?, commit_message?), action=close (number). Args: slug, action, ...",
+			InputSchema: schemaObject(map[string]any{
+				"slug":              map[string]any{"type": "string"},
+				"action":            map[string]any{"type": "string", "enum": []string{"create", "list", "get", "merge", "close"}},
+				"number":            map[string]any{"type": "integer"},
+				"title":             map[string]any{"type": "string"},
+				"body":              map[string]any{"type": "string"},
+				"head":              map[string]any{"type": "string"},
+				"base":              map[string]any{"type": "string"},
+				"draft":             map[string]any{"type": "boolean"},
+				"state":             map[string]any{"type": "string", "enum": []string{"open", "closed", "all"}},
+				"limit":             map[string]any{"type": "integer"},
+				"method":            map[string]any{"type": "string", "enum": []string{"merge", "squash", "rebase"}},
+				"expected_head_sha": map[string]any{"type": "string", "description": "Merge only if the pull request head is still this commit."},
+				"commit_title":      map[string]any{"type": "string"},
+				"commit_message":    map[string]any{"type": "string"},
+			}, []string{"slug", "action"}),
+			HandlerCtx: a.toolGitPullRequest,
 		},
 		{
 			Name:        "repos_git_diff",
@@ -230,7 +275,50 @@ func (a *App) toolGitPush(callCtx context.Context, ctx *sdk.AppCtx, args map[str
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Push(ctx, repo, strArg(args, "actor"), boolArg(args, "set_upstream"))
+	return service.withContext(callCtx).PushBranch(ctx, repo, GitPushInput{
+		Actor: strArg(args, "actor"), SetUpstream: boolArg(args, "set_upstream"),
+		Source: strArg(args, "source"), RemoteBranch: strArg(args, "remote_branch"),
+	})
+}
+
+func (a *App) toolGitTag(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	service, repo, err := a.gitRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	service = service.withContext(callCtx)
+	name, actor := strArg(args, "name"), strArg(args, "actor")
+	switch strings.ToLower(strArg(args, "action")) {
+	case "create":
+		return service.CreateTag(ctx, repo, name, strArg(args, "target"), strArg(args, "message"), actor)
+	case "list":
+		return service.ListTags(ctx, repo, intArg(args, "limit", 100), boolArg(args, "compare_remote"))
+	case "push":
+		return service.PushTag(ctx, repo, name, actor)
+	case "delete":
+		return service.DeleteTag(ctx, repo, name, actor)
+	default:
+		return nil, errors.New("action must be create, list, push or delete")
+	}
+}
+
+func (a *App) toolGitPullRequest(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	service, repo, err := a.gitRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return service.withContext(callCtx).PullRequest(ctx, repo, pullRequestInputFromArgs(args))
+}
+
+func pullRequestInputFromArgs(args map[string]any) PullRequestInput {
+	return PullRequestInput{
+		Action: strArg(args, "action"), Number: intArg(args, "number", 0),
+		Title: strArg(args, "title"), Body: strArg(args, "body"),
+		Head: strArg(args, "head"), Base: strArg(args, "base"), Draft: boolArg(args, "draft"),
+		State: strArg(args, "state"), Limit: intArg(args, "limit", 0),
+		Method: strArg(args, "method"), ExpectedHeadSHA: strArg(args, "expected_head_sha"),
+		CommitTitle: strArg(args, "commit_title"), CommitMessage: strArg(args, "commit_message"),
+	}
 }
 
 func (a *App) toolGitDiff(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

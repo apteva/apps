@@ -133,8 +133,10 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		var body struct {
-			Actor       string `json:"actor"`
-			SetUpstream bool   `json:"set_upstream"`
+			Actor        string `json:"actor"`
+			SetUpstream  bool   `json:"set_upstream"`
+			Source       string `json:"source"`
+			RemoteBranch string `json:"remote_branch"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		var status *GitStatus
@@ -144,7 +146,9 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 		case "pull":
 			status, err = service.withContext(r.Context()).Pull(globalCtx, repo, httpActor(r))
 		case "push":
-			status, err = service.withContext(r.Context()).Push(globalCtx, repo, httpActor(r), body.SetUpstream)
+			status, err = service.withContext(r.Context()).PushBranch(globalCtx, repo, GitPushInput{
+				Actor: httpActor(r), SetUpstream: body.SetUpstream, Source: body.Source, RemoteBranch: body.RemoteBranch,
+			})
 		}
 		if err != nil {
 			writeGitHTTPError(w, err)
@@ -261,6 +265,74 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		httpJSON(w, status)
+	case "tags":
+		// GET lists (?limit=&compare_remote=1); POST {action: create|push|delete, name, target?, message?}.
+		svc := service.withContext(r.Context())
+		var result *GitTagResult
+		switch r.Method {
+		case http.MethodGet:
+			q := r.URL.Query()
+			limit, _ := strconv.Atoi(q.Get("limit"))
+			result, err = svc.ListTags(globalCtx, repo, limit, q.Get("compare_remote") == "1" || q.Get("compare_remote") == "true")
+		case http.MethodPost:
+			var body struct {
+				Action  string `json:"action"`
+				Name    string `json:"name"`
+				Target  string `json:"target"`
+				Message string `json:"message"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil {
+				httpErr(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+			switch strings.ToLower(body.Action) {
+			case "create":
+				result, err = svc.CreateTag(globalCtx, repo, body.Name, body.Target, body.Message, httpActor(r))
+			case "push":
+				result, err = svc.PushTag(globalCtx, repo, body.Name, httpActor(r))
+			case "delete":
+				result, err = svc.DeleteTag(globalCtx, repo, body.Name, httpActor(r))
+			default:
+				httpErr(w, http.StatusBadRequest, "action must be create, push or delete")
+				return
+			}
+		default:
+			httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+			return
+		}
+		if err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
+		httpJSON(w, result)
+	case "pull-requests":
+		// GET lists (?state=&head=&base=&limit=); POST takes the repos_git_pull_request arguments.
+		var in PullRequestInput
+		switch r.Method {
+		case http.MethodGet:
+			q := r.URL.Query()
+			limit, _ := strconv.Atoi(q.Get("limit"))
+			in = PullRequestInput{Action: "list", State: q.Get("state"), Head: q.Get("head"), Base: q.Get("base"), Limit: limit}
+			if n, _ := strconv.Atoi(q.Get("number")); n > 0 {
+				in = PullRequestInput{Action: "get", Number: n}
+			}
+		case http.MethodPost:
+			args := map[string]any{}
+			if json.NewDecoder(r.Body).Decode(&args) != nil {
+				httpErr(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+			in = pullRequestInputFromArgs(args)
+		default:
+			httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+			return
+		}
+		result, err := service.withContext(r.Context()).PullRequest(globalCtx, repo, in)
+		if err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
+		httpJSON(w, result)
 	default:
 		httpErr(w, http.StatusNotFound, "no such Git action")
 	}
@@ -275,7 +347,8 @@ func writeGitHTTPError(w http.ResponseWriter, err error) {
 	switch {
 	case strings.Contains(message, "not Git-backed"):
 		status = http.StatusConflict
-	case strings.Contains(message, "uncommitted"), strings.Contains(message, "conflict"), strings.Contains(message, "already Git-backed"):
+	case strings.Contains(message, "uncommitted"), strings.Contains(message, "conflict"), strings.Contains(message, "already Git-backed"),
+		strings.Contains(message, "already exists"), strings.Contains(message, "force push is not available"):
 		status = http.StatusConflict
 	case strings.Contains(message, "not bound"), strings.Contains(message, "credentials"):
 		status = http.StatusFailedDependency

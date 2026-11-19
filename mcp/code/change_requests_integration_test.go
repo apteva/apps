@@ -19,8 +19,12 @@ import (
 func TestSidecar_ChangeRequests_ProtectedMainReviewMerge(t *testing.T) {
 	const project = "native-cr"
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(project), tk.WithEnv("CODE_REPOS_DIR", t.TempDir()))
-	author := func(tool string, args map[string]any) map[string]any { return sc.MCPAs(tool, args, 1, "t-author", project) }
-	reviewer := func(tool string, args map[string]any) map[string]any { return sc.MCPAs(tool, args, 2, "t-review", project) }
+	author := func(tool string, args map[string]any) map[string]any {
+		return sc.MCPAs(tool, args, 1, "t-author", project)
+	}
+	reviewer := func(tool string, args map[string]any) map[string]any {
+		return sc.MCPAs(tool, args, 2, "t-review", project)
+	}
 	author("repos_create", map[string]any{"name": "Review Demo", "framework": "blank"})
 	slug := "review-demo"
 	author("code_write_file", map[string]any{"slug": slug, "path": "app.txt", "content": "color=blue\n"})

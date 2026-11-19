@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.18.1
+version: 0.19.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,12 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.19.0 adds release plumbing for Git-backed repositories. repos_git_tag
+  creates, lists, pushes and deletes annotated tags and never moves a
+  published tag; repos_git_push can push any local branch to another branch
+  name on origin, fast-forward only; repos_git_pull_request creates, lists,
+  gets, merges and closes GitHub pull requests through the repository's
+  GitHub connection.
   v0.18.0 adds native remotes. repos_remote adds another Code repository as a
   remote (in this project, or on another Apteva install over HTTPS with a
   per-call token), fetches its branches as <remote>/<branch>, pushes branches
@@ -248,7 +254,11 @@ provides:
     - name: repos_git_commit
       description: Commit selected or all changes only when external Git is configured and the user requested a Git commit. Working-tree writes are already saved; no commit is needed for ordinary edits or previews.
     - name: repos_git_push
-      description: Push the current branch without force.
+      description: Push a local branch to origin, optionally to another branch name; fast-forward only, never forced.
+    - name: repos_git_tag
+      description: Create, list, push or delete annotated Git tags; published tags are never moved.
+    - name: repos_git_pull_request
+      description: Create, list, get, merge or close GitHub pull requests through the repository's GitHub connection.
     - name: repos_git_diff
       description: Return a bounded unified diff.
     - name: repos_git_log
@@ -410,7 +420,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.18.1
+    ref: code/v0.19.0
     entry: mcp/code
   port: 8080
   health_check: /health
