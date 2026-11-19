@@ -242,6 +242,26 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		httpJSON(w, status)
+	case "branches/delete":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Name  string `json:"name"`
+			Where string `json:"where"`
+			Force bool   `json:"force"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		result, err := service.withContext(r.Context()).DeleteBranch(globalCtx, repo, GitBranchDeleteInput{Name: body.Name, Where: body.Where, Force: body.Force, Actor: httpActor(r)})
+		if err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
+		httpJSON(w, result)
 	case "switch":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")
@@ -348,7 +368,9 @@ func writeGitHTTPError(w http.ResponseWriter, err error) {
 	case strings.Contains(message, "not Git-backed"):
 		status = http.StatusConflict
 	case strings.Contains(message, "uncommitted"), strings.Contains(message, "conflict"), strings.Contains(message, "already Git-backed"),
-		strings.Contains(message, "already exists"), strings.Contains(message, "force push is not available"):
+		strings.Contains(message, "already exists"), strings.Contains(message, "force push is not available"),
+		strings.Contains(message, "not merged into"), strings.Contains(message, "cannot be deleted"), strings.Contains(message, "checked-out branch"),
+		strings.Contains(message, "branch changed after it was checked"):
 		status = http.StatusConflict
 	case strings.Contains(message, "not bound"), strings.Contains(message, "credentials"):
 		status = http.StatusFailedDependency

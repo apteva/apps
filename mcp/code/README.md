@@ -1,5 +1,13 @@
 # Apteva Code
 
+## v0.20.0 — branch deletion
+
+`repos_git_branch_delete` deletes a Git branch locally, on origin, or both
+(`where=local|remote|both`). Work not merged into the checked-out branch or
+origin's default branch needs `force=true`; the checked-out branch and
+origin's default branch are never deleted; the result returns each deleted
+tip SHA so the branch can be recreated. Details in RELEASE-NOTES.md.
+
 ## v0.19.0 — tags, release branches and pull requests
 
 Git-backed repositories can now be released from Code. `repos_git_tag`

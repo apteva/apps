@@ -1,3 +1,35 @@
+# Apteva Code 0.20.0
+
+Adds branch deletion for Git-backed repositories. Existing tools keep their
+arguments and output.
+
+## Changes
+
+- **`repos_git_branch_delete`** (new; REST `POST /api/repos/<slug>/git/branches/delete`):
+  deletes a branch locally, on origin, or both (`where=local|remote|both`,
+  default `local`).
+  - A branch whose commits are not in the checked-out branch or origin's
+    default branch is refused unless `force=true`. Deleting only the local
+    copy of a branch that is still on origin counts as safe.
+  - A branch on origin this repository never fetched counts as unmerged.
+  - The checked-out branch and origin's default branch are never deleted,
+    even with `force`.
+  - Nothing is deleted until every check passes. Origin is deleted first and
+    only if its branch still points where it was checked (a leased push), so
+    a refused or lost race leaves the local branch untouched.
+  - The result returns each deleted tip SHA and what it was merged into
+    (`merged_into`, empty when forced); `repos_git_branch_create
+    start_point=<sha>` recreates it. Refusals are 409 on REST.
+  - Logged as `branch_delete` and emitted as `repo.git.branch_deleted`.
+
+## Validation
+
+- Tier 1: `TestGitBranchDelete_*` against a real bare remote through the
+  service (merged, unmerged, pushed, remote-only, both, unfetched, default
+  branch, checked-out branch).
+- Tier 2: `TestSidecar_GitRelease_*` deletes a release branch on origin and a
+  local branch over MCP and refuses origin's default branch over MCP and REST.
+
 # Apteva Code 0.19.0
 
 Adds what was missing to release from Code: Git tags, pushing to a release

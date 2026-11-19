@@ -143,6 +143,27 @@ func TestSidecar_GitRelease_TagsReleaseBranchAndPullRequestGuard(t *testing.T) {
 		t.Fatal("refused push changed the release branch")
 	}
 
+	// Branch deletion: the release branch on origin (merged into main), the old
+	// local branch, and origin's default branch is refused over MCP and REST.
+	deleted := sc.MCP("repos_git_branch_delete", map[string]any{"slug": "apps", "name": "release/app-v0.2", "where": "remote"})
+	if deleted["remote"].(map[string]any)["sha"] != head || deleted["remote"].(map[string]any)["merged_into"] != "main" || remoteRef("refs/heads/release/app-v0.2") != "" {
+		t.Fatalf("remote branch delete=%v", deleted)
+	}
+	deleted = sc.MCP("repos_git_branch_delete", map[string]any{"slug": "apps", "name": "old"})
+	if deleted["local"].(map[string]any)["merged_into"] != "main" {
+		t.Fatalf("local branch delete=%v", deleted)
+	}
+	if err := nativeMCPError(sc, "repos_git_branch_delete", map[string]any{"slug": "apps", "name": "main", "where": "remote", "force": true}); err == nil || !strings.Contains(err.Error(), "default branch") {
+		t.Fatalf("deleting origin's default branch: %v", err)
+	}
+	var deleteREST map[string]any
+	if resp := sc.POST("/api/repos/apps/git/branches/delete", map[string]any{"name": "main", "where": "both", "force": true}, &deleteREST); resp.Status != 409 {
+		t.Fatalf("REST delete of main status=%d", resp.Status)
+	}
+	if remoteRef("refs/heads/main") != head {
+		t.Fatal("main moved or vanished on origin")
+	}
+
 	// Pull requests need a github.com origin.
 	if err := nativeMCPError(sc, "repos_git_pull_request", map[string]any{"slug": "apps", "action": "list"}); err == nil || !strings.Contains(err.Error(), "github.com remotes only") {
 		t.Fatalf("pull request on a non-GitHub origin: %v", err)

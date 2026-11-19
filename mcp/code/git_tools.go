@@ -150,6 +150,20 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			HandlerCtx: a.toolGitBranchCreate,
 		},
 		{
+			Name: "repos_git_branch_delete",
+			Description: "Delete a branch locally, on origin, or both (where=local|remote|both, default local). " +
+				"A branch whose commits are not in the checked-out branch or origin's default branch is refused unless force=true; " +
+				"the checked-out branch and origin's default branch are never deleted. The origin deletion only happens if the branch still points where it was checked. " +
+				"The result returns each deleted tip SHA so the branch can be recreated with repos_git_branch_create start_point. Args: slug, name, where?, force?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
+				"where": map[string]any{"type": "string", "enum": []string{"local", "remote", "both"}, "description": "local (default), remote (origin only) or both."},
+				"force": map[string]any{"type": "boolean", "description": "Delete even if the branch has commits not merged anywhere else."},
+				"actor": map[string]any{"type": "string"},
+			}, []string{"slug", "name"}),
+			HandlerCtx: a.toolGitBranchDelete,
+		},
+		{
 			Name:        "repos_git_switch",
 			Description: "Switch to an existing local branch. Refuses repositories with uncommitted or conflicted changes. Args: slug, name, actor?.",
 			InputSchema: schemaObject(map[string]any{
@@ -363,6 +377,16 @@ func (a *App) toolGitBranchCreate(callCtx context.Context, ctx *sdk.AppCtx, args
 		return nil, err
 	}
 	return service.withContext(callCtx).CreateBranch(ctx, repo, strArg(args, "name"), strArg(args, "start_point"), strArg(args, "actor"))
+}
+
+func (a *App) toolGitBranchDelete(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	service, repo, err := a.gitRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return service.withContext(callCtx).DeleteBranch(ctx, repo, GitBranchDeleteInput{
+		Name: strArg(args, "name"), Where: strArg(args, "where"), Force: boolArg(args, "force"), Actor: strArg(args, "actor"),
+	})
 }
 
 func (a *App) toolGitSwitch(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

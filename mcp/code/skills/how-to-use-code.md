@@ -177,6 +177,12 @@ shows `git_backed: true`:
   request from the pushed branch into the default branch (`base` to change
   it). Use `list`, `get`, `merge` (with `expected_head_sha` when merging what
   you reviewed) and `close` for the rest. Merge only when the user asked for it.
+- `repos_git_branch_delete name=... where=local|remote|both` removes a branch
+  once its work is merged or released (default `local`). Unmerged work is
+  refused; pass `force=true` only when the user wants it gone. The result
+  returns each deleted tip so `repos_git_branch_create start_point=<sha>` can
+  bring it back. The checked-out branch and origin's default branch are never
+  deleted.
 
 ## Revisions are optional during ordinary work
 
