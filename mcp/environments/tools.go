@@ -91,6 +91,7 @@ var environmentAssertionTypes = []string{
 	"web_state",
 	"web_event",
 	"protocol_event",
+	"integration_state",
 }
 
 func assertionTypeCatalog() []string {
@@ -138,7 +139,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
 		{Name: "environment_inspect", Description: "Inspect runtime state, edge calls, and optional agent telemetry.", InputSchema: requiredSchema("run_id"), Handler: a.toolInspect},
-		{Name: "environment_assert", Description: "Run an app, edge, telemetry, web state, or web event assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
+		{Name: "environment_assert", Description: "Run an app, edge, telemetry, web state, web event, protocol event, or simulated integration state assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
+		{Name: "environment_integration_trigger", Description: "Cause a provider-side event, such as an incoming call, on a simulated integration (an integration binding with simulate:true). Returns the provider response and each webhook delivery to the run's apps.", InputSchema: integrationTriggerSchema, Handler: a.toolIntegrationTrigger},
+		{Name: "environment_integration_state", Description: "Read a simulated integration's provider state (its collections, such as calls or phone numbers) and every webhook delivery so far.", InputSchema: integrationStateSchema, Handler: a.toolIntegrationState},
 		{Name: "environment_snapshot", Description: "Snapshot a running defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshot},
 		{Name: "environment_snapshot_list", Description: "List snapshots.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.runtime().ListRuntimeSnapshots() }},
 		{Name: "environment_snapshot_delete", Description: "Delete a snapshot.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshotDelete},

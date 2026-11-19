@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.11.0
-description: Isolated environments with bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
+version: 0.12.0
+description: Isolated environments with simulated integrations (trigger provider events and assert on provider state and webhook deliveries), bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -48,7 +48,7 @@ provides:
     - { name: environment_call, description: "Call any tool on an app cloned into a run." }
     - { name: environment_mcp_call, description: "Call any tool on a managed MCP server cloned into a run." }
     - { name: environment_inspect, description: "Inspect runtime apps, agents, edge calls, and telemetry." }
-    - { name: environment_assert, description: "Evaluate app, managed MCP, edge, telemetry, web-state, or web-event assertions." }
+    - { name: environment_assert, description: "Evaluate app, managed MCP, edge, telemetry, web-state, web-event, protocol-event, or simulated integration state assertions." }
     - { name: environment_snapshot, description: "Capture a reusable snapshot of a running environment." }
     - { name: environment_snapshot_list, description: "List snapshots owned by this Environments install." }
     - { name: environment_snapshot_delete, description: "Delete a snapshot." }
@@ -59,6 +59,8 @@ provides:
     - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions." }
     - { name: environment_voice_call_get, description: "Get a simulated voice call, transcript, metrics, and recording handles." }
     - { name: environment_voice_recording_get, description: "Get a receptionist, clean caller, or delivered caller WAV recording from a simulated voice call." }
+    - { name: environment_integration_trigger, description: "Cause a provider-side event, such as an incoming call, on a simulated integration binding and return the provider response and webhook deliveries." }
+    - { name: environment_integration_state, description: "Read a simulated integration's provider collections and webhook deliveries." }
   publishes:
     - { name: environment.created, description: "An environment definition was created." }
     - { name: environment.started, description: "An environment runtime is running." }
@@ -78,7 +80,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.11.0, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.12.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

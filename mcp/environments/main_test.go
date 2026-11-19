@@ -394,7 +394,7 @@ func TestEnvironmentRunCreateRejectsPseudoEvaluationArguments(t *testing.T) {
 }
 
 func TestAssertionTypeCatalogIsAuthoritative(t *testing.T) {
-	want := []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}
+	want := []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event", "integration_state"}
 	got := assertionTypeCatalog()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("assertion types=%v, want %v", got, want)

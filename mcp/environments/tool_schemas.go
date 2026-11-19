@@ -67,6 +67,12 @@ var environmentSpecSchema = strictObject(map[string]any{
 		"auth_type":        map[string]any{"type": "string"},
 		"credentials":      stringMapSchema(),
 		"expose_to_agents": map[string]any{"type": "boolean"},
+		"simulate":         map[string]any{"type": "boolean", "description": "Run the integration's catalog simulation instead of a dead fake connection. Drive it with environment_integration_trigger and read it with environment_integration_state."},
+		"seed": map[string]any{
+			"type":                 "object",
+			"description":          "Pre-load simulation collections, for example {\"phone_numbers\": [{\"phone_number\": \"+15550100001\"}]}. Requires simulate.",
+			"additionalProperties": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+		},
 	})),
 	"connection_bindings": arraySchema(strictObject(map[string]any{
 		"app":           map[string]any{"type": "string"},
