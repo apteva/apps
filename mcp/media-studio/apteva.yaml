@@ -2,8 +2,16 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.11.0
+version: 0.12.0
 description: |
+  v0.12.0 adds HeyGen Avatar 6 and Avatar 6 Turbo. Avatar engine choices
+  now follow each look's supported engines, so new HeyGen engines appear
+  automatically; Avatar 6 adds 2K output, a motion prompt and calmer
+  expressiveness, and every engine is checked before any paid request.
+  Cost estimates cover Avatar 6 Turbo at 1080p and show no estimate where
+  HeyGen publishes no rate. Also includes canonical brand profiles with
+  persona-aware content production (previously tagged 0.11.0) and Kling 4
+  video references mapped to Venice's flat-reference format.
   v0.10.63 aligns the Codex image catalog and default requests with
   gpt-6.1-sol, preserving explicitly selected models.
   v0.10.62 adds project-scoped media_job_get so consumers can poll existing
@@ -274,7 +282,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.11.0
+    ref: media-studio/v0.12.0
     entry: mcp/media-studio
   port: 8080
   health_check: /health
