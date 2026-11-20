@@ -11,16 +11,19 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ─── probability ───────────────────────────────────────────────────
 
 type ProbabilityResult struct {
 	FairProb float64  `json:"fair_prob"`
-	Method   string   `json:"method"`             // odds_devig | cross_venue | macro_implied | unavailable
-	Books    int      `json:"books,omitempty"`    // for odds_devig: how many bookmakers contributed
+	Method   string   `json:"method"`          // odds_devig | cross_venue | macro_implied | unavailable
+	Books    int      `json:"books,omitempty"` // for odds_devig: how many bookmakers contributed
 	Sources  []string `json:"sources"`
 	Detail   string   `json:"detail,omitempty"`
 }
@@ -94,17 +97,22 @@ func fairProbFromOddsAPI(raw json.RawMessage, target string) (float64, int) {
 				if mk.Key != "h2h" {
 					continue
 				}
-				prices := make([]float64, 0, len(mk.Outcomes))
-				idx := -1
-				for i, o := range mk.Outcomes {
-					prices = append(prices, o.Price)
+				// Vendor outcome order is not stable across bookmakers. Put the
+				// requested outcome first for every book before taking consensus;
+				// reusing one book's index can silently invert a trading signal.
+				var targetPrice float64
+				others := make([]float64, 0, len(mk.Outcomes)-1)
+				for _, o := range mk.Outcomes {
 					if strings.Contains(strings.ToLower(o.Name), tl) {
-						idx = i
+						targetPrice = o.Price
+					} else {
+						others = append(others, o.Price)
 					}
 				}
-				if idx >= 0 && len(prices) >= 2 {
+				if targetPrice > 0 && len(others) >= 1 {
+					prices := append([]float64{targetPrice}, others...)
 					bookOutcomes = append(bookOutcomes, prices)
-					targetIdxAcross = idx
+					targetIdxAcross = 0
 				}
 			}
 		}
@@ -208,7 +216,7 @@ func (e jsonErr) Error() string { return string(e) }
 type StatsResult struct {
 	Entity  string                     `json:"entity"`
 	Domain  string                     `json:"domain"`
-	Data    map[string]json.RawMessage `json:"data"`    // queryType → raw normalized payload
+	Data    map[string]json.RawMessage `json:"data"` // queryType → raw normalized payload
 	Sources []string                   `json:"sources"`
 }
 
@@ -264,6 +272,7 @@ type NewsItem struct {
 	Title  string `json:"title"`
 	URL    string `json:"url,omitempty"`
 	Source string `json:"source,omitempty"`
+	Date   string `json:"date,omitempty"`
 }
 
 type ContextResult struct {
@@ -276,10 +285,47 @@ type ContextResult struct {
 // + dedups by normalized title. v0.1 dedup is title-prefix based;
 // sentiment scoring is v0.2.
 func gwContext(sc sourceClient, topic string) ContextResult {
+	return gwContextParams(sc, map[string]any{"topic": topic})
+}
+
+func gwContextParams(sc sourceClient, params map[string]any) ContextResult {
+	topic := strArgM(params, "topic")
 	out := ContextResult{Topic: topic, Items: []NewsItem{}, Sources: []string{}}
 	seenTitle := map[string]bool{}
+	// SEC EDGAR is a two-step source: resolve the ticker to a CIK, then
+	// retrieve the company's recent filings. Keep this special case here so
+	// the generic news fan-out remains compatible with search-style sources.
+	if raw, ok := sc.call("sec-edgar", "ticker_to_cik", map[string]any{"ticker": topic}); ok {
+		if cik, ok := secCIKForTicker(raw, topic); ok {
+			if filings, ok := sc.call("sec-edgar", "company_submissions", map[string]any{"cik": cik}); ok {
+				secItems := parseSECSubmissions(filings, cik)
+				// SEC keeps older filings in archive files listed by the
+				// submissions response. Fetch those through the adapter too;
+				// the gateway remains source-agnostic.
+				for _, file := range secArchiveFiles(filings) {
+					if archived, ok := sc.call("sec-edgar", "submission_archive", map[string]any{"file": file}); ok {
+						secItems = append(secItems, parseSECSubmissions(archived, cik)...)
+					}
+				}
+				for _, it := range filterNewsDates(secItems, strArgM(params, "from"), strArgM(params, "to")) {
+					key := normTitle(it.Title)
+					if key == "" || seenTitle[key] {
+						continue
+					}
+					seenTitle[key] = true
+					out.Items = append(out.Items, it)
+				}
+				if len(out.Items) > 0 {
+					out.Sources = append(out.Sources, "sec-edgar")
+				}
+			}
+		}
+	}
 	for _, spec := range specsFor("*", qNews) {
-		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(map[string]any{"topic": topic}))
+		if spec.slug == "sec-edgar" {
+			continue // handled above as a two-step filings query
+		}
+		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(params))
 		if !ok {
 			continue
 		}
@@ -300,6 +346,9 @@ func gwContext(sc sourceClient, topic string) ContextResult {
 	// Stable-ish ordering: alphabetical by title so output is
 	// deterministic for tests.
 	sort.SliceStable(out.Items, func(i, j int) bool { return out.Items[i].Title < out.Items[j].Title })
+	if n := intArg(params, "limit"); n > 0 && len(out.Items) > n {
+		out.Items = out.Items[:n]
+	}
 	return out
 }
 
@@ -314,10 +363,12 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 			URL   string `json:"url"`
 		} `json:"results"`
 		Articles []struct {
-			Title  string `json:"title"`
-			URL    string `json:"url"`
-			Domain string `json:"domain"`
-			Source struct {
+			Title       string `json:"title"`
+			URL         string `json:"url"`
+			Domain      string `json:"domain"`
+			SeenDate    string `json:"seendate"`
+			PublishedAt string `json:"publishedAt"`
+			Source      struct {
 				Name string `json:"name"`
 			} `json:"source"`
 		} `json:"articles"`
@@ -340,7 +391,124 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 		if src == "" {
 			src = slug
 		}
-		out = append(out, NewsItem{Title: a.Title, URL: a.URL, Source: src})
+		out = append(out, NewsItem{Title: a.Title, URL: a.URL, Source: src, Date: normalizeNewsDate(orString(a.PublishedAt, a.SeenDate))})
+	}
+	return out
+}
+
+// secCIKForTicker accepts the SEC's company_tickers.json map. The endpoint
+// has used both numeric and string cik_str values, so decode flexibly.
+func secCIKForTicker(raw json.RawMessage, ticker string) (string, bool) {
+	target := strings.ToUpper(strings.TrimSpace(ticker))
+	var rows map[string]struct {
+		CIKStr json.RawMessage `json:"cik_str"`
+		Ticker string          `json:"ticker"`
+		Title  string          `json:"title"`
+	}
+	if json.Unmarshal(raw, &rows) != nil {
+		return "", false
+	}
+	for _, row := range rows {
+		if strings.ToUpper(row.Ticker) != target {
+			continue
+		}
+		var n int64
+		if json.Unmarshal(row.CIKStr, &n) == nil {
+			return fmt.Sprintf("%010d", n), true
+		}
+		var s string
+		if json.Unmarshal(row.CIKStr, &s) == nil && s != "" {
+			return fmt.Sprintf("%010s", strings.TrimSpace(s)), true
+		}
+	}
+	return "", false
+}
+
+func parseSECSubmissions(raw json.RawMessage, cik string) []NewsItem {
+	var payload struct {
+		Filings struct {
+			Recent struct {
+				Accession  []string `json:"accessionNumber"`
+				FilingDate []string `json:"filingDate"`
+				ReportDate []string `json:"reportDate"`
+				Form       []string `json:"form"`
+				Primary    []string `json:"primaryDocument"`
+			} `json:"recent"`
+		} `json:"filings"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	r := payload.Filings.Recent
+	// Archived submission files flatten the same parallel arrays at the
+	// top level rather than nesting them under filings.recent.
+	if len(r.Form) == 0 {
+		var archive struct {
+			Accession  []string `json:"accessionNumber"`
+			FilingDate []string `json:"filingDate"`
+			ReportDate []string `json:"reportDate"`
+			Form       []string `json:"form"`
+			Primary    []string `json:"primaryDocument"`
+		}
+		if json.Unmarshal(raw, &archive) != nil {
+			return nil
+		}
+		r.Accession, r.FilingDate, r.ReportDate, r.Form, r.Primary = archive.Accession, archive.FilingDate, archive.ReportDate, archive.Form, archive.Primary
+	}
+	items := make([]NewsItem, 0, len(r.Form))
+	for i, form := range r.Form {
+		if form == "" || i >= len(r.Accession) || i >= len(r.FilingDate) {
+			continue
+		}
+		date := r.FilingDate[i]
+		title := fmt.Sprintf("SEC %s filing (%s)", form, date)
+		if i < len(r.ReportDate) && r.ReportDate[i] != "" && r.ReportDate[i] != date {
+			title += " — period " + r.ReportDate[i]
+		}
+		acc := strings.ReplaceAll(r.Accession[i], "-", "")
+		doc := ""
+		if i < len(r.Primary) {
+			doc = r.Primary[i]
+		}
+		url := fmt.Sprintf("https://www.sec.gov/Archives/edgar/data/%s/%s", strings.TrimLeft(cik, "0"), acc)
+		if doc != "" {
+			url += "/" + doc
+		}
+		items = append(items, NewsItem{Title: title, URL: url, Source: "SEC EDGAR", Date: date})
+	}
+	return items
+}
+
+func filterNewsDates(items []NewsItem, from, to string) []NewsItem {
+	if from == "" && to == "" {
+		return items
+	}
+	out := make([]NewsItem, 0, len(items))
+	for _, it := range items {
+		if it.Date == "" || (from != "" && it.Date < from) || (to != "" && it.Date > to) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+func secArchiveFiles(raw json.RawMessage) []string {
+	var payload struct {
+		Filings struct {
+			Files []struct {
+				Name string `json:"name"`
+			} `json:"files"`
+		} `json:"filings"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(payload.Filings.Files))
+	for _, f := range payload.Filings.Files {
+		if strings.HasPrefix(f.Name, "CIK") && strings.HasSuffix(f.Name, ".json") {
+			out = append(out, f.Name)
+		}
 	}
 	return out
 }
@@ -351,6 +519,15 @@ func normTitle(t string) string {
 		t = t[:60]
 	}
 	return t
+}
+
+func intArg(params map[string]any, key string) int {
+	v := strArgM(params, key)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
 }
 
 // ─── sources_status ────────────────────────────────────────────────
@@ -375,14 +552,16 @@ func allRegistrySlugs() []string {
 func gwSourcesStatus(sc sourceClient) map[string]any {
 	slugs := allRegistrySlugs()
 	bound := sc.boundSlugs(slugs)
+	caps := sourceCapabilities()
 	rows := make([]map[string]any, 0, len(slugs))
 	for _, s := range slugs {
 		pub := isPublicSource(s)
 		rows = append(rows, map[string]any{
-			"slug":      s,
-			"bound":     bound[s],
-			"public":    pub,
-			"available": pub || bound[s], // public works without binding
+			"slug":         s,
+			"bound":        bound[s],
+			"public":       pub,
+			"available":    pub || bound[s], // public works without binding
+			"capabilities": caps[s],
 		})
 	}
 	return map[string]any{"sources": rows}
@@ -391,6 +570,18 @@ func gwSourcesStatus(sc sourceClient) map[string]any {
 func strArgM(m map[string]any, k string) string {
 	if s, ok := m[k].(string); ok {
 		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// normalizeNewsDate turns GDELT's 20261119T120000Z and RFC3339 variants
+// into RFC3339; unknown shapes return "".
+func normalizeNewsDate(v string) string {
+	v = strings.TrimSpace(v)
+	for _, layout := range []string{"20060102T150405Z", time.RFC3339, "2006-01-02T15:04:05Z07:00", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
 	}
 	return ""
 }
