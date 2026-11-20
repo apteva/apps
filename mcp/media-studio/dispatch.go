@@ -182,6 +182,10 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if strings.TrimSpace(prompt) == "" {
 		return nil, errors.New("prompt required")
 	}
+	policy, policyErr := resolveBrandProductionPolicy(ctx, args)
+	if policyErr != nil {
+		return mcpError("brand policy: " + policyErr.Error()), nil
+	}
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	pid := projectScope(ctx)
 	if wantsDraft(args) {
@@ -216,6 +220,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	if bound == nil {
 		return mcpError("no " + h.Role + " bound — pick one in app settings"), nil
+	}
+	if policy != nil && policy.Provider != "" && bound.AppSlug != policy.Provider {
+		return mcpError("required brand provider is not bound; fallback is not allowed"), nil
 	}
 	draftID := int64Arg(args, "_draft_generation_id", 0)
 	tool := bound.ToolFor(capability)
@@ -514,7 +521,7 @@ func selectBoundProvider(ctx *sdk.AppCtx, h kindHandler, args map[string]any, ca
 	if len(bounds) == 0 {
 		return nil, nil
 	}
-	provider := ""
+	provider := strings.TrimSpace(strArg(args, "provider", ""))
 	if h.Role == "audio_provider" {
 		var err error
 		provider, err = normalizeAudioProviderArgs(args)
@@ -522,6 +529,9 @@ func selectBoundProvider(ctx *sdk.AppCtx, h kindHandler, args map[string]any, ca
 			return nil, err
 		}
 	} else if parsed, stripped, ok := splitProviderModel(strArg(args, "model", "")); ok {
+		if provider != "" && provider != parsed {
+			return nil, errors.New("image provider and model provider do not match")
+		}
 		provider = parsed
 		args["model"] = stripped
 	}
