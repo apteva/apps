@@ -260,6 +260,20 @@ func heygenAvatarQuote(providerSlug string, args map[string]any) float64 {
 	}
 	avatarType := strArg(opts, "avatar_type", "photo_avatar")
 	resolution := strings.ToLower(strArg(opts, "resolution", "1080p"))
+	switch engine := heygenEngineType(heygenEngineConfig(opts["engine"])); engine {
+	case "", "avatar_iii", "avatar_iv", "avatar_v":
+		// Classic per-avatar-type rates below.
+	case "heygen-avatar-6-turbo":
+		// Published "from $0.05/sec"; only the 1080p rate is known.
+		if resolution == "1080p" {
+			return seconds * 0.05
+		}
+		return 0
+	default:
+		// Avatar 6 standard, 2K and engines without published rates:
+		// return no quote rather than a guessed price.
+		return 0
+	}
 	rate := 0.05
 	if avatarType == "studio_avatar" || avatarType == "digital_twin" {
 		rate = 0.0667

@@ -112,13 +112,7 @@ func buildHeyGenAvatarArgs(args map[string]any) (map[string]any, error) {
 				out["engine"] = engine
 			}
 		}
-		if !heygenIsAvatarV(out["engine"]) {
-			for _, k := range []string{"motion_prompt", "expressiveness"} {
-				if v, exists := opts[k]; exists {
-					out[k] = v
-				}
-			}
-		}
+		applyHeyGenMotionOptions(out, opts)
 		if out["audio_url"] != nil || out["audio_asset_id"] != nil {
 			delete(out, "script")
 			delete(out, "voice_id")
@@ -168,22 +162,145 @@ func heygenEngineConfig(v any) map[string]any {
 	return nil
 }
 
-func heygenIsAvatarV(v any) bool {
-	m, ok := v.(map[string]any)
-	return ok && strArg(m, "type", "") == "avatar_v"
+// heygenEngineProfile describes what Media Studio knows about a HeyGen
+// avatar engine. Engines not in the table are passed through untouched
+// (HeyGen validates them), so new engine versions work without a code
+// change; the table only adds friendlier preflight and option mapping.
+type heygenEngineProfile struct {
+	// Resolutions the engine renders; nil means no local restriction.
+	Resolutions []string
+	// MotionPrompt reports whether top-level motion_prompt is accepted.
+	MotionPrompt bool
+	// MaxMotionPromptChars caps motion_prompt length (0 = no local cap).
+	MaxMotionPromptChars int
+	// Expressiveness says where expressiveness goes: "top" for the
+	// top-level expressiveness field, "engine" for
+	// engine.motion_expressiveness, "" when the engine rejects it.
+	Expressiveness string
+	// AvatarOnly engines reject raw image input (type: "image").
+	AvatarOnly bool
+	// RequiresAdvertised engines must appear in the look's
+	// supported_api_engines; an empty list counts as unsupported.
+	RequiresAdvertised bool
 }
 
+var heygenEngineProfiles = map[string]heygenEngineProfile{
+	"avatar_iii": {AvatarOnly: true},
+	"avatar_iv":  {MotionPrompt: true, Expressiveness: "top"},
+	"avatar_v":   {RequiresAdvertised: true},
+	"heygen-avatar-6": {
+		Resolutions: []string{"1080p", "2k"}, MotionPrompt: true, MaxMotionPromptChars: 1200,
+		Expressiveness: "engine", AvatarOnly: true, RequiresAdvertised: true,
+	},
+	"heygen-avatar-6-turbo": {
+		Resolutions: []string{"1080p", "2k"}, MotionPrompt: true, MaxMotionPromptChars: 1200,
+		Expressiveness: "engine", AvatarOnly: true, RequiresAdvertised: true,
+	},
+}
+
+// heygenEngineType returns the engine type of an engine config built by
+// heygenEngineConfig ("" for auto / unset).
+func heygenEngineType(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strArg(m, "type", "")
+}
+
+func heygenIsAvatarV(v any) bool {
+	return heygenEngineType(v) == "avatar_v"
+}
+
+// applyHeyGenMotionOptions copies motion_prompt / expressiveness into
+// the request in the shape the selected engine expects. Unknown engines
+// and auto get both fields as-is; known engines that reject a field
+// have it dropped.
+func applyHeyGenMotionOptions(out, opts map[string]any) {
+	engineType := heygenEngineType(out["engine"])
+	profile, known := heygenEngineProfiles[engineType]
+	if !known {
+		for _, k := range []string{"motion_prompt", "expressiveness"} {
+			if v, exists := opts[k]; exists {
+				out[k] = v
+			}
+		}
+		return
+	}
+	if profile.MotionPrompt {
+		if v, exists := opts["motion_prompt"]; exists {
+			out["motion_prompt"] = v
+		}
+	}
+	switch profile.Expressiveness {
+	case "top":
+		if v, exists := opts["expressiveness"]; exists {
+			out["expressiveness"] = v
+		}
+	case "engine":
+		level := strArg(opts, "motion_expressiveness", "")
+		if level == "" {
+			level = heygenMotionExpressiveness(strArg(opts, "expressiveness", ""))
+		}
+		if level != "" {
+			engine, _ := out["engine"].(map[string]any)
+			if _, set := engine["motion_expressiveness"]; !set {
+				merged := make(map[string]any, len(engine)+1)
+				for k, v := range engine {
+					merged[k] = v
+				}
+				merged["motion_expressiveness"] = level
+				out["engine"] = merged
+			}
+		}
+	}
+}
+
+// heygenMotionExpressiveness maps the generic expressiveness levels onto
+// Avatar 6's default / less scale.
+func heygenMotionExpressiveness(level string) string {
+	switch strings.ToLower(level) {
+	case "low", "less":
+		return "less"
+	case "medium", "high", "default":
+		return "default"
+	}
+	return ""
+}
+
+// validateHeyGenAvatarEngine rejects requests HeyGen would refuse for the
+// selected engine before any provider call: unsupported resolution, raw
+// image input on avatar-only engines, over-long motion prompts, and looks
+// that do not advertise the engine in supported_api_engines.
 func validateHeyGenAvatarEngine(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, args map[string]any) error {
 	opts, _ := args["options"].(map[string]any)
-	if opts == nil || !heygenIsAvatarV(heygenEngineConfig(opts["engine"])) {
+	if opts == nil {
 		return nil
 	}
+	engineType := heygenEngineType(heygenEngineConfig(opts["engine"]))
+	if engineType == "" {
+		return nil
+	}
+	profile, known := heygenEngineProfiles[engineType]
 	avatarID := strArg(args, "avatar", "")
+
+	if known {
+		if res := strings.ToLower(strArg(opts, "resolution", "1080p")); profile.Resolutions != nil && !containsString(profile.Resolutions, res) {
+			return fmt.Errorf("engine %s supports resolution %s, not %q", engineType, strings.Join(profile.Resolutions, " or "), res)
+		}
+		if profile.AvatarOnly && avatarID == "" {
+			return fmt.Errorf("engine %s needs a HeyGen avatar look; raw source_image input is not supported", engineType)
+		}
+		if n := profile.MaxMotionPromptChars; n > 0 && len([]rune(strArg(opts, "motion_prompt", ""))) > n {
+			return fmt.Errorf("motion_prompt exceeds %d characters for engine %s", n, engineType)
+		}
+	}
 	if avatarID == "" {
-		// Image-to-video with Avatar V is validated by HeyGen because
-		// there is no reusable look id to preflight.
+		// Image-to-video has no reusable look id to preflight; HeyGen
+		// validates the engine itself.
 		return nil
 	}
+
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_avatar_look",
 		map[string]any{"look_id": avatarID})
 	if err != nil {
@@ -200,12 +317,25 @@ func validateHeyGenAvatarEngine(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, ar
 	if err := json.Unmarshal(res.Data, &body); err != nil {
 		return err
 	}
-	for _, engine := range body.Data.SupportedAPIEngines {
-		if engine == "avatar_v" {
-			return nil
+	engines := body.Data.SupportedAPIEngines
+	if containsString(engines, engineType) {
+		return nil
+	}
+	if len(engines) == 0 && !profile.RequiresAdvertised {
+		// Older looks advertise nothing; only engines that HeyGen gates
+		// on the list are refused in that case.
+		return nil
+	}
+	return fmt.Errorf("selected avatar look does not advertise supported_api_engines=[%s]", engineType)
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
 		}
 	}
-	return errors.New("selected avatar look does not advertise supported_api_engines=[avatar_v]")
+	return false
 }
 
 // buildTavusAvatarArgs → POST /v2/videos. replica_id + script required;

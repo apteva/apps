@@ -247,3 +247,149 @@ export function uploadValidationError(
   }
   return "";
 }
+
+// --- HeyGen avatar engines ---
+//
+// Engine choices come from the selected look's supported_api_engines, so
+// new HeyGen engine versions show up without a panel change. The profile
+// table only adds labels, resolution limits and motion controls for
+// engines we know; unknown engines fall back to permissive defaults and
+// HeyGen validates them. Keep in sync with heygenEngineProfiles in
+// avatar.go.
+
+export interface HeyGenEngineProfile {
+  label: string;
+  resolutions?: string[];
+  motionPrompt: boolean;
+  maxMotionPromptChars?: number;
+  /** "top" = expressiveness high/medium/low, "engine" = motion_expressiveness default/less. */
+  expressiveness: "top" | "engine" | "";
+  requiresAdvertised: boolean;
+}
+
+export const HEYGEN_ENGINE_PROFILES: Record<string, HeyGenEngineProfile> = {
+  "heygen-avatar-6": {
+    label: "Avatar 6",
+    resolutions: ["1080p", "2k"],
+    motionPrompt: true,
+    maxMotionPromptChars: 1200,
+    expressiveness: "engine",
+    requiresAdvertised: true,
+  },
+  "heygen-avatar-6-turbo": {
+    label: "Avatar 6 Turbo",
+    resolutions: ["1080p", "2k"],
+    motionPrompt: true,
+    maxMotionPromptChars: 1200,
+    expressiveness: "engine",
+    requiresAdvertised: true,
+  },
+  avatar_v: { label: "Avatar V", motionPrompt: false, expressiveness: "", requiresAdvertised: true },
+  avatar_iv: { label: "Avatar IV", motionPrompt: true, expressiveness: "top", requiresAdvertised: false },
+  avatar_iii: { label: "Avatar III", motionPrompt: false, expressiveness: "", requiresAdvertised: false },
+};
+
+export const HEYGEN_ALL_RESOLUTIONS = ["1080p", "720p", "2k", "4k"];
+const HEYGEN_CLASSIC_RESOLUTIONS = ["1080p", "720p", "4k"];
+
+export function heygenEngineLabel(engine: string): string {
+  if (engine === "auto") return "Auto";
+  return HEYGEN_ENGINE_PROFILES[engine]?.label || engine;
+}
+
+/** Engine ids offered for a look, always starting with "auto". */
+export function heygenEngineChoices(look?: { supported_api_engines?: string[] }): string[] {
+  const out = ["auto"];
+  const advertised = look?.supported_api_engines || [];
+  if (look && advertised.length > 0) {
+    for (const e of advertised) if (e && !out.includes(e)) out.push(e);
+    return out;
+  }
+  for (const [id, profile] of Object.entries(HEYGEN_ENGINE_PROFILES)) {
+    // Looks that advertise nothing can't use engines HeyGen gates on the list.
+    if (look && profile.requiresAdvertised) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+export function heygenEngineResolutions(engine: string): string[] {
+  if (engine === "auto") return HEYGEN_CLASSIC_RESOLUTIONS;
+  const profile = HEYGEN_ENGINE_PROFILES[engine];
+  if (!profile) return HEYGEN_ALL_RESOLUTIONS;
+  return profile.resolutions || HEYGEN_CLASSIC_RESOLUTIONS;
+}
+
+export function heygenResolutionLabel(resolution: string): string {
+  return resolution === "2k" || resolution === "4k" ? resolution.toUpperCase() : resolution;
+}
+
+/** Motion controls for an engine. Auto hides them; unknown engines show both generically. */
+export function heygenEngineMotion(engine: string): {
+  prompt: boolean;
+  maxChars?: number;
+  expressiveness: "top" | "engine" | "";
+} {
+  if (engine === "auto") return { prompt: false, expressiveness: "" };
+  const profile = HEYGEN_ENGINE_PROFILES[engine];
+  if (!profile) return { prompt: true, expressiveness: "top" };
+  return {
+    prompt: profile.motionPrompt,
+    maxChars: profile.maxMotionPromptChars,
+    expressiveness: profile.expressiveness,
+  };
+}
+
+export function heygenExpressivenessLevels(kind: "top" | "engine" | ""): string[] {
+  if (kind === "engine") return ["default", "less"];
+  if (kind === "top") return ["high", "medium", "low"];
+  return [];
+}
+
+/** True when the selected look can't use the engine (auto is always allowed). */
+export function heygenEngineBlocked(
+  engine: string,
+  look?: { supported_api_engines?: string[] },
+): boolean {
+  if (engine === "auto" || !look) return false;
+  return !heygenEngineChoices(look).includes(engine);
+}
+
+/** HeyGen request options for the selected engine and motion settings. */
+export function heygenAvatarEngineOptions(
+  engine: string,
+  motionPrompt: string,
+  expressiveness: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (engine === "auto") return out;
+  out.engine = { type: engine };
+  const motion = heygenEngineMotion(engine);
+  const prompt = motionPrompt.trim();
+  if (motion.prompt && prompt) out.motion_prompt = prompt;
+  if (expressiveness && heygenExpressivenessLevels(motion.expressiveness).includes(expressiveness)) {
+    if (motion.expressiveness === "engine") out.motion_expressiveness = expressiveness;
+    else out.expressiveness = expressiveness;
+  }
+  return out;
+}
+
+/**
+ * Estimated HeyGen API cost in USD, or 0 when there is no known rate
+ * (Avatar 6 standard, 2K, unknown engines). Mirrors heygenAvatarQuote.
+ */
+export function estimateHeyGenAvatarCostUSD(
+  seconds: number,
+  engine: string,
+  avatarType: string | undefined,
+  resolution: string,
+): number {
+  if (seconds <= 0) return 0;
+  const res = resolution.toLowerCase();
+  if (engine === "heygen-avatar-6-turbo") return res === "1080p" ? seconds * 0.05 : 0;
+  if (!["auto", "avatar_iii", "avatar_iv", "avatar_v"].includes(engine)) return 0;
+  const type = avatarType || "photo_avatar";
+  let rate = type === "studio_avatar" || type === "digital_twin" ? 0.0667 : 0.05;
+  if (res === "4k") rate = type === "photo_avatar" ? 0.0667 : 0.0833;
+  return seconds * rate;
+}

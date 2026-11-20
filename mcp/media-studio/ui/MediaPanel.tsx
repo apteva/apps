@@ -39,6 +39,15 @@ import {
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
   voicesForProvider,
+  estimateHeyGenAvatarCostUSD,
+  heygenAvatarEngineOptions,
+  heygenEngineBlocked,
+  heygenEngineChoices,
+  heygenEngineLabel,
+  heygenEngineMotion,
+  heygenEngineResolutions,
+  heygenExpressivenessLevels,
+  heygenResolutionLabel,
   type DurationKind,
   type VideoReferencePurpose,
 } from "./mediaPanelLogic";
@@ -480,6 +489,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [avatarEngine, setAvatarEngine] = useState("avatar_v");
   const [avatarResolution, setAvatarResolution] = useState("1080p");
   const [avatarAspect, setAvatarAspect] = useState("16:9");
+  const [avatarMotionPrompt, setAvatarMotionPrompt] = useState("");
+  const [avatarExpressiveness, setAvatarExpressiveness] = useState("");
   const [avatarCaps, setAvatarCaps] = useState<AvatarCapabilities | null>(null);
   const [avatarCreateJobs, setAvatarCreateJobs] = useState<AvatarCreateJob[]>([]);
   const [avatarCreateOpen, setAvatarCreateOpen] = useState(false);
@@ -1408,7 +1419,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           aspect: avatarAspect,
           estimated_duration_seconds: estimateSpeechSeconds(prompt),
         };
-        if (avatarEngine !== "auto") options.engine = { type: avatarEngine };
+        Object.assign(options, heygenAvatarEngineOptions(avatarEngine, avatarMotionPrompt, avatarExpressiveness));
         if (selected?.avatar_type) options.avatar_type = selected.avatar_type;
         body.options = options;
       }
@@ -1484,6 +1495,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     avatarEngine,
     avatarResolution,
     avatarAspect,
+    avatarMotionPrompt,
+    avatarExpressiveness,
     storageFolder,
     sourceImages,
   ]);
@@ -2282,6 +2295,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setAvatarResolution={setAvatarResolution}
             avatarAspect={avatarAspect}
             setAvatarAspect={setAvatarAspect}
+            avatarMotionPrompt={avatarMotionPrompt}
+            setAvatarMotionPrompt={setAvatarMotionPrompt}
+            avatarExpressiveness={avatarExpressiveness}
+            setAvatarExpressiveness={setAvatarExpressiveness}
             voices={voices}
             voiceIdentities={voiceIdentities}
             voiceCreateOpen={voiceCreateOpen}
@@ -2625,6 +2642,10 @@ interface ComposerProps {
   setAvatarResolution: (v: string) => void;
   avatarAspect: string;
   setAvatarAspect: (v: string) => void;
+  avatarMotionPrompt: string;
+  setAvatarMotionPrompt: (v: string) => void;
+  avatarExpressiveness: string;
+  setAvatarExpressiveness: (v: string) => void;
   voices: VoiceEntry[];
   voiceIdentities: MediaIdentity[];
   voiceCreateOpen: boolean;
@@ -2723,12 +2744,16 @@ function Composer(p: ComposerProps) {
     if (!voiceProviderSupportsPrompt(provider)) p.setVoiceCreateSourceType("audio");
     p.setVoiceCreateOpen(true);
   };
-  const avatarVBlocked =
+  const avatarEngineBlocked =
     p.kind === "avatar" &&
     p.avatarProvider === "heygen" &&
-    p.avatarEngine === "avatar_v" &&
-    !!selectedAvatar &&
-    !avatarSupportsEngine(selectedAvatar, "avatar_v");
+    heygenEngineBlocked(p.avatarEngine, selectedAvatar);
+  const avatarMotionMax = heygenEngineMotion(p.avatarEngine).maxChars;
+  const avatarMotionTooLong =
+    p.kind === "avatar" &&
+    p.avatarProvider === "heygen" &&
+    !!avatarMotionMax &&
+    p.avatarMotionPrompt.length > avatarMotionMax;
   const voiceRequiredMissing =
     p.kind === "audio_tts" &&
     ttsProviderUsesSeparateVoice(ttsProvider) &&
@@ -2955,6 +2980,10 @@ function Composer(p: ComposerProps) {
           setResolution={p.setAvatarResolution}
           aspect={p.avatarAspect}
           setAspect={p.setAvatarAspect}
+          motionPrompt={p.avatarMotionPrompt}
+          setMotionPrompt={p.setAvatarMotionPrompt}
+          expressiveness={p.avatarExpressiveness}
+          setExpressiveness={p.setAvatarExpressiveness}
         />
       )}
       {p.kind === "avatar" && p.voices.length > 0 && (
@@ -2991,11 +3020,13 @@ function Composer(p: ComposerProps) {
           </button>
           <button
             onClick={p.generate}
-            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing || voiceRequiredMissing}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarEngineBlocked || avatarMotionTooLong || p.sourceRequiredMissing || voiceRequiredMissing}
             className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
             title={
-              avatarVBlocked
-                ? "Selected avatar does not advertise Avatar V support"
+              avatarEngineBlocked
+                ? `Selected avatar does not support ${heygenEngineLabel(p.avatarEngine)}`
+                : avatarMotionTooLong
+                ? `Motion prompt is limited to ${avatarMotionMax} characters`
                 : p.sourceRequiredMissing
                   ? "The selected video model requires a source image"
                   : voiceRequiredMissing
@@ -3720,12 +3751,6 @@ function looksLikeImageURL(url: string) {
   return clean.endsWith(".png") || clean.endsWith(".jpg") || clean.endsWith(".jpeg") || clean.endsWith(".webp");
 }
 
-function avatarSupportsEngine(av: AvatarEntry, engine: string) {
-  const engines = av.supported_api_engines || [];
-  if (engines.length === 0) return engine !== "avatar_v";
-  return engines.includes(engine);
-}
-
 function HeyGenAvatarOptions({
   prompt,
   selectedAvatar,
@@ -3735,6 +3760,10 @@ function HeyGenAvatarOptions({
   setResolution,
   aspect,
   setAspect,
+  motionPrompt,
+  setMotionPrompt,
+  expressiveness,
+  setExpressiveness,
 }: {
   prompt: string;
   selectedAvatar?: AvatarEntry;
@@ -3744,33 +3773,61 @@ function HeyGenAvatarOptions({
   setResolution: (v: string) => void;
   aspect: string;
   setAspect: (v: string) => void;
+  motionPrompt: string;
+  setMotionPrompt: (v: string) => void;
+  expressiveness: string;
+  setExpressiveness: (v: string) => void;
 }) {
-  const cost = estimateHeyGenAvatarCost(prompt, selectedAvatar, resolution);
-  const blocked = engine === "avatar_v" && !!selectedAvatar && !avatarSupportsEngine(selectedAvatar, "avatar_v");
+  const engines = heygenEngineChoices(selectedAvatar);
+  const resolutions = heygenEngineResolutions(engine);
+  const motion = heygenEngineMotion(engine);
+  const levels = heygenExpressivenessLevels(motion.expressiveness);
+  const blocked = heygenEngineBlocked(engine, selectedAvatar);
+
+  // Keep selections valid as the look / engine change: an engine the
+  // look doesn't offer falls back to Auto, a resolution the engine
+  // can't render falls back to its first supported one.
+  useEffect(() => {
+    if (!engines.includes(engine)) setEngine("auto");
+  }, [engines.join("|"), engine]);
+  useEffect(() => {
+    if (!resolutions.includes(resolution)) setResolution(resolutions[0]);
+  }, [resolutions.join("|"), resolution]);
+  useEffect(() => {
+    if (expressiveness && !levels.includes(expressiveness)) setExpressiveness("");
+  }, [levels.join("|"), expressiveness]);
+
+  const cost = estimateHeyGenAvatarCostUSD(
+    estimateSpeechSeconds(prompt),
+    engine,
+    selectedAvatar?.avatar_type,
+    resolution,
+  );
+  const tooLong = !!motion.maxChars && motionPrompt.length > motion.maxChars;
   return (
     <>
       <div>
         <label className="text-text-muted text-xs block">Engine</label>
         <select
-          value={engine}
+          value={engines.includes(engine) ? engine : "auto"}
           onChange={(e) => setEngine(e.target.value)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         >
-          <option value="avatar_v">Avatar V</option>
-          <option value="avatar_iv">Avatar IV</option>
-          <option value="auto">Auto</option>
+          {engines.map((id) => (
+            <option key={id} value={id}>{heygenEngineLabel(id)}</option>
+          ))}
         </select>
       </div>
       <div>
         <label className="text-text-muted text-xs block">Resolution</label>
         <select
-          value={resolution}
+          value={resolutions.includes(resolution) ? resolution : resolutions[0]}
           onChange={(e) => setResolution(e.target.value)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         >
-          <option value="1080p">1080p</option>
-          <option value="720p">720p</option>
-          <option value="4k">4K</option>
+          {resolutions.map((r) => (
+            <option key={r} value={r}>{heygenResolutionLabel(r)}</option>
+          ))}
         </select>
       </div>
       <div>
@@ -3784,21 +3841,51 @@ function HeyGenAvatarOptions({
           <option value="9:16">9:16</option>
         </select>
       </div>
+      {levels.length > 0 && (
+        <div>
+          <label className="text-text-muted text-xs block">Expressiveness</label>
+          <select
+            value={expressiveness}
+            onChange={(e) => setExpressiveness(e.target.value)}
+            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          >
+            <option value="">Engine default</option>
+            {levels.map((l) => (
+              <option key={l} value={l}>{l.charAt(0).toUpperCase() + l.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="text-text-dim text-xs pb-1">
-        {blocked ? "Avatar V unavailable" : cost ? `est. ${formatCost(cost)} API` : "est. after script"}
+        {blocked
+          ? `${heygenEngineLabel(engine)} unavailable for this avatar`
+          : cost
+            ? `est. ${formatCost(cost)} API`
+            : prompt.trim()
+              ? "no published rate"
+              : "est. after script"}
       </div>
+      {motion.prompt && (
+        <div className="ms-option-wide">
+          <label className="text-text-muted text-xs flex items-center justify-between gap-2">
+            <span>Motion prompt (optional)</span>
+            {motion.maxChars ? (
+              <span className={tooLong ? "text-red" : "text-text-dim"}>
+                {motionPrompt.length}/{motion.maxChars}
+              </span>
+            ) : null}
+          </label>
+          <textarea
+            value={motionPrompt}
+            onChange={(e) => setMotionPrompt(e.target.value)}
+            rows={2}
+            placeholder="Gestures, expression and posture, e.g. calm, open hand gestures, nods while listening"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          />
+        </div>
+      )}
     </>
   );
-}
-
-function estimateHeyGenAvatarCost(prompt: string, selectedAvatar: AvatarEntry | undefined, resolution: string) {
-  const seconds = estimateSpeechSeconds(prompt);
-  if (seconds <= 0) return 0;
-  const type = selectedAvatar?.avatar_type || "photo_avatar";
-  const is4k = resolution.toLowerCase() === "4k";
-  let rate = type === "studio_avatar" || type === "digital_twin" ? 0.0667 : 0.05;
-  if (is4k) rate = type === "photo_avatar" ? 0.0667 : 0.0833;
-  return seconds * rate;
 }
 
 function estimateSpeechSeconds(script: string) {
