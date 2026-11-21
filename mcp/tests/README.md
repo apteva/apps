@@ -867,10 +867,69 @@ simulated integration, or hand-written release suites).
 **Setup and limits.**
 - Routes and other app setup belong in the environment's seed plan, which runs
   before the checks. Write tools are not allowed as `app_tool` steps.
-- Telephony currently requires an agent to own an inbound route, and seed
-  plans cannot create agents. So a Telephony inbound-call scenario needs that
-  resolved outside Tests first.
-- The Telnyx simulation does not cover media streams, dial, transfer or SMS
-  (501).
+- Telephony 0.23.0 or newer accepts a `human_browser` route with no agent,
+  so a seed plan can set up an inbound route on its own (see 0.10.0 below).
+- The Telnyx simulation covers call control, media streams, recordings, dial
+  and direct SIP calls. Transfer and SMS are not simulated (501).
 - Whether a browser's WebRTC connection works on an isolated run's blocked
   network is untested.
+
+## Apps by name and app settings (0.10.0)
+
+A generated environment can now run apps the project has not installed, and
+set their settings, so an isolated suite can test Telephony against a fake
+Telnyx with no carrier key.
+
+- `environment.apps_by_name` (Environments 0.14.0 or newer) adds apps by name.
+  The run fetches each one the way it fetches a required dependency. An
+  `app_versions` pin also selects the version to fetch. An app goes in either
+  `apps` (project install) or `apps_by_name`, not both. Targets,
+  `integrations`, `read_tools` and `app_config` may name apps from both
+  lists.
+- `environment.app_config` (Environments 0.13.0 or newer) sets install
+  settings on the run's app copies before they first start. Values are
+  strings.
+- Saving the suite fails if the bound Environments is too old to keep these
+  fields, rather than starting runs without them.
+- Seeds can pass an earlier seed's result on with `{"$ref": "<index>.<path>"}`
+  (for example a route id), and `{{candidate_digest}}` in a seed input is the
+  run's candidate.
+
+A suite with no Deploy candidate still needs a candidate probe: a read tool
+that returns the run's candidate digest. One way is to name a seeded record
+after `{{candidate_digest}}` and read it back, then pass `candidate_digest`
+to `tests_run`.
+
+```json
+{"mode": "isolated",
+ "environment": {
+   "apps_by_name": ["telephony", "storage"],
+   "app_versions": {"telephony": "0.27.1"},
+   "app_config": {"telephony": {"sip_transport": "udp", "sip_allow_insecure_signaling": "true",
+     "sip_listen": "127.0.0.1:0", "sip_public_host": "127.0.0.1", "sip_public_ip": "127.0.0.1",
+     "sip_allowed_cidrs": "telnyx=127.0.0.1/32", "sip_srtp": "disabled",
+     "sip_rtp_port_min": "0", "sip_rtp_port_max": "0"}},
+   "integrations": [{"app": "telephony", "role": "carrier", "slug": "telnyx", "simulate": true,
+     "seed": {"call_control_applications": [{"id": "9001", "application_name": "previous"}],
+              "phone_numbers": [{"id": "7001", "phone_number": "+15550100001", "connection_id": "9001"}]}}],
+   "seeds": ["… prompts, route, telephony_routes_configure_carrier, a flow named {{candidate_digest}} …"],
+   "candidate_probe": {"app": "telephony", "tool": "telephony_flows_list", "path": "/flows/0/name"},
+   "read_tools": {"telephony": ["telephony_calls_list"]}}}
+```
+
+A check can then place a direct SIP call and follow it:
+
+```json
+{"steps": [
+  {"id": "ring", "kind": "integration_trigger", "slug": "telnyx", "trigger": "incoming_call",
+   "input": {"to": "+15550100001", "from": "+15550199999"}, "capture": {"sip": "/result/sip_call_id"}},
+  {"id": "menu", "kind": "integration_state", "slug": "telnyx", "poll_every_ms": 250, "timeout_ms": 20000,
+   "assertions": [{"path": "/collections/sip_calls/0/report/state", "op": "equals", "value": "answered"}]},
+  {"id": "press", "kind": "integration_trigger", "slug": "telnyx", "trigger": "sip_dtmf",
+   "input": {"sip_call_id": "{{sip}}", "digits": "1"}},
+  {"id": "ended", "kind": "integration_state", "slug": "telnyx", "poll_every_ms": 250, "timeout_ms": 30000,
+   "assertions": [{"path": "/collections/sip_calls/0/report/state", "op": "equals", "value": "ended"}]}]}
+```
+
+Direct SIP prompts are prerecorded audio: upload them to Storage in a seed and
+map the prompt text to the file id with `telephony_local_media_settings`.

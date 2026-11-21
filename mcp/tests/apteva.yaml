@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: tests
 display_name: Tests
-version: 0.9.0
-description: Browser and backend scenarios against deployed endpoints or isolated runtimes, project test suites run on a candidate's exact source in locked-down workspaces, per-case history and quarantine, encrypted test credentials, owned failure evidence, and candidate-specific release verdicts.
+version: 0.10.0
+description: Browser and backend scenarios against deployed endpoints or isolated runtimes, including apps the project has not installed against simulated providers, project test suites run on a candidate's exact source in locked-down workspaces, per-case history and quarantine, encrypted test credentials, owned failure evidence, and candidate-specific release verdicts.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tests
 icon: /ui/icon.svg
@@ -14,7 +14,7 @@ requires:
   permissions: [db.write.app, platform.apps.call, net.egress]
   apps:
     - { name: functions, optional: true, reason: "Select Functions to enable function checks; omit for HTTP-only suites." }
-    - { name: environments, version: ">=0.9.0", optional: true, reason: "Bind Environments v0.9.0 or newer for hand-written isolated release suites; v0.11.0 or newer for isolated suite targets; v0.12.0 or newer for simulated integrations (integration_trigger and integration_state steps)." }
+    - { name: environments, version: ">=0.9.0", optional: true, reason: "Bind Environments v0.9.0 or newer for hand-written isolated release suites; v0.11.0 or newer for isolated suite targets; v0.12.0 or newer for simulated integrations (integration_trigger and integration_state steps); v0.13.0 or newer for environment.app_config; v0.14.0 or newer for environment.apps_by_name." }
     - { name: deploy, optional: true, reason: "Bind Deploy to resolve target.candidate builds and their digests; Deploy v0.33.0 or newer also provides the candidate's source for code checks." }
     - { name: computer, version: ">=0.9.3", optional: true, reason: "Bind Computer v0.9.3 or newer for browser steps: the isolated test browser in isolated runs, regular browser sessions against deployed targets. Computer v0.14.0 or newer adds element text/value assertions, page diagnostics, masked screenshots and sign-in profile cleanup for deployed targets." }
     - { name: workspaces, version: ">=0.8.0", optional: true, reason: "Bind Workspaces v0.8.0 or newer for code checks: each runs in a locked-down test workspace (builder prepares, runner tests without network)." }
@@ -91,7 +91,7 @@ provides:
     - { name: tests.run.completed, description: A run finished with passed or failed status and result counts. }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: tests/v0.9.0, entry: mcp/tests }
+  source: { repo: github.com/apteva/apps, ref: tests/v0.10.0, entry: mcp/tests }
   port: 8080
   health_check: /health
 db:

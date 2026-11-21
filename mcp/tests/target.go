@@ -49,6 +49,13 @@ type GeneratedEnvironment struct {
 	ReadTools      map[string][]string `json:"read_tools,omitempty"`
 	// Integrations bind simulated providers to app roles (Environments 0.12.0+).
 	Integrations []SimulatedIntegration `json:"integrations,omitempty"`
+	// AppsByName adds apps to the run by name instead of by project install,
+	// so a run can test an app the project has not installed, for example
+	// Telephony against a simulated carrier (Environments 0.14.0+).
+	AppsByName []string `json:"apps_by_name,omitempty"`
+	// AppConfig sets install settings on the run's app copies before they
+	// first start, by app name; values are strings (Environments 0.13.0+).
+	AppConfig map[string]map[string]string `json:"app_config,omitempty"`
 	// Pinned is filled by Tests when the suite is saved.
 	Pinned *PinnedEnvironment `json:"pinned,omitempty"`
 }
@@ -133,7 +140,7 @@ func (t *TargetConfig) validate() error {
 				target.Path == "" || validateGatewayPath(target.Path) != nil {
 				return fmt.Errorf("target %q needs an app and a public path in isolated mode", name)
 			}
-			if !containsString(t.Environment.Apps, target.App) {
+			if !t.Environment.hasApp(target.App) {
 				return fmt.Errorf("target %q uses app %q, which is not in the environment", name, target.App)
 			}
 		}
@@ -170,15 +177,9 @@ func (t *TargetConfig) validate() error {
 }
 
 func (e *GeneratedEnvironment) validate() error {
-	if len(e.Apps) == 0 || len(e.Apps) > 24 {
-		return errors.New("environment.apps needs 1–24 app names")
-	}
-	seen := map[string]bool{}
-	for _, app := range e.Apps {
-		if !slugPattern.MatchString(app) || seen[app] {
-			return fmt.Errorf("invalid or duplicate environment app %q", app)
-		}
-		seen[app] = true
+	seen, err := e.validateApps()
+	if err != nil {
+		return err
 	}
 	for app, version := range e.AppVersions {
 		if !seen[app] || version == "" || len(version) > 64 || strings.TrimSpace(version) != version {
@@ -198,6 +199,9 @@ func (e *GeneratedEnvironment) validate() error {
 		return errors.New("at most 64 environment seeds")
 	}
 	if err := e.validateIntegrations(); err != nil {
+		return err
+	}
+	if err := e.validateAppConfig(seen); err != nil {
 		return err
 	}
 	if e.CandidateProbe != nil && !validProbe(*e.CandidateProbe) {
@@ -587,7 +591,7 @@ func generatedReleaseConfig(t *TargetConfig, prep queuePrep) (*ReleaseConfig, er
 	}
 	probe := env.CandidateProbe
 	if probe == nil {
-		if !containsString(env.Apps, "deploy") || prep.BuildID == 0 {
+		if !env.hasApp("deploy") || prep.BuildID == 0 {
 			return nil, errors.New("isolated mode needs a candidate_probe, or the deploy app plus a target.candidate")
 		}
 		probe = &ToolProbe{App: "deploy", Tool: "deploy_candidate_digest", Input: map[string]any{"build_id": prep.BuildID}, Path: "/candidate_digest"}
@@ -624,8 +628,17 @@ func generatedSpec(t *TargetConfig, installs map[string]int64) (map[string]any, 
 		ids = append(ids, id)
 	}
 	spec := map[string]any{
-		"version": 1, "ttl_seconds": env.TTLSeconds, "app_install_ids": ids,
+		"version": 1, "ttl_seconds": env.TTLSeconds,
 		"network_mode": "block", "integration_mode": "mock",
+	}
+	if len(ids) > 0 {
+		spec["app_install_ids"] = ids
+	}
+	if len(env.AppsByName) > 0 {
+		spec["apps"] = env.appsByNameSpec()
+	}
+	if len(env.AppConfig) > 0 {
+		spec["app_config"] = env.AppConfig
 	}
 	if len(t.Targets) > 0 {
 		targets := map[string]any{}
@@ -691,6 +704,9 @@ func (a *App) pinEnvironment(ctx context.Context, app *sdk.AppCtx, v *Suite, pre
 	}
 	if !digestPattern.MatchString(saved.SpecDigest) {
 		return errors.New("isolated targets need Environments 0.11.0 or newer (spec digests)")
+	}
+	if err := v.Target.Environment.checkSavedSpec(saved.Spec); err != nil {
+		return err
 	}
 	v.Target.Environment.Pinned = &PinnedEnvironment{EnvironmentID: saved.ID, SpecVersion: saved.SpecVersion, SpecDigest: saved.SpecDigest}
 	return nil

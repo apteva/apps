@@ -29,8 +29,8 @@ func (e *GeneratedEnvironment) validateIntegrations() error {
 		if !in.Simulate {
 			return fmt.Errorf("integration %q: generated environments only take simulated integrations (simulate: true); live connections are never bound", in.Slug)
 		}
-		if !slugPattern.MatchString(in.Slug) || !slugPattern.MatchString(in.Role) || !containsString(e.Apps, in.App) {
-			return fmt.Errorf("integration %q needs a slug, a role and an app from environment.apps", in.Slug)
+		if !slugPattern.MatchString(in.Slug) || !slugPattern.MatchString(in.Role) || !e.hasApp(in.App) {
+			return fmt.Errorf("integration %q needs a slug, a role and an app from environment.apps or apps_by_name", in.Slug)
 		}
 		key := in.App + "/" + in.Role
 		if seen[key] {
