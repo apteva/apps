@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.13.0
-description: Isolated environments with per-app settings for app copies, run agents that seeds can reference, simulated integrations (trigger provider events and assert on provider state and webhook deliveries), bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
+version: 0.14.0
+description: Isolated environments that can run apps by name without a project install, with per-app settings for app copies, run agents that seeds can reference, simulated integrations (trigger provider events and assert on provider state and webhook deliveries), bounded paginated summary lists, deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -80,7 +80,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.13.0, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.14.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
