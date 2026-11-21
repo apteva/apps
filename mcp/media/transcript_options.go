@@ -42,6 +42,9 @@ func resolveTranscriptionOptions(ctx *sdk.AppCtx, args map[string]any) (transcri
 			*field.value = strings.TrimSpace(v)
 		}
 	}
+	if _, explicit := args["model"]; !explicit {
+		o.Model = defaultTranscriptionModel(ctx, o.Language, o.Diarize)
+	}
 	if !transcriptModelPattern.MatchString(o.Model) {
 		return o, errors.New("invalid transcription model")
 	}
@@ -89,7 +92,9 @@ func freezeLegacyTranscriptOptions(db *sql.DB, row *TranscriptRow, defaults tran
 }
 
 func transcriptionDefaults(ctx *sdk.AppCtx) transcriptionOptions {
-	return transcriptionOptions{Model: firstNonEmpty(strings.TrimSpace(ctx.Config().Get("transcribe_model")), "nova-3"), Language: firstNonEmpty(strings.TrimSpace(ctx.Config().Get("transcribe_language")), "auto"), Diarize: configBool(ctx.Config().Get("transcribe_diarize"), false)}
+	o := transcriptionOptions{Language: firstNonEmpty(strings.TrimSpace(ctx.Config().Get("transcribe_language")), "auto"), Diarize: configBool(ctx.Config().Get("transcribe_diarize"), false)}
+	o.Model = defaultTranscriptionModel(ctx, o.Language, o.Diarize)
+	return o
 }
 
 func sameTranscriptionOptions(a, b *transcriptionOptions) bool {

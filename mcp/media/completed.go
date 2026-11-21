@@ -142,7 +142,7 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 	// the transcripts integration is bound; otherwise the file is
 	// transcript-not-applicable and that's terminal.
 	existingTranscript, _ := getTranscript(db, projectID, fileID)
-	transcriptsBound := app.IntegrationFor("transcripts") != nil && (configBool(app.Config().Get("transcribe_auto"), true) || existingTranscript != nil)
+	transcriptsBound := transcriptionConfigured(app) && (configBool(app.Config().Get("transcribe_auto"), true) || existingTranscript != nil)
 	var hasTranscript bool
 	if row.HasAudio && transcriptsBound {
 		t, _ := getTranscript(db, projectID, fileID)

@@ -142,6 +142,16 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 // row and returns it as running. SQLite RETURNING (3.35+) gives us
 // the claim without a tx.
 func claimNextPendingTranscript(db *sql.DB, projectID string) (*TranscriptRow, error) {
+	return claimPendingTranscript(db, projectID, "")
+}
+
+// claimNextPendingLocalTranscript claims only rows frozen to a local engine
+// model, for installs with no Deepgram integration and engine=deepgram.
+func claimNextPendingLocalTranscript(db *sql.DB, projectID string) (*TranscriptRow, error) {
+	return claimPendingTranscript(db, projectID, ` AND lower(COALESCE(json_extract(request_options,'$.model'),'')) LIKE 'parakeet%'`)
+}
+
+func claimPendingTranscript(db *sql.DB, projectID, filter string) (*TranscriptRow, error) {
 	if projectID == "" {
 		return nil, errors.New("project_id required")
 	}
@@ -151,7 +161,7 @@ func claimNextPendingTranscript(db *sql.DB, projectID string) (*TranscriptRow, e
 		   SET status = 'running', started_at = ?
 		 WHERE file_id = (
 		   SELECT file_id FROM transcripts
-		    WHERE status = 'pending' AND project_id = ?
+		    WHERE status = 'pending' AND project_id = ?`+filter+`
 		    ORDER BY created_at
 		    LIMIT 1
 		 ) AND project_id = ? AND status = 'pending'

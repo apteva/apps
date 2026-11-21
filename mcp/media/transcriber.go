@@ -114,9 +114,10 @@ func transcriberOne(app *sdk.AppCtx, msg transcriberMsg) {
 	// project for this row.
 	app = app.WithProject(msg.ProjectID)
 	bound := app.IntegrationFor("transcripts")
-	if bound == nil {
-		// No integration — fall through silently. Periodic sweep
-		// will mark candidates as skipped with a clearer message.
+	if !transcriptionConfigured(app) {
+		// No integration and no local engine: only explicitly requested
+		// Parakeet rows can run.
+		drainLocalTranscripts(app)
 		return
 	}
 	if !configBool(app.Config().Get("transcribe_auto"), true) {
@@ -178,7 +179,8 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 		return
 	}
 	bound := app.IntegrationFor("transcripts")
-	if bound == nil {
+	if !transcriptionConfigured(app) {
+		drainLocalTranscripts(app)
 		// Do not create and immediately skip the same queue rows on
 		// every sweep. Once an integration is connected, the normal
 		// candidate query will discover both missing and previously
@@ -223,11 +225,40 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 	}
 }
 
+// drainLocalTranscripts runs pending rows that asked for a local model
+// (model=parakeet-*) while no integration or local engine is configured.
+// Deepgram rows stay pending until an integration is connected.
+func drainLocalTranscripts(app *sdk.AppCtx) {
+	pid := app.CurrentProject()
+	if pid == "" {
+		return
+	}
+	for {
+		row, err := claimNextPendingLocalTranscript(app.AppDB(), pid)
+		if err != nil {
+			if !isNoRows(err) {
+				app.Logger().Error("claim local transcript failed", "err", err)
+			}
+			return
+		}
+		runOneTranscription(app, nil, row)
+		select {
+		case <-mediaDone(app):
+			return
+		default:
+		}
+	}
+}
+
 // runOneTranscription owns a single transcript row's lifecycle: gate
 // against duration cap, mint signed URL, invoke Deepgram, normalise,
 // persist. All terminal states write the DB; the worker never leaves
 // a row stuck in 'running'.
 func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *TranscriptRow) {
+	if bound == nil {
+		// Resolve here so callers that queued for a local engine need no integration.
+		bound = app.IntegrationFor("transcripts")
+	}
 	markFailure := func(message string) error {
 		return transcriptMarkFailed(app.AppDB(), row.ProjectID, row.FileID, message, row.StartedAt)
 	}
@@ -239,7 +270,6 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		maybeEmitMediaCompleted(app, row.ProjectID, row.FileID)
 		app.EmitWithProject("media.updated", row.ProjectID, map[string]any{"file_id": row.FileID, "change": "transcript_status"})
 	}()
-	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
 	// Freeze pre-upgrade queue rows once; all new requests carry queue-time settings.
@@ -264,6 +294,22 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	if media.DurationMs > int64(maxMinutes)*60_000 {
 		_ = markSkipped(
 			fmt.Sprintf("source duration %d ms exceeds cap of %d minutes", media.DurationMs, maxMinutes))
+		return
+	}
+
+	if isParakeetModel(model) {
+		parent, stop := mediaContext(context.Background(), app)
+		defer stop()
+		parsed, audioEvidence, err := transcribeWithParakeet(parent, app, newStorageClient(), media, row.Options)
+		if err != nil {
+			_ = markFailure("parakeet: " + err.Error())
+			return
+		}
+		finishTranscription(app, row, media, model, "parakeet", parsed, audioEvidence, parent)
+		return
+	}
+	if bound == nil {
+		_ = markSkipped("no transcripts integration connected; connect Deepgram or set transcribe_engine to parakeet")
 		return
 	}
 
@@ -327,6 +373,18 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		return
 	}
 
+	finishTranscription(app, row, media, model, "deepgram", parsed, audioEvidence, ctx)
+}
+
+// finishTranscription validates a parsed provider result against the
+// transcription audio and persists it. Shared by every engine.
+func finishTranscription(app *sdk.AppCtx, row *TranscriptRow, media *MediaRow, model, provider string, parsed *parsedTranscript, audioEvidence *transcriptAudioEvidence, ctx context.Context) {
+	markFailure := func(message string) error {
+		return transcriptMarkFailed(app.AppDB(), row.ProjectID, row.FileID, message, row.StartedAt)
+	}
+	log := app.Logger()
+	db := app.AppDB()
+	sc := newStorageClient()
 	// Provider success does not certify that all speech was recognized. Keep
 	// actual provider metadata and last-word timing separate from source duration.
 	if parsed.ProviderDurationMs > 0 && audioEvidence != nil && math.Abs(float64(parsed.ProviderDurationMs-audioEvidence.Validation.DurationMs)) > transcriptAudioDurationTolerance(audioEvidence.Validation.DurationMs) {
@@ -361,7 +419,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		Diagnostics:        diagnostics,
 		Language:           parsed.Language,
 		Text:               parsed.Text,
-		Provider:           "deepgram",
+		Provider:           provider,
 		Model:              model,
 		DurationMs:         media.DurationMs,
 		SourceKind:         row.SourceKind,

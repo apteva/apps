@@ -176,7 +176,7 @@ func classifyComponentPlan(command string) (int, bool) {
 	if control {
 		return 0, true
 	}
-	if strings.Contains(command, "APTEVA_RESULT:") || strings.Contains(command, "APTEVA_POSE:") || strings.Contains(command, "APTEVA_POSE_STAGE:") {
+	if strings.Contains(command, "APTEVA_RESULT:") || strings.Contains(command, "APTEVA_POSE:") || strings.Contains(command, "APTEVA_POSE_STAGE:") || strings.Contains(command, "APTEVA_PARAKEET") {
 		return 2, false
 	}
 	return 1, false

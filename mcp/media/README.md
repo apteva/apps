@@ -3,6 +3,33 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Local transcription with Parakeet (v0.17.0)
+
+Media can transcribe without Deepgram using NVIDIA Parakeet TDT 0.6B v3 (int8)
+through sherpa-onnx on CPU. Choose it with `transcribe_engine`:
+
+- `deepgram` (default) uses the bound Deepgram integration, as before.
+- `parakeet` always transcribes locally; no integration is needed.
+- `auto` uses Parakeet unless the job needs diarization or a language outside
+  its 25 European languages, then Deepgram.
+
+A per-request `model: parakeet-tdt-0.6b-v3` on `media_transcribe` selects it for
+one file. The model is frozen at queue time like every other option.
+
+Where it runs: on the media executor when offloading is configured
+(`execution_mode: component`), otherwise on Media's own host. The first job on a
+host provisions a pinned Python 3.12 runtime (sherpa-onnx 2.0.2) with `uv` and
+downloads the ~490 MB model archive; each extracted model file is checked
+against a pinned SHA-256. Later jobs reuse it. Each job takes two work units and
+about 1 GB of RAM; `transcribe_parakeet_threads` (default 4) sets CPU threads.
+
+Output keeps word start/end times and per-word confidence. Words the decoder
+emitted on a single frame are spread evenly up to the next word; their count is
+reported as `estimated_words` in the diagnostics. Segments end at sentence
+punctuation or a pause over one second. Parakeet does not report the detected
+language, so `language` is empty unless the request named one. The same audio
+identity, duration and word-timing checks as Deepgram results apply.
+
 ## Failed-file retry backoff (v0.16.1)
 
 A file whose indexing fails is retried after 1 minute, then 2, 4, and so on up

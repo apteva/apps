@@ -630,7 +630,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_transcribe",
-			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?, require_word_timings?, model?, language?. Model/language defaults are frozen when queued and reused on retries; install configuration is never changed. Completed transcripts remain readable while upgrades run and after failure.",
+			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?, require_word_timings?, model?, language?. model=parakeet-tdt-0.6b-v3 transcribes locally on CPU (word timings, 25 European languages, no diarization) instead of Deepgram. Model/language defaults are frozen when queued and reused on retries; install configuration is never changed. Completed transcripts remain readable while upgrades run and after failure.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":              map[string]any{"type": "string"},
 				"force":                map[string]any{"type": "boolean"},

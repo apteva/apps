@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.16.1
+version: 0.17.0
 description: |
+  v0.17.0 adds local transcription with Parakeet TDT 0.6B v3 (int8, CPU) as an
+  alternative to Deepgram: transcribe_engine=parakeet|auto, or model
+  parakeet-tdt-0.6b-v3 per request. It runs on the media executor when offloading
+  is configured, otherwise on Media's host; runtime and hash-pinned model are
+  provisioned on first use. Word timings and confidence are kept; 25 European
+  languages; no diarization (auto falls back to Deepgram for it).
   v0.16.1 backs off retries of failed files (1 min doubling to 6 h) instead of
   retrying them on every indexer run; reindex and success reset the wait.
   v0.16.0 indexes incrementally: a durable queue fed by Storage's change feed
@@ -265,7 +271,7 @@ requires:
         transcribe: listen
       required: false
       label: "Speech-to-text provider"
-      hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual."
+      hint: "Connect Deepgram to auto-transcribe audio + video, or set transcribe_engine=parakeet to transcribe locally on CPU without an integration."
     - role: descriptions
       kind: integration
       compatible_slugs: [opencode-go, openai-api, openai-codex]
@@ -731,7 +737,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.16.1
+    ref: media/v0.17.0
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -928,11 +934,21 @@ config_schema:
     default: "10"
     label: Transcriber batch size
     description: Maximum new pending rows queued per sweep tick. Drains the queue one row at a time afterwards.
+  - name: transcribe_engine
+    type: text
+    default: "deepgram"
+    label: Transcription engine
+    description: deepgram = the bound Deepgram integration (default). parakeet = local Parakeet TDT 0.6B v3 on CPU, no integration needed; runs on the media executor when offloading is configured. auto = Parakeet unless the job needs diarization or a language outside its 25 European languages, then Deepgram. A per-request model always wins.
+  - name: transcribe_parakeet_threads
+    type: text
+    default: "4"
+    label: Parakeet CPU threads
+    description: Threads per Parakeet transcription (capped at the host's cores). Each job uses about 1 GB RAM and two work units.
   - name: transcribe_model
     type: text
     default: "nova-3"
     label: Deepgram model
-    description: Speech-to-text model. nova-3 = latest, nova-2 = cheaper, whisper-cloud = OpenAI Whisper via Deepgram. See https://developers.deepgram.com/docs/models-languages-overview.
+    description: Deepgram speech-to-text model used when the engine is deepgram (or auto falls back). nova-3 = latest, nova-2 = cheaper, whisper-cloud = OpenAI Whisper via Deepgram. Set parakeet-tdt-0.6b-v3 to use the local engine. See https://developers.deepgram.com/docs/models-languages-overview.
   - name: transcribe_language
     type: text
     default: "auto"
