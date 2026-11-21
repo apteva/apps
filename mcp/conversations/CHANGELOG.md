@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.27.0 — 2026-11-21
+
+- Answer an agent's first operator chat from its main thread. Main receives those messages with a short reply rule and replies there, while keeping its own instructions, tools and global conversation access. There is no new label or setting.
+- Keep every other conversation on its own thread. Public, room, agent-created and bridged (Telegram or external participant) conversations never use main. Deleting or archiving the conversation main answers, or bridging it, hands main to the agent's next new chat.
+- Show main's activity in that conversation only while it answers a message there; main's background turns no longer appear as Thinking.
+- Ask conversation threads to pace themselves: end every turn with an explicit timing decision instead of falling back to a periodic wake.
+- Report finished tasks, decisions and agent-wide standing instructions from conversation threads to main.
+- Stop a deleted conversation's threads in Core, with retries. Threads leaked by earlier releases are stopped on upgrade.
+- After `idle_thread_days` (default 14, 0 disables) without messages, send a conversation thread one idle check. A thread with ongoing timed work keeps itself with the new `conversations_keep_thread` tool; otherwise main gets a short note and the thread is stopped until the next message restarts it with its history.
+
 ## 0.26.3 — 2026-11-17
 
 - Align numbered and bulleted list markers with the surrounding message text. The list indent now fits the marker in the current font, so `1.` no longer hangs left of the paragraph edge in monospace themes, and lists with ten or more items get room for two-digit numbers.

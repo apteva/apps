@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.26.3
+version: 0.27.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, questions, and forms). Inbox items are messages — an
@@ -25,6 +25,9 @@ description: |
   with scoped loading, readable fallback states and retry. Keep app cards visible
   in a resizable side panel or an in-page floating view. Repeated resource
   references share one mounted view while the conversation continues.
+  An agent's first operator chat is answered by its main thread; other
+  conversations keep their own self-pacing threads, report outcomes to main,
+  stop when deleted, and sleep after a quiet period until the next message.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -72,6 +75,11 @@ config_schema:
     required: false
     label: Trusted identity resolver app installation IDs
     description: Comma-separated backend app install IDs. Empty denies all resolution. These apps must derive agent/thread from trusted caller context, never model arguments.
+  - name: idle_thread_days
+    type: number
+    default: "14"
+    label: Idle conversation thread days
+    description: Days without messages before a conversation's agent thread is asked whether it still has timed work and, if not, stopped. The conversation and its history stay; the next message restarts the thread. 0 disables idle stopping. Deleted conversations always stop their threads.
 
 provides:
   publishes:
@@ -178,6 +186,7 @@ provides:
     - { name: create,           description: "Main-thread conversation management only. Reuse the originating conversation or search existing work topics first. Create only when none fits, using a meaningful work title such as November content plan or Backup recovery. Avoid generic Reports, Alerts, or Approvals buckets. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
     - { name: list,             description: "Main-thread conversation management only. Use a known originating conversation_id directly; otherwise search for the work topic before creating a conversation. List conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
     - { name: history,          description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation thread may read only its own exact conversation; generic workers are not granted this tool. Args: conversation_id, since_id?, limit?." }
+    - { name: keep_thread,      description: "Answer a [conversation idle check] from a conversation thread that still has ongoing timed work (a scheduled follow-up, a running job, a watched condition). Keeps this thread awake for another idle period. Only the conversation's own thread may call it; do nothing when no timed work remains. Args: conversation_id, reason." }
     - { name: inbox_post, exposure: app_only, description: "INTERNAL sibling-app entry point via CallAppResult. Pass conversation_id for work originating in an existing operator conversation in the authenticated project. Calls without conversation context use the legacy app inbox conversation. Agent calls are refused. Args: kind (report|alert|approval), title, conversation_id?, body?, severity?, actions?, callback_tool?, agent_id?, client_message_id? (reuse for identical retries). When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
@@ -305,6 +314,8 @@ provides:
   workers:
     - name: delivery-retry
       schedule: "@every 10s"
+    - name: thread-lifecycle
+      schedule: "@every 5m"
     - name: telegram-maintenance
       schedule: "@every 1h"
 
@@ -324,7 +335,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.26.3, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.27.0, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

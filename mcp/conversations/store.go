@@ -651,6 +651,11 @@ func (s *store) DeleteConversation(id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("conversation not found")
 	}
+	// The delete trigger has already retired these threads. Remove the
+	// bindings explicitly so a main binding cannot outlive its conversation.
+	if _, err := tx.Exec(`DELETE FROM conversation_agent_threads WHERE conversation_id = ?`, id); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -829,7 +834,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 			if err != nil || agentID <= 0 {
 				return nil, false, fmt.Errorf("invalid inbound agent")
 			}
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO conversation_agent_threads(conversation_id,agent_id,thread_id) VALUES(?,?,?)`, m.ConversationID, agentID, conversationThreadID(m.ConversationID)); err != nil {
+			if err := bindInboundAgentTx(tx, m.ConversationID, agentID); err != nil {
 				return nil, false, err
 			}
 		}

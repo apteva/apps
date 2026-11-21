@@ -244,6 +244,50 @@ func TestSidecar_AgentToolFlow(t *testing.T) {
 	}
 }
 
+func TestSidecar_FirstChatIsAnsweredByMainWhichStaysGlobal(t *testing.T) {
+	sc := spawnHTTPTestSidecar(t)
+	create := func(title string) string {
+		t.Helper()
+		var conv map[string]any
+		if resp := itHTTP(sc, "POST", "/chats", map[string]any{"agent_id": 41, "title": title}, &conv); resp.Status != http.StatusOK {
+			t.Fatalf("create %s: %d %s", title, resp.Status, resp.Body)
+		}
+		id, _ := conv["id"].(string)
+		return id
+	}
+	mainID := create("Everyday")
+	if resp := itHTTP(sc, "POST", "/messages?chat_id="+mainID, map[string]any{"content": "hello", "client_message_id": "m-1"}, nil); resp.Status != http.StatusOK {
+		t.Fatalf("post: %d %s", resp.Status, resp.Body)
+	}
+	otherID := create("Side task")
+	if resp := itHTTP(sc, "POST", "/messages?chat_id="+otherID, map[string]any{"content": "side", "client_message_id": "o-1"}, nil); resp.Status != http.StatusOK {
+		t.Fatalf("post: %d %s", resp.Status, resp.Body)
+	}
+
+	listed, _ := json.Marshal(sc.MCPAs("list", map[string]any{}, 41, "main", itProject))
+	if !strings.Contains(string(listed), "main_conversation_id") || !strings.Contains(string(listed), mainID) {
+		t.Fatalf("main list result lacks its conversation: %s", listed)
+	}
+	sc.MCPAs("send", map[string]any{"conversation_id": mainID, "text": "Answered from main", "phase": "final"}, 41, "main", itProject)
+	var transcript []map[string]any
+	if resp := itHTTP(sc, http.MethodGet, "/messages?chat_id="+mainID, nil, &transcript); resp.Status != http.StatusOK {
+		t.Fatalf("transcript: %d", resp.Status)
+	}
+	found := false
+	for _, row := range transcript {
+		found = found || (row["content"] == "Answered from main" && row["thread_id"] == "main")
+	}
+	if !found {
+		t.Fatalf("main reply missing from its conversation: %+v", transcript)
+	}
+	if msg := mcpErrAsThread(t, sc, "send", map[string]any{"conversation_id": otherID, "text": "not mine"}, 41, "main"); !strings.Contains(msg, "mapped conversation thread") {
+		t.Fatalf("main ordinary reply in another conversation error=%q", msg)
+	}
+	if msg := mcpErrAsThread(t, sc, "send", map[string]any{"conversation_id": mainID, "text": "cross"}, 41, conversationThreadID(otherID)); !strings.Contains(msg, "belongs to conversation "+otherID) {
+		t.Fatalf("chat thread crossed into main's conversation: %q", msg)
+	}
+}
+
 func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testing.T) {
 	sc := spawnHTTPTestSidecar(t)
 	create := func(title string) string {
@@ -256,6 +300,14 @@ func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testi
 		}
 		id, _ := conv["id"].(string)
 		return id
+	}
+	// The agent's first operator chat is answered by main (v0.27). Give main
+	// its conversation first so this test exercises a chat-* thread binding.
+	mainID := create("Main conversation")
+	if resp := itHTTP(sc, "POST", "/messages?chat_id="+mainID, map[string]any{
+		"content": "claim main", "client_message_id": "main-1",
+	}, nil); resp.Status != http.StatusOK {
+		t.Fatalf("claim main: %d %s", resp.Status, resp.Body)
 	}
 	ownedID := create("Owned conversation")
 	targetID := create("Other conversation")

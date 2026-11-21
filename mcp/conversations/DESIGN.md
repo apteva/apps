@@ -101,6 +101,51 @@ An explicitly unsupported ensure endpoint may use the legacy spawn API with the
 same event; other failures remain queued. There is no fallback to a different
 thread. Eventless profile caches are bounded and expire after five minutes.
 
+### Main routing (v0.27)
+
+An agent's first qualifying operator chat binds to the agent's `main` thread
+instead of `chat-<id>`. Qualifying means a one-agent, web-origin, operator
+conversation with no Telegram binding and no external participant. The binding
+is recorded in the same transaction as the inbound message. A unique partial
+index allows one `thread_id='main'` binding per agent, so a lost race becomes
+an ordinary chat binding. Existing bindings never move. There is no flag, label
+or setting: the binding row is the only record.
+
+Inbound messages for that conversation go to main through
+`SendTrackedAgentEvent` with the usual stable event ID and accepted/duplicate
+receipt rule, plus a short reply contract naming the conversation. Main is
+never ensured, spawned or reconfigured. The binding is a delivery route, not
+ownership: `boundConversation` treats main as unbound, so main keeps its global
+discovery, creation and inbox tools, and may send ordinary replies only in the
+conversation it answers. The streamer shows main's activity in that
+conversation only while a response to one of its messages is open; main's
+background turns never claim it.
+
+Deleting or archiving that conversation, linking a transport, or adding an
+external participant removes the main binding. Main is never retired or killed.
+The agent's next qualifying conversation takes main over.
+
+### Thread lifecycle (v0.27)
+
+Chat threads pace themselves like main: their directive asks for an explicit
+timing decision at the end of every turn (`clear_wake` when nothing is pending,
+a matching `sleep` otherwise), keeps recurring conversation work in the thread,
+and reports finished tasks, decisions and agent-wide instructions to main with
+`send`.
+
+Deleting a conversation retires its chat threads (the trigger excludes main),
+and `killRetiredThreads` stops them in Core with backoff until Core confirms or
+reports them gone. The `thread-lifecycle` worker runs every five minutes.
+
+After `idle_thread_days` (default 14, 0 disables) without any message, a chat
+thread with no pending approval or interaction, queued delivery or live voice
+session receives one tracked `[conversation idle check]`. `conversations_keep_thread`,
+callable only by that thread, keeps it for another period. Otherwise, an hour
+later, main receives a `[conversation dormant]` note with the last final reply,
+the thread is killed, and the binding is marked `dormant`. The next inbound
+message recreates it through `EnsureThread` with a `[conversation resumed]`
+notice and marks it active once delivery is confirmed.
+
 Conversation-thread tools resolve that persisted binding, not a thread-name
 prefix. They may operate only on their originating conversation. Main manages
 global conversations/reports. Generic workers report to their parent. Public

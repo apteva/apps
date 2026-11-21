@@ -134,7 +134,9 @@ func (d *agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversatio
 			event.Message = fmt.Sprint(event.Message) + "\nThis approval originated during a voice session that has ended. Continue any approved work in this durable conversation; do not resume the ended voice thread."
 		}
 	}
-	if conv != nil && threadID == "main" {
+	if conv != nil && threadID == mainThreadID && d.app != nil && d.app.store.mainRouted(conv.ID, agentID) {
+		event.Message = fmt.Sprint(event.Message) + fmt.Sprintf("\nYou answer conversation %s from main. Acknowledge with conversations_send conversation_id=%s, phase=acknowledgement, approval_message_id=%d, then continue there as usual.", conv.ID, conv.ID, msg.ID)
+	} else if conv != nil && threadID == mainThreadID {
 		event.Message = fmt.Sprint(event.Message) + fmt.Sprintf("\nUse conversations_send with conversation_id=%s, phase=acknowledgement, approval_message_id=%d to acknowledge this decision from main. This exception only permits the receipt; ordinary replies remain in their conversation thread.", conv.ID, msg.ID)
 	}
 	client := app.AgentEventsAPI()
@@ -198,6 +200,10 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 	if ack {
 		d.app.streamer.emitInboundAck(conv.ID, threadID, agentID, msg)
 	}
+	if threadID == mainThreadID {
+		return d.deliverMain(app, conv, msg, agentID, targets, event, ack)
+	}
+	resumed := d.app.store.threadDormant(conv.ID, agentID)
 	if hasTransferableAttachments(msg) {
 		var files sdk.FileReferencesClient
 		files, err = sharedFileReferences(app, conv.ProjectID)
@@ -214,6 +220,9 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 			}
 		}
 	}
+	if resumed {
+		event.Message = withResumeNotice(event.Message, conv)
+	}
 	var delivered bool
 	if err == nil {
 		_, delivered, err = d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
@@ -227,11 +236,38 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 		}
 		return fmt.Errorf("platform did not confirm inbound event %q", event.ID)
 	}
+	if resumed {
+		d.app.store.markThreadActive(conv.ID, agentID)
+	}
 	// A soft break is sent only while an existing response is active. Keep that
 	// response's acknowledgement/stream bubble authoritative instead of
 	// replacing it with a second synthetic ack that could settle out of order.
 	// The durable "Break requested" transcript row is the immediate feedback.
 	return nil
+}
+
+// deliverMain hands an inbound message to the agent's main thread. Main is
+// never ensured or reconfigured; file references are granted to main itself.
+func (d *agentInboundAdapter) deliverMain(app *sdk.AppCtx, conv *Conversation, msg *Message, agentID int64, targets []int64, event sdk.ThreadEvent, ack bool) error {
+	var err error
+	if hasTransferableAttachments(msg) {
+		var files sdk.FileReferencesClient
+		files, err = sharedFileReferences(app, conv.ProjectID)
+		if err == nil {
+			var refs map[string]sdk.FileHandle
+			refs, err = d.app.registerAgentFileReferences(context.Background(), files, conv, msg, agentID, mainThreadID)
+			if err == nil {
+				event.Message = d.app.agentEventPayloadWithFileRefs(conv, msg, agentID, targets, refs)
+			}
+		}
+	}
+	if err == nil {
+		err = deliverToMain(app, conv, agentID, event)
+	}
+	if err != nil && ack {
+		d.app.streamer.finishResponse(conv.ID, agentID, msg.ID)
+	}
+	return err
 }
 
 type appCallbackAdapter struct{}

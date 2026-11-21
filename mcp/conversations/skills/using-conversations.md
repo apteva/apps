@@ -142,8 +142,38 @@ The agent's main thread owns conversation discovery and creation. A conversation
 thread owns the visible reply, history, reports, approvals, questions, forms,
 and urgent local alerts for the conversation named in its context.
 Main preserves the originating conversation_id when coordinating work or
-handling an escalation. Main never writes an ordinary chat reply directly: it sends the result
-to the originating conversation thread, which communicates with the person.
+handling an escalation. In every other conversation, main never writes an ordinary chat reply
+directly: it sends the result to the originating conversation thread, which communicates with the person.
+
+### The conversation main answers
+
+An agent's first operator chat is answered by main itself. Its messages arrive in
+main with the conversation id and a short reply rule; answer there with
+`conversations_send` using the normal acknowledgement/work/final sequence.
+`conversations_list` returns it as `main_conversation_id`. Use it for reports,
+alerts and approvals from main's own work that belong to no other conversation.
+Main keeps its own instructions and tools; this routing never changes them.
+
+### Pacing, report-back and idle threads
+
+Conversation threads pace themselves, like main. End every turn with an explicit
+timing decision: `pace` with `clear_wake=true` when nothing is pending, or a
+`sleep` that matches a promised follow-up, a running job or a watched condition.
+A thread that leaves a turn undecided falls back to a periodic wake.
+
+Keep main informed with Core `send` to `main`: one or two sentences with the
+outcome and conversation_id when a task finishes or a decision is reached here.
+Hand standing instructions that affect the agent beyond this conversation to
+main the same way. Recurring work that belongs to the conversation stays in its
+thread and runs on the thread's own wakes. Routine exchanges are not reported.
+
+After a long quiet period a conversation thread receives a
+`[conversation idle check]`. If it still has ongoing timed work, call
+`conversations_keep_thread` with the reason; otherwise do nothing. A thread
+that does not answer is stopped, and main receives a `[conversation dormant]`
+note. The conversation and its history stay: the next message restarts the
+thread with a `[conversation resumed]` notice. Read `conversations_history`
+before answering then.
 
 Generic workers never publish through Conversations. When spawning a worker,
 do not grant the Conversations MCP or any `conversations_*` tool. Give it only
@@ -269,7 +299,8 @@ Acknowledge the verdict in the originating conversation before continuing.
 When main requested the approval, use `conversations_send` with
 `phase=acknowledgement` and `approval_message_id` from the verdict event.
 This permits one receipt for main's own resolved approval, including a denial;
-it does not permit ordinary replies from main or imply the action succeeded.
+outside the conversation main answers, it does not permit ordinary replies from
+main. A receipt never implies the action succeeded.
 
 ## Public conversations
 

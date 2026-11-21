@@ -166,6 +166,13 @@ func (a *App) Workers() []sdk.Worker {
 			},
 		},
 		{
+			Name:     "thread-lifecycle",
+			Schedule: "@every 5m",
+			Run: func(_ context.Context, app *sdk.AppCtx) error {
+				return a.runThreadLifecycle(app)
+			},
+		},
+		{
 			Name:     "telegram-maintenance",
 			Schedule: "@every 1h",
 			Run: func(_ context.Context, _ *sdk.AppCtx) error {
@@ -301,6 +308,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolHistory,
 		},
 		{
+			Name: "keep_thread",
+			Description: "Answer a [conversation idle check] from a conversation thread that still has ongoing timed work " +
+				"(a scheduled follow-up, a running job, a watched condition). Keeps this thread awake for another idle period. " +
+				"Only the conversation's own thread may call it; do nothing when no timed work remains.",
+			InputSchema: schemaObject(map[string]any{
+				"conversation_id": map[string]any{"type": "string"},
+				"reason":          map[string]any{"type": "string", "maxLength": 300, "description": "The ongoing timed work that needs this thread."},
+			}, []string{"conversation_id", "reason"}),
+			HandlerCtx: a.toolKeepThread,
+		},
+		{
 			Name:     "inbox_post",
 			Exposure: sdk.ToolExposureAppOnly,
 			Description: "INTERNAL sibling-app entry point (CallAppResult) — not for agents; agent calls are " +
@@ -357,6 +375,11 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 // thread, if any. Conversations owns this relationship in its store; neither
 // Core nor the SDK needs to classify threads as main/conversation/worker.
 func (a *App) boundConversation(from *callIdentity) (*Conversation, error) {
+	// Main may answer one conversation (main routing), but that binding is a
+	// delivery route. Main stays the agent's global caller.
+	if from.ThreadID == mainThreadID {
+		return nil, nil
+	}
 	var retired int
 	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM retired_conversation_threads WHERE project_id=? AND agent_id=? AND thread_id=?`, from.ProjectID, from.AgentID, from.ThreadID).Scan(&retired); err != nil {
 		return nil, err
@@ -456,16 +479,21 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	clientID := strings.TrimSpace(stringArg(args, "idempotency_key"))
-	if from.ThreadID == "main" {
+	if from.ThreadID == mainThreadID {
 		approvalID := int64(intArg(args, "approval_message_id", 0))
-		approval, err := a.store.GetMessage(approvalID)
-		if phase != "acknowledgement" || err != nil || approval.ComponentKind != kindApproval ||
-			approval.ConversationID != conv.ID || approval.AgentID != from.AgentID || approval.ThreadID != "main" ||
-			(approval.ActionStatus == "" || approval.ActionStatus == "pending") {
-			return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread; main may only acknowledge its own resolved approval with phase=acknowledgement and approval_message_id")
+		routed := a.store.mainRouted(conv.ID, from.AgentID)
+		if approvalID > 0 || !routed {
+			// Outside the conversation main answers, main may only acknowledge
+			// its own resolved approval.
+			approval, err := a.store.GetMessage(approvalID)
+			if phase != "acknowledgement" || err != nil || approval.ComponentKind != kindApproval ||
+				approval.ConversationID != conv.ID || approval.AgentID != from.AgentID || approval.ThreadID != mainThreadID ||
+				(approval.ActionStatus == "" || approval.ActionStatus == "pending") {
+				return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread; main may only acknowledge its own resolved approval with phase=acknowledgement and approval_message_id")
+			}
+			// An event retry or a second tool call must not duplicate the receipt.
+			clientID = fmt.Sprintf("approval:%d:acknowledgement", approvalID)
 		}
-		// An event retry or a second tool call must not duplicate the receipt.
-		clientID = fmt.Sprintf("approval:%d:acknowledgement", approvalID)
 	}
 	components, err := componentsArg(args, "components")
 	if err != nil {
@@ -697,7 +725,14 @@ func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 
-	return map[string]any{"conversations": conversations}, nil
+	out := map[string]any{"conversations": conversations}
+	if from.ThreadID == mainThreadID {
+		// Agent-facing only: the conversation whose messages arrive in main.
+		if id := a.store.mainConversationID(from.ProjectID, from.AgentID); id != "" {
+			out["main_conversation_id"] = id
+		}
+	}
+	return out, nil
 }
 
 func (a *App) toolHistory(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {

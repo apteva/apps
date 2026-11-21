@@ -112,6 +112,41 @@ func (c *scenarioClient) ensureAgent() (int64, func()) {
 	return id, func() {}
 }
 
+// claimMainRouting gives a fresh runner agent's main thread its conversation
+// (v0.27 main routing) and requires a real reply from main there. Scenarios
+// that assert chat-* thread behavior call it first, so their own conversation
+// gets a conversation thread as before.
+func (c *scenarioClient) claimMainRouting(agentID int64) func() {
+	c.t.Helper()
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agentID, "title": "Main conversation"}, &conv); status != 200 || conv.ID == "" {
+		c.t.Fatalf("create main conversation: %d", status)
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": "Reply with exactly: main-ready", "client_message_id": "main-routing-claim",
+	}, nil); status != 200 {
+		c.t.Fatalf("post main message: %d", status)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var rows []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &rows)
+		for _, row := range rows {
+			if row.Role == "agent" && strings.Contains(strings.ToLower(row.Content), "main-ready") {
+				if row.ThreadID != "main" {
+					c.t.Fatalf("first operator chat answered from %q, want main", row.ThreadID)
+				}
+				return func() { c.deleteConversation(conv.ID) }
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	c.t.Fatal("main did not reply in its conversation within 120s")
+	return func() {}
+}
+
 // TestScenario_ChatRoundTrip: create a conversation with the agent,
 // send one message, and require a real model-authored reply through
 // conversations_send within the deadline.
@@ -489,6 +524,7 @@ func TestScenario_ImageStorageTicket(t *testing.T) {
 		t.Fatal("scenario must provision Storage and Tickets")
 	}
 	agent, _ := c.ensureAgent()
+	defer c.claimMainRouting(agent)()
 	var conv Conversation
 	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Image Storage ticket"}, &conv); status != 200 || conv.ID == "" {
 		t.Fatalf("create: %d", status)

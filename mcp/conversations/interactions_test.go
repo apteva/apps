@@ -208,7 +208,9 @@ func TestInteractiveSchemaValidationAndExistingCards(t *testing.T) {
 	for _, tool := range a.MCPTools() {
 		names = append(names, tool.Name)
 	}
-	if len(names) != 9 {
+	// Interactive components add no tools. keep_thread (v0.27) is the
+	// lifecycle tool for conversation threads, not an interaction tool.
+	if len(names) != 10 {
 		t.Fatalf("added tools: %v", names)
 	}
 }

@@ -219,6 +219,12 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if conversationID == "" {
 		return
 	}
+	if threadID == mainThreadID && !s.hasActiveResponse(conversationID, agentID) {
+		// Main also runs the agent's background work. Only turns answering a
+		// message in the conversation main answers are shown there; webhook,
+		// timer and other background turns never claim that conversation.
+		return
+	}
 	s.observeResponseWake(eventType, agentID, threadID, dataJSON, ts)
 	// Proactive turns (subscription, webhook, timer, or an agent-created
 	// conversation) have no inbound user message to seed response progress.
@@ -247,6 +253,15 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	case "tool.result":
 		s.onToolEnd(agentID, threadID, conversationID, dataJSON, ts)
 	}
+}
+
+// hasActiveResponse reports whether a response (inbound or proactive) is
+// currently open for the agent in the conversation.
+func (s *streamer) hasActiveResponse(chat string, agent int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.responses[responseProgressKey(chat, agent)]
+	return p != nil && p.Phase != "idle"
 }
 
 // startProactiveResponse claims a response for a turn that did not originate

@@ -374,6 +374,11 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Stop the deleted conversation's threads now; the lifecycle worker
+		// retries anything Core could not stop yet.
+		if app := a.appCtx(r); app != nil {
+			go func() { _ = a.killRetiredThreads(app) }()
+		}
 		writeJSON(w, map[string]any{"deleted": true})
 	default:
 		http.Error(w, "GET, POST, PATCH or DELETE", http.StatusMethodNotAllowed)

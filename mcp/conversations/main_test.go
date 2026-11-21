@@ -47,6 +47,7 @@ type recordingPlatform struct {
 	duplicateSpawnReceipt  bool
 	omitSpawnReceipt       bool
 	killed                 []sdk.ThreadRef
+	killErr                error
 	projects               []sdk.PlatformProject
 }
 
@@ -177,6 +178,9 @@ func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.Thre
 }
 
 func (p *recordingPlatform) KillThread(agentID int64, threadID string) error {
+	if p.killErr != nil {
+		return p.killErr
+	}
 	p.killed = append(p.killed, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
 	return nil
 }
@@ -230,7 +234,27 @@ func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
 		t.Fatalf("OnMount: %v", err)
 	}
 	t.Cleanup(func() { _ = app.OnUnmount(ctx) })
+	occupyMainRouting(t, app, 41, 42, 43, 44)
 	return app, ctx, platform
+}
+
+// occupyMainRouting gives each agent a main-routed conversation in a separate
+// project, so tests written for chat-* threads keep exercising them. Main
+// routing itself is covered by main_routing_test.go with a fresh agent.
+func occupyMainRouting(t *testing.T, app *App, agents ...int64) {
+	t.Helper()
+	for _, agentID := range agents {
+		holder, err := app.store.CreateConversation(CreateConversationInput{
+			ProjectID: "main-holder-project", LeadAgentID: agentID, Title: "Main holder", OwnerUserID: 1,
+		})
+		if err != nil {
+			t.Fatalf("create main holder: %v", err)
+		}
+		if _, err := app.store.db.Exec(`INSERT INTO conversation_agent_threads(conversation_id,agent_id,thread_id) VALUES(?,?,?)`,
+			holder.ID, agentID, mainThreadID); err != nil {
+			t.Fatalf("occupy main routing: %v", err)
+		}
+	}
 }
 
 func callerCtx(agentID int64, threadID string) context.Context {
