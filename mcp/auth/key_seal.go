@@ -121,6 +121,10 @@ func sealSigningKey(pid string, oid int64, kid, privPEM string) (string, error) 
 	if aead == nil {
 		return privPEM, nil
 	}
+	return sealSigningKeyWith(aead, pid, oid, kid, privPEM)
+}
+
+func sealSigningKeyWith(aead cipher.AEAD, pid string, oid int64, kid, privPEM string) (string, error) {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
@@ -139,6 +143,10 @@ func openSigningKey(pid string, oid int64, kid, stored string) (string, error) {
 	if aead == nil {
 		return "", errSigningKeySealed
 	}
+	return openSigningKeyWith(aead, pid, oid, kid, stored)
+}
+
+func openSigningKeyWith(aead cipher.AEAD, pid string, oid int64, kid, stored string) (string, error) {
 	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, sealedKeyPrefix))
 	if err != nil || len(blob) < aead.NonceSize()+aead.Overhead() {
 		return "", errSigningKeySealed
