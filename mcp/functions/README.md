@@ -1,6 +1,15 @@
-# Functions 1.19.0
+# Functions 1.20.0
 
-New functions reuse healthy workers after authenticated and ordinary requests.
+**New in 1.20.0:** snapshot restore. When an Apteva runtime is restored from a
+snapshot, the app SDK moves every `project_id` to the new runtime before
+Functions mounts; function, version and invocation ids do not change, so API
+routes and principals that name function ids keep resolving, and copied build
+artifacts are reused. The restore hook maps the installation ids in invocation
+policies (`authenticated_callers[].installation_id`) and audit identities to
+the restored installs, rewrites environment values and issuers that embed the
+old runtime's public URL, and points `build_dir` at the copied artifact.
+
+**1.19.0:** new functions reuse healthy workers after authenticated and ordinary requests.
 Existing functions preserve their previous isolation behavior. See
 [worker isolation and warm targets](TRUSTED_INVOCATIONS.md#isolation-audit-and-session-lifecycle).
 

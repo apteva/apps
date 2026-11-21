@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.19.0
+version: 1.20.0
 description: |
+  v1.20.0 Keeps functions, versions, built artifacts and invocation history
+  when a runtime is restored from a snapshot. Function ids do not change, and
+  invocation policies admit the restored installations of their callers.
+
   v1.19.0 Reuses healthy workers across authenticated and ordinary calls for
   newly created functions. Existing functions keep their isolation policy
   until switched. Every invocation still has its own authorization context.
@@ -199,7 +203,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.19.0
+    ref: functions/v1.20.0
     entry: mcp/functions
   port: 8080
   health_check: /health
