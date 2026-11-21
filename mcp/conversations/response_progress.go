@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Only a user-triggered response owns live progress. Background model work
@@ -63,6 +64,38 @@ func (s *streamer) observeResponseWake(event string, agent int64, thread, raw st
 		turn.wakeAt = ts
 		s.completedTurns[key] = turn
 	}
+}
+
+// inboundPreviewMatches reports whether Core's event.received preview is the
+// registered inbound message. Core keeps the first 100 bytes of the event text
+// and appends "..." when it cuts. Messages main receives through tracked agent
+// events carry Core's source tag in the text ("[console] [chat] ..."), with
+// the same name in the event's source field, so after that tag only the bytes
+// Core kept can be compared.
+func inboundPreviewMatches(message, source, preview string) bool {
+	if strings.HasPrefix(message, preview) {
+		return true
+	}
+	if source == "" {
+		return false
+	}
+	rest, tagged := strings.CutPrefix(message, "["+source+"] ")
+	if !tagged {
+		return false
+	}
+	if strings.HasPrefix(rest, preview) {
+		return true
+	}
+	kept, cut := strings.CutSuffix(rest, "...")
+	if !cut {
+		return false
+	}
+	// Core cuts bytes; JSON turns a split rune into U+FFFD.
+	kept = strings.TrimRight(kept, "�")
+	for kept != "" && !utf8.ValidString(kept) {
+		kept = kept[:len(kept)-1]
+	}
+	return len(kept) > len("[chat] ") && strings.HasPrefix(preview, kept)
 }
 
 func responseProgressKey(chat string, agent int64) string {
@@ -133,6 +166,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		CallID     string `json:"call_id"`
 		ToolCallID string `json:"tool_call_id"`
 		Message    string `json:"message"`
+		Source     string `json:"source"`
 	}
 	_ = json.Unmarshal([]byte(raw), &d)
 	name := firstNonEmptyString(d.Name, d.Tool)
@@ -146,7 +180,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 	// Register progress before delivery; transfer ownership only when Core
 	// consumes this message, never on the previous reply's housekeeping.
 	if p.inboundPreview != "" && !p.inboundReceived {
-		if event != "event.received" || !strings.HasPrefix(d.Message, p.inboundPreview) {
+		if event != "event.received" || !inboundPreviewMatches(d.Message, d.Source, p.inboundPreview) {
 			s.mu.Unlock()
 			return
 		}

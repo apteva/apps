@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -367,8 +368,10 @@ func TestIdleThreadIsCheckedThenSleptThenResumed(t *testing.T) {
 		t.Fatal("dormant thread was not recreated")
 	}
 	resumed := platform.ensures[len(platform.ensures)-1]
+	// The notice follows the message so Core's preview still starts with it.
 	if resumed.ThreadID != chat || len(resumed.Events) != 1 ||
-		!strings.Contains(fmt.Sprint(resumed.Events[0].Message), "[conversation resumed]") {
+		!strings.Contains(fmt.Sprint(resumed.Events[0].Message), "[conversation resumed]") ||
+		!strings.HasPrefix(fmt.Sprint(resumed.Events[0].Message), "[chat] back again") {
 		t.Fatalf("resume event=%+v", resumed.Events)
 	}
 	if app.store.threadDormant(conv.ID, 41) {
@@ -433,14 +436,68 @@ func TestStreamerIgnoresMainBackgroundTurns(t *testing.T) {
 	mountedCtx = ctx
 	routed := mkAgentConversation(t, app, CreateConversationInput{Title: "Everyday"})
 	postUserMessage(t, app, routed, "hello")
-	app.streamer.finishResponse(routed.ID, routedAgent, 0)
-	app.streamer.mu.Lock()
-	delete(app.streamer.responses, responseProgressKey(routed.ID, routedAgent))
-	app.streamer.mu.Unlock()
+	app.streamer.finishResponse(routed.ID, routedAgent)
+	if app.streamer.hasActiveResponse(routed.ID, routedAgent) {
+		t.Fatal("main's reply did not settle the response")
+	}
 
 	app.streamer.Ingest("llm.start", routedAgent, mainThreadID, `{}`, time.Now())
 	if app.streamer.hasActiveResponse(routed.ID, routedAgent) {
 		t.Fatal("a background main turn claimed the conversation")
+	}
+}
+
+// coreEventPreview mirrors Core's event.received telemetry for a tracked
+// event to main: "[console] " plus the event text, cut to 100 bytes and "...".
+func coreEventPreview(text string) string {
+	text = "[console] " + text
+	if len(text) > 100 {
+		return text[:100] + "..."
+	}
+	return text
+}
+
+// Live 0.27.0 bug: main receives "[console] [chat] ...", so the inbound
+// preview never matched and Thinking stayed on after main's final reply.
+func TestMainRoutedReplySettlesThinking(t *testing.T) {
+	cases := map[string]string{
+		"short":   "Hey",
+		"long":    strings.Repeat("Please check the invoice backlog. ", 5),
+		"unicode": strings.Repeat("a", 82) + "你好, check the invoices",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			app, ctx, platform := newTestEnv(t)
+			mountedCtx = ctx
+			app.streamer.telemetryConnected = true
+			routed := mkAgentConversation(t, app, CreateConversationInput{Title: "Chat"})
+			postUserMessage(t, app, routed, content)
+			if len(platform.trackedEvents) != 1 || platform.trackedEvents[0].ThreadID != mainThreadID {
+				t.Fatalf("main deliveries=%+v", platform.trackedEvents)
+			}
+			text, _ := platform.trackedEvents[0].Message.(string)
+			received := func(text string) string {
+				raw, _ := json.Marshal(map[string]string{"source": "console", "message": coreEventPreview(text)})
+				return string(raw)
+			}
+			now := time.Now()
+			// Another console event cannot take over this response.
+			app.streamer.Ingest("event.received", routedAgent, mainThreadID, received("[chat] something else"), now)
+			app.streamer.Ingest("llm.start", routedAgent, mainThreadID, `{}`, now.Add(time.Millisecond))
+			app.streamer.Ingest("tool.call", routedAgent, mainThreadID, `{"name":"pace"}`, now.Add(2*time.Millisecond))
+			if !app.streamer.hasActiveResponse(routed.ID, routedAgent) {
+				t.Fatal("an unrelated main event settled the response")
+			}
+			app.streamer.Ingest("event.received", routedAgent, mainThreadID, received(text), now.Add(3*time.Millisecond))
+			app.streamer.Ingest("llm.start", routedAgent, mainThreadID, `{}`, now.Add(4*time.Millisecond))
+			if _, err := app.toolSend(callerCtxCall(routedAgent, mainThreadID, "final"), ctx, map[string]any{
+				"conversation_id": routed.ID, "text": "Hey! How can I help?", "phase": "final"}); err != nil {
+				t.Fatal(err)
+			}
+			if ids := app.streamer.activeConversationIDs(); len(ids) != 0 {
+				t.Fatalf("Thinking stayed on after main's final reply: %v", ids)
+			}
+		})
 	}
 }
 

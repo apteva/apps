@@ -258,14 +258,18 @@ func (s *store) markThreadActive(conversationID string, agentID int64) {
 }
 
 // withResumeNotice prefixes the first inbound event after dormancy.
+// The notice follows the message: the event text must start with the inbound
+// "[chat] ..." preview, or Thinking never settles for the resumed response.
 func withResumeNotice(payload any, conv *Conversation) any {
 	notice := fmt.Sprintf("[conversation resumed] This conversation was inactive, so its thread was restarted."+
-		" Read conversations_history conversation_id=%s before answering.\n", conv.ID)
+		" Read conversations_history conversation_id=%s before answering.", conv.ID)
 	switch p := payload.(type) {
 	case string:
-		return notice + p
+		return p + "\n\n" + notice
 	case []map[string]any:
-		return append([]map[string]any{{"type": "text", "text": strings.TrimSpace(notice)}}, p...)
+		out := make([]map[string]any, len(p), len(p)+1)
+		copy(out, p)
+		return append(out, map[string]any{"type": "text", "text": notice})
 	}
 	return payload
 }

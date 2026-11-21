@@ -119,7 +119,11 @@ ownership: `boundConversation` treats main as unbound, so main keeps its global
 discovery, creation and inbox tools, and may send ordinary replies only in the
 conversation it answers. The streamer shows main's activity in that
 conversation only while a response to one of its messages is open; main's
-background turns never claim it.
+background turns never claim it. Core tags those deliveries with their source
+("[console] [chat] ...") and reports the tag as `source`, so the inbound
+preview is matched after that tag, against the bytes Core kept. Any notice
+added to an inbound message (main's reply rule, a resume notice) follows the
+user's text for the same reason.
 
 Deleting or archiving that conversation, linking a transport, or adding an
 external participant removes the main binding. Main is never retired or killed.

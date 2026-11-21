@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.27.2 — 2026-11-21
+
+- Clear the working dot and Thinking after main replies in the conversation it answers. Core delivers those messages as "[console] [chat] ...", so Conversations never saw main receive them and kept the response open after the final reply.
+- Put the resume notice after the user's message when a dormant conversation thread restarts, so that first reply also clears Thinking.
+
 ## 0.27.1 — 2026-11-21
 
 - Stop a just-deleted conversation's thread in the same pass, ahead of threads still queued from earlier releases. Previously, right after an upgrade, that backlog could delay the stop by one or more five-minute worker passes.
