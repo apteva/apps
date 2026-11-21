@@ -5,7 +5,7 @@ go 1.25.13
 toolchain go1.26.11
 
 require (
-	github.com/apteva/app-sdk v0.115.1
+	github.com/apteva/app-sdk v0.118.0
 	golang.org/x/crypto v0.32.0
 	modernc.org/sqlite v1.50.0
 )
