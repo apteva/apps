@@ -468,3 +468,33 @@ destination is then seeded with the usual `telephony_flows_*` tools.
   platform refuses an agent from another project, including the source agent.
 - Fix the agent's `provider` and `model` for repeatable runs. There is no
   recorded model fixture for voice agents.
+
+## Apps by name (0.14.0)
+
+`app_install_ids` copies apps the project has installed. `apps` runs an app the
+project has not installed, so a run can test it against simulated
+integrations without a real account. For example, Telephony normally needs a
+verified carrier connection before it can be installed; a run can instead start
+it by name with a simulated Telnyx carrier:
+
+```json
+"apps": [{"name": "telephony", "version": ">=0.27.1"}],
+"integration_bindings": [{"app": "telephony", "role": "carrier", "slug": "telnyx", "simulate": true}],
+"app_config": {"telephony": {"sip_enabled": "true"}}
+```
+
+- The platform resolves each name the way it resolves required app
+  dependencies: a running install in the project (or a global one), the local
+  app cache, the registry, then a development checkout. `version` is an
+  optional semver constraint such as `">=0.27.1"` or `"0.27.1"`.
+- Nothing is installed in the project. The run's copy starts with empty
+  settings and no connections; set them with `app_config` and
+  `integration_bindings`.
+- An app may come from `app_install_ids` or `apps`, not both. The two lists
+  name at most 16 apps together.
+- A snapshot records the apps a run added by name, and a run from that
+  snapshot that names no apps runs them again.
+- `apps` is part of the stored spec, so it changes `spec_digest`.
+- This needs Apteva with runtime apps by name. An older server ignores the
+  field; Environments then fails the run, naming the missing apps, instead of
+  starting it without them.

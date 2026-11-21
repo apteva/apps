@@ -213,10 +213,14 @@ func (s *service) startRun(environmentID, kind string, spec EnvironmentSpec, id 
 	if err = s.createProtocolFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create protocol fixtures: %w", err)
 	}
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID, AppConfig: spec.AppConfig}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID, AppConfig: spec.AppConfig, Apps: spec.Apps}
 	created = true
-	if _, err = s.runtime().CreateRuntime(req); err != nil {
+	var summary *sdk.RuntimeSummary
+	if summary, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
+	}
+	if missing := runAppsMissing(spec.Apps, summary); len(missing) > 0 {
+		return run, fmt.Errorf("create runtime: %s not in the run; this Apteva server does not run apps by name", strings.Join(missing, ", "))
 	}
 	// Seed results stay addressable so a later seed can reference what an
 	// earlier one created, through {"$ref": "<index>.<path>"} in its input.
@@ -681,6 +685,9 @@ func validateSpec(spec EnvironmentSpec) error {
 		return err
 	}
 	if err := validateAppConfig(spec.AppConfig); err != nil {
+		return err
+	}
+	if err := validateRunApps(spec); err != nil {
 		return err
 	}
 	for i, seed := range spec.Seeds {

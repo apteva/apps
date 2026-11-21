@@ -32,6 +32,10 @@ type EnvironmentSpec struct {
 	// AppConfig sets install settings on the run's app copies by app name
 	// before they first start (0.13.0). Values are strings.
 	AppConfig map[string]map[string]string `json:"app_config,omitempty"`
+	// Apps runs apps by name without a project install (0.14.0), so a run
+	// can test an app the project has not installed, against simulated
+	// integrations only.
+	Apps []sdk.RuntimeAppSource `json:"apps,omitempty"`
 }
 
 type WebFixtureSpec struct {

@@ -58,6 +58,15 @@ var environmentSpecSchema = strictObject(map[string]any{
 		"available_at": map[string]any{"type": "string", "format": "date-time"},
 		"expires_at":   map[string]any{"type": "string", "format": "date-time"},
 	})),
+	"apps": map[string]any{
+		"type":        "array",
+		"maxItems":    maxRunApps,
+		"description": "Apps to run by name without a project install, resolved from the project's installs, the local app cache, the registry, or a development checkout. version is an optional semver constraint. Use with simulated integration_bindings to test an app with no real integration account. Example: [{\"name\": \"telephony\", \"version\": \">=0.27.1\"}].",
+		"items": strictObject(map[string]any{
+			"name":    map[string]any{"type": "string"},
+			"version": map[string]any{"type": "string"},
+		}, "name"),
+	},
 	"app_config": map[string]any{
 		"type":        "object",
 		"description": "Install settings for the run's app copies, by app name then config_schema field, applied before each copy first starts. Values are strings; booleans are \"true\" or \"false\". Example: {\"telephony\": {\"softphone_webrtc_enabled\": \"true\"}}.",
