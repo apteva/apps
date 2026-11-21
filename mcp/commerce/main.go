@@ -51,6 +51,7 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "provider-dispatch-reconcile", Schedule: "@every 30s", Run: a.reconcileProviderDispatches},
 		{Name: "provider-source-sync", Schedule: "@every 15m", Run: a.reconcileProviderSources},
 		{Name: "sale-financial-reconcile", Schedule: "@every 5m", Run: a.reconcileSaleFinancials},
+		{Name: "sale-analytics-reconcile", Schedule: "@every 1m", Run: a.reconcileSaleAnalytics},
 	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler {
@@ -114,6 +115,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_collections_remove_product", Description: "Remove a listing from a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsRemoveProduct},
 		{Name: "commerce_cart_create", Description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "session_token": typ("string")}, nil), Handler: a.toolCartCreate},
 		{Name: "commerce_carts_list", Description: "List Commerce carts, including inactive abandonment candidates. Args: store_id?, status?, updated_before? (RFC3339), updated_after? (RFC3339), inactive_for_minutes?, has_items?, abandoned_only? (nonempty open/checkout carts; defaults to 24h inactivity), sort? (updated_desc|updated_asc), limit?.", InputSchema: schemaObject(cartFilterProps(), nil), Handler: a.toolCartsList},
+		{Name: "commerce_cart_attribution_set", Description: "Save consented anonymous attribution on a server-owned cart; never accepts customer identity. Args cart_id, attribution. Revoking consent clears saved attribution.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "store_id": typ("integer"), "session_token": typ("string"), "attribution": typ("object")}, []string{"attribution"}), Handler: a.toolCartAttributionSet},
 		{Name: "commerce_cart_get", Description: "Fetch a Commerce cart with items. Args: cart_id? or session_token? plus store_id?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "session_token": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolCartGet},
 		{Name: "commerce_cart_add_item", Description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "variant_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "variant_id"}), Handler: a.toolCartAddItem},
 		{Name: "commerce_cart_set_quantity", Description: "Set a Commerce cart item's quantity. Args: cart_id, item_id, quantity.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "item_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "item_id", "quantity"}), Handler: a.toolCartSetQuantity},
@@ -858,7 +860,19 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 			if err != nil {
 				return nil, err
 			}
+			if hasSale, e := a.cartHasSale(ctx, pid, reopened); e != nil {
+				return nil, e
+			} else if hasSale {
+				return a.replaceRetriedCart(ctx, pid, store, reopened, token)
+			}
 			return a.rebuildCheckoutCart(ctx, pid, reopened)
+		}
+		if existing.Status == "open" {
+			if hasSale, e := a.cartHasSale(ctx, pid, existing); e != nil {
+				return nil, e
+			} else if hasSale {
+				return a.replaceRetriedCart(ctx, pid, store, existing, token)
+			}
 		}
 		if existing.Status == "converted" {
 			return a.replaceConvertedCart(ctx, pid, store, existing, token)
@@ -1663,6 +1677,17 @@ func (a *App) voidCheckoutInvoice(ctx *sdk.AppCtx, pid string, checkout *Checkou
 		"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled",
 	}, &response); err != nil {
 		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "active provider payment") {
+			// Billing verifies that this provider payment is still cancellable;
+			// paid/captured invoices are rejected there, never voided here.
+			if cancelErr := ctx.PlatformAPI().CallAppResult("billing", "invoices_cancel_payment", map[string]any{"_project_id": pid, "invoice_id": *checkout.InvoiceID}, &response); cancelErr != nil {
+				return fmt.Errorf("cancel unpaid provider payment: %w", cancelErr)
+			}
+			if retryErr := ctx.PlatformAPI().CallAppResult("billing", "invoices_void", map[string]any{"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled"}, &response); retryErr != nil {
+				return fmt.Errorf("void cancelled invoice: %w", retryErr)
+			}
+			return nil
+		}
 		if !strings.Contains(message, "already void") && !strings.Contains(message, "already cancelled") {
 			return fmt.Errorf("void Billing invoice: %w", err)
 		}
