@@ -150,9 +150,11 @@ export class RuntimeTelephonyTransport {
 
   mediaURL(proxyURL: URL, transport?: string): URL {
     if (!this.directBase) return proxyURL;
-    const marker = `/api/apps/telephony/_install/${this.proxy.installId}`;
+    const marker = `/api/apps/telephony/_install/${this.proxy.installId}/`;
+    const at = proxyURL.pathname.indexOf(marker);
+    if (at < 0) throw new Error('Invalid Telephony media endpoint');
     const base = transport === 'webrtc' || transport === 'auto' ? this.info?.browser_signaling_base : this.info?.browser_media_base;
-    const url = new URL((base || this.directBase) + proxyURL.pathname.slice(marker.length));
+    const url = new URL((base || this.directBase) + proxyURL.pathname.slice(at + marker.length - 1));
     url.search = proxyURL.search;
     return url;
   }

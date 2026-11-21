@@ -32,6 +32,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -1313,17 +1314,31 @@ type softphoneSession struct {
 	Standby string `json:"standby,omitempty"`
 }
 
-// softphoneMediaURL is the install-scoped path the operator's browser dials.
-// Keep it relative: the panel may be served through a local or private Apteva
-// host while PublicURL names the internet-facing carrier webhook host. The
-// browser must attach through the same gateway that served the panel, not jump
-// to PublicURL (which could be a different installation entirely).
-func (a *App) softphoneMediaURL(callID, token string) string {
-	path := "/softphone/media/" + callID + "/" + token
-	if a.installID > 0 {
-		return fmt.Sprintf("/api/apps/telephony/_install/%d%s", a.installID, path)
+// browserInstallPath is the install-scoped path an operator's browser uses to
+// reach this install. Keep it relative: the panel may be served through a
+// local or private Apteva host while PublicURL names the internet-facing
+// carrier webhook host. The browser must attach through the same gateway that
+// served the panel, not jump to PublicURL (which could be a different
+// installation entirely).
+//
+// Inside an Environment the install is not on the platform's app gateway.
+// Browsers driven by a test run reach it through the environment's loopback
+// gateway, /api/environment-app-public/<environment>, so the path carries
+// that prefix.
+func (a *App) browserInstallPath(path string) string {
+	if a.installID <= 0 {
+		return path
 	}
-	return path
+	install := fmt.Sprintf("/api/apps/telephony/_install/%d%s", a.installID, path)
+	if environment := sdk.CurrentEnvironmentID(); environment != "" {
+		return "/api/environment-app-public/" + url.PathEscape(environment) + install
+	}
+	return install
+}
+
+// softphoneMediaURL is the path the operator's browser dials for call audio.
+func (a *App) softphoneMediaURL(callID, token string) string {
+	return a.browserInstallPath("/softphone/media/" + callID + "/" + token)
 }
 
 func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project string) {

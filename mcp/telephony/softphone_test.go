@@ -821,6 +821,7 @@ func TestCallsPanelHidesBenignHistoricalMediaShutdownErrors(t *testing.T) {
 }
 
 func TestSoftphoneMediaURLUsesInstallScopedSameOriginPath(t *testing.T) {
+	t.Setenv("APTEVA_ENVIRONMENT_ID", "")
 	app := &App{installID: 42}
 	got := app.softphoneMediaURL("call-1", "browser-token")
 	want := "/api/apps/telephony/_install/42/softphone/media/call-1/browser-token"
@@ -833,6 +834,28 @@ func TestSoftphoneMediaURLUsesInstallScopedSameOriginPath(t *testing.T) {
 
 	if got := (&App{}).softphoneMediaURL("call-2", "token-2"); got != "/softphone/media/call-2/token-2" {
 		t.Fatalf("uninstalled softphoneMediaURL() = %q", got)
+	}
+}
+
+// Inside an Environment, browsers reach the install through the environment's
+// gateway. The media paths keep the install-scoped tail behind that prefix, and
+// the existing legacy-token comparison sees the same path.
+func TestBrowserMediaURLsUseEnvironmentGatewayInsideEnvironment(t *testing.T) {
+	t.Setenv("APTEVA_ENVIRONMENT_ID", "rt_env_7f3a")
+	app := &App{installID: 42}
+	prefix := "/api/environment-app-public/rt_env_7f3a/api/apps/telephony/_install/42"
+	if got, want := app.softphoneMediaURL("call-1", "tok"), prefix+"/softphone/media/call-1/tok"; got != want {
+		t.Fatalf("softphoneMediaURL() = %q, want %q", got, want)
+	}
+	if got, want := app.listenerMediaURL("call-1", "tok"), prefix+"/softphone/listen-media/call-1/tok"; got != want {
+		t.Fatalf("listenerMediaURL() = %q, want %q", got, want)
+	}
+	if got := (&App{}).softphoneMediaURL("call-2", "t2"); got != "/softphone/media/call-2/t2" {
+		t.Fatalf("uninstalled softphoneMediaURL() = %q", got)
+	}
+	t.Setenv("APTEVA_ENVIRONMENT_ID", "a/b")
+	if got, want := app.softphoneMediaURL("c", "t"), "/api/environment-app-public/a%2Fb/api/apps/telephony/_install/42/softphone/media/c/t"; got != want {
+		t.Fatalf("escaped environment softphoneMediaURL() = %q, want %q", got, want)
 	}
 }
 

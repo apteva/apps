@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -249,11 +248,7 @@ func (a *App) listenerCapability(row *callRow) (bool, string) {
 	return true, ""
 }
 func (a *App) listenerMediaURL(id, token string) string {
-	path := "/softphone/listen-media/" + id + "/" + token
-	if a.installID > 0 {
-		return fmt.Sprintf("/api/apps/telephony/_install/%d%s", a.installID, path)
-	}
-	return path
+	return a.browserInstallPath("/softphone/listen-media/" + id + "/" + token)
 }
 func (a *App) listenerSessionValid(row *callRow, token string) bool {
 	reason, _ := a.listenerSessionCheck(row, token)

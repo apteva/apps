@@ -486,7 +486,9 @@ export class TelephonyClient {
   private resolveMediaURL(session: CallSession, kind: "media" | "listen-media", transport?: string): string {
     const gateway = new URL(this.app.mcpURL(), typeof location === "undefined" ? undefined : location.href);
     const url = new URL(session.media_url, gateway);
-    const prefix = `/api/apps/telephony/_install/${this.app.installId}/softphone/${kind}/${callID(session.call_id)}/`;
+    // Inside an Environment, Telephony returns the same path behind the
+    // environment's loopback gateway. Nothing else may precede the install.
+    const prefix = environmentGatewayPrefix(url.pathname) + `/api/apps/telephony/_install/${this.app.installId}/softphone/${kind}/${callID(session.call_id)}/`;
     if (url.origin !== gateway.origin || !["http:", "https:"].includes(url.protocol) ||
         url.username || url.password || url.search || url.hash || !url.pathname.startsWith(prefix) ||
         !/^[A-Za-z0-9_-]+$/.test(url.pathname.slice(prefix.length))) {
@@ -512,6 +514,11 @@ export class TelephonyClient {
     this.resolveMediaURL(session, kind);
     return { ...session, lease_started_ms: startedMS };
   }
+}
+
+/** The /api/environment-app-public/<environment> prefix of a media path, or "". */
+function environmentGatewayPrefix(pathname: string): string {
+  return /^\/api\/environment-app-public\/[A-Za-z0-9_-]{1,128}(?=\/api\/apps\/telephony\/_install\/)/.exec(pathname)?.[0] ?? "";
 }
 
 export const telephonyExtension = defineAppExtension({

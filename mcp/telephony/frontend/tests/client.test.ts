@@ -210,6 +210,23 @@ describe("Telephony extension", () => {
       expect(() => f.client.mediaURL({ ...f.session, media_url })).toThrow("Invalid Telephony media");
     }
   });
+  test("accepts the environment gateway prefix and nothing else before the install path", () => {
+    const f = fixture();
+    const env = "/api/environment-app-public/rt_env_7f3a" + f.session.media_url;
+    expect(f.client.mediaURL({ ...f.session, media_url: env })).toBe("wss://gateway.example" + env);
+    const listener = { ...f.session, media_url: "/api/environment-app-public/rt_env_7f3a/api/apps/telephony/_install/42/softphone/listen-media/call-1/secret" };
+    expect(f.client.listenerMediaURL(listener)).toBe("wss://gateway.example" + listener.media_url);
+    for (const media_url of [
+      "/api/environment-app-public/rt_env_7f3a/api/apps/telephony/_install/43/softphone/media/call-1/secret",
+      "/api/environment-app-public/rt%2Fx/api/apps/telephony/_install/42/softphone/media/call-1/secret",
+      "/api/environment-app-public/rt/extra/api/apps/telephony/_install/42/softphone/media/call-1/secret",
+      "/api/environment-app-public//api/apps/telephony/_install/42/softphone/media/call-1/secret",
+      "/other/api/apps/telephony/_install/42/softphone/media/call-1/secret",
+      "https://evil.example/api/environment-app-public/rt_env_7f3a/api/apps/telephony/_install/42/softphone/media/call-1/secret",
+    ]) {
+      expect(() => f.client.mediaURL({ ...f.session, media_url })).toThrow("Invalid Telephony media");
+    }
+  });
   test("failed microphone preflight never starts a paid call", async () => {
     const f = fixture();
     f.setPreflight(async () => { throw new Error("permission denied"); });
