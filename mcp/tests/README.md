@@ -917,19 +917,43 @@ to `tests_run`.
    "read_tools": {"telephony": ["telephony_calls_list"]}}}
 ```
 
-A check can then place a direct SIP call and follow it:
+A check can then place a direct SIP call and follow it. Every step needs at
+least one assertion, and a step waits at most 30 seconds:
 
 ```json
 {"steps": [
   {"id": "ring", "kind": "integration_trigger", "slug": "telnyx", "trigger": "incoming_call",
-   "input": {"to": "+15550100001", "from": "+15550199999"}, "capture": {"sip": "/result/sip_call_id"}},
+   "input": {"to": "+15550100001", "from": "+15550199999"}, "capture": {"sip": "/result/sip_call_id"},
+   "assertions": [{"path": "/result/sip_call_id", "op": "exists"}]},
   {"id": "menu", "kind": "integration_state", "slug": "telnyx", "poll_every_ms": 250, "timeout_ms": 20000,
    "assertions": [{"path": "/collections/sip_calls/0/report/state", "op": "equals", "value": "answered"}]},
   {"id": "press", "kind": "integration_trigger", "slug": "telnyx", "trigger": "sip_dtmf",
-   "input": {"sip_call_id": "{{sip}}", "digits": "1"}},
+   "input": {"sip_call_id": "{{sip}}", "digits": "1"},
+   "assertions": [{"path": "/result", "op": "exists"}]},
   {"id": "ended", "kind": "integration_state", "slug": "telnyx", "poll_every_ms": 250, "timeout_ms": 30000,
-   "assertions": [{"path": "/collections/sip_calls/0/report/state", "op": "equals", "value": "ended"}]}]}
+   "assertions": [{"path": "/collections/sip_calls/0/report/state", "op": "equals", "value": "ended"},
+                  {"path": "/collections/sip_calls/0/report/ended_by", "op": "equals", "value": "app"},
+                  {"path": "/collections/sip_calls/0/report/rtp/non_silent_ms", "op": "gte", "value": 2500}]}]}
 ```
+
+The report also has `cause`, `q850`, `codec`, `dtmf_sent` and `rtp`
+(`sent_packets`, `received_packets`, `non_silent_ms`, `peak`, `rms`). A
+`sip_caller_hangup` trigger ends the call from the caller's side
+(`ended_by: "caller"`). Calls are listed in the order they were placed, so a
+second call in the same run is `sip_calls/1`.
 
 Direct SIP prompts are prerecorded audio: upload them to Storage in a seed and
 map the prompt text to the file id with `telephony_local_media_settings`.
+
+The same run can test a Function and a page that uses it. Add `functions` to
+`apps_by_name`, create the function in a seed with a `function_url` token,
+and point a browser target at it (`{"app": "functions", "path":
+"/url/<name>"}`). A function URL request reaches the handler as
+`{trigger: "function_url", method, body}`, and a handler can return
+`{statusCode, headers, body}` to serve HTML. A `function` step invokes the
+function directly inside the run.
+
+Checked on Apteva 0.100.21 with Environments 0.14.0, Telephony 0.27.1,
+Storage 0.14.0, Functions 1.19.0 and Computer 0.15.0: a suite with two SIP
+calls, a function and a browser check passed three runs in a row, each in
+about 15–20 seconds including the run's start.
