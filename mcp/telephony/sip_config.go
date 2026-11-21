@@ -174,7 +174,8 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 		return cfg, fmt.Errorf("SIP public host %s must resolve to a public IPv4 address; use sip_public_ip only for unusual NAT: %w",
 			cfg.PublicHost, err)
 	}
-	if !usableSIPPublicIPv4(cfg.PublicIP) {
+	loopback := environmentLoopbackSIP(cfg.PublicIP)
+	if !usableSIPPublicIPv4(cfg.PublicIP) && !loopback {
 		return cfg, fmt.Errorf("SIP public host %s resolved to non-public address %s; use sip_public_ip only for unusual NAT",
 			cfg.PublicHost, cfg.PublicIP)
 	}
@@ -183,8 +184,14 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 	if err != nil || !cfg.RTPBindIP.Is4() {
 		return cfg, errors.New("SIP RTP bind address must be an IPv4 address")
 	}
-	if _, _, err := net.SplitHostPort(cfg.ListenAddress); err != nil {
+	listenHost, listenPort, err := net.SplitHostPort(cfg.ListenAddress)
+	if err != nil {
 		return cfg, fmt.Errorf("SIP listen address must be host:port: %w", err)
+	}
+	if loopback {
+		if err := applyEnvironmentLoopbackSIP(&cfg, listenHost, listenPort); err != nil {
+			return cfg, err
+		}
 	}
 	switch cfg.Transport {
 	case "tls":
@@ -204,14 +211,16 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 	default:
 		return cfg, errors.New("SIP transport must be tls, tcp, or udp")
 	}
-	if cfg.RTPPortMin < 1024 || cfg.RTPPortMax > 65535 || cfg.RTPPortMin >= cfg.RTPPortMax {
-		return cfg, errors.New("direct SIP RTP port range must be between 1024 and 65535")
-	}
-	if cfg.RTPPortMin%2 != 0 {
-		cfg.RTPPortMin++
-	}
-	if cfg.RTPPortMax-cfg.RTPPortMin < 2 {
-		return cfg, errors.New("direct SIP RTP port range must contain at least two ports")
+	if !(loopback && cfg.RTPPortMin == 0 && cfg.RTPPortMax == 0) {
+		if cfg.RTPPortMin < 1024 || cfg.RTPPortMax > 65535 || cfg.RTPPortMin >= cfg.RTPPortMax {
+			return cfg, errors.New("direct SIP RTP port range must be between 1024 and 65535")
+		}
+		if cfg.RTPPortMin%2 != 0 {
+			cfg.RTPPortMin++
+		}
+		if cfg.RTPPortMax-cfg.RTPPortMin < 2 {
+			return cfg, errors.New("direct SIP RTP port range must contain at least two ports")
+		}
 	}
 	switch cfg.SRTPMode {
 	case sipSRTPRequired, sipSRTPPreferred, sipSRTPDisabled:
@@ -341,6 +350,58 @@ func sipHostFromPublicURL(raw string) (string, error) {
 		return "", errors.New("Apteva public URL must use HTTPS before enabling direct SIP")
 	}
 	return strings.TrimSuffix(strings.ToLower(parsed.Hostname()), "."), nil
+}
+
+// environmentLoopbackSIP reports whether this install runs inside an
+// Environment with a loopback SIP address. The simulated carrier there calls
+// from the same host (see carrier_simulation.go), so the internet-facing
+// checks give way to loopback-only ones.
+func environmentLoopbackSIP(publicIP netip.Addr) bool {
+	return sdk.CurrentEnvironmentID() != "" && publicIP.IsValid() && publicIP.Unmap().IsLoopback()
+}
+
+// applyEnvironmentLoopbackSIP keeps a loopback SIP gateway on loopback and
+// lets it use OS-chosen ports: another Telephony on the same host already
+// holds the standard ones. Signaling port 0 is resolved here, once, so the
+// gateway listens on, and registers with the carrier, the same port. RTP
+// range 0-0 asks for OS-chosen RTP ports.
+func applyEnvironmentLoopbackSIP(cfg *sipGatewayConfig, host, port string) error {
+	listenIP, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil || !listenIP.Unmap().IsLoopback() {
+		return errors.New("a loopback SIP address inside an Environment needs a loopback sip_listen address")
+	}
+	if cfg.RTPBindIP.IsUnspecified() {
+		cfg.RTPBindIP = netip.MustParseAddr("127.0.0.1")
+	}
+	if !cfg.RTPBindIP.IsLoopback() {
+		return errors.New("a loopback SIP address inside an Environment needs a loopback sip_rtp_bind_ip")
+	}
+	if port != "0" {
+		return nil
+	}
+	free, err := freeLoopbackSIPPort(cfg.Transport, listenIP.Unmap())
+	if err != nil {
+		return fmt.Errorf("choose a SIP listen port: %w", err)
+	}
+	cfg.ListenAddress = net.JoinHostPort(listenIP.Unmap().String(), strconv.Itoa(free))
+	return nil
+}
+
+func freeLoopbackSIPPort(transport string, ip netip.Addr) (int, error) {
+	if transport == "udp" {
+		conn, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, 0)))
+		if err != nil {
+			return 0, err
+		}
+		defer conn.Close()
+		return conn.LocalAddr().(*net.UDPAddr).Port, nil
+	}
+	listener, err := net.ListenTCP("tcp4", net.TCPAddrFromAddrPort(netip.AddrPortFrom(ip, 0)))
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
 func usableSIPPublicIPv4(address netip.Addr) bool {

@@ -491,6 +491,8 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	carrierSim         *carrierSimulator // Environment-only simulated SIP carrier
+	carrierSimOnce     sync.Once
 	networkChecks      networkCheckRegistry
 	legacyAdmission    atomic.Uint32
 	legacyWork         atomic.Int64
@@ -692,6 +694,9 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	a.stopAIPolicies()
 	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
+	if a.carrierSim != nil {
+		a.carrierSim.stop()
+	}
 	a.stopSIPGateway()
 	if err := a.flushCarrierTelemetryOnShutdown(); err != nil && ctx != nil {
 		ctx.Logger().Warn("carrier telemetry shutdown flush incomplete", "error", err)
