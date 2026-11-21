@@ -22,8 +22,9 @@ type routeCache struct {
 	snapshots map[routeCacheKey]routeSnapshot
 }
 type routeCacheKey struct {
-	project string
-	apiID   int64
+	project         string
+	apiID           int64
+	configurationID int64
 }
 
 var routeCaches sync.Map
@@ -39,12 +40,12 @@ func releaseRouteCache(db *sql.DB) { routeCaches.Delete(db) }
 func invalidateRoutes(db *sql.DB, pid string, id int64) {
 	c := cacheFor(db)
 	c.mu.Lock()
-	delete(c.snapshots, routeCacheKey{pid, id})
+	delete(c.snapshots, routeCacheKey{project: pid, apiID: id, configurationID: 0})
 	c.mu.Unlock()
 }
 func compiledRoutes(db *sql.DB, pid string, id int64) ([]compiledRoute, error) {
 	c := cacheFor(db)
-	key := routeCacheKey{pid, id}
+	key := routeCacheKey{project: pid, apiID: id, configurationID: 0}
 	now := time.Now()
 	c.mu.RLock()
 	snapshot, ok := c.snapshots[key]
@@ -86,6 +87,57 @@ func compiledRoutes(db *sql.DB, pid string, id int64) ([]compiledRoute, error) {
 			if len(b.segments) > len(a.segments) && b.segments[len(a.segments)] == "*" {
 				return true
 			}
+			return len(a.segments) > len(b.segments)
+		}
+		if (a.route.Method == "ANY") != (b.route.Method == "ANY") {
+			return a.route.Method != "ANY"
+		}
+		return a.route.ID < b.route.ID
+	})
+	if len(c.snapshots) >= 1024 {
+		clear(c.snapshots)
+	}
+	c.snapshots[key] = routeSnapshot{routes, now.Add(time.Minute)}
+	return routes, nil
+}
+
+func compiledConfigurationRoutes(db *sql.DB, pid string, apiID, configurationID int64) ([]compiledRoute, error) {
+	c := cacheFor(db)
+	key := routeCacheKey{project: pid, apiID: apiID, configurationID: configurationID}
+	now := time.Now()
+	c.mu.RLock()
+	snapshot, ok := c.snapshots[key]
+	c.mu.RUnlock()
+	if ok && now.Before(snapshot.expires) {
+		return snapshot.routes, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if snapshot, ok = c.snapshots[key]; ok && now.Before(snapshot.expires) {
+		return snapshot.routes, nil
+	}
+	rows, err := dbListConfigurationRoutes(db, pid, configurationID)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]compiledRoute, 0, len(rows))
+	for _, r := range rows {
+		if r.Enabled {
+			routes = append(routes, compiledRoute{r, splitPath(r.PathPattern)})
+		}
+	}
+	sort.SliceStable(routes, func(i, j int) bool {
+		a, b := routes[i], routes[j]
+		if a.route.Priority != b.route.Priority {
+			return a.route.Priority < b.route.Priority
+		}
+		for k := 0; k < len(a.segments) && k < len(b.segments); k++ {
+			x, y := segmentRank(a.segments[k]), segmentRank(b.segments[k])
+			if x != y {
+				return x > y
+			}
+		}
+		if len(a.segments) != len(b.segments) {
 			return len(a.segments) > len(b.segments)
 		}
 		if (a.route.Method == "ANY") != (b.route.Method == "ANY") {

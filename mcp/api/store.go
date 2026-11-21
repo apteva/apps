@@ -33,6 +33,8 @@ type API struct {
 	AuthJSON              string `json:"auth_json,omitempty"`
 	CreatedAt             string `json:"created_at,omitempty"`
 	UpdatedAt             string `json:"updated_at,omitempty"`
+	StageID               int64  `json:"-"`
+	ConfigurationID       int64  `json:"-"`
 }
 
 type APIRoute struct {
@@ -55,34 +57,60 @@ type APIRoute struct {
 }
 
 type APIKey struct {
-	ID         int64  `json:"id"`
-	ProjectID  string `json:"project_id,omitempty"`
-	APIID      int64  `json:"api_id"`
-	Name       string `json:"name"`
-	KeyPrefix  string `json:"key_prefix"`
-	Status     string `json:"status"`
-	LastUsedAt string `json:"last_used_at,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
-	RevokedAt  string `json:"revoked_at,omitempty"`
+	ID          int64          `json:"id"`
+	ProjectID   string         `json:"project_id,omitempty"`
+	APIID       int64          `json:"api_id"`
+	Name        string         `json:"name"`
+	KeyPrefix   string         `json:"key_prefix"`
+	Status      string         `json:"status"`
+	SubjectType string         `json:"subject_type,omitempty"`
+	SubjectID   string         `json:"subject_id,omitempty"`
+	Claims      map[string]any `json:"claims,omitempty"`
+	Scopes      []string       `json:"scopes,omitempty"`
+	ExpiresAt   string         `json:"expires_at,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	ExternalID  string         `json:"external_id,omitempty"`
+	LastUsedAt  string         `json:"last_used_at,omitempty"`
+	CreatedAt   string         `json:"created_at,omitempty"`
+	RevokedAt   string         `json:"revoked_at,omitempty"`
+	IssuanceKey string         `json:"-"`
+	Fingerprint string         `json:"-"`
+}
+
+type apiKeyInput struct {
+	ProjectID    string
+	APIID        int64
+	Name         string
+	SubjectType  string
+	SubjectID    string
+	ClaimsJSON   string
+	ScopesJSON   string
+	ExpiresAt    string
+	MetadataJSON string
+	ExternalID   string
+	IssuanceKey  string
+	Fingerprint  string
 }
 
 type RequestLog struct {
-	ID         int64  `json:"id"`
-	ProjectID  string `json:"project_id,omitempty"`
-	APIID      int64  `json:"api_id,omitempty"`
-	RouteID    int64  `json:"route_id,omitempty"`
-	Hostname   string `json:"hostname"`
-	Method     string `json:"method"`
-	Path       string `json:"path"`
-	StatusCode int    `json:"status_code"`
-	TargetKind string `json:"target_kind,omitempty"`
-	TargetRef  string `json:"target_ref,omitempty"`
-	AuthKind   string `json:"auth_kind,omitempty"`
-	Subject    string `json:"subject,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	Error      string `json:"error,omitempty"`
-	RequestID  string `json:"request_id,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
+	ID              int64  `json:"id"`
+	ProjectID       string `json:"project_id,omitempty"`
+	APIID           int64  `json:"api_id,omitempty"`
+	RouteID         int64  `json:"route_id,omitempty"`
+	Hostname        string `json:"hostname"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	StatusCode      int    `json:"status_code"`
+	TargetKind      string `json:"target_kind,omitempty"`
+	TargetRef       string `json:"target_ref,omitempty"`
+	AuthKind        string `json:"auth_kind,omitempty"`
+	Subject         string `json:"subject,omitempty"`
+	DurationMS      int64  `json:"duration_ms"`
+	Error           string `json:"error,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
+	StageID         int64  `json:"stage_id,omitempty"`
+	ConfigurationID int64  `json:"configuration_id,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
 }
 
 type apiInput struct {
@@ -475,7 +503,7 @@ func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 	if _, err = tx.Exec(`UPDATE api_exposures SET cleanup=1 WHERE project_id=? AND api_id=?`, pid, id); err != nil {
 		return false, err
 	}
-	for _, table := range []string{"api_request_logs", "api_keys", "api_routes"} {
+	for _, table := range []string{"api_request_logs", "api_keys", "api_stages", "api_configuration_routes", "api_configurations", "api_routes"} {
 		if _, err = tx.Exec("DELETE FROM "+table+" WHERE project_id=? AND api_id=?", pid, id); err != nil {
 			return false, err
 		}
@@ -656,6 +684,23 @@ func dbMatchRoute(db *sql.DB, pid string, apiID int64, method, path string) (*AP
 	}
 	return nil, nil, nil
 }
+
+func dbMatchConfigurationRoute(db *sql.DB, pid string, apiID, configurationID int64, method, path string) (*APIRoute, map[string]string, error) {
+	routes, err := compiledConfigurationRoutes(db, pid, apiID, configurationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	segments := splitPath(path)
+	for _, candidate := range routes {
+		if candidate.route.Method != "ANY" && candidate.route.Method != method {
+			continue
+		}
+		if params, ok := matchSegments(candidate.segments, segments); ok {
+			return candidate.route, params, nil
+		}
+	}
+	return nil, nil, nil
+}
 func matchPath(pattern, path string) (map[string]string, bool) {
 	return matchSegments(splitPath(pattern), splitPath(path))
 }
@@ -684,74 +729,182 @@ func hashAPIKey(k string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func dbCreateAPIKey(db *sql.DB, pid string, apiID int64, name string) (*APIKey, string, error) {
+const apiKeyColumns = `id, project_id, api_id, name, key_prefix, status,
+	subject_type, subject_id, claims_json, scopes_json, COALESCE(expires_at,''),
+	metadata_json, external_id, issuance_key, issuance_fingerprint,
+	COALESCE(last_used_at,''), created_at, COALESCE(revoked_at,'')`
+
+func scanAPIKey(scanner interface{ Scan(...any) error }) (*APIKey, error) {
+	var k APIKey
+	var claimsJSON, scopesJSON, metadataJSON string
+	if err := scanner.Scan(&k.ID, &k.ProjectID, &k.APIID, &k.Name, &k.KeyPrefix, &k.Status,
+		&k.SubjectType, &k.SubjectID, &claimsJSON, &scopesJSON, &k.ExpiresAt,
+		&metadataJSON, &k.ExternalID, &k.IssuanceKey, &k.Fingerprint,
+		&k.LastUsedAt, &k.CreatedAt, &k.RevokedAt); err != nil {
+		return nil, err
+	}
+	claims := json.NewDecoder(strings.NewReader(claimsJSON))
+	claims.UseNumber()
+	if !json.Valid([]byte(claimsJSON)) || claims.Decode(&k.Claims) != nil || k.Claims == nil {
+		return nil, errors.New("invalid stored API key claims")
+	}
+	if err := json.Unmarshal([]byte(scopesJSON), &k.Scopes); err != nil || k.Scopes == nil {
+		return nil, errors.New("invalid stored API key scopes")
+	}
+	if err := json.Unmarshal([]byte(metadataJSON), &k.Metadata); err != nil || k.Metadata == nil {
+		return nil, errors.New("invalid stored API key metadata")
+	}
+	return &k, nil
+}
+
+func dbCreateAPIKey(db *sql.DB, in apiKeyInput) (*APIKey, string, bool, error) {
+	if in.IssuanceKey != "" {
+		existing, err := dbGetAPIKeyByIssuance(db, in.ProjectID, in.APIID, in.IssuanceKey)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if existing != nil {
+			if existing.Fingerprint != in.Fingerprint {
+				return nil, "", false, errors.New("idempotency_key was already used with different arguments")
+			}
+			return existing, "", false, nil
+		}
+	}
 	plain, prefix, hash, err := makeAPIKey()
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(`INSERT INTO api_keys (project_id, api_id, name, key_prefix, key_hash, status, created_at)
-		VALUES (?, ?, ?, ?, ?, 'active', ?)`, pid, apiID, strings.TrimSpace(name), prefix, hash, now)
+	res, err := db.Exec(`INSERT INTO api_keys
+		(project_id, api_id, name, key_prefix, key_hash, status, subject_type, subject_id,
+		 claims_json, scopes_json, expires_at, metadata_json, external_id, issuance_key,
+		 issuance_fingerprint, created_at)
+		VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, NULLIF(?,''), ?, ?, ?, ?, ?)`,
+		in.ProjectID, in.APIID, strings.TrimSpace(in.Name), prefix, hash, in.SubjectType, in.SubjectID,
+		in.ClaimsJSON, in.ScopesJSON, in.ExpiresAt, in.MetadataJSON, in.ExternalID,
+		in.IssuanceKey, in.Fingerprint, now)
 	if err != nil {
-		return nil, "", err
+		// A concurrent retry may win the unique issuance-key race.
+		if in.IssuanceKey != "" {
+			existing, getErr := dbGetAPIKeyByIssuance(db, in.ProjectID, in.APIID, in.IssuanceKey)
+			if getErr == nil && existing != nil {
+				if existing.Fingerprint != in.Fingerprint {
+					return nil, "", false, errors.New("idempotency_key was already used with different arguments")
+				}
+				return existing, "", false, nil
+			}
+		}
+		return nil, "", false, err
 	}
 	id, _ := res.LastInsertId()
-	key, err := dbGetAPIKey(db, pid, id)
-	return key, plain, err
+	key, err := dbGetAPIKey(db, in.ProjectID, id)
+	return key, plain, true, err
 }
 
 func dbGetAPIKey(db *sql.DB, pid string, id int64) (*APIKey, error) {
-	row := db.QueryRow(`SELECT id, project_id, api_id, name, key_prefix, status, COALESCE(last_used_at,''), created_at, COALESCE(revoked_at,'')
-		FROM api_keys WHERE project_id=? AND id=?`, pid, id)
-	var k APIKey
-	if err := row.Scan(&k.ID, &k.ProjectID, &k.APIID, &k.Name, &k.KeyPrefix, &k.Status, &k.LastUsedAt, &k.CreatedAt, &k.RevokedAt); err != nil {
+	k, err := scanAPIKey(db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE project_id=? AND id=?`, pid, id))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return &k, nil
+	return k, nil
+}
+
+func dbGetAPIKeyByIssuance(db *sql.DB, pid string, apiID int64, issuanceKey string) (*APIKey, error) {
+	k, err := scanAPIKey(db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE project_id=? AND api_id=? AND issuance_key=?`, pid, apiID, issuanceKey))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return k, err
 }
 
 func dbListAPIKeys(db *sql.DB, pid string, apiID int64) ([]*APIKey, error) {
-	rows, err := db.Query(`SELECT id, project_id, api_id, name, key_prefix, status, COALESCE(last_used_at,''), created_at, COALESCE(revoked_at,'')
-		FROM api_keys WHERE project_id=? AND api_id=? ORDER BY created_at DESC`, pid, apiID)
+	rows, err := db.Query(`SELECT `+apiKeyColumns+` FROM api_keys WHERE project_id=? AND api_id=? ORDER BY created_at DESC`, pid, apiID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*APIKey
 	for rows.Next() {
-		var k APIKey
-		if err := rows.Scan(&k.ID, &k.ProjectID, &k.APIID, &k.Name, &k.KeyPrefix, &k.Status, &k.LastUsedAt, &k.CreatedAt, &k.RevokedAt); err != nil {
+		k, err := scanAPIKey(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, &k)
+		out = append(out, k)
 	}
 	return out, rows.Err()
 }
 
-func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (int64, bool, error) {
+func dbListAPIKeysBySubject(db *sql.DB, pid string, apiID int64, subjectType, subjectID string) ([]*APIKey, error) {
+	query := `SELECT ` + apiKeyColumns + ` FROM api_keys WHERE project_id=? AND subject_type=? AND subject_id=?`
+	args := []any{pid, subjectType, subjectID}
+	if apiID != 0 {
+		query += ` AND api_id=?`
+		args = append(args, apiID)
+	}
+	query += ` ORDER BY created_at DESC`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*APIKey
+	for rows.Next() {
+		k, err := scanAPIKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (*APIKey, bool, error) {
 	prefix := ""
 	if len(plain) >= 18 {
 		prefix = plain[:18]
 	}
-	row := db.QueryRow(`SELECT id, key_hash, COALESCE(last_used_at,'') FROM api_keys WHERE project_id=? AND api_id=? AND key_prefix=? AND status='active'`, pid, apiID, prefix)
-	var id int64
-	var want, lastUsed string
-	if err := row.Scan(&id, &want, &lastUsed); err != nil {
+	row := db.QueryRow(`SELECT `+apiKeyColumns+`, key_hash FROM api_keys WHERE project_id=? AND api_id=? AND key_prefix=? AND status='active'`, pid, apiID, prefix)
+	var k APIKey
+	var claimsJSON, scopesJSON, metadataJSON, want string
+	if err := row.Scan(&k.ID, &k.ProjectID, &k.APIID, &k.Name, &k.KeyPrefix, &k.Status,
+		&k.SubjectType, &k.SubjectID, &claimsJSON, &scopesJSON, &k.ExpiresAt,
+		&metadataJSON, &k.ExternalID, &k.IssuanceKey, &k.Fingerprint,
+		&k.LastUsedAt, &k.CreatedAt, &k.RevokedAt, &want); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, false, nil
+			return nil, false, nil
 		}
-		return 0, false, err
+		return nil, false, err
 	}
 	if subtle.ConstantTimeCompare([]byte(hashAPIKey(plain)), []byte(want)) != 1 {
-		return 0, false, nil
+		return nil, false, nil
 	}
-	if lastUsed < time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) {
-		_, _ = db.Exec(`UPDATE api_keys SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at < ?)`, time.Now().UTC().Format(time.RFC3339), id, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	if k.ExpiresAt != "" {
+		expires, err := time.Parse(time.RFC3339, k.ExpiresAt)
+		if err != nil {
+			return nil, false, errors.New("invalid stored API key expiration")
+		}
+		if !expires.After(time.Now()) {
+			return nil, false, nil
+		}
 	}
-	return id, true, nil
+	claims := json.NewDecoder(strings.NewReader(claimsJSON))
+	claims.UseNumber()
+	if !json.Valid([]byte(claimsJSON)) || claims.Decode(&k.Claims) != nil || k.Claims == nil {
+		return nil, false, errors.New("invalid stored API key claims")
+	}
+	if err := json.Unmarshal([]byte(scopesJSON), &k.Scopes); err != nil || k.Scopes == nil {
+		return nil, false, errors.New("invalid stored API key scopes")
+	}
+	if err := json.Unmarshal([]byte(metadataJSON), &k.Metadata); err != nil || k.Metadata == nil {
+		return nil, false, errors.New("invalid stored API key metadata")
+	}
+	if k.LastUsedAt < time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) {
+		_, _ = db.Exec(`UPDATE api_keys SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at < ?)`, time.Now().UTC().Format(time.RFC3339), k.ID, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	}
+	return &k, true, nil
 }
 
 func dbValidateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (bool, error) {
@@ -769,12 +922,48 @@ func dbRevokeAPIKey(db *sql.DB, pid string, id int64) (bool, error) {
 	return n > 0, nil
 }
 
+func dbRevokeAPIKeysBySubject(db *sql.DB, pid string, apiID int64, subjectType, subjectID string) ([]int64, error) {
+	query := `SELECT id FROM api_keys WHERE project_id=? AND subject_type=? AND subject_id=? AND status!='revoked'`
+	args := []any{pid, subjectType, subjectID}
+	if apiID != 0 {
+		query += ` AND api_id=?`
+		args = append(args, apiID)
+	}
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	update := `UPDATE api_keys SET status='revoked', revoked_at=? WHERE project_id=? AND subject_type=? AND subject_id=? AND status!='revoked'`
+	updateArgs := []any{time.Now().UTC().Format(time.RFC3339), pid, subjectType, subjectID}
+	if apiID != 0 {
+		update += ` AND api_id=?`
+		updateArgs = append(updateArgs, apiID)
+	}
+	_, err = db.Exec(update, updateArgs...)
+	return ids, err
+}
+
 func dbInsertLog(db *sql.DB, l RequestLog) {
 	_, _ = db.Exec(`INSERT INTO api_request_logs
-		(project_id, api_id, route_id, hostname, method, path, status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(project_id, api_id, route_id, hostname, method, path, status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, stage_id, configuration_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.ProjectID, nullableID(l.APIID), nullableID(l.RouteID), l.Hostname, l.Method, l.Path, l.StatusCode,
-		l.TargetKind, l.TargetRef, l.AuthKind, l.Subject, l.DurationMS, l.Error, l.RequestID)
+		l.TargetKind, l.TargetRef, l.AuthKind, l.Subject, l.DurationMS, l.Error, l.RequestID, l.StageID, l.ConfigurationID)
 }
 
 func dbListLogs(db *sql.DB, pid string, apiID int64, limit int) ([]*RequestLog, error) {
@@ -786,7 +975,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 		limit = 100
 	}
 	query := `SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
-		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, created_at
+		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at
 		FROM api_request_logs WHERE project_id=? AND api_id=?`
 	args := []any{pid, apiID}
 	if beforeID > 0 {
@@ -804,7 +993,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 	for rows.Next() {
 		var l RequestLog
 		if err := rows.Scan(&l.ID, &l.ProjectID, &l.APIID, &l.RouteID, &l.Hostname, &l.Method, &l.Path,
-			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.CreatedAt); err != nil {
+			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)

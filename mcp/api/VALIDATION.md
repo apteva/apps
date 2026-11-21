@@ -83,9 +83,10 @@ The existing Domains interface offers neither conditional create nor
 compare-and-swap. Gateway cleanup checks the recorded record ID/value and refuses
 known external conflicts, but cannot make a provider mutation atomic with a
 concurrent external DNS writer. Diagnostic logs may be dropped under saturation;
-they are not a durable security ledger. Per-route key scopes and short-lived
-browser credentials remain product extensions, rather than silently changed
-API-key semantics.
+they are not a durable security ledger. Version 0.10.0 adds opt-in per-route key
+scopes and expiring generic credentials without changing the semantics of old
+keys or routes. Short-lived browser credential exchange remains a separate
+product extension.
 
 Release validation upgraded the SDK pin from v0.73.0 to v0.74.1, verified its
 tag ancestry, and reran the standalone race suite and build checks. Original

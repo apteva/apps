@@ -1,4 +1,4 @@
-import { updatedAuth, parseJSON, corsEnabledFrom, corsOriginsFrom, corsCredentialsFrom, updatedCORS, LatestRequest, fetchPanelRows } from "./policy";
+import { authAlternativeMethods, updatedAuth, parseJSON, corsEnabledFrom, corsOriginsFrom, corsCredentialsFrom, updatedCORS, LatestRequest, fetchPanelRows } from "./policy";
 import { useCallback, useEffect, useState, useRef } from "react";
 import type { ReactNode } from "react";
 
@@ -50,6 +50,10 @@ interface APIKey {
   name: string;
   key_prefix: string;
   status: string;
+  subject_type?: string;
+  subject_id?: string;
+  scopes?: string[];
+  expires_at?: string;
   last_used_at?: string;
   created_at?: string;
   revoked_at?: string;
@@ -447,6 +451,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
             <option value="api_key">api_key</option>
             <option value="auth_jwt">Auth JWT</option>
             <option value="authorizer">Configurable authorizer</option>
+            <option value="any_of">Bearer session or API key</option>
           </select>
         </Field>
         <Field label="Options">
@@ -456,7 +461,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
           </div>
         </Field>
       </div>
-      {(authKind === "authorizer" || authKind === "auth_jwt" || authKind === "api_key") && <AuthorizerFields kind={authKind} value={authorizer} onChange={setAuthorizer} />}
+      {(authKind === "authorizer" || authKind === "auth_jwt" || authKind === "api_key" || authKind === "any_of") && <AuthorizerFields kind={authKind} value={authorizer} onChange={setAuthorizer} />}
       {corsEnabled && (
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-4">
           <Field label="Allowed browser origins">
@@ -544,8 +549,8 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
         <Field label="Target"><select className={inputCls} value={targetKind} onChange={(e) => { const kind = e.target.value; setTargetKind(kind); if (kind === "app_events") { setMethod("GET"); setAuth("api_key"); setTargetPath(""); } }}>{["http", "function", "app", "app_events"].map((k) => <option key={k}>{k}</option>)}</select></Field>
         <Field label={targetKind === "app_events" ? "Source app" : "Ref"}><input className={inputCls} value={targetRef} onChange={(e) => setTargetRef(e.target.value)} placeholder={targetKind === "http" ? "https://..." : targetKind === "function" ? "function-name" : targetKind === "app_events" ? "tables" : "app-name"} /></Field>
         <Field label="Target path"><input className={inputCls} value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder={targetKind === "app_events" ? "not used" : "/upstream"} disabled={targetKind === "app_events"} /></Field>
-        <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{(targetKind === "app_events" ? ["default", "api_key", "auth_jwt", "authorizer"] : ["default", "public", "api_key", "auth_jwt", "authorizer"]).map((k) => <option key={k}>{k}</option>)}</select></Field>
-        {(auth === "authorizer" || auth === "auth_jwt" || auth === "api_key") && <div className="lg:col-span-6"><AuthorizerFields kind={auth} value={authorizer} onChange={setAuthorizer} /></div>}
+        <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{(targetKind === "app_events" ? ["default", "api_key", "auth_jwt", "authorizer", "any_of"] : ["default", "public", "api_key", "auth_jwt", "authorizer", "any_of"]).map((k) => <option key={k}>{k}</option>)}</select></Field>
+        {(auth === "authorizer" || auth === "auth_jwt" || auth === "api_key" || auth === "any_of") && <div className="lg:col-span-6"><AuthorizerFields kind={auth} value={authorizer} onChange={setAuthorizer} /></div>}
         {targetKind === "app_events" && (
           <div className="lg:col-span-6 grid grid-cols-1 lg:grid-cols-4 gap-2 border border-border rounded p-3">
             <Field label="Topics (comma separated)"><input className={inputCls} value={eventTopics} onChange={(e) => setEventTopics(e.target.value)} placeholder="row.inserted, row.updated" /></Field>
@@ -588,10 +593,13 @@ function KeysView({ keys, busy, onCreate, onRevoke }: {
         <button type="submit" className={primaryBtn} disabled={busy}>Create</button>
       </form>
       <DataTable
-        columns={["name", "prefix", "status", "last used", ""]}
+        columns={["name", "prefix", "subject", "scopes", "expires", "status", "last used", ""]}
         rows={keys.map((k) => [
           k.name,
           k.key_prefix,
+          k.subject_type && k.subject_id ? `${k.subject_type}:${k.subject_id}` : "-",
+          k.scopes?.join(", ") || "-",
+          date(k.expires_at),
           k.status,
           date(k.last_used_at),
           k.status === "active" ? <button type="button" className="text-red-300 hover:underline" disabled={busy} onClick={() => onRevoke(k.id)}>Revoke</button> : "",
@@ -670,20 +678,42 @@ function date(s?: string): string {
   return d.toLocaleString();
 }
 
-function AuthorizerFields({ kind, value, onChange }: { kind: string; value: Record<string, unknown>; onChange(value: Record<string, unknown>): void }) {
+function AuthorizerFields({ kind, value, onChange, nested = false }: { kind: string; value: Record<string, unknown>; onChange(value: Record<string, unknown>): void; nested?: boolean }) {
+  if (kind === "any_of") {
+    const [bearer, apiKey] = authAlternativeMethods(value);
+    const update = (bearer: Record<string, unknown>, apiKey: Record<string, unknown>) => onChange({ ...value, methods: [bearer, apiKey] });
+    return <div className="space-y-3 border border-border rounded p-3">
+      <p className="text-xs text-text-dim">Send one credential per request. Bearer tokens use Authorization. API keys use X-API-Key or the api_key query parameter.</p>
+      <Field label="Bearer verifier"><select className={inputCls} value={String(bearer.kind)} onChange={e => update({ ...bearer, kind: e.target.value }, apiKey)}><option value="auth_jwt">Auth JWT</option><option value="authorizer">Configurable authorizer</option></select></Field>
+      <AuthorizerFields kind={String(bearer.kind)} value={bearer} onChange={next => update(next, apiKey)} nested />
+      <AuthorizerFields kind="api_key" value={apiKey} onChange={next => update(bearer, next)} nested />
+      <FunctionScopeFields value={value} onChange={onChange} />
+    </div>;
+  }
   const provider = kind === "auth_jwt" ? "auth" : value.provider === "app" ? "app" : "auth";
+  const usesTool = typeof value.tool === "string";
   const field = (name: string, text: string) => onChange({ ...value, [name]: text });
   return <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 border border-border rounded p-3">
     {kind === "authorizer" && <Field label="Authentication provider"><select className={inputCls} value={provider} onChange={e => field("provider", e.target.value)}><option value="auth">Auth</option><option value="app">Installed authorizer app</option></select></Field>}
     {kind !== "api_key" && provider === "app" && <>
       <Field label="Authorizer app"><input className={inputCls} required value={String(value.app || "")} onChange={e => field("app", e.target.value)} placeholder="identity-provider" /></Field>
-      <Field label="Authorizer endpoint"><input className={inputCls} required value={String(value.path || "/authorize")} onChange={e => field("path", e.target.value)} placeholder="/authorize" /></Field>
+      <Field label="Authorizer transport"><select className={inputCls} value={usesTool ? "tool" : "path"} onChange={e => onChange({ ...value, tool: e.target.value === "tool" ? "" : undefined })}><option value="path">HTTP endpoint</option><option value="tool">MCP tool</option></select></Field>
+      {usesTool
+        ? <Field label="Authorizer tool"><input className={inputCls} required value={String(value.tool)} onChange={e => field("tool", e.target.value)} placeholder="verify_bearer" /></Field>
+        : <Field label="Authorizer endpoint"><input className={inputCls} required value={String(value.path || "/authorize")} onChange={e => field("path", e.target.value)} placeholder="/authorize" /></Field>}
       <Field label="Expected issuer"><input className={inputCls} required value={String(value.issuer || "")} onChange={e => field("issuer", e.target.value)} placeholder="https://identity.example.com" /></Field>
     </>}
     {kind !== "api_key" && <><Field label="Required tenant (optional)"><input className={inputCls} value={String(value.tenant_id || "")} onChange={e => field("tenant_id", e.target.value)} placeholder="Accept only this tenant" /></Field>
     <Field label="Allowed authorization claims"><input className={inputCls} value={Array.isArray(value.claims) ? value.claims.join(", ") : ""} onChange={e => onChange({ ...value, claims: e.target.value.split(",").map(s => s.trim()) })} placeholder="roles, permissions" /></Field></>}
+    {kind === "api_key" && <Field label="Required scopes"><input className={inputCls} value={Array.isArray(value.required_scopes) ? value.required_scopes.join(", ") : ""} onChange={e => onChange({ ...value, required_scopes: e.target.value.split(",").map(s => s.trim()).filter(Boolean) })} placeholder="orders:write, records:read" /></Field>}
+    {!nested && <FunctionScopeFields value={value} onChange={onChange} />}
+    {kind !== "api_key" && <p className="lg:col-span-2 text-xs text-text-dim">Only allowed claims from the verified provider are passed to Functions. Auth supplies server-managed authorization claims. No claims are forwarded by default.</p>}
+  </div>;
+}
+
+function FunctionScopeFields({ value, onChange }: { value: Record<string, unknown>; onChange(value: Record<string, unknown>): void }) {
+  return <>
     <Field label="Permitted Function IDs"><input className={inputCls} value={Array.isArray(value.function_ids) ? value.function_ids.join(", ") : ""} onChange={e => onChange({ ...value, function_ids: e.target.value.split(",").map(s => s.trim()) })} placeholder="12, 34" /></Field>
     <p className="lg:col-span-2 text-xs text-text-dim">Authenticated Function routes require the destination ID and every permitted nested Function ID. Each Function must trust this API installation and issuer.</p>
-    <p className="lg:col-span-2 text-xs text-text-dim">Only allowed claims from the verified provider are passed to Functions. Auth supplies server-managed authorization claims. No claims are forwarded by default.</p>
-  </div>;
+  </>;
 }

@@ -102,8 +102,8 @@ func (s *logSink) write(rows []*RequestLog) error {
 	defer tx.Rollback()
 	for _, r := range rows {
 		// A completed request must not resurrect logs for a deleted API.
-		_, err = tx.Exec(`INSERT INTO api_request_logs(project_id,api_id,route_id,hostname,method,path,status_code,target_kind,target_ref,auth_kind,subject,duration_ms,error,request_id)
-   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM apis WHERE project_id=? AND id=?)`, r.ProjectID, nullableID(r.APIID), nullableID(r.RouteID), r.Hostname, r.Method, r.Path, r.StatusCode, r.TargetKind, r.TargetRef, r.AuthKind, r.Subject, r.DurationMS, r.Error, r.RequestID, r.ProjectID, r.APIID)
+		_, err = tx.Exec(`INSERT INTO api_request_logs(project_id,api_id,route_id,hostname,method,path,status_code,target_kind,target_ref,auth_kind,subject,duration_ms,error,request_id,stage_id,configuration_id)
+	SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM apis WHERE project_id=? AND id=?)`, r.ProjectID, nullableID(r.APIID), nullableID(r.RouteID), r.Hostname, r.Method, r.Path, r.StatusCode, r.TargetKind, r.TargetRef, r.AuthKind, r.Subject, r.DurationMS, r.Error, r.RequestID, r.StageID, r.ConfigurationID, r.ProjectID, r.APIID)
 		if err != nil {
 			return err
 		}

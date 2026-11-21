@@ -3,6 +3,74 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Alternative authentication methods (0.12.0)
+
+An API or route can use `auth.kind: any_of` to accept either a bearer session
+or a scoped API key. One request selects one verifier by credential location
+and reaches the same backend with its verified identity. The dashboard exposes
+this policy as **Bearer session or API key**. See
+[the authentication configuration](AUTHORIZATION.md#alternative-authentication-methods)
+for method settings and credential carriers.
+
+## Generic API credentials (0.10.0)
+
+API keys remain API-scoped opaque secrets, but may now carry an optional
+generic `subject_type`/`subject_id`, bounded verified `claims`, exact
+case-sensitive `scopes`, an RFC3339 expiration, management-only `metadata`, and
+an external credential identifier. The gateway assigns the authoritative
+principal subject (`api_key:<internal-id>`); application identifiers remain
+opaque values and no subject type or identifier format is hard-coded.
+
+```json
+{
+  "api_slug": "commerce",
+  "name": "order client",
+  "subject_type": "service",
+  "subject_id": "worker-42",
+  "claims": { "tenant_id": "tenant-a", "region": "eu" },
+  "scopes": ["orders:read", "orders:write"],
+  "expires_at": "2027-01-01T00:00:00Z",
+  "external_id": "credential-42",
+  "idempotency_key": "issue-42"
+}
+```
+
+The plaintext secret is returned only for a newly created credential. Retrying
+the same issuance key returns the existing metadata with `created: false` and
+no secret; reusing it with different arguments is rejected. Existing keys have
+empty identity, claims, and scopes with no expiration, so existing routes are
+unchanged. A route opts into scope enforcement explicitly:
+
+```json
+{ "kind": "api_key", "required_scopes": ["orders:write"] }
+```
+
+All listed scopes are required. Metadata is never forwarded. Functions receive
+only the gateway-owned identity plus the stored generic claims, subject fields,
+and scopes, and continue to own business authorization and billing-sensitive
+decisions.
+
+Optional usage plans attach a token-bucket `rate_limit`, `interval_seconds`, and
+`burst` to a key. They are operational traffic controls, not subscriptions,
+entitlements, billing quotas, or durable usage ledgers. Buckets are local to an
+API app process and reset when that process restarts; deployments requiring a
+strict cross-replica commercial limit must enforce it in shared infrastructure.
+
+## Optional configurations and stages (0.9.0)
+
+Existing APIs remain mutable and continue to resolve exactly as before. The
+`api_config_create` tool creates an immutable snapshot of the current API and
+its routes; `api_config_clone` creates another immutable version without
+changing the live API. `api_stage_create` then points a named stage at a
+configuration. If the stage has a hostname, requests for that hostname use the
+stage's configuration; otherwise the stage is management-only.
+
+`api_stage_promote` and `api_stage_rollback` atomically move the stage pointer
+between configurations. Stage CORS/auth JSON can override the snapshot's
+defaults, while API keys remain API-scoped. Stages are deliberately opt-in:
+legacy API hostnames, slug URLs, route mutations, keys, and logs retain their
+existing semantics when no stage hostname is configured.
+
 See [AUTHORIZATION.md](AUTHORIZATION.md) for configurable authorizers, normalized
 principals, trusted Function request envelopes, and CORS for resumable streams.
 
@@ -71,7 +139,7 @@ Coalescing is keyed by the rendered output. If several allowed resources change
 inside one window, each resource receives one invalidation in AppBus sequence
 order; repeated changes to the same resource collapse into one frame. Topic
 patterns can be exact, `prefix.*`, or `*`. Streams require `api_key`,
-`auth_jwt`, or `authorizer`; public event routes are rejected. Clients can reconnect with
+`auth_jwt`, `authorizer`, or `any_of`; public event routes are rejected. Clients can reconnect with
 `Last-Event-ID` or `since`, and the endpoint sends 15-second heartbeat comments.
 
 API Gateway shares one internal AppBus connection per project and source app,

@@ -30,6 +30,7 @@ func TestAuthorizerPoliciesReplaceRatherThanMerge(t *testing.T) {
 		`{"kind":"auth_jwt","claims":["session_id"]}`, `{"kind":"auth_jwt","claims":["principal"]}`,
 		`{"kind":"auth_jwt","claims":["roles","roles"]}`, `{"kind":"auth_jwt","claims":null}`,
 		`{"kind":"authorizer","provider":"app","app":"api","path":"/gw/x","issuer":"i"}`,
+		`{"kind":"authorizer","provider":"auth","tool":"verify_bearer"}`,
 	} {
 		if validateAuthPolicy(bad) == nil {
 			t.Errorf("accepted %s", bad)
@@ -39,6 +40,22 @@ func TestAuthorizerPoliciesReplaceRatherThanMerge(t *testing.T) {
 		raw := fmt.Sprintf(`{"kind":"authorizer","provider":"app","app":"identity","issuer":"i","path":%q}`, path)
 		if validateAuthPolicy(raw) == nil {
 			t.Errorf("accepted path %q", path)
+		}
+	}
+}
+
+func TestAppAuthorizerTransportPolicy(t *testing.T) {
+	const base = `{"kind":"authorizer","provider":"app","app":"identity","issuer":"issuer"`
+	policy, err := effectiveAuthPolicy(base+`,"tool":"Identity.verify_bearer"}`, `{}`)
+	if err != nil || policy.Tool != "Identity.verify_bearer" || policy.Path != "" {
+		t.Fatalf("inherited tool policy: %+v %v", policy, err)
+	}
+	for _, fields := range []string{
+		`}`, `,"tool":""}`, `,"tool":null}`, `,"tool":"/authorize"}`,
+		`,"path":"/authorize","tool":"verify_bearer"}`, `,"path":"","tool":"verify_bearer"}`,
+	} {
+		if err := validateAuthPolicy(base + fields); err == nil {
+			t.Errorf("accepted invalid transport: %s", base+fields)
 		}
 	}
 }

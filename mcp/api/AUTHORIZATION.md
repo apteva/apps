@@ -25,6 +25,21 @@ Existing `public`, `api_key`, and `auth_jwt` policies remain supported.
 }
 ```
 
+API-key policies may additionally require exact, case-sensitive scopes:
+
+```json
+{
+  "kind": "api_key",
+  "required_scopes": ["orders:write"],
+  "function_ids": [12]
+}
+```
+
+The key's gateway-managed principal always uses subject `api_key:<internal-id>`.
+Optional generic `subject_type`, `subject_id`, scopes, and stored claims are
+copied into its verified claims. Management metadata is never forwarded. An
+empty scope requirement preserves compatibility with every existing API key.
+
 Auth verifies the bearer token through its project-scoped `/me` endpoint. The
 principal uses the verified user ID, the organization slug as `tenant_id`, and
 `apteva:auth:<organization-slug>` as its issuer. Claims are selected exclusively
@@ -59,6 +74,50 @@ A route chooses its Function independently:
 }
 ```
 
+## Alternative authentication methods
+
+Use `any_of` when one route should accept either a bearer session or an API key.
+Configure one bearer verifier (`auth_jwt` or `authorizer`) and one `api_key`
+method. Each method keeps its own tenant, claim, or scope settings.
+
+```json
+{
+  "kind": "any_of",
+  "function_ids": [12, 34],
+  "methods": [
+    {
+      "kind": "auth_jwt",
+      "tenant_id": "tenant-a",
+      "claims": ["roles", "permissions"]
+    },
+    {
+      "kind": "api_key",
+      "required_scopes": ["records:read"]
+    }
+  ]
+}
+```
+
+Send the session in `Authorization: Bearer <session>`, or the API key in
+`X-API-Key: <key>`. An API key can also use the `api_key` query parameter for
+EventSource clients. Supply exactly one client credential. Missing or invalid
+credentials are rejected with 401, and ambiguous or repeated credential
+carriers are rejected with 400. A failed selected verifier ends the request.
+The Gateway recognizes its own platform-injected app token as internal.
+
+The bearer method can use any configured HTTP or MCP tool authorizer, including
+Auth's `auth_verify_session` tool through `provider: app`. Both methods dispatch
+to the route's same backend with their respective verified principals. API keys
+retain their scopes, expiration, revocation, usage plans, and stream cancellation.
+Functions must trust the expected issuer of each method and enforce the caller's
+access to tenant data. The Gateway keeps API-key scopes and user permissions as
+their respective verified claims.
+
+Set shared `function_ids` on the outer policy. Methods cannot contain their own
+Function IDs. An empty route auth object inherits the complete API policy; a
+nonempty route policy replaces it. Public methods, nested alternatives, and
+multiple verifiers for the same credential carrier are rejected.
+
 ## Other authorizers
 
 Bind an installed app through API's `authorizer` integration (or another existing
@@ -78,8 +137,12 @@ authorizers. The platform enforces authenticated app-to-app calls and bindings.
 }
 ```
 
-API sends a POST through the platform's project-scoped bound-app proxy, using
-its outbound app credential. The provider receives:
+Set exactly one of `path` or `tool`. With `path`, Gateway sends a POST through
+the platform's project-scoped bound-app proxy. With `tool`, Gateway calls the
+named MCP tool through the platform's bound-app `/call` endpoint. For example,
+replace `"path": "/authorize"` with `"tool": "verify_bearer"` for an app that
+exposes that tool. Gateway uses its outbound app credential for both transports.
+The authorizer receives this input.
 
 ```json
 {
@@ -107,9 +170,9 @@ revocation/expiry and project/tenant membership, then return:
 
 The configured issuer and gateway-selected project must match exactly. If a
 tenant is configured it must also match. The subject must be nonempty and the
-RFC3339 expiry must be in the future. Return HTTP 401/403 or
-`{"authenticated":false}` to deny access. Invalid responses, unavailable
-providers and timeouts fail closed. Authorizer requests have a five-second
+RFC3339 expiry must be in the future. Return `{"authenticated":false}` to deny
+access. HTTP authorizers can also deny access with HTTP 401 or 403. Invalid
+responses, unavailable providers and timeouts fail closed. Authorizer requests have a five-second
 maximum and honor earlier request deadlines and browser cancellation.
 Authenticated `app_events` streams also close at the returned identity expiry.
 

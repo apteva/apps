@@ -27,8 +27,8 @@ func validateEffectivePolicies(db *sql.DB, api *API, replacement *APIRoute, remo
 		if requireFunctionScope && route.Enabled && route.TargetKind == "function" && kind != "public" && len(policy.FunctionIDs) == 0 {
 			return errors.New("authenticated Function routes require auth.function_ids including the root and permitted nested Functions")
 		}
-		if route.TargetKind == "app_events" && (kind != "api_key" && kind != "auth_jwt" && kind != "authorizer") {
-			return errors.New("app_events routes require api_key, auth_jwt, or authorizer authentication")
+		if route.TargetKind == "app_events" && (kind != "api_key" && kind != "auth_jwt" && kind != "authorizer" && kind != "any_of") {
+			return errors.New("app_events routes require authentication")
 		}
 		cors, err := parseEffectiveCORSPolicy(api.CORSJSON, route.CORSJSON)
 		if err != nil {

@@ -27,6 +27,7 @@ type App struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	requestSlots      chan struct{}
+	throttles         throttleRegistry
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -53,6 +54,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		// retried on the next mount. Do not make the Gateway unavailable when
 		// the platform policy endpoint is temporarily unavailable.
 		ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
+	}
+	if err := a.reconcileStageExposures(ctx); err != nil {
+		ctx.Logger().Warn("stage exposure reconciliation incomplete", "error", err)
 	}
 	a.startMaintenance(ctx)
 	ctx.Logger().Info("api mounted", "project_id", ctx.CurrentProject())

@@ -11,15 +11,19 @@ import (
 )
 
 type authorizationError struct {
-	status  int
-	message string
-	cause   error
+	status     int
+	message    string
+	cause      error
+	retryAfter time.Duration
 }
 
 func (e *authorizationError) Error() string { return e.message }
 func (e *authorizationError) Unwrap() error { return e.cause }
 func authFailure(status int, message string, cause error) error {
-	return &authorizationError{status, message, cause}
+	return &authorizationError{status: status, message: message, cause: cause}
+}
+func throttleFailure(retryAfter time.Duration) error {
+	return &authorizationError{status: http.StatusTooManyRequests, message: "api key request rate exceeded", retryAfter: retryAfter}
 }
 func authBackendFailure(err error) error {
 	if errors.Is(err, context.Canceled) {
@@ -63,7 +67,13 @@ func (a *App) writeAuthorizationError(w http.ResponseWriter, r *http.Request, er
 	if r.Context().Err() != nil {
 		panic(http.ErrAbortHandler)
 	}
-	if status == 503 {
+	if failure != nil && failure.retryAfter > 0 {
+		seconds := int(failure.retryAfter.Round(time.Second) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", fmt.Sprint(seconds))
+	} else if status == 503 {
 		w.Header().Set("Retry-After", "1")
 	}
 	httpErr(w, status, message)

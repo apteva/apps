@@ -83,6 +83,7 @@ func (a *App) retryPendingWork(ctx *sdk.AppCtx) error {
 		}
 	}
 	errs = append(errs, a.reconcileExposures(ctx))
+	errs = append(errs, a.reconcileStageExposures(ctx))
 	apis, listErr := dbListAllAPIs(ctx.AppDB())
 	errs = append(errs, listErr)
 	for _, api := range apis {

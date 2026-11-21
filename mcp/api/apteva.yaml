@@ -2,8 +2,25 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.8.1
+version: 0.12.0
 description: |
+  v0.12.0 Adds opt-in any_of authentication for routes accepting either a bearer
+  session or an API key. Credential carriers select one verifier before
+  validation; ambiguous requests fail closed. Both methods retain their verified
+  identities, permissions, deadlines, and API-key usage controls.
+
+  v0.11.0 Adds MCP tool authorizers for bound apps alongside HTTP authorizers.
+  Gateway scopes tool calls to the API project, honors the request deadline,
+  and applies the same principal checks to both transports. Uses app-sdk v0.115.1.
+
+  v0.10.0 Extends API keys into generic attributed credentials with opaque
+  subjects and claims, exact route scopes, expiration, idempotent issuance,
+  subject lookup/revocation, and optional operational usage plans. Existing
+  keys and unscoped routes retain their previous behavior.
+
+  v0.9.0 Adds optional immutable API configurations and stage pointers with
+  atomic promotion and rollback; legacy mutable APIs remain unchanged.
+
   v0.8.1 Allows independent repair of legacy authenticated Function routes while
   preserving edited-route validation, shared CORS checks, and fail-closed calls.
 
@@ -103,13 +120,51 @@ provides:
     - name: api_route_delete
       description: "Delete a route by id."
     - name: api_key_create
-      description: "Create an API key. Returns the plaintext key once. Args: api_id or api_slug, name."
+      description: "Create a generic API credential. Returns plaintext only once; supports optional subject, claims, scopes, expiration, external ID, metadata, and idempotent issuance."
+    - name: api_key_get
+      description: "Fetch API key metadata by id without returning a secret or hash."
     - name: api_key_list
       description: "List API keys for an API, excluding key hashes."
+    - name: api_key_list_by_subject
+      description: "List credentials for an exact generic subject, optionally within one API."
     - name: api_key_revoke
       description: "Revoke an API key by id."
+    - name: api_key_revoke_by_subject
+      description: "Revoke active credentials for an exact generic subject."
+    - name: api_usage_plan_create
+      description: "Create an operational request-throttling plan for an API."
+    - name: api_usage_plan_get
+      description: "Fetch an operational usage plan."
+    - name: api_usage_plan_list
+      description: "List operational usage plans for an API."
+    - name: api_usage_plan_update
+      description: "Update an operational usage plan."
+    - name: api_usage_plan_attach_key
+      description: "Attach a usage plan to an API key."
+    - name: api_usage_plan_detach_key
+      description: "Detach a usage plan from an API key."
     - name: api_logs
       description: "List recent request logs for an API."
+    - name: api_config_create
+      description: "Create an immutable configuration snapshot without changing the live API."
+    - name: api_config_clone
+      description: "Clone an immutable API configuration into a new version."
+    - name: api_config_list
+      description: "List immutable API configurations."
+    - name: api_config_diff
+      description: "Compare two immutable API configurations."
+    - name: api_stage_create
+      description: "Create an opt-in stage pointing at an immutable configuration."
+    - name: api_stage_list
+      description: "List stages for an API."
+    - name: api_stage_get
+      description: "Fetch a stage by id."
+    - name: api_stage_update
+      description: "Update stage metadata, hostname, status, or optional defaults."
+    - name: api_stage_promote
+      description: "Atomically point a stage at an immutable configuration."
+    - name: api_stage_rollback
+      description: "Roll a stage back to an earlier immutable configuration."
   ui_panels:
     - slot: project.page
       label: API Gateway
@@ -120,7 +175,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.8.1
+    ref: api/v0.12.0
     entry: mcp/api
   port: 8080
   health_check: /health
