@@ -417,3 +417,54 @@ marks it `deprecated`. New specs should bind the carrier integration with
 `simulate: true`. The pack will be removed once no stored environment uses it.
 `environment_voice_call` (a simulated caller talking to a realtime agent) is
 separate and unchanged.
+
+## App settings and run agents in seeds (0.13.0)
+
+### `app_config`
+
+A run's app copies are new installs with no settings of their own. `app_config`
+sets them by app name and `config_schema` field, before each copy first starts,
+so nothing restarts:
+
+```json
+"app_config": {"telephony": {"softphone_webrtc_enabled": "true"}}
+```
+
+- Values are strings, as apps read them: booleans are `"true"` or `"false"`.
+  A JSON `true` is rejected.
+- Environments checks the shape (at most 32 apps, 128 settings per app, values
+  up to 16 KiB). When the run starts, the platform rejects a key that is not in
+  the app's `config_schema`, a boolean that is not `"true"`/`"false"`, a select
+  value outside its options, and an app that is not in the run.
+- Settings are not copied from the source install. Secrets are not marked in
+  `config_schema` and some text fields hold credentials, so a run only gets the
+  settings its spec names.
+- `app_config` is part of the stored spec, so it changes `spec_digest`.
+- This needs Apteva with runtime app settings. An older server ignores the
+  field and copies start with empty settings.
+
+### `$agent` in seeds
+
+A seed input can use `{"$agent": "<alias>"}` for the runtime id of the run's
+agent with that alias, for example to make a Telephony routing destination
+send unanswered calls to an AI agent in the run:
+
+```json
+"agents": [{"alias": "fallback", "source_agent_id": 5, "provider": "openai", "model": "gpt-realtime"}],
+"seeds": [
+  {"app": "telephony", "tool": "telephony_destinations_create",
+   "input": {"name": "AI fallback", "kind": "ai", "config": {"agent_id": {"$agent": "fallback"}}}}
+]
+```
+
+A routing flow that rings the advisers first and falls back to that
+destination is then seeded with the usual `telephony_flows_*` tools.
+
+- Agents referenced this way start before the seeds; other agents still start
+  after them.
+- The alias must belong to an agent in the spec. Agents without an alias cannot
+  be referenced.
+- Run agents have their own ids. A run's apps can only use the run's agents: the
+  platform refuses an agent from another project, including the source agent.
+- Fix the agent's `provider` and `model` for repeatable runs. There is no
+  recorded model fixture for voice agents.

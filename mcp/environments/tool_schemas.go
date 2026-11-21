@@ -58,6 +58,14 @@ var environmentSpecSchema = strictObject(map[string]any{
 		"available_at": map[string]any{"type": "string", "format": "date-time"},
 		"expires_at":   map[string]any{"type": "string", "format": "date-time"},
 	})),
+	"app_config": map[string]any{
+		"type":        "object",
+		"description": "Install settings for the run's app copies, by app name then config_schema field, applied before each copy first starts. Values are strings; booleans are \"true\" or \"false\". Example: {\"telephony\": {\"softphone_webrtc_enabled\": \"true\"}}.",
+		"additionalProperties": map[string]any{
+			"type":                 "object",
+			"additionalProperties": map[string]any{"type": "string", "maxLength": maxAppConfigValueLen},
+		},
+	},
 	"integration_bindings": arraySchema(strictObject(map[string]any{
 		"app":              map[string]any{"type": "string"},
 		"role":             map[string]any{"type": "string"},

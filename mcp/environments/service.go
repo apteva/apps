@@ -213,7 +213,7 @@ func (s *service) startRun(environmentID, kind string, spec EnvironmentSpec, id 
 	if err = s.createProtocolFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create protocol fixtures: %w", err)
 	}
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID, AppConfig: spec.AppConfig}
 	created = true
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
@@ -224,12 +224,38 @@ func (s *service) startRun(environmentID, kind string, spec EnvironmentSpec, id 
 	if targetErr != nil {
 		return run, targetErr
 	}
+	// Agents a seed references with $agent start before the seeds so their
+	// runtime ids can be written into app data, for example a Telephony
+	// destination. Other agents keep starting after the seeds.
+	referenced := seedAgentAliases(spec.Seeds)
+	agentIDs := map[string]int64{}
+	spawnAgents := func(early bool) error {
+		for i, agent := range spec.Agents {
+			if referenced[strings.TrimSpace(agent.Alias)] != early {
+				continue
+			}
+			spawned, spawnErr := s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused, Provider: agent.Provider, Model: agent.Model})
+			if spawnErr != nil {
+				return fmt.Errorf("agent %d: %w", i, spawnErr)
+			}
+			if early {
+				if spawned == nil || spawned.ID <= 0 {
+					return fmt.Errorf("agent %d: runtime returned no agent id", i)
+				}
+				agentIDs[strings.TrimSpace(agent.Alias)] = spawned.ID
+			}
+		}
+		return nil
+	}
+	if err = spawnAgents(true); err != nil {
+		return run, err
+	}
 	results := make([]any, 0, len(spec.Seeds))
 	for i, seed := range spec.Seeds {
 		if strings.TrimSpace(seed.App) == "" || strings.TrimSpace(seed.Tool) == "" {
 			return run, fmt.Errorf("seed %d: app and tool required", i)
 		}
-		input, refErr := resolveSeedRefs(seed.Input, results, targets)
+		input, refErr := resolveSeedRefsWithAgents(seed.Input, results, targets, agentIDs)
 		if refErr != nil {
 			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, refErr)
 		}
@@ -239,11 +265,8 @@ func (s *service) startRun(environmentID, kind string, spec EnvironmentSpec, id 
 		}
 		results = append(results, result)
 	}
-	for i, agent := range spec.Agents {
-		_, err = s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused, Provider: agent.Provider, Model: agent.Model})
-		if err != nil {
-			return run, fmt.Errorf("agent %d: %w", i, err)
-		}
+	if err = spawnAgents(false); err != nil {
+		return run, err
 	}
 	transitioned, transitionErr := s.db.transitionRun(run.ID, "starting", "running", "")
 	if transitionErr != nil {
@@ -652,6 +675,12 @@ func validateSpec(spec EnvironmentSpec) error {
 		return errors.New("mcp_server_ids may contain at most 16 entries")
 	}
 	if err := validateIntegrationBindings(spec); err != nil {
+		return err
+	}
+	if err := validateSeedAgentRefs(spec); err != nil {
+		return err
+	}
+	if err := validateAppConfig(spec.AppConfig); err != nil {
 		return err
 	}
 	for i, seed := range spec.Seeds {
