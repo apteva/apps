@@ -765,7 +765,7 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 		}
 		raw, ok := env.sc.call("gdelt", "doc_search", map[string]any{"query": query, "maxrecords": "250", "timespan": timespan})
 		if !ok {
-			reason, _ := lastGDELTError.Load().(string)
+			reason := lastSourceError("gdelt")
 			failures = append(failures, "gdelt: "+orStr(reason, "unavailable"))
 			break // don't hammer a limiting API; the next run retries
 		}

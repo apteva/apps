@@ -44,7 +44,7 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.apps.call             # llm app for extraction + assessment
-    - net.egress                     # public sources (markets, GDELT, BLS)
+    - net.egress                     # Binance public prices (signals pack)
     - platform.connections.execute   # bound data integrations
     - platform.connections.read
   integrations:

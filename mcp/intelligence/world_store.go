@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-func nowUTC() time.Time { return time.Now().UTC() }
+// nowUTC is a variable so the reproducible ingestion sample can pin the clock.
+var nowUTC = func() time.Time { return time.Now().UTC() }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 

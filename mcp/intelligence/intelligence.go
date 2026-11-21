@@ -115,7 +115,7 @@ func recordEvidenceDetailed(db *sql.DB, e Evidence, projectID string) (map[strin
 		return nil, false, errors.New("project_id and source are required")
 	}
 	if e.ObservedAt == nil {
-		now := time.Now().UTC()
+		now := nowUTC()
 		e.ObservedAt = &now
 	}
 	if len(e.Payload) == 0 {
@@ -144,7 +144,7 @@ func recordEvidenceDetailed(db *sql.DB, e Evidence, projectID string) (map[strin
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err
 	}
-	now := time.Now().UTC()
+	now := nowUTC()
 	e.IngestedAt = &now
 	refs, _ := json.Marshal(e.EntityRefs)
 	if e.EntityRefs == nil {

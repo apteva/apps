@@ -14,6 +14,7 @@ package main
 // (slug, tool).
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -107,7 +108,7 @@ var registry = map[string]map[queryType][]sourceSpec{
 			}},
 		},
 	},
-	// Prediction-market venue prices. All public (direct HTTP, no key).
+	// Prediction-market venue prices. All keyless catalog integrations (no connection).
 	// Polymarket gamma is the anchor; kalshi + manifold give cross-venue
 	// comparison.
 	"prediction_market": {
@@ -192,7 +193,8 @@ type sourceClient interface {
 
 // platformSourceClient is the production sourceClient — resolves slugs
 // to connections via ListConnections (cached briefly) and dispatches
-// through ExecuteIntegrationTool.
+// through ExecuteIntegrationTool, or runs keyless sources through the
+// platform's public integration route (catalog_calls.go).
 type platformSourceClient struct {
 	ctx *sdk.AppCtx
 
@@ -233,25 +235,36 @@ func (p *platformSourceClient) connFor(slug string) (int64, bool) {
 }
 
 func (p *platformSourceClient) call(slug, tool string, args map[string]any) (json.RawMessage, bool) {
-	// Public sources first — direct HTTP, no binding, no key.
-	if isPublicSource(slug) {
-		if data, ok := directPublicCall(slug, tool, args); ok {
-			return data, true
+	if p.ctx == nil || p.ctx.PlatformAPI() == nil {
+		return nil, false
+	}
+	api := p.ctx.PlatformAPI()
+	ctool, cargs := catalogCall(slug, tool, args)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	var (
+		res *sdk.ExecuteResult
+		err error
+	)
+	// A bound connection wins (an operator's key may lift rate limits);
+	// keyless sources run without one. Both use the catalog tool.
+	if id, bound := p.connFor(slug); bound {
+		res, err = sdk.ExecuteIntegrationToolContext(ctx, api, id, ctool, cargs)
+	} else if isPublicSource(slug) {
+		res, err = sdk.ExecutePublicIntegrationTool(ctx, api, slug, ctool, cargs)
+	} else {
+		return nil, false
+	}
+	if err != nil || res == nil || !res.Success || res.Status >= 400 {
+		var data []byte
+		status := 0
+		if res != nil {
+			data, status = res.Data, res.Status
 		}
-		// A public source that failed (network blip, bad args) shouldn't
-		// fall through to ExecuteIntegrationTool — there's no bound
-		// connection for it anyway. Report miss.
+		setSourceError(slug, failureReason(status, data, err))
 		return nil, false
 	}
-	// Keyed sources — need a bound connection.
-	id, ok := p.connFor(slug)
-	if !ok {
-		return nil, false
-	}
-	res, err := p.ctx.PlatformAPI().ExecuteIntegrationTool(id, tool, args)
-	if err != nil || res == nil || !res.Success {
-		return nil, false
-	}
+	setSourceError(slug, "")
 	return res.Data, true
 }
 
