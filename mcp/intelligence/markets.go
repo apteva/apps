@@ -3,7 +3,7 @@ package main
 // Live-markets board — pulls active markets from the public prediction
 // venues (Polymarket gamma, Kalshi, Manifold) so the panel has real
 // data to show the moment it opens, zero setup. All three are public
-// (direct HTTP, no key), so this works on a fresh install.
+// (keyless catalog integrations, no connection), so this works on a fresh install.
 
 import (
 	"encoding/json"
