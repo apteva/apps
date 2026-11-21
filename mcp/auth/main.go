@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.14.0
+version: 0.15.0
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -57,6 +57,8 @@ description: |
   client IP, records who performed each audited action, stops marking
   unverified signups as verified, caps access tokens at one hour, encrypts
   signing keys at rest, and adds user containment and signup abuse limits.
+  v0.15.0 keeps organizations, users, sessions and signing keys when a runtime
+  is restored from a snapshot.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
 icon: /ui/icon.svg
@@ -211,7 +213,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: auth/v0.14.0
+    ref: auth/v0.15.0
     entry: mcp/auth
   port: 8080
   health_check: /health

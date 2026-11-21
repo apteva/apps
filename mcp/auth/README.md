@@ -1,8 +1,10 @@
-# Auth v0.14.0
+# Auth v0.15.0
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.14.0 hardens client IP handling, audit attribution, email
+permissions. v0.15.0 supports snapshot restore: a runtime restored from a
+snapshot keeps its organizations, users, sessions and signing keys under the new
+project (see below). v0.14.0 hardens client IP handling, audit attribution, email
 verification provenance, access-token lifetime and signing-key storage, and adds
 user containment; see below. Existing sessions stay valid. v0.13.0 added private
 bearer-session verification for bound apps.
@@ -12,6 +14,18 @@ platform credentials and a renewal
 endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
 migration and preserves existing Auth sessions. Configure explicit role bindings
 and platform policies before enabling delegated access.
+
+## v0.15.0 snapshot restore
+
+When an Apteva runtime is restored from a snapshot, the app SDK moves every
+`project_id` to the new runtime before Auth mounts; organization, user and
+client ids do not change. Auth's restore hook then re-seals signing keys under
+the new project (a sealed key is bound to its project, so without this the
+first mount would rotate every key and revoke all sessions), rewrites stored
+URLs that embed the old runtime's public URL (client redirect URIs and origins,
+pending recovery links, avatars) and maps the acting app install in the audit
+log. Tokens issued before the snapshot carry the old issuer URL; refresh tokens
+keep working and return tokens for the new issuer. No migration.
 
 ## v0.14.0 security hardening
 
