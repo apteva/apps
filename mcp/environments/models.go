@@ -29,6 +29,9 @@ type EnvironmentSpec struct {
 	WebFixtures         []WebFixtureSpec                `json:"web_fixtures,omitempty"`
 	ProtocolFixtures    []ProtocolFixtureSpec           `json:"protocol_fixtures,omitempty"`
 	VoiceFixtures       []VoiceFixtureSpec              `json:"voice_fixtures,omitempty"`
+	// AppConfig sets install settings on the run's app copies by app name
+	// before they first start (0.13.0). Values are strings.
+	AppConfig map[string]map[string]string `json:"app_config,omitempty"`
 }
 
 type WebFixtureSpec struct {

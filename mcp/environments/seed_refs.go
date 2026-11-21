@@ -19,7 +19,25 @@ type seedRefResolver func(ref string) (any, error)
 // value it points at. results holds the outputs of the seeds that already ran,
 // in spec order.
 func resolveSeedRefs(input map[string]any, results []any, targets ...map[string]string) (map[string]any, error) {
+	var t map[string]string
+	if len(targets) > 0 {
+		t = targets[0]
+	}
+	return resolveSeedRefsWithAgents(input, results, t, nil)
+}
+
+// resolveSeedRefsWithAgents also resolves {"$agent": "<alias>"} to the id of
+// the run's agent with that alias (0.13.0). Agents a seed references are
+// spawned before the seeds, so the id exists when the seed runs.
+func resolveSeedRefsWithAgents(input map[string]any, results []any, targetValues map[string]string, agents map[string]int64) (map[string]any, error) {
+	targets := []map[string]string{targetValues}
 	return walkSeedRefs(input, func(ref string) (any, error) {
+		if alias, ok := strings.CutPrefix(ref, "agent:"); ok {
+			if id, ok := agents[alias]; ok {
+				return id, nil
+			}
+			return nil, fmt.Errorf("unknown run agent %q", alias)
+		}
 		if name, ok := strings.CutPrefix(ref, "target:"); ok {
 			if len(targets) > 0 {
 				if value, ok := targets[0][name]; ok {
@@ -37,6 +55,12 @@ func resolveSeedRefs(input map[string]any, results []any, targets ...map[string]
 // than part-way through a start.
 func validateSeedRefs(input map[string]any, index int, targets ...map[string]RuntimeTarget) error {
 	_, err := walkSeedRefs(input, func(ref string) (any, error) {
+		if alias, ok := strings.CutPrefix(ref, "agent:"); ok {
+			if strings.TrimSpace(alias) == "" {
+				return nil, fmt.Errorf("$agent requires an agent alias")
+			}
+			return nil, nil
+		}
 		if name, ok := strings.CutPrefix(ref, "target:"); ok {
 			if !validID(name) {
 				return nil, fmt.Errorf("invalid runtime target %q", name)
@@ -84,6 +108,13 @@ func resolveSeedRefValue(value any, resolve seedRefResolver) (any, error) {
 				return nil, fmt.Errorf("$target requires one named runtime target")
 			}
 			return resolve("target:" + name)
+		}
+		if raw, ok := typed["$agent"]; ok {
+			alias, ok := raw.(string)
+			if !ok || len(typed) != 1 {
+				return nil, fmt.Errorf("$agent requires one run agent alias")
+			}
+			return resolve("agent:" + alias)
 		}
 		if raw, ok := typed[seedRefKey]; ok {
 			if len(typed) > 1 {
@@ -149,4 +180,36 @@ func parseSeedRef(ref string) (int, string, error) {
 		return 0, "", fmt.Errorf("%s %q: seed index must not be negative", seedRefKey, ref)
 	}
 	return index, path, nil
+}
+
+// seedAgentAliases returns the agent aliases the seeds reference with $agent.
+func seedAgentAliases(seeds []SeedStep) map[string]bool {
+	out := map[string]bool{}
+	for _, seed := range seeds {
+		_, _ = walkSeedRefs(seed.Input, func(ref string) (any, error) {
+			if alias, ok := strings.CutPrefix(ref, "agent:"); ok {
+				out[alias] = true
+			}
+			return nil, nil
+		})
+	}
+	return out
+}
+
+// validateSeedAgentRefs checks that every $agent alias names an agent in the
+// spec. Agents without an alias cannot be referenced.
+func validateSeedAgentRefs(spec EnvironmentSpec) error {
+	aliases := map[string]bool{}
+	for _, agent := range spec.Agents {
+		if alias := strings.TrimSpace(agent.Alias); alias != "" {
+			aliases[alias] = true
+		}
+	}
+	for alias := range seedAgentAliases(spec.Seeds) {
+		// An empty alias is reported by validateSeedRefs.
+		if strings.TrimSpace(alias) != "" && !aliases[alias] {
+			return fmt.Errorf("$agent %q: no agent in this spec has that alias", alias)
+		}
+	}
+	return nil
 }
