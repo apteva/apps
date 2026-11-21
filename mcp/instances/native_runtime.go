@@ -471,6 +471,11 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 	out.Health.HostReachable = e == nil
 	out.Health.AdministrativeSSH = e == nil
 	out.Health.ProcessRunning = e == nil && obs.State == "running"
+	// Process facts are never carried over from an earlier observation.
+	out.Process = nil
+	if e == nil {
+		out.Process, _ = nativeProcessFromObservation(obs.Process)
+	}
 	out.ProcessResources = obs.ProcessResources
 	out.StateBytes, out.StateEntries, out.StateAvailableBytes = obs.StateBytes, obs.StateEntries, obs.StateAvailableBytes
 	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
@@ -481,7 +486,7 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 		return out
 	}
 	before := nativeJSON(d)
-	if obs.State == "unknown" || obs.State == "failed" {
+	if obs.State == "unknown" || obs.State == "failed" || obs.State == "exited" {
 		b.invalidateRestore(d)
 	}
 	switch {
@@ -564,7 +569,7 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 			out.State = "unknown"
 		}
 	}
-	if out.State == "unknown" || out.State == "failed" {
+	if out.State == "unknown" || out.State == "failed" || out.State == "exited" {
 		b.invalidateRestore(d)
 	}
 	d.Execution = out

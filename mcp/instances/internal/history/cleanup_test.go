@@ -34,6 +34,9 @@ func TestRoutineCleanupSharedCadenceAndBoundedBacklog(t *testing.T) {
 		if err := s.Ingest(host, Batch{Version: CollectorVersion, Latest: ptr(reading(time.Now().UnixMilli(), 10, 10))}); err != nil {
 			t.Fatal(err)
 		}
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	expired := func() int {
 		t.Helper()
@@ -80,6 +83,9 @@ func TestIncidentCapEnforcedBetweenScheduledSweeps(t *testing.T) {
 			b.Incidents = append(b.Incidents, monitor.Incident{ID: fmt.Sprintf("event-%03d", n), Start: now + int64(n), Updated: now + int64(n)})
 		}
 		if err = s.Ingest(1, b); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Flush(); err != nil {
 			t.Fatal(err)
 		}
 		var n int
@@ -251,6 +257,9 @@ func TestDetailBudgetEnforcedWithoutWaitingForMaintenance(t *testing.T) {
 	s.lastPrune = time.Now()
 	b := Batch{Version: CollectorVersion, Latest: ptr(reading(now, 10, 10)), Incidents: []monitor.Incident{{ID: "4", Start: now + 4, Updated: now + 5}}}
 	if err = s.Ingest(1, b); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	var bytes int64

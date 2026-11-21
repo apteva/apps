@@ -32,7 +32,19 @@ type nativePort struct {
 	End       int    `json:"end"`
 	Exclusive bool   `json:"exclusive"`
 }
+
+// The observed systemd main process. Exit details are present only when the
+// unit is confirmed exited; Server decides whether and how to recover.
+type nativeProcess struct {
+	PID        int        `json:"pid,omitempty"`
+	Result     string     `json:"result,omitempty"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	ExitSignal *int       `json:"exit_signal,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	ExitedAt   *time.Time `json:"exited_at,omitempty"`
+}
 type nativeExecution struct {
+	Process             *nativeProcess         `json:"process,omitempty"`
 	IngressHostKey      string                 `json:"ingress_host_key,omitempty"`
 	IngressUpstream     string                 `json:"ingress_upstream,omitempty"`
 	Health              *nativeExecutionHealth `json:"health,omitempty"`
@@ -149,16 +161,25 @@ type nativeProbe struct {
 	MemoryMB            int64
 	DiskMB              int64
 }
+type nativeProcessObservation struct {
+	PID        int    `json:"pid"`
+	Result     string `json:"result"`
+	ExitCode   *int   `json:"exit_code"`
+	ExitSignal *int   `json:"exit_signal"`
+	Started    int64  `json:"started_unix"`
+	Exited     int64  `json:"exited_unix"`
+}
 type nativeObservation struct {
-	ProcessResources    map[string]string `json:"process_resources,omitempty"`
-	StateBytes          *int64            `json:"state_bytes,omitempty"`
-	StateEntries        *int64            `json:"state_entries,omitempty"`
-	StateAvailableBytes *int64            `json:"state_available_bytes,omitempty"`
-	RestorePending      bool              `json:"restore_pending,omitempty"`
-	SnapshotSHA256      string            `json:"snapshot_sha256,omitempty"`
-	State               string            `json:"state"`
-	Prepared            bool              `json:"-"`
-	Stopped             bool              `json:"-"`
+	Process             *nativeProcessObservation `json:"process,omitempty"`
+	ProcessResources    map[string]string         `json:"process_resources,omitempty"`
+	StateBytes          *int64                    `json:"state_bytes,omitempty"`
+	StateEntries        *int64                    `json:"state_entries,omitempty"`
+	StateAvailableBytes *int64                    `json:"state_available_bytes,omitempty"`
+	RestorePending      bool                      `json:"restore_pending,omitempty"`
+	SnapshotSHA256      string                    `json:"snapshot_sha256,omitempty"`
+	State               string                    `json:"state"`
+	Prepared            bool                      `json:"-"`
+	Stopped             bool                      `json:"-"`
 }
 
 func nativeJSON(v any) string    { b, _ := json.Marshal(v); return string(b) }

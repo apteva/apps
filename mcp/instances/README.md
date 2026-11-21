@@ -502,8 +502,12 @@ running through sidecar restarts and host reboots. Host files live in
 `$HOME/.local/share/apteva-instances-monitor/` with owner-only permissions;
 exports use a private Unix socket over the existing SSH transport. CPU reads
 are independent of slower filesystem/process observations. Resources are
-sampled every second, disk capacity every 30 seconds, and live snapshots are
-imported about every two seconds, independent of any open dashboard.
+sampled every second and disk capacity every 30 seconds. Remote collectors
+sample CPU every 250ms and are imported every two seconds while the host is
+viewed (a live, history or incident read in the last minute) and every ten
+seconds otherwise; a catch-up backlog is drained at once. The in-process local
+sampler reads CPU every second, and every 250ms while viewed or while an
+incident is open.
 
 CPU counter deltas cover consecutive approximately 250ms intervals. The
 collector records total CPU, busiest-core usage, user/system CPU, I/O wait and
@@ -516,8 +520,12 @@ are excluded from fine history rather than represented as precise 250ms peaks.
 Sampling cannot reconstruct the instantaneous amplitude of shorter bursts.
 
 The separate `<DataDir>/monitoring.db` stores one packed record per host and
-bucket. Every tier is updated transactionally from original one-second
-summaries; replay is idempotent. Each metric retains its observed-duration
+bucket. Imports are merged in memory and committed per host every ten seconds;
+live status and latest reads include pending data, and history and incident
+reads commit it first. Every tier is updated transactionally from original
+one-second summaries; replay is idempotent. Open incidents are re-exported with
+their recordings on every import; their summary follows each commit while the
+recording blob is rewritten at most once a minute and when the incident closes. Each metric retains its observed-duration
 weighted sum, minimum, maximum and original peak timestamp. CPU also retains
 observed time above 80%/95%. Missing observations remain gaps, never zeros.
 
@@ -531,8 +539,9 @@ observed time above 80%/95%. Missing observations remain gaps, never zeros.
 
 Normal steady-state storage is approximately 13,000 records per host. The
 512MiB global budget can shorten that retention; the API/UI reports budget
-evictions and available history. The database reserves space for its bounded
-rollback journal, uses a page allocation ceiling and reclaims expired pages.
+evictions and available history. The database runs in WAL mode with
+`synchronous=NORMAL`, reserves space for its bounded WAL, uses a page allocation
+ceiling and reclaims expired pages.
 Under allocation pressure it evicts oldest incident detail first, then oldest
 fine history and finally older summaries. Every range query defaults to at
 most 600 buckets; `max_points` is capped at 3,600. Automatic resolution selects

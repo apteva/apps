@@ -18,6 +18,17 @@ import (
 const DefaultBudget = int64(512 << 20)
 const pruneInterval = time.Minute
 
+// Collector batches are merged in memory and committed together. Readers see
+// pending data (status/latest overlay, flush before history and incidents);
+// a crash loses at most one interval of already-sampled history.
+const flushInterval = 10 * time.Second
+const maxPendingPoints = 4096
+
+// Open incidents are re-exported on every poll with all recordings. Their
+// summary follows each flush; the large detail blob is rewritten at most this
+// often, and always when the incident closes.
+const detailInterval = time.Minute
+
 type Status struct {
 	BudgetEvictions  int64  `json:"budget_evictions"`
 	Enabled          bool   `json:"enabled"`
@@ -32,10 +43,23 @@ type Status struct {
 	SampleIntervalMS int    `json:"sample_interval_ms"`
 }
 type Store struct {
-	DB        *sql.DB
-	mu        sync.Mutex
-	budget    int64
-	lastPrune time.Time
+	DB            *sql.DB
+	mu            sync.Mutex
+	budget        int64
+	lastPrune     time.Time
+	lastFlush     time.Time
+	pending       map[int64]*pendingHost
+	pendingPoints int
+	detailWritten map[string]time.Time
+}
+type pointKey struct{ step, ts int64 }
+type pendingHost struct {
+	points    map[pointKey]monitor.Point
+	incidents map[string]monitor.Incident
+	version   string
+	latest    *monitor.Metrics
+	lastSeen  int64
+	lastPoint int64
 }
 
 func OpenStore(path string, budget int64) (*Store, error) {
@@ -50,11 +74,14 @@ func OpenStore(path string, budget int64) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{DB: db, budget: budget}
-	// Reserve 1/8 of the budget for the rollback journal. Small transactions and
-	// incremental vacuum bound both the live file and journal; no unbounded WAL.
+	s := &Store{DB: db, budget: budget, pending: map[int64]*pendingHost{}, detailWritten: map[string]time.Time{}, lastFlush: time.Now()}
+	// Reserve 1/8 of the budget for the WAL. The single connection never holds a
+	// reader open across a checkpoint, so auto-checkpoints keep the WAL near
+	// 1MiB and journal_size_limit truncates it back after a large transaction.
+	// synchronous=NORMAL drops the per-commit fsync; WAL stays crash-consistent.
 	for _, stmt := range []string{
-		"PRAGMA busy_timeout=5000", "PRAGMA page_size=4096", "PRAGMA auto_vacuum=INCREMENTAL", "PRAGMA journal_mode=TRUNCATE", "PRAGMA journal_size_limit=0",
+		"PRAGMA busy_timeout=5000", "PRAGMA page_size=4096", "PRAGMA auto_vacuum=INCREMENTAL", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA wal_autocheckpoint=256",
+		fmt.Sprintf("PRAGMA journal_size_limit=%d", budget/8),
 		fmt.Sprintf("PRAGMA max_page_count=%d", budget*7/8/4096),
 		`CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value INTEGER NOT NULL)`,
 		`INSERT OR IGNORE INTO metadata(key,value) VALUES('budget_evictions',0)`,
@@ -73,7 +100,22 @@ func OpenStore(path string, budget int64) (*Store, error) {
 	}
 	return s, nil
 }
-func (s *Store) Close() error { return s.DB.Close() }
+func (s *Store) Close() error {
+	s.mu.Lock()
+	err := s.flushLocked(time.Now())
+	s.mu.Unlock()
+	if closeErr := s.DB.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// Flush commits pending collector data immediately.
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked(time.Now())
+}
 func (s *Store) EnsureHost(id int64) error {
 	_, err := s.DB.Exec(`INSERT OR IGNORE INTO hosts(id) VALUES(?)`, id)
 	return err
@@ -84,12 +126,17 @@ func (s *Store) Status(id int64) (Status, error) {
 	if err == sql.ErrNoRows {
 		err = nil
 	}
+	s.mu.Lock()
+	if p := s.pending[id]; p != nil && out.Enabled {
+		out.State, out.Version, out.Error, out.LastSeen, out.LastPoint = "running", p.version, "", p.lastSeen, p.lastPoint
+	}
+	s.mu.Unlock()
 	var pages, size int64
 	s.DB.QueryRow("PRAGMA page_count").Scan(&pages)
 	s.DB.QueryRow("PRAGMA page_size").Scan(&size)
 	out.StorageBytes = pages * size
 	s.DB.QueryRow("SELECT value FROM metadata WHERE key='budget_evictions'").Scan(&out.BudgetEvictions)
-	if out.Enabled && out.LastSeen > 0 && time.Now().UnixMilli()-out.LastSeen > 15000 {
+	if out.Enabled && out.LastSeen > 0 && time.Now().UnixMilli()-out.LastSeen > 30000 {
 		out.State = "stale"
 	}
 	if !out.Enabled {
@@ -98,6 +145,11 @@ func (s *Store) Status(id int64) (Status, error) {
 	return out, err
 }
 func (s *Store) SetState(id int64, state, version, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.flushHostLocked(id, time.Now()); err != nil {
+		return err
+	}
 	if err := s.EnsureHost(id); err != nil {
 		return err
 	}
@@ -107,6 +159,11 @@ func (s *Store) SetState(id int64, state, version, message string) error {
 func (s *Store) SetEnabled(id int64, enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !enabled {
+		s.dropPendingLocked(id)
+	} else if err := s.flushHostLocked(id, time.Now()); err != nil {
+		return err
+	}
 	if err := s.EnsureHost(id); err != nil {
 		return err
 	}
@@ -118,6 +175,13 @@ func (s *Store) SetEnabled(id int64, enabled bool) error {
 	return err
 }
 func (s *Store) Latest(id int64) (*monitor.Metrics, error) {
+	s.mu.Lock()
+	if p := s.pending[id]; p != nil && p.latest != nil {
+		latest := *p.latest
+		s.mu.Unlock()
+		return &latest, nil
+	}
+	s.mu.Unlock()
 	var text sql.NullString
 	if err := s.DB.QueryRow(`SELECT latest FROM hosts WHERE id=?`, id).Scan(&text); err != nil {
 		return nil, err
@@ -143,20 +207,122 @@ func (s *Store) Ingest(id int64, b monitor.Batch) error {
 	if err := monitor.ValidateMetrics(b.Latest); err != nil {
 		return err
 	}
-	if err := s.EnsureHost(id); err != nil {
+	if err := s.bufferLocked(id, b); err != nil {
 		return err
 	}
-	// Maintenance is shared by all hosts, not repeated for every two-second
-	// import. Bound catch-up work; SQLite's page cap and the full-database retry
-	// below enforce the physical budget even between scheduled passes.
 	now := time.Now()
+	if now.Sub(s.lastFlush) >= flushInterval || s.pendingPoints >= maxPendingPoints {
+		return s.flushLocked(now)
+	}
+	return nil
+}
+
+// Validates a batch and merges it into the host's pending aggregates without
+// touching the database beyond one read when the host has nothing pending.
+func (s *Store) bufferLocked(id int64, b monitor.Batch) error {
+	p := s.pending[id]
+	if p == nil {
+		if err := s.EnsureHost(id); err != nil {
+			return err
+		}
+		var enabled bool
+		var last int64
+		if err := s.DB.QueryRow(`SELECT enabled,last_point FROM hosts WHERE id=?`, id).Scan(&enabled, &last); err != nil {
+			return err
+		}
+		if !enabled {
+			return nil
+		}
+		p = &pendingHost{points: map[pointKey]monitor.Point{}, incidents: map[string]monitor.Incident{}, lastPoint: last}
+	}
+	now := time.Now()
+	newLast := p.lastPoint
+	merged := map[pointKey]monitor.Point{}
+	for _, point := range b.Points {
+		if point.Time <= p.lastPoint {
+			continue
+		}
+		if point.Step != 1000 || point.Time%1000 != 0 || point.ObservedMS < 1 || point.ObservedMS > 1000 || point.Samples < 1 || point.Time > now.Add(5*time.Minute).UnixMilli() {
+			return errors.New("invalid collector point or host clock")
+		}
+		// Advance past expired spool entries too, otherwise reconnect repeatedly
+		// imports the same old batch. Older readings may still fit coarser tiers.
+		if point.Time > newLast {
+			newLast = point.Time
+		}
+		for _, tier := range monitor.Tiers {
+			if point.Time < now.Add(-tier.Retention).UnixMilli()/tier.Step*tier.Step {
+				continue
+			}
+			key := pointKey{tier.Step, point.Time / tier.Step * tier.Step}
+			agg, ok := merged[key]
+			if !ok {
+				agg, ok = p.points[key]
+			}
+			if !ok {
+				agg = monitor.Point{Time: key.ts, Step: key.step}
+			}
+			agg.Merge(point)
+			merged[key] = agg
+		}
+	}
+	// The whole batch is validated before any of it becomes pending.
+	for key, agg := range merged {
+		if _, ok := p.points[key]; !ok {
+			s.pendingPoints++
+		}
+		p.points[key] = agg
+	}
+	for _, ev := range b.Incidents {
+		if len(ev.Recordings) > 3000 || ev.Start > now.Add(5*time.Minute).UnixMilli() || ev.Start < now.Add(-30*24*time.Hour).UnixMilli() {
+			continue
+		}
+		if old, ok := p.incidents[ev.ID]; ok && old.Updated >= ev.Updated {
+			continue
+		}
+		p.incidents[ev.ID] = ev
+	}
+	latest := *b.Latest
+	sampleTime, _ := time.Parse(time.RFC3339Nano, b.Latest.Timestamp)
+	p.version, p.latest, p.lastSeen, p.lastPoint = b.Version, &latest, sampleTime.UnixMilli(), newLast
+	s.pending[id] = p
+	return nil
+}
+func (s *Store) dropPendingLocked(id int64) {
+	if p := s.pending[id]; p != nil {
+		s.pendingPoints -= len(p.points)
+		delete(s.pending, id)
+	}
+}
+func (s *Store) flushLocked(now time.Time) error {
+	s.lastFlush = now
+	var first error
+	for id := range s.pending {
+		if err := s.flushHostLocked(id, now); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// Pending data that cannot be committed is dropped after the bounded budget
+// retries, like a rejected batch was before buffering; it never accumulates.
+func (s *Store) flushHostLocked(id int64, now time.Time) error {
+	p := s.pending[id]
+	if p == nil {
+		return nil
+	}
+	s.dropPendingLocked(id)
+	// Maintenance is shared by all hosts, not repeated for every flush. Bound
+	// catch-up work; SQLite's page cap and the full-database retry below enforce
+	// the physical budget even between scheduled passes.
 	if s.lastPrune.IsZero() || now.Sub(s.lastPrune) >= pruneInterval {
 		if err := s.pruneLocked(now, false); err != nil {
 			return err
 		}
 		s.lastPrune = now
 	}
-	err := s.ingestLocked(id, b)
+	err := s.commitLocked(id, p, now)
 	for retry := 0; err != nil && strings.Contains(strings.ToLower(err.Error()), "full") && retry < 3; retry++ {
 		// Reclaim old incident detail first; preserve its summary and rollup peaks.
 		n, evictErr := s.execSelected(`SELECT host,id FROM incidents INDEXED BY incidents_detail_budget WHERE detail IS NOT NULL ORDER BY updated LIMIT 16`, `UPDATE incidents SET detail=NULL WHERE host=? AND id=?`, 2)
@@ -181,78 +347,54 @@ func (s *Store) Ingest(id int64, b monitor.Batch) error {
 		}
 		s.DB.Exec(`UPDATE metadata SET value=value+? WHERE key='budget_evictions'`, n)
 		s.DB.Exec("PRAGMA incremental_vacuum(1000)")
-		err = s.ingestLocked(id, b)
+		err = s.commitLocked(id, p, now)
 	}
-
 	return err
 }
-func (s *Store) ingestLocked(id int64, b monitor.Batch) error {
+func (s *Store) commitLocked(id int64, p *pendingHost, now time.Time) error {
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var enabled bool
-	var last int64
-	if err := tx.QueryRow(`SELECT enabled,last_point FROM hosts WHERE id=?`, id).Scan(&enabled, &last); err != nil {
+	if err := tx.QueryRow(`SELECT enabled FROM hosts WHERE id=?`, id).Scan(&enabled); err != nil {
 		return err
 	}
 	if !enabled {
 		return nil
 	}
-	now := time.Now()
-	newLast := last
-	for _, p := range b.Points {
-		if p.Time <= last {
-			continue
+	for key, delta := range p.points {
+		agg := monitor.Point{Time: key.ts, Step: key.step}
+		var data string
+		err := tx.QueryRow(`SELECT data FROM points WHERE host=? AND step=? AND ts=?`, id, key.step, key.ts).Scan(&data)
+		if err != nil && err != sql.ErrNoRows {
+			return err
 		}
-		if p.Step != 1000 || p.Time%1000 != 0 || p.ObservedMS < 1 || p.ObservedMS > 1000 || p.Samples < 1 || p.Time > now.Add(5*time.Minute).UnixMilli() {
-			return errors.New("invalid collector point or host clock")
-		}
-		// Advance past expired spool entries too, otherwise reconnect repeatedly
-		// imports the same old batch. Older readings may still fit coarser tiers.
-		if p.Time > newLast {
-			newLast = p.Time
-		}
-		for _, tier := range monitor.Tiers {
-			if p.Time < now.Add(-tier.Retention).UnixMilli()/tier.Step*tier.Step {
-				continue
-			}
-			ts := p.Time / tier.Step * tier.Step
-			agg := monitor.Point{Time: ts, Step: tier.Step}
-			var data string
-			err := tx.QueryRow(`SELECT data FROM points WHERE host=? AND step=? AND ts=?`, id, tier.Step, ts).Scan(&data)
-			if err != nil && err != sql.ErrNoRows {
-				return err
-			}
-			if err == nil {
-				if err := json.Unmarshal([]byte(data), &agg); err != nil {
-					return err
-				}
-			}
-			agg.Merge(p)
-			encoded, err := json.Marshal(agg)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`INSERT INTO points(host,step,ts,data) VALUES(?,?,?,?) ON CONFLICT(host,step,ts) DO UPDATE SET data=excluded.data`, id, tier.Step, ts, string(encoded)); err != nil {
+		if err == nil {
+			if err := json.Unmarshal([]byte(data), &agg); err != nil {
 				return err
 			}
 		}
-		if p.Time > newLast {
-			newLast = p.Time
+		agg.Merge(delta)
+		encoded, err := json.Marshal(agg)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO points(host,step,ts,data) VALUES(?,?,?,?) ON CONFLICT(host,step,ts) DO UPDATE SET data=excluded.data`, id, key.step, key.ts, string(encoded)); err != nil {
+			return err
 		}
 	}
-	for _, ev := range b.Incidents {
-		if len(ev.Recordings) > 3000 || ev.Start > now.Add(5*time.Minute).UnixMilli() || ev.Start < now.Add(-30*24*time.Hour).UnixMilli() {
-			continue
-		}
+	written := []string{}
+	for _, ev := range p.incidents {
 		var detail []byte
-		if len(ev.Recordings) > 0 {
+		key := fmt.Sprintf("%d/%s", id, ev.ID)
+		if len(ev.Recordings) > 0 && (ev.End != 0 || now.Sub(s.detailWritten[key]) >= detailInterval) {
 			detail, err = monitor.Encode(ev.Recordings)
 			if err != nil {
 				return err
 			}
+			written = append(written, key)
 		}
 		ev.Recordings = nil
 		data, err := json.Marshal(ev)
@@ -263,7 +405,7 @@ func (s *Store) ingestLocked(id int64, b monitor.Batch) error {
 			return err
 		}
 	}
-	if len(b.Incidents) > 0 {
+	if len(p.incidents) > 0 {
 		// Incident limits are enforced when incidents change, independently of
 		// the scheduled history sweep. The host/start index avoids payload scans.
 		if _, err := tx.Exec(`DELETE FROM incidents WHERE host=? AND id IN (SELECT id FROM incidents WHERE host=? ORDER BY start DESC,id LIMIT 50 OFFSET 200)`, id, id); err != nil {
@@ -273,15 +415,27 @@ func (s *Store) ingestLocked(id int64, b monitor.Batch) error {
 			return err
 		}
 	}
-	latest, err := json.Marshal(b.Latest)
+	latest, err := json.Marshal(p.latest)
 	if err != nil {
 		return err
 	}
-	sampleTime, _ := time.Parse(time.RFC3339Nano, b.Latest.Timestamp)
-	if _, err := tx.Exec(`UPDATE hosts SET state='running',version=?,error='',latest=?,last_seen=?,last_point=? WHERE id=?`, b.Version, string(latest), sampleTime.UnixMilli(), newLast, id); err != nil {
+	if _, err := tx.Exec(`UPDATE hosts SET state='running',version=?,error='',latest=?,last_seen=?,last_point=? WHERE id=?`, p.version, string(latest), p.lastSeen, p.lastPoint, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, key := range written {
+		s.detailWritten[key] = now
+	}
+	if len(s.detailWritten) > 1024 {
+		for key, at := range s.detailWritten {
+			if now.Sub(at) > 2*detailInterval {
+				delete(s.detailWritten, key)
+			}
+		}
+	}
+	return nil
 }
 func (s *Store) Prune(now time.Time) error {
 	s.mu.Lock()
@@ -472,6 +626,9 @@ func (s *Store) History(id int64, from, to int64, resolution string, max int) (H
 		return out, errors.New("requested resolution exceeds max_points; use auto or a larger interval")
 	}
 	out.Resolution = tier.Name
+	if err := s.Flush(); err != nil {
+		return out, err
+	}
 	out.Status, _ = s.Status(id)
 	rows, err := s.DB.Query(`SELECT data FROM points WHERE host=? AND step=? AND ts>=? AND ts<? ORDER BY ts LIMIT ?`, id, tier.Step, from/tier.Step*tier.Step, to, max)
 	if err != nil {
@@ -502,6 +659,9 @@ func (s *Store) ListIncidents(id int64, limit int) ([]monitor.Incident, error) {
 	if limit < 1 || limit > 200 {
 		return nil, errors.New("limit must be 1–200")
 	}
+	if err := s.Flush(); err != nil {
+		return nil, err
+	}
 	rows, err := s.DB.Query(`SELECT data,detail IS NULL FROM incidents WHERE host=? ORDER BY start DESC LIMIT ?`, id, limit)
 	if err != nil {
 		return nil, err
@@ -524,6 +684,19 @@ func (s *Store) ListIncidents(id int64, limit int) ([]monitor.Incident, error) {
 	return out, rows.Err()
 }
 func (s *Store) Incident(id int64, event string) (*monitor.Incident, error) {
+	// A detail view always gets the newest recordings, even mid-throttle.
+	s.mu.Lock()
+	if p := s.pending[id]; p != nil {
+		if ev, ok := p.incidents[event]; ok {
+			s.mu.Unlock()
+			return &ev, nil
+		}
+	}
+	err := s.flushLocked(time.Now())
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	var data string
 	var detail []byte
 	if err := s.DB.QueryRow(`SELECT data,detail FROM incidents WHERE host=? AND id=?`, id, event).Scan(&data, &detail); err != nil {
@@ -545,6 +718,7 @@ func (s *Store) Incident(id int64, event string) (*monitor.Incident, error) {
 func (s *Store) RemoveHost(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.dropPendingLocked(id)
 	for _, table := range []string{"points", "incidents"} {
 		if _, err := s.DB.Exec("DELETE FROM "+table+" WHERE host=?", id); err != nil {
 			return err
@@ -558,6 +732,9 @@ func (s *Store) RemoveHost(id int64) error {
 func (s *Store) CloseOpenIncidents(id int64, now int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.flushHostLocked(id, time.Now()); err != nil {
+		return err
+	}
 	rows, err := s.DB.Query(`SELECT id,data FROM incidents WHERE host=?`, id)
 	if err != nil {
 		return err
