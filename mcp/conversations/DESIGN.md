@@ -119,7 +119,13 @@ ownership: `boundConversation` treats main as unbound, so main keeps its global
 discovery, creation and inbox tools, and may send ordinary replies only in the
 conversation it answers. The streamer shows main's activity in that
 conversation only while a response to one of its messages is open; main's
-background turns never claim it. Core tags those deliveries with their source
+background turns never claim it. Main's telemetry is a separate feed (thread
+prefix `main`, exact thread match). Its events are attributed in memory to the
+one receipt-gated response main owns per agent; approval receipts on main stay
+ungated and settle on durable messages. Tool starts are recorded only inside
+that owned response, and results only update rows recorded so. Each response
+checks the feed covering its own thread: without main's feed, main's responses
+settle on main's durable reply. Core tags those deliveries with their source
 ("[console] [chat] ...") and reports the tag as `source`, so the inbound
 preview is matched after that tag, against the bytes Core kept. Any notice
 added to an inbound message (main's reply rule, a resume notice) follows the

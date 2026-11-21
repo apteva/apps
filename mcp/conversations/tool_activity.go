@@ -86,7 +86,21 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 	if a.streamer == nil || a.streamer.resolve == nil {
 		return nil
 	}
-	chat := a.streamer.resolve(agent, thread)
+	var chat string
+	if thread == mainThreadID {
+		// Main's background tool calls never appear in the conversation it
+		// answers: starts are recorded only while main owns that
+		// conversation's response, and results only update rows recorded so.
+		if event == "tool.call" {
+			if owned, received := a.streamer.mainResponseChat(agent); received {
+				chat = owned
+			}
+		} else {
+			chat = a.streamer.resolve(agent, thread)
+		}
+	} else {
+		chat = a.streamer.resolve(agent, thread)
+	}
 	if chat == "" {
 		return nil
 	}
@@ -165,5 +179,10 @@ func truncateActivity(s string, n int) string {
 // A lost telemetry feed must not leave a permanent running indicator after restart.
 func (s *store) interruptToolActivities() error {
 	_, err := s.db.Exec(`UPDATE conversation_tool_activity SET status='interrupted',revision=revision+1 WHERE status='running'`)
+	return err
+}
+
+func (s *store) interruptMainToolActivities() error {
+	_, err := s.db.Exec(`UPDATE conversation_tool_activity SET status='interrupted',revision=revision+1 WHERE status='running' AND thread_id=?`, mainThreadID)
 	return err
 }

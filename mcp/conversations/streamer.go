@@ -74,14 +74,18 @@ type streamer struct {
 	completedTurns     map[string]completedResponseTurn
 	progressSeq        uint64
 	telemetryConnected bool
-	hub                *hub
-	resolve            func(int64, string) string
-	throttle           time.Duration
-	mu                 sync.Mutex
-	buffers            map[string]*streamState
-	lastEmit           map[string]string
-	touched            map[string]time.Time
-	ackTimes           map[string]time.Time
+	// mainTelemetryConnected tracks the separate feed for agents' main
+	// threads, which answer one operator conversation each. Without it,
+	// main's responses settle on durable replies instead of Core receipts.
+	mainTelemetryConnected bool
+	hub                    *hub
+	resolve                func(int64, string) string
+	throttle               time.Duration
+	mu                     sync.Mutex
+	buffers                map[string]*streamState
+	lastEmit               map[string]string
+	touched                map[string]time.Time
+	ackTimes               map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
@@ -212,18 +216,23 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if s == nil {
 		return
 	}
-	conversationID := conversationForThread(threadID)
-	if s.resolve != nil {
-		conversationID = s.resolve(agentID, threadID)
-	}
-	if conversationID == "" {
-		return
-	}
-	if threadID == mainThreadID && !s.hasActiveResponse(conversationID, agentID) {
-		// Main also runs the agent's background work. Only turns answering a
-		// message in the conversation main answers are shown there; webhook,
-		// timer and other background turns never claim that conversation.
-		return
+	var conversationID string
+	if threadID == mainThreadID {
+		// Main also runs the agent's background work. Only the open response
+		// to a message in the conversation main answers receives main's
+		// events; webhook, timer and other background turns never claim it.
+		// Resolved in memory: main's feed carries every agent's main thread.
+		if conversationID, _ = s.mainResponseChat(agentID); conversationID == "" {
+			return
+		}
+	} else {
+		conversationID = conversationForThread(threadID)
+		if s.resolve != nil {
+			conversationID = s.resolve(agentID, threadID)
+		}
+		if conversationID == "" {
+			return
+		}
 	}
 	s.observeResponseWake(eventType, agentID, threadID, dataJSON, ts)
 	// Proactive turns (subscription, webhook, timer, or an agent-created
@@ -478,10 +487,10 @@ func (s *streamer) emitInboundAck(chat, thread string, agent int64, msg *Message
 		}
 	}
 	s.mu.Lock()
-	connected := s.telemetryConnected
+	connected := s.feedConnectedLocked(thread)
 	s.mu.Unlock()
 	if !connected {
-		preview = "" // Keep durable-reply settlement on servers without telemetry.
+		preview = "" // Keep durable-reply settlement without this thread's telemetry.
 	}
 	s.emitResponseAck(chat, thread, agent, msg.ID, preview)
 }
@@ -603,15 +612,39 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
+	responseEvents := []string{"event.received", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
-		Events:       []string{"event.received", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
-		ThreadPrefix: "chat-",
-	}, false)
+		Events: responseEvents, ThreadPrefix: "chat-",
+	}, chatFeed)
+	// Main answers one operator conversation per agent. Its events reach that
+	// conversation only while main owns its open response.
+	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
+		Events: responseEvents, ThreadPrefix: mainThreadID,
+	}, mainFeed)
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events:       []string{"realtime.user", "realtime.assistant", "tool.call", "tool.result", "thread.done"},
 		ThreadPrefix: "voice-",
-	}, true)
+	}, voiceFeed)
 	return true
+}
+
+type telemetryFeed int
+
+const (
+	chatFeed telemetryFeed = iota
+	mainFeed
+	voiceFeed
+)
+
+func (a *App) setFeedConnected(feed telemetryFeed, connected bool) {
+	a.streamer.mu.Lock()
+	defer a.streamer.mu.Unlock()
+	switch feed {
+	case chatFeed:
+		a.streamer.telemetryConnected = connected
+	case mainFeed:
+		a.streamer.mainTelemetryConnected = connected
+	}
 }
 
 const (
@@ -626,7 +659,8 @@ type telemetrySubscriber interface {
 // connectTelemetryFeed owns one filtered subscription. 403/404/405 mean the
 // permission or bridge is genuinely unavailable; other startup failures,
 // including 401 while registration settles, are retried with backoff.
-func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc telemetrySubscriber, feedCtx context.Context, sub sdk.TelemetrySubscription, voice bool) {
+func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc telemetrySubscriber, feedCtx context.Context, sub sdk.TelemetrySubscription, feed telemetryFeed) {
+	voice := feed == voiceFeed
 	backoff := telemetryRetryInitial
 	for {
 		if feedCtx.Err() != nil {
@@ -634,16 +668,12 @@ func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc telemetrySubscriber, feed
 		}
 		ch, err := tc.SubscribeTelemetry(feedCtx, sub)
 		if err == nil {
-			if !voice {
-				a.streamer.mu.Lock()
-				a.streamer.telemetryConnected = true
-				a.streamer.mu.Unlock()
-			}
+			a.setFeedConnected(feed, true)
 			ctx.Logger().Info("telemetry bridge connected", "thread_prefix", sub.ThreadPrefix)
 			if voice {
 				a.consumeVoiceTelemetry(ctx, ch)
 			} else {
-				a.consumeChatTelemetry(ctx, ch)
+				a.consumeChatTelemetry(ctx, ch, feed)
 			}
 			return
 		}
@@ -688,18 +718,25 @@ func retryTelemetrySubscription(err error) bool {
 	return true
 }
 
-func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {
+func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent, feed telemetryFeed) {
 	for ev := range ch {
+		// The main feed filters by prefix; other threads (say "maintenance")
+		// belong to neither feed.
+		if feed == mainFeed && ev.ThreadID != mainThreadID {
+			continue
+		}
 		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
 			ctx.Logger().Error("tool activity persistence failed", "err", err)
 		}
 		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 	}
-	a.streamer.mu.Lock()
-	a.streamer.telemetryConnected = false
-	a.streamer.mu.Unlock()
-	_ = a.store.interruptToolActivities()
-	ctx.Logger().Info("telemetry feed ended")
+	a.setFeedConnected(feed, false)
+	if feed == mainFeed {
+		_ = a.store.interruptMainToolActivities()
+	} else {
+		_ = a.store.interruptToolActivities()
+	}
+	ctx.Logger().Info("telemetry feed ended", "main", feed == mainFeed)
 }
 
 func (a *App) consumeVoiceTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {

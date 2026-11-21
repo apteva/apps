@@ -470,6 +470,7 @@ func TestMainRoutedReplySettlesThinking(t *testing.T) {
 			app, ctx, platform := newTestEnv(t)
 			mountedCtx = ctx
 			app.streamer.telemetryConnected = true
+			app.streamer.mainTelemetryConnected = true
 			routed := mkAgentConversation(t, app, CreateConversationInput{Title: "Chat"})
 			postUserMessage(t, app, routed, content)
 			if len(platform.trackedEvents) != 1 || platform.trackedEvents[0].ThreadID != mainThreadID {
@@ -498,6 +499,90 @@ func TestMainRoutedReplySettlesThinking(t *testing.T) {
 				t.Fatalf("Thinking stayed on after main's final reply: %v", ids)
 			}
 		})
+	}
+}
+
+// The live 0.27.0 condition: the chat-thread feed is connected, main's is not,
+// so Core's receipt for main never arrives. Main's reply must still settle.
+func TestMainReplySettlesWithoutMainTelemetry(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+	app.streamer.telemetryConnected = true
+	routed := mkAgentConversation(t, app, CreateConversationInput{Title: "Chat"})
+	postUserMessage(t, app, routed, "Hey")
+	if !app.streamer.hasActiveResponse(routed.ID, routedAgent) {
+		t.Fatal("no Thinking while main answers")
+	}
+	if _, err := app.toolSend(callerCtxCall(routedAgent, mainThreadID, "final"), ctx, map[string]any{
+		"conversation_id": routed.ID, "text": "Hey! How can I help?", "phase": "final"}); err != nil {
+		t.Fatal(err)
+	}
+	if ids := app.streamer.activeConversationIDs(); len(ids) != 0 {
+		t.Fatalf("Thinking stayed on after main's final reply: %v", ids)
+	}
+}
+
+// Main's feed carries all of main's work. Only tool calls inside the response
+// main owns appear in the conversation it answers.
+func TestMainToolActivityOnlyInsideOwnedResponse(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	app.streamer.telemetryConnected = true
+	app.streamer.mainTelemetryConnected = true
+	routed := mkAgentConversation(t, app, CreateConversationInput{Title: "Chat"})
+	at := time.Now()
+	step := func(typ, data string) {
+		t.Helper()
+		at = at.Add(time.Millisecond)
+		if err := app.ingestToolActivity(typ, routedAgent, mainThreadID, data, at); err != nil {
+			t.Fatal(err)
+		}
+		app.streamer.Ingest(typ, routedAgent, mainThreadID, data, at)
+	}
+	// Background work before anyone writes.
+	step("tool.call", `{"id":"background-1","name":"code_repos_list"}`)
+	postUserMessage(t, app, routed, "List the repositories")
+	// Core's events follow the acknowledgement; earlier ones are ignored.
+	at = time.Now()
+	// Background work while the message waits in Core's queue.
+	step("tool.call", `{"id":"background-2","name":"code_repos_list"}`)
+	text, _ := platform.trackedEvents[0].Message.(string)
+	received, _ := json.Marshal(map[string]string{"source": "console", "message": coreEventPreview(text)})
+	step("event.received", string(received))
+	step("llm.start", `{}`)
+	step("tool.call", `{"id":"owned-1","name":"code_repos_list"}`)
+	if !app.streamer.hasActiveResponse(routed.ID, routedAgent) {
+		t.Fatal("main's work did not show as active")
+	}
+	if _, err := app.toolSend(callerCtxCall(routedAgent, mainThreadID, "final"), ctx, map[string]any{
+		"conversation_id": routed.ID, "text": "Two repositories.", "phase": "final"}); err != nil {
+		t.Fatal(err)
+	}
+	// A parallel call's result lands after the reply; later work is background.
+	step("tool.result", `{"id":"owned-1","name":"code_repos_list","success":true}`)
+	step("tool.call", `{"id":"background-3","name":"code_repos_list"}`)
+	step("tool.result", `{"id":"background-3","name":"code_repos_list","success":true}`)
+
+	rows, err := app.store.toolActivities(routed.ID)
+	if err != nil || len(rows) != 1 || rows[0].CallID != "owned-1" || rows[0].Status != "completed" {
+		t.Fatalf("activity rows=%+v err=%v, want only owned-1 completed", rows, err)
+	}
+	if ids := app.streamer.activeConversationIDs(); len(ids) != 0 {
+		t.Fatalf("background work reopened the conversation: %v", ids)
+	}
+}
+
+func TestMainFeedEndFallsBackWithoutTouchingChatFeed(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	app.streamer.telemetryConnected = true
+	app.streamer.mainTelemetryConnected = true
+	ch := make(chan sdk.TelemetryStreamEvent, 1)
+	// The prefix also matches other thread names; they are not main.
+	ch <- sdk.TelemetryStreamEvent{AgentID: routedAgent, ThreadID: "maintenance", Type: "llm.start", Time: time.Now(), Data: json.RawMessage(`{}`)}
+	close(ch)
+	app.consumeChatTelemetry(ctx, ch, mainFeed)
+	if app.streamer.mainTelemetryConnected || !app.streamer.telemetryConnected {
+		t.Fatalf("main=%v chat=%v after main feed ended", app.streamer.mainTelemetryConnected, app.streamer.telemetryConnected)
 	}
 }
 

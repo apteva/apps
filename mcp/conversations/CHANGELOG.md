@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27.3 — 2026-11-21
+
+- Actually clear the working dot and Thinking after main replies in the conversation it answers. The app only listened to Core telemetry for `chat-` threads, so it never saw main receive the message and ignored main's final reply. 0.27.2 fixed how that receipt is matched but could not help without the events.
+- Listen to main threads on their own feed. Main's progress, streamed reply text and tool activity now show in the conversation it answers, only while main is answering a message there; main's background work stays out of it.
+- Settle main's responses on its durable reply whenever main's feed is unavailable.
+
 ## 0.27.2 — 2026-11-21
 
 - Clear the working dot and Thinking after main replies in the conversation it answers. Core delivers those messages as "[console] [chat] ...", so Conversations never saw main receive them and kept the response open after the final reply.

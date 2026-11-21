@@ -98,6 +98,31 @@ func inboundPreviewMatches(message, source, preview string) bool {
 	return len(kept) > len("[chat] ") && strings.HasPrefix(preview, kept)
 }
 
+// feedConnectedLocked reports whether the telemetry feed covering thread is
+// live. Main threads have their own feed. Called with mu held.
+func (s *streamer) feedConnectedLocked(thread string) bool {
+	if thread == mainThreadID {
+		return s.mainTelemetryConnected
+	}
+	return s.telemetryConnected
+}
+
+// mainResponseChat returns the conversation whose open response main owns for
+// agent, and whether Core has received that message. Only receipt-gated
+// responses count: the conversation main answers has at most one per agent.
+// Approval receipts on main open ungated responses that settle on durable
+// messages, so main's telemetry is never attributed to them.
+func (s *streamer) mainResponseChat(agent int64) (chat string, received bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.responses {
+		if p.threadID == mainThreadID && p.agentID == agent && p.inboundPreview != "" && p.Phase != "idle" {
+			return p.chatID, p.inboundReceived
+		}
+	}
+	return "", false
+}
+
 func responseProgressKey(chat string, agent int64) string {
 	return chat + ":" + strconv.FormatInt(agent, 10)
 }
@@ -115,7 +140,7 @@ func (s *streamer) finishResponse(chat string, agent int64, afterMessageIDs ...i
 func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64, afterMessageIDs ...int64) {
 	s.mu.Lock()
 	p := s.responses[responseProgressKey(chat, agent)]
-	if p == nil || (len(afterMessageIDs) == 0 && s.telemetryConnected && p.inboundPreview != "" && !p.inboundReceived) || (len(afterMessageIDs) > 0 && p.AfterMessageID != afterMessageIDs[0]) {
+	if p == nil || (len(afterMessageIDs) == 0 && s.feedConnectedLocked(p.threadID) && p.inboundPreview != "" && !p.inboundReceived) || (len(afterMessageIDs) > 0 && p.AfterMessageID != afterMessageIDs[0]) {
 		s.mu.Unlock()
 		return
 	}
@@ -140,7 +165,7 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 }
 func (s *streamer) intermediateReply(chat string, agent int64) {
 	s.mu.Lock()
-	if p := s.responses[responseProgressKey(chat, agent)]; p != nil && (!s.telemetryConnected || p.inboundPreview == "" || p.inboundReceived) {
+	if p := s.responses[responseProgressKey(chat, agent)]; p != nil && (!s.feedConnectedLocked(p.threadID) || p.inboundPreview == "" || p.inboundReceived) {
 		// A progress message is part of the current response, so subsequent
 		// pacing belongs to this response even when Core does not emit another
 		// llm.start before sleeping. Acknowledgements do not call this method,

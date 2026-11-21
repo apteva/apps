@@ -320,7 +320,7 @@ func TestTelemetryStartupAuthRaceRecoversActivityAndLiveFrames(t *testing.T) {
 	defer stop()
 	done := make(chan struct{})
 	go func() {
-		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{ThreadPrefix: "chat-"}, false)
+		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{ThreadPrefix: "chat-"}, chatFeed)
 		close(done)
 	}()
 	select {
@@ -357,7 +357,7 @@ func TestTelemetryStartupRetryStopsOnUnmount(t *testing.T) {
 	})
 	done := make(chan struct{})
 	go func() {
-		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{}, false)
+		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{}, chatFeed)
 		close(done)
 	}()
 	<-attempted
