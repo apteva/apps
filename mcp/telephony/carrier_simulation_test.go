@@ -380,11 +380,17 @@ func testCarrierSimulationAppHangup(t *testing.T, transport string) {
 
 func TestCarrierSimulationCallerHangsUpWhileRinging(t *testing.T) {
 	f := newCarrierSimFixture(t)
-	result, err := f.handOff(t, carrierSimKindInbound, "sip_cancel", f.inbound(nil, ""))
+	// The simulation's silent caller: {"name":"silence"} with no audio bytes.
+	payload := f.inbound(nil, "")
+	payload["caller_audio"] = map[string]any{"name": "silence"}
+	result, err := f.handOff(t, carrierSimKindInbound, "sip_cancel", payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	call := f.ringingCall(t, "sip_cancel", result)
+	if _, err := f.handOff(t, carrierSimKindPlay, "sip_cancel", map[string]any{"caller_audio": map[string]any{"name": "silence"}}); err != nil {
+		t.Fatalf("silent sip_play: %v", err)
+	}
 	if _, err := f.handOff(t, carrierSimKindDTMF, "sip_cancel", map[string]any{"digits": "1"}); err == nil {
 		t.Fatal("DTMF was accepted before the answer")
 	}

@@ -78,6 +78,12 @@ type carrierSimAudio struct {
 	WAVBase64 string `json:"wav_base64"`
 }
 
+// hasAudio is false for a silent caller: the simulation sends
+// {"name":"silence"} without audio bytes.
+func (a *carrierSimAudio) hasAudio() bool {
+	return a != nil && strings.TrimSpace(a.WAVBase64) != ""
+}
+
 type carrierSimInbound struct {
 	From   string `json:"from"`
 	To     string `json:"to"`
@@ -231,7 +237,7 @@ func (s *carrierSimulator) startInbound(app *App, ctx *sdk.AppCtx, event sdk.Int
 	}
 	var audio []int16
 	var audioRate int
-	if request.CallerAudio != nil {
+	if request.CallerAudio.hasAudio() {
 		if audio, audioRate, err = decodeCarrierSimWAV(request.CallerAudio.WAVBase64); err != nil {
 			return nil, fmt.Errorf("caller audio %q: %w", request.CallerAudio.Name, err)
 		}
@@ -451,6 +457,9 @@ func (c *carrierSimCall) control(event sdk.IntegrationSimulationEvent) (any, err
 		}
 		if err := json.Unmarshal(event.Payload, &request); err != nil || request.CallerAudio == nil {
 			return nil, errors.New("sip_play needs caller_audio")
+		}
+		if !request.CallerAudio.hasAudio() {
+			return map[string]any{"queued_ms": 0}, nil
 		}
 		pcm, rate, err := decodeCarrierSimWAV(request.CallerAudio.WAVBase64)
 		if err != nil {
