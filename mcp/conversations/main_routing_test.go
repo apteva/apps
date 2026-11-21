@@ -253,6 +253,44 @@ func TestDeleteKillsChatThreadAndRetriesFailures(t *testing.T) {
 	}
 }
 
+// A backlog of threads retired by earlier releases must not delay stopping the
+// thread of a conversation deleted just now.
+func TestDeleteStopsNewThreadBeforeRetiredBacklog(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	for i := 0; i < lifecycleBatch+10; i++ {
+		if _, err := app.store.db.Exec(`INSERT INTO retired_conversation_threads(project_id,agent_id,thread_id) VALUES(?,?,?)`,
+			testProject, 999, fmt.Sprintf("chat-old-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conv := mkConversation(t, app, 41)
+	postUserMessage(t, app, conv, "hello")
+	if err := app.store.DeleteConversation(conv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.killRetiredThreads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := sdk.ThreadRef{AgentID: 41, ThreadID: conversationThreadID(conv.ID)}
+	if len(platform.killed) != lifecycleBatch || platform.killed[0] != want {
+		first := sdk.ThreadRef{}
+		if len(platform.killed) > 0 {
+			first = platform.killed[0]
+		}
+		t.Fatalf("killed %d threads, first %+v; want %d starting with %+v", len(platform.killed), first, lifecycleBatch, want)
+	}
+	// The backlog still drains on later passes.
+	for i := 0; i < 3; i++ {
+		_ = app.killRetiredThreads(ctx)
+	}
+	var pending int
+	_ = app.store.db.QueryRow(`SELECT COUNT(*) FROM retired_conversation_threads WHERE killed_at IS NULL`).Scan(&pending)
+	if pending != 0 {
+		t.Fatalf("pending kills=%d, want 0", pending)
+	}
+}
+
 func ageConversation(t *testing.T, app *App, conv *Conversation, days int) {
 	t.Helper()
 	old := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)

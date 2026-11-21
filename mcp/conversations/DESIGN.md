@@ -135,7 +135,10 @@ and reports finished tasks, decisions and agent-wide instructions to main with
 
 Deleting a conversation retires its chat threads (the trigger excludes main),
 and `killRetiredThreads` stops them in Core with backoff until Core confirms or
-reports them gone. The `thread-lifecycle` worker runs every five minutes.
+reports them gone. The `thread-lifecycle` worker runs every five minutes, and
+the delete handler runs one pass immediately. Each pass takes the newest
+retirements first, so a backlog retired by earlier releases cannot delay
+stopping a conversation deleted now.
 
 After `idle_thread_days` (default 14, 0 disables) without any message, a chat
 thread with no pending approval or interaction, queued delivery or live voice

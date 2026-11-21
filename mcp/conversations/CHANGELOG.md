@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.1 — 2026-11-21
+
+- Stop a just-deleted conversation's thread in the same pass, ahead of threads still queued from earlier releases. Previously, right after an upgrade, that backlog could delay the stop by one or more five-minute worker passes.
+
 ## 0.27.0 — 2026-11-21
 
 - Answer an agent's first operator chat from its main thread. Main receives those messages with a short reply rule and replies there, while keeping its own instructions, tools and global conversation access. There is no new label or setting.

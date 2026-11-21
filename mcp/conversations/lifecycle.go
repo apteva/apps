@@ -79,9 +79,11 @@ func (a *App) killRetiredThreads(app *sdk.AppCtx) error {
 		agent           int64
 		attempts        int
 	}
+	// Newest retirements first: a conversation deleted just now is stopped in
+	// this pass even when threads retired by earlier releases are still queued.
 	rows, err := a.store.db.Query(`SELECT project_id,agent_id,thread_id,kill_attempts FROM retired_conversation_threads
 		WHERE killed_at IS NULL AND thread_id!=? AND (next_kill_at IS NULL OR next_kill_at<=?)
-		ORDER BY kill_attempts LIMIT ?`, mainThreadID, sqliteTime(time.Now()), lifecycleBatch)
+		ORDER BY kill_attempts, rowid DESC LIMIT ?`, mainThreadID, sqliteTime(time.Now()), lifecycleBatch)
 	if err != nil {
 		return err
 	}
