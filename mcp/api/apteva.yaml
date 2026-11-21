@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.12.0
+version: 0.13.0
 description: |
+  v0.13.0 Keeps APIs, routes, keys, configurations and stages when a runtime is
+  restored from a snapshot. Routes still reach their functions, and URLs that
+  pointed at the old runtime follow the new one.
+
   v0.12.0 Adds opt-in any_of authentication for routes accepting either a bearer
   session or an API key. Credential carriers select one verifier before
   validation; ambiguous requests fail closed. Both methods retain their verified
@@ -175,7 +179,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.12.0
+    ref: api/v0.13.0
     entry: mcp/api
   port: 8080
   health_check: /health

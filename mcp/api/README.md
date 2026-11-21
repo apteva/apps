@@ -3,6 +3,16 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Snapshot restore (0.13.0)
+
+When an Apteva runtime is restored from a snapshot, the app SDK moves every
+`project_id` to the new runtime before the gateway mounts; API, route, key,
+configuration and stage ids do not change. Function targets keep naming their
+function and authenticated routes keep Functions' `function_ids`, which the
+Functions restore preserves. The restore hook rewrites URLs that embed the old
+runtime's public URL (HTTP route targets and app authorizer issuers).
+Browser-origin policies and stage exposures are registered again at mount.
+
 ## Alternative authentication methods (0.12.0)
 
 An API or route can use `auth.kind: any_of` to accept either a bearer session
