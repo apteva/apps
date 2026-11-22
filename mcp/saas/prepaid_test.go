@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -391,5 +392,51 @@ func TestPrepaid_WalletEmails(t *testing.T) {
 	_ = app.handleCreditsBalanceLow(ctx, sdk.Event{Event: "credits.balance.low", SourceApp: "credits", ProjectID: "proj-test", Data: map[string]any{"subject_type": "customer", "subject_id": "c1"}})
 	if len(pf.platformStub.calls) != before {
 		t.Fatal("non-account wallet event should not send")
+	}
+}
+
+func TestPrepaid_AuthorizeReturnsPricedOutputLimit(t *testing.T) {
+	app, ctx, pf, acct := setupPrepaidAccount(t)
+	meta := map[string]any{"account_id": acct.ID}
+
+	// No max_output_tokens: the hold is priced on the plan estimate (4096 by
+	// default) and that limit is returned so llm caps the provider request.
+	out, err := app.toolUsageAuthorize(ctx, map[string]any{
+		"request_id": "req_limit_default", "token_metadata": meta, "model": "text-fast", "estimated_input_tokens": 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := asMap(t, out)
+	if res["allow"] != true || int64FromAny(res["max_output_tokens"]) != defaultMaxOutputTokens {
+		t.Fatalf("authorize without limit = %#v, want max_output_tokens %d", res, defaultMaxOutputTokens)
+	}
+	held := int64FromAny(res["amount"])
+	ref := strFromAny(res["admission_ref"])
+
+	// Using the whole returned limit with the estimated input never commits
+	// more than was held.
+	out, err = app.toolUsageSettle(ctx, map[string]any{
+		"admission_ref": ref, "status": "completed", "token_metadata": meta,
+		"requested_model": "text-fast", "input_tokens": 1000, "output_tokens": defaultMaxOutputTokens,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdID, _ := strconv.ParseInt(ref, 10, 64)
+	if got := int64FromAny(asMap(t, out)["amount"]); got > held || pf.committed[holdID] > held {
+		t.Fatalf("settle at the returned limit committed %d (stub %d), held %d", got, pf.committed[holdID], held)
+	}
+
+	// An explicit limit is returned unchanged.
+	out, err = app.toolUsageAuthorize(ctx, map[string]any{
+		"request_id": "req_limit_500", "token_metadata": meta, "model": "text-fast",
+		"estimated_input_tokens": 1000, "max_output_tokens": 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := asMap(t, out); int64FromAny(res["max_output_tokens"]) != 500 {
+		t.Fatalf("authorize with 500 = %#v", res)
 	}
 }
