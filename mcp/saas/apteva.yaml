@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.12.0
+version: 0.12.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -41,6 +41,10 @@ description: |
   the per-request admission hook (hold, then commit or release), account API
   keys are issued through the plan's credential provider (llm by default),
   and low-balance and top-up receipt emails go out through messaging.
+  v0.12.1 cancels the linked subscription when an account is cancelled
+  (at period end when the plan sets cancel_at_period_end), retries failed
+  cancels from reconcile and the subscription-cancel-sync worker, and never
+  bills a renewal for a cancelled account.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -212,7 +216,7 @@ provides:
       description: Fetch one SaaS account.
       requires: saas.read
     - name: saas_account_reconcile
-      description: Repair Subscription metadata and Entitlements projections from the account's authoritative SaaS plan.
+      description: Repair Subscription metadata and Entitlements projections from the account's authoritative SaaS plan. For a cancelled account, make sure its subscription is cancelled instead.
       requires: saas.admin
     - name: saas_account_change_plan
       description: Upgrade or downgrade an active account within one Catalog product, including proration and payment orchestration.
@@ -233,7 +237,7 @@ provides:
       description: Resume a suspended, past-due, or cancelled SaaS account.
       requires: saas.admin
     - name: saas_account_cancel
-      description: Cancel a SaaS account.
+      description: Cancel a SaaS account and its subscription (at period end when the plan sets cancel_at_period_end). A failed subscription cancel is recorded on the account and retried; the account stays cancelled.
       requires: saas.admin
     - name: saas_subscription_sync
       description: Apply a subscription lifecycle status to a SaaS account.

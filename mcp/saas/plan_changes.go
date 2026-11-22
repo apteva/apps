@@ -644,6 +644,24 @@ func (a *App) toolAccountReconcile(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 
 	steps := map[string]any{}
+	if acct.Status == StatusCancelled {
+		// A cancelled account keeps no plan access. Reconcile only makes sure
+		// its subscription is cancelled too (retries failed or missing requests).
+		if int64PtrValue(acct.SubscriptionID) != 0 {
+			state := a.cancelAccountSubscription(ctx, pid, acct, subscriptionCancelOpts{
+				AtPeriodEnd: planCancelAtPeriodEnd(plan),
+				Actor:       firstNonEmpty(strArg(args, "actor"), "saas"),
+				Force:       true,
+			})
+			steps["subscription_cancel"] = state
+		}
+		steps["plan_access"] = "skipped_cancelled"
+		updated, err := dbAccountGet(ctx.AppDB(), pid, acct.ID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"account": updated, "plan": plan, "reconciled": true, "steps": steps}, nil
+	}
 	if subID := int64PtrValue(acct.SubscriptionID); subID != 0 {
 		var out map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_metadata", map[string]any{
