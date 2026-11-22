@@ -147,6 +147,12 @@ func (a *App) Workers() []sdk.Worker {
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.retryPendingCRMCustomers(ctx)
 		},
+	}, {
+		Name:     "subscription-cancel-sync",
+		Schedule: "@every 10m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.retryPendingSubscriptionCancels(ctx)
+		},
 	}}
 }
 
@@ -204,7 +210,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolAccountCreate},
 		{Name: "saas_account_get", Description: "Fetch one SaaS account with customer and Billing summary.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
-		{Name: "saas_account_reconcile", Description: "Repair Subscription and Entitlements projections from the account's authoritative SaaS plan.", InputSchema: accountIDSchema(), Handler: a.toolAccountReconcile},
+		{Name: "saas_account_reconcile", Description: "Repair Subscription and Entitlements projections from the account's authoritative SaaS plan. For a cancelled account, make sure its subscription is cancelled instead.", InputSchema: accountIDSchema(), Handler: a.toolAccountReconcile},
 		{Name: "saas_account_change_plan", Description: "Upgrade or downgrade an active account within the same SaaS product, with durable proration and payment orchestration.", InputSchema: schemaObject(map[string]any{
 			"account_id": strSchema(), "target_plan_key": strSchema(), "effective_at": strSchema(), "proration_policy": strSchema(),
 			"discount_policy": strSchema(), "idempotency_key": strSchema(), "success_url": strSchema(), "cancel_url": strSchema(),
@@ -219,7 +225,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_billing_sync", Description: "Refresh linked Billing invoice/payment projections.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "limit": intSchema(), "offset": intSchema()}, nil), Handler: a.toolBillingSync},
 		{Name: "saas_account_suspend", Description: "Suspend a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountSuspend},
 		{Name: "saas_account_resume", Description: "Resume a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountResume},
-		{Name: "saas_account_cancel", Description: "Cancel a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountCancel},
+		{Name: "saas_account_cancel", Description: "Cancel a SaaS account and its subscription (at period end when the plan sets cancel_at_period_end). A failed subscription cancel is recorded on the account and retried; the account stays cancelled.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "reason": strSchema(), "actor": strSchema()}, []string{"account_id"}), Handler: a.toolAccountCancel},
 		{Name: "saas_subscription_sync", Description: "Apply subscription status to a SaaS account.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "subscription_id": intSchema(), "subscription_status": strSchema(), "actor": strSchema(), "allow_cancelled_reactivation": boolSchema()}, []string{"subscription_status"}), Handler: a.toolSubscriptionSync},
 		{Name: "saas_usage_sync", Description: "Pull live usage gauges from configured sources.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "status": strSchema()}, nil), Handler: a.toolUsageSync},
 		{Name: "saas_usage_record", Description: "Upsert one live usage gauge.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema(), "quantity": intSchema(), "source_app": strSchema(), "metadata": objSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolUsageRecord},
@@ -2704,7 +2710,21 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 		return nil, firstErr(err, errors.New("account not found"))
 	}
 	if acct.Status == status {
-		return map[string]any{"account": acct, "changed": false}, nil
+		out := map[string]any{"account": acct, "changed": false}
+		// A repeated explicit cancel retries a subscription cancel that failed
+		// or was never sent.
+		if status == StatusCancelled && event == "cancelled" && int64PtrValue(acct.SubscriptionID) != 0 &&
+			strArg(subscriptionCancelState(acct), "status") != subscriptionCancelDone {
+			out["subscription_cancel"] = a.cancelAccountSubscription(ctx, pid, acct, subscriptionCancelOpts{
+				AtPeriodEnd: a.accountCancelAtPeriodEnd(ctx, pid, acct),
+				Reason:      strArg(args, "reason"),
+				Actor:       actor(args),
+			})
+			if fresh, err := dbAccountGet(ctx.AppDB(), pid, acct.ID); err == nil && fresh != nil {
+				out["account"] = fresh
+			}
+		}
+		return out, nil
 	}
 	if acct.Status == StatusCancelled && status == StatusActive && !boolArg(args, "allow_cancelled_reactivation") {
 		return nil, errors.New("cancelled account requires explicit reactivation policy")
@@ -2741,7 +2761,26 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 		return nil, err
 	}
 	_ = recordEvent(ctx.AppDB(), pid, acct.ID, event, actor(args), map[string]any{"transition_id": transition.ID})
-	return map[string]any{"account": acct, "changed": true, "transition_id": transition.ID}, nil
+	out := map[string]any{"account": acct, "changed": true, "transition_id": transition.ID}
+	if status == StatusCancelled && int64PtrValue(acct.SubscriptionID) != 0 {
+		switch {
+		case event == "cancelled":
+			// Explicit cancel: stop the subscription too. A failure keeps the
+			// account cancelled and is retried by reconcile or the sweep.
+			out["subscription_cancel"] = a.cancelAccountSubscription(ctx, pid, acct, subscriptionCancelOpts{
+				AtPeriodEnd: a.accountCancelAtPeriodEnd(ctx, pid, acct),
+				Reason:      strArg(args, "reason"),
+				Actor:       actor(args),
+			})
+		case strings.HasPrefix(event, "subscription."):
+			// Subscriptions reported the cancel; never call it back.
+			markSubscriptionCancelled(ctx.AppDB(), pid, acct, event)
+		}
+		if fresh, err := dbAccountGet(ctx.AppDB(), pid, acct.ID); err == nil && fresh != nil {
+			out["account"] = fresh
+		}
+	}
+	return out, nil
 }
 
 func (a *App) handleSubscriptionLifecycle(ctx *sdk.AppCtx, event sdk.Event) error {
@@ -2818,6 +2857,15 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return fmt.Errorf("subscription %d is linked to multiple SaaS accounts", subID)
 	}
 	acct := accounts[0]
+	if acct.Status == StatusCancelled {
+		// Never bill a cancelled account. Stop the stray subscription now.
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "renewal.skipped", "saas", map[string]any{
+			"subscription_id": subID, "cycle_id": cycleID, "reason": "account_cancelled",
+			"period_start": periodStart, "period_end": periodEnd,
+		})
+		a.cancelAccountSubscription(ctx, pid, acct, subscriptionCancelOpts{Reason: subscriptionCancelReason, Actor: "saas", Force: true})
+		return nil
+	}
 	collectionMethod := strings.ToLower(strArg(mapFromAny(event.Data["metadata"]), "collection_method"))
 	if collectionMethod == "" {
 		plan, planErr := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)

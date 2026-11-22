@@ -132,6 +132,28 @@ SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
 fulfillment, account-management, usage-write, and manual-payment tools require
 `saas.admin`; customer checkout requires `saas.checkout`.
 
+## Cancelling accounts
+
+`saas_account_cancel` cancels the account and then asks Subscriptions to cancel
+the linked subscription (`subscriptions_cancel`, with the caller's `actor` and
+an optional `reason`, default `account_cancelled`). When the plan metadata sets
+`cancel_at_period_end: true` the subscription runs to the end of its paid
+period; the account itself is cancelled at once either way.
+
+The request is recorded in the account metadata under `subscription_cancel`
+(`requested`, `done` or `failed`, with attempts and the last error). A failed
+call never rolls the account back: it is retried by a repeated
+`saas_account_cancel`, by `saas_account_reconcile`, and by the
+`subscription-cancel-sync` worker every 10 minutes. The worker also cleans up
+accounts cancelled before v0.12.1 whose subscriptions are still active.
+Reconciling a cancelled account only ensures the subscription is cancelled; it
+does not restore plan access.
+
+A cancel reported by Subscriptions (`subscription.cancelled` / `.ended`) is
+marked as done and never sent back. A `subscription.cycle_due` renewal for a
+cancelled account creates no invoice: SaaS records `renewal.skipped` and cancels
+the stray subscription immediately.
+
 ## Recovery and account browsing
 
 The checkout recovery worker resumes failed billing preparation and paid-invoice
