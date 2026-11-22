@@ -99,6 +99,17 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 		input = map[string]any{}
 	}
 	input["_project_id"] = ctx.CurrentProject()
+	if msg.InstallID != 0 {
+		if msg.Type != "call" || msg.InstallID < 0 {
+			ans.Error = "install_id must be a positive app installation id"
+			return ans
+		}
+		if msg.App == "functions" || msg.App == "tables" {
+			ans.Error = "install_id is not supported for " + msg.App + " calls"
+			return ans
+		}
+		parent = sdk.WithAppInstallation(parent, msg.InstallID)
+	}
 	if msg.Type == "call" && msg.App == "tables" {
 		delete(input, "_request_id")
 		if id := correlationID(parent); id != "" {
@@ -126,7 +137,11 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 			err = api.CallAppResultContext(parent, msg.App, msg.Tool, input, &ans.Result)
 		} else if os.Getenv("APTEVA_APP_TOKEN") != "" && os.Getenv("APTEVA_GATEWAY_URL") != "" {
 			var raw json.RawMessage
-			err = callbackRequest(parent, "POST", "/api/apps/callback/apps/"+url.PathEscape(msg.App)+"/call", map[string]any{"tool": msg.Tool, "input": input}, &raw)
+			body := map[string]any{"tool": msg.Tool, "input": input}
+			if msg.InstallID > 0 {
+				body["target_install_id"] = msg.InstallID
+			}
+			err = callbackRequest(parent, "POST", "/api/apps/callback/apps/"+url.PathEscape(msg.App)+"/call", body, &raw)
 			if err == nil {
 				ans.Result, err = unwrapCallback(raw)
 			}

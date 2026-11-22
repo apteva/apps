@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.20.0
+version: 1.21.0
 description: |
+  v1.21.0 Node functions can pin a cross-app call to one installation of
+  the target app: context.call(app, tool, input, { install_id }). Use it
+  when a project has several installs of the same app (for example a
+  staging Telephony beside the default one). Calls without it still go to
+  the project's default installation. Not available for functions/tables.
+
   v1.20.0 Keeps functions, versions, built artifacts and invocation history
   when a runtime is restored from a snapshot. Function ids do not change, and
   invocation policies admit the restored installations of their callers.
@@ -203,7 +209,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.20.0
+    ref: functions/v1.21.0
     entry: mcp/functions
   port: 8080
   health_check: /health

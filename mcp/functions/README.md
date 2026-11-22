@@ -228,6 +228,11 @@ Either way, `context` / `ctx` gives you:
   another Apteva app's MCP tool. The sidecar mediates it; your code
   never holds a platform token.
   `await context.call("tables", "rows_insert", {...})`.
+  Node only: pass `{ install_id: <id> }` as a fourth argument to reach
+  one exact installation when the project has several installs of that
+  app (`context.call("telephony", "telephony_call_get", { call_id },
+  { install_id: 124 })`). Without it the platform uses the project's
+  default installation. Not supported for `functions` and `tables`.
 - **`context.integration(conn, tool, input)`** (`ctx.Integration` in
   Go) — invoke a tool on an integration connection (Pushover, Slack,
   Resend, anything in the integrations catalog). `conn` is either a

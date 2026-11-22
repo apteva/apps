@@ -88,17 +88,20 @@ type wireRequest struct {
 // to auto-resolve in the function's project). servicePlatformIntegration
 // handles both shapes.
 type wireResponse struct {
-	Type       string            `json:"type"`
-	ID         int64             `json:"id"`
-	OK         bool              `json:"ok"`
-	Result     json.RawMessage   `json:"result"`
-	Error      string            `json:"error"`
-	Logs       []string          `json:"logs"`
-	CallID     int64             `json:"callId"`
-	App        string            `json:"app"`
-	Tool       string            `json:"tool"`
-	Input      json.RawMessage   `json:"input"`
-	Conn       json.RawMessage   `json:"conn"`
+	Type   string          `json:"type"`
+	ID     int64           `json:"id"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result"`
+	Error  string          `json:"error"`
+	Logs   []string        `json:"logs"`
+	CallID int64           `json:"callId"`
+	App    string          `json:"app"`
+	Tool   string          `json:"tool"`
+	Input  json.RawMessage `json:"input"`
+	Conn   json.RawMessage `json:"conn"`
+	// InstallID optionally pins context.call to one installation of the
+	// target app (several installs of an app can share a project).
+	InstallID  int64             `json:"installId,omitempty"`
 	StatusCode int               `json:"statusCode"`
 	Headers    map[string]string `json:"headers"`
 	Data       string            `json:"data"`
@@ -564,6 +567,10 @@ func servicePlatformCall(ctx *sdk.AppCtx, msg wireResponse) callResult {
 	ans := callResult{Type: "call_result", CallID: msg.CallID}
 	if msg.App == "" || msg.Tool == "" {
 		ans.Error = "context.call needs both an app and a tool name"
+		return ans
+	}
+	if msg.InstallID != 0 {
+		ans.Error = "context.call install_id is not available in this context"
 		return ans
 	}
 	if ctx == nil || ctx.PlatformAPI() == nil {

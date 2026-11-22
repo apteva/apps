@@ -19,7 +19,7 @@
 // context = { functionName, functionId, runtime, env, log, call, integration,
 //             stream, sse }.
 //
-// context.call(app, tool, input) reaches sibling Apteva apps.
+// context.call(app, tool, input[, {install_id}]) reaches sibling Apteva apps.
 // context.integration(conn, tool, input) reaches an in-project
 //   integration connection (Pushover, Slack, Resend, ...). `conn` is
 //   the numeric connection_id from the Connections panel OR the app
@@ -130,16 +130,26 @@ async function main() {
   let callSeq = 0;
   const pendingCalls = new Map(); // callId -> { resolve, reject }
 
-  function makeCall(app, tool, input, invocationId) {
+  function makeCall(app, tool, input, invocationId, options) {
     return new Promise((resolve, reject) => {
       if (!app || !tool) {
         reject(new Error("context.call(app, tool, input): app and tool are required"));
         return;
       }
+      // options.install_id pins the call to one installation of the target
+      // app when a project has several (e.g. a staging telephony install).
+      const installId = options?.install_id ?? options?.installId;
+      if (installId !== undefined && installId !== null && installId !== "" &&
+          !(Number.isSafeInteger(Number(installId)) && Number(installId) > 0)) {
+        reject(new Error("context.call options.install_id must be a positive integer"));
+        return;
+      }
       const callId = ++callSeq;
       pendingCalls.set(callId, { resolve, reject });
       try {
-        sock.write(encodeFrame({ type: "call", id: invocationId, callId, app, tool, input: input ?? {} }));
+        const frame = { type: "call", id: invocationId, callId, app, tool, input: input ?? {} };
+        if (installId !== undefined && installId !== null && installId !== "") frame.installId = Number(installId);
+        sock.write(encodeFrame(frame));
       } catch (e) {
         pendingCalls.delete(callId);
         reject(e);
@@ -240,7 +250,7 @@ async function main() {
       runtime: process.env.APTEVA_FUNCTION_RUNTIME || "",
       env: { ...process.env },
       log: (...a) => console.log(...a),
-      call: (app, tool, input) => {assertActive();return makeCall(app, tool, input,id)},
+      call: (app, tool, input, options) => {assertActive();return makeCall(app, tool, input,id,options)},
       integration: (conn, tool, input) => {assertActive();return makeIntegration(conn, tool, input,id)},
       stream: { start: startStream, write: writeStream },
       sse: { send: sendSSE, comment: sendSSEComment },
