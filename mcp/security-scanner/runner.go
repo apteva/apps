@@ -35,6 +35,7 @@ type scanManager struct {
 	dbMu    sync.Mutex // serialise writes from host workers
 	vulns   func(db *sql.DB) *vulnSource
 	resolve resolver
+	reverse reverseResolver
 	wg      sync.WaitGroup
 }
 
@@ -189,6 +190,20 @@ type hostResult struct {
 func (m *scanManager) run(ctx context.Context, app *sdk.AppCtx, pid string, s *Scan, plan portPlan, opt scanOptions, hostnames map[string]string) {
 	db := app.AppDB()
 	m.exec(db, `UPDATE scans SET status='running', phase='scanning', started_at=? WHERE id=?`, nowUTC(), s.ID)
+	// Name bare IPs so TLS/HTTP probes send SNI and Host (see sni.go).
+	if scope, _, err := loadScope(db, pid); err == nil {
+		named := tlsNames(ctx, scope, s.Addresses, hostnames, m.resolve, m.reverse)
+		if len(named) > 0 {
+			merged := make(map[string]string, len(hostnames)+len(named))
+			for a, n := range hostnames {
+				merged[a] = n
+			}
+			for a, n := range named {
+				merged[a] = n
+			}
+			hostnames = merged
+		}
+	}
 	lim := newRateLimiter(opt.RatePPS)
 	timeout := time.Duration(opt.TimeoutMS) * time.Millisecond
 

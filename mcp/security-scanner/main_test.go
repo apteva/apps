@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,8 @@ func newTestApp(t *testing.T) (*App, *sdk.AppCtx) {
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Keep tests off real DNS: no reverse names unless a test sets them.
+	app.scans.reverse = func(context.Context, string) ([]string, error) { return nil, errors.New("no PTR in tests") }
 	t.Cleanup(func() { _ = app.OnUnmount(ctx) })
 	return app, ctx
 }

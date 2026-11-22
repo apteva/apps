@@ -275,6 +275,10 @@ func (p *prober) probeHTTP(ctx context.Context, addr string, port int, overTLS b
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if !overTLS && plainHTTPOnTLSPort(resp.StatusCode, body) {
+		// The port speaks TLS; let probeTLS fingerprint it properly.
+		return false
+	}
 	if overTLS {
 		info.Service = "https"
 	} else {
@@ -505,4 +509,16 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max]
+}
+
+// plainHTTPOnTLSPort recognises the error servers send when a plain HTTP
+// request reaches a TLS port (Go/Caddy, nginx, Apache).
+func plainHTTPOnTLSPort(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	b := strings.ToLower(string(body))
+	return strings.Contains(b, "http request to an https server") ||
+		strings.Contains(b, "plain http request was sent to https port") ||
+		strings.Contains(b, "speaking plain http to an ssl-enabled server")
 }
