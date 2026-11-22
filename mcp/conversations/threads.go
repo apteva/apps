@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,24 @@ func conversationThreadID(conversationID string) string { return "chat-" + conve
 // fan-out when a room addresses more than one agent.
 func conversationThreadEventID(conversationID string, messageID, agentID int64) string {
 	return fmt.Sprintf("conversation:%s:message:%d:agent:%d", conversationID, messageID, agentID)
+}
+
+// parseConversationThreadEventID reverses conversationThreadEventID. Other
+// tracked events (idle checks, dormancy notes) do not parse.
+func parseConversationThreadEventID(id string) (conversationID string, messageID, agentID int64, ok bool) {
+	parts := strings.Split(id, ":")
+	if len(parts) != 6 || parts[0] != "conversation" || parts[1] == "" || parts[2] != "message" || parts[4] != "agent" {
+		return "", 0, 0, false
+	}
+	messageID, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || messageID <= 0 {
+		return "", 0, 0, false
+	}
+	agentID, err = strconv.ParseInt(parts[5], 10, 64)
+	if err != nil || agentID <= 0 {
+		return "", 0, 0, false
+	}
+	return parts[1], messageID, agentID, true
 }
 
 // spawnedThreads caches eventless ensure calls. Inbound messages deliberately

@@ -328,6 +328,9 @@ Tell the visitor you are checking and relay the decision when main replies.
   conversation in its context.
 - `conversations_list` — main lists the conversations the agent participates
   in. A conversation thread already has its authoritative id.
+- An agent without a project (such as the Apteva Helper) works only in the
+  conversations it was added to, using the conversation id from the message.
+  It cannot list or create conversations.
 
 ## Rooms and Telegram
 

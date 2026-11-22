@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27.4 — 2026-11-22
+
+- Let agents without a project, such as the Apteva Helper, reply in conversations they were added to. Their `conversations_send` failed with "authenticated project required", so the reply never arrived. Their calls now run in the conversation's project. They still cannot list or create conversations, and their conversation threads still cannot write to any other conversation.
+- Clear Thinking when an agent's turn ends without a reply, for example after a refused send. Core reports when main has finished with a message, and that now settles the response.
+- Settle a response on the agent's reply when this install never receives that agent's telemetry, instead of waiting for a receipt that cannot arrive. A project-scoped install does not see telemetry from agents without a project.
+
 ## 0.27.3 — 2026-11-21
 
 - Actually clear the working dot and Thinking after main replies in the conversation it answers. The app only listened to Core telemetry for `chat-` threads, so it never saw main receive the message and ignored main's final reply. 0.27.2 fixed how that receipt is matched but could not help without the events.

@@ -355,20 +355,29 @@ type callIdentity struct {
 
 // requireAgentCaller fails closed: a tool call without caller identity
 // cannot write into conversations. (The SDK treats nil caller as full
-// access for back-compat; a conversation store must not.)
+// access for back-compat; a conversation store must not.) The project may be
+// empty: agents without a project, such as the Apteva Helper, act only in
+// conversations they were added to (requireParticipant), and cannot list or
+// create conversations (requireCallerProject).
 func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 	caller := sdk.CallerFrom(ctx)
 	if caller == nil || caller.AgentID == 0 {
 		return nil, errors.New("caller identity required: this tool must be called by an agent")
 	}
-	if strings.TrimSpace(caller.ProjectID) == "" {
-		return nil, errors.New("authenticated project context required")
-	}
 	if strings.TrimSpace(caller.ThreadID) == "" {
 		return nil, errors.New("trusted agent thread context required")
 	}
 	return &callIdentity{AgentID: caller.AgentID, ThreadID: strings.TrimSpace(caller.ThreadID),
-		ToolCallID: caller.ToolCallID, ProjectID: caller.ProjectID}, nil
+		ToolCallID: caller.ToolCallID, ProjectID: strings.TrimSpace(caller.ProjectID)}, nil
+}
+
+// requireCallerProject guards the tools that act across a project rather than
+// on a conversation the caller was added to.
+func requireCallerProject(from *callIdentity, tool string) error {
+	if from.ProjectID == "" {
+		return fmt.Errorf("%s needs an authenticated project; this agent has no project, so it can act only in conversations it was added to (use their conversation_id)", tool)
+	}
+	return nil
 }
 
 // boundConversation returns the conversation that owns the caller's opaque
@@ -381,7 +390,7 @@ func (a *App) boundConversation(from *callIdentity) (*Conversation, error) {
 		return nil, nil
 	}
 	var retired int
-	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM retired_conversation_threads WHERE project_id=? AND agent_id=? AND thread_id=?`, from.ProjectID, from.AgentID, from.ThreadID).Scan(&retired); err != nil {
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM retired_conversation_threads WHERE (?='' OR project_id=?) AND agent_id=? AND thread_id=?`, from.ProjectID, from.ProjectID, from.AgentID, from.ThreadID).Scan(&retired); err != nil {
 		return nil, err
 	}
 	if retired > 0 {
@@ -430,13 +439,17 @@ func (a *App) requireConversationArg(from *callIdentity, args map[string]any) (*
 }
 
 // requireParticipant loads the conversation and verifies the calling
-// agent belongs to it.
+// agent belongs to it. A caller with a project must match the conversation's
+// project. A caller without one (such as the Apteva Helper) is authorized by
+// its participant row alone, which only project users can add; the rest of
+// the call then runs in the conversation's project.
 func (a *App) requireParticipant(from *callIdentity, conversationID string) (*Conversation, error) {
 	conv, err := a.store.GetConversation(conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("conversation not found: %s", conversationID)
 	}
-	if conv.ProjectID != from.ProjectID {
+	projectless := from.ProjectID == ""
+	if !projectless && conv.ProjectID != from.ProjectID {
 		return nil, fmt.Errorf("conversation not found: %s", conversationID)
 	}
 	ok, err := a.store.IsParticipantAgent(conversationID, from.AgentID)
@@ -452,6 +465,9 @@ func (a *App) requireParticipant(from *callIdentity, conversationID string) (*Co
 	}
 	if bound != nil && bound.ID != conv.ID {
 		return nil, fmt.Errorf("thread %s belongs to conversation %s and cannot operate on conversation %s", from.ThreadID, bound.ID, conv.ID)
+	}
+	if projectless {
+		from.ProjectID = conv.ProjectID
 	}
 	return conv, nil
 }
@@ -687,6 +703,9 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
+	if err := requireCallerProject(from, "conversations_create"); err != nil {
+		return nil, err
+	}
 	if err := a.requireGlobalCaller(from, "conversations_create"); err != nil {
 		return nil, err
 	}
@@ -714,6 +733,9 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireCallerProject(from, "conversations_list"); err != nil {
 		return nil, err
 	}
 	if err := a.requireGlobalCaller(from, "conversations_list"); err != nil {

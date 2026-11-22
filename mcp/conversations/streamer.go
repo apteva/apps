@@ -78,14 +78,20 @@ type streamer struct {
 	// threads, which answer one operator conversation each. Without it,
 	// main's responses settle on durable replies instead of Core receipts.
 	mainTelemetryConnected bool
-	hub                    *hub
-	resolve                func(int64, string) string
-	throttle               time.Duration
-	mu                     sync.Mutex
-	buffers                map[string]*streamState
-	lastEmit               map[string]string
-	touched                map[string]time.Time
-	ackTimes               map[string]time.Time
+	// telemetrySeen holds the agents whose Core telemetry the feeds have
+	// delivered. The server shows an install only its own project's
+	// telemetry, so a project-scoped install never sees an agent without a
+	// project (such as the Apteva Helper). Such an agent's responses must not
+	// wait for a receipt that cannot arrive.
+	telemetrySeen map[int64]bool
+	hub           *hub
+	resolve       func(int64, string) string
+	throttle      time.Duration
+	mu            sync.Mutex
+	buffers       map[string]*streamState
+	lastEmit      map[string]string
+	touched       map[string]time.Time
+	ackTimes      map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
@@ -125,7 +131,7 @@ func newStreamer(h *hub) *streamer {
 		buffers:        map[string]*streamState{},
 		lastEmit:       map[string]string{},
 		touched:        map[string]time.Time{}, ackTimes: map[string]time.Time{},
-		pendingAcks: map[string]string{},
+		pendingAcks: map[string]string{}, telemetrySeen: map[int64]bool{},
 	}
 }
 
@@ -214,6 +220,13 @@ func streamCallKey(agentID int64, threadID, callID string) string {
 // the feed loop needs no per-event gating.
 func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON string, ts time.Time) {
 	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.telemetrySeen[agentID] = true
+	s.mu.Unlock()
+	if eventType == "event.settled" {
+		s.settleTrackedEvent(agentID, threadID, dataJSON)
 		return
 	}
 	var conversationID string
@@ -612,7 +625,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	responseEvents := []string{"event.received", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
+	responseEvents := []string{"event.received", "event.settled", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events: responseEvents, ThreadPrefix: "chat-",
 	}, chatFeed)

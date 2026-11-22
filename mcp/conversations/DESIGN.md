@@ -36,6 +36,12 @@ inspection/retry apply that resource rule. Private cards have no project-wide
 content delivery. A public *audience* controls visitor-facing agent behavior;
 it does not remove authentication or make a private row project-visible.
 
+Agent tools take the caller's project from the platform. An agent without a
+project (the Apteva Helper) is authorized by its participant row alone, which
+only project users can add, and its call then runs in the conversation's
+project. It cannot list or create conversations. Its thread binding is looked
+up in every project, so its conversation threads stay confined as anyone's do.
+
 Creation initializes the roster transactionally. Reusing a key requires access
 before returning the row. `app:<name>:inbox` is reserved for authenticated app
 callers. Agent-created topic keys are deterministic per agent/title. Archiving
@@ -125,7 +131,11 @@ one receipt-gated response main owns per agent; approval receipts on main stay
 ungated and settle on durable messages. Tool starts are recorded only inside
 that owned response, and results only update rows recorded so. Each response
 checks the feed covering its own thread: without main's feed, main's responses
-settle on main's durable reply. Core tags those deliveries with their source
+settle on main's durable reply, and so do responses for an agent the feeds
+have never shown (a project-scoped install never sees agents without a
+project). Core reports `event.settled` with the message's event ID when main
+reaches its wait boundary; that ends the response even if main never replied.
+Core tags those deliveries with their source
 ("[console] [chat] ...") and reports the tag as `source`, so the inbound
 preview is matched after that tag, against the bytes Core kept. Any notice
 added to an inbound message (main's reply rule, a resume notice) follows the

@@ -414,15 +414,18 @@ func (s *store) FindAgentConversationByTitle(projectID string, agentID int64, ti
 // so an old live thread cannot silently become an unbound global caller.
 func (s *store) ConversationForAgentThread(projectID string, agentID int64, threadID string) (*Conversation, error) {
 	threadID = strings.TrimSpace(threadID)
-	if strings.TrimSpace(projectID) == "" || agentID <= 0 || threadID == "" {
+	projectID = strings.TrimSpace(projectID)
+	if agentID <= 0 || threadID == "" {
 		return nil, nil
 	}
+	// An empty project is an agent without one (such as the Apteva Helper):
+	// its conversation threads stay bound to their conversation in any project.
 	conv, err := scanConversation(s.db.QueryRow(`
 		SELECT `+prefixCols("c.", conversationCols)+`
 		FROM conversation_agent_threads t
 		JOIN conversations c ON c.id = t.conversation_id
-		WHERE c.project_id = ? AND t.agent_id = ? AND t.thread_id = ?
-		LIMIT 1`, projectID, agentID, threadID))
+		WHERE (? = '' OR c.project_id = ?) AND t.agent_id = ? AND t.thread_id = ?
+		LIMIT 1`, projectID, projectID, agentID, threadID))
 	if err == nil {
 		return conv, nil
 	}
@@ -431,8 +434,8 @@ func (s *store) ConversationForAgentThread(projectID string, agentID int64, thre
 	}
 	conv, err = scanConversation(s.db.QueryRow(`SELECT `+prefixCols("c.", conversationCols)+`
 		FROM conversation_voice_sessions v JOIN conversations c ON c.id=v.conversation_id
-		WHERE c.project_id=? AND v.agent_id=? AND v.thread_id=? AND v.status IN ('starting','active')
-		LIMIT 1`, projectID, agentID, threadID))
+		WHERE (?='' OR c.project_id=?) AND v.agent_id=? AND v.thread_id=? AND v.status IN ('starting','active')
+		LIMIT 1`, projectID, projectID, agentID, threadID))
 	if err == nil {
 		return conv, nil
 	}

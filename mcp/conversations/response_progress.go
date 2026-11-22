@@ -107,6 +107,43 @@ func (s *streamer) feedConnectedLocked(thread string) bool {
 	return s.telemetryConnected
 }
 
+// awaitingReceiptLocked reports whether p must wait for Core's receipt of its
+// message before a durable reply may settle it. Only while the feed covering
+// its thread is connected and has shown this agent's telemetry: an agent the
+// install cannot see (no project, for a project-scoped install) never sends
+// a receipt, so its response settles on the durable reply.
+func (s *streamer) awaitingReceiptLocked(p *responseProgressState) bool {
+	return p.inboundPreview != "" && !p.inboundReceived && s.feedConnectedLocked(p.threadID) && s.telemetrySeen[p.agentID]
+}
+
+// settleTrackedEvent ends the response to a message when Core reports that
+// the turn which consumed it settled (the thread reached its wait boundary).
+// A turn can end without a reply, say after a refused conversations_send;
+// Thinking would otherwise stay on. A reply has already settled the
+// response, and a newer message's response has another id, so this is then
+// a no-op. Core tracks the events of main; chat threads end with pace/done.
+func (s *streamer) settleTrackedEvent(agent int64, thread, raw string) {
+	var d struct {
+		SourceEventID string `json:"source_event_id"`
+	}
+	if json.Unmarshal([]byte(raw), &d) != nil {
+		return
+	}
+	chat, messageID, eventAgent, ok := parseConversationThreadEventID(d.SourceEventID)
+	if !ok || eventAgent != agent {
+		return
+	}
+	s.mu.Lock()
+	p := s.responses[responseProgressKey(chat, agent)]
+	match := p != nil && p.threadID == thread && p.AfterMessageID == messageID
+	s.mu.Unlock()
+	if !match {
+		return
+	}
+	s.settleAck(chat, agent)
+	s.finishResponse(chat, agent, messageID)
+}
+
 // mainResponseChat returns the conversation whose open response main owns for
 // agent, and whether Core has received that message. Only receipt-gated
 // responses count: the conversation main answers has at most one per agent.
@@ -140,7 +177,7 @@ func (s *streamer) finishResponse(chat string, agent int64, afterMessageIDs ...i
 func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64, afterMessageIDs ...int64) {
 	s.mu.Lock()
 	p := s.responses[responseProgressKey(chat, agent)]
-	if p == nil || (len(afterMessageIDs) == 0 && s.feedConnectedLocked(p.threadID) && p.inboundPreview != "" && !p.inboundReceived) || (len(afterMessageIDs) > 0 && p.AfterMessageID != afterMessageIDs[0]) {
+	if p == nil || (len(afterMessageIDs) == 0 && s.awaitingReceiptLocked(p)) || (len(afterMessageIDs) > 0 && p.AfterMessageID != afterMessageIDs[0]) {
 		s.mu.Unlock()
 		return
 	}
@@ -165,7 +202,7 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 }
 func (s *streamer) intermediateReply(chat string, agent int64) {
 	s.mu.Lock()
-	if p := s.responses[responseProgressKey(chat, agent)]; p != nil && (!s.feedConnectedLocked(p.threadID) || p.inboundPreview == "" || p.inboundReceived) {
+	if p := s.responses[responseProgressKey(chat, agent)]; p != nil && !s.awaitingReceiptLocked(p) {
 		// A progress message is part of the current response, so subsequent
 		// pacing belongs to this response even when Core does not emit another
 		// llm.start before sleeping. Acknowledgements do not call this method,
