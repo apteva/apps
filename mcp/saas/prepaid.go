@@ -671,7 +671,13 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if holdID == 0 {
 		return nil, errors.New("credits reserve returned no hold")
 	}
-	return map[string]any{"allow": true, "admission_ref": strconv.FormatInt(holdID, 10), "hold_id": holdID, "amount": amount, "available_after": reserve.AvailableAfter}, nil
+	// Return the output limit the hold was priced on. llm caps the provider
+	// request at it (max_tokens), so settle can never exceed the hold on
+	// output. Without it a request with no max_tokens runs unbounded.
+	return map[string]any{
+		"allow": true, "admission_ref": strconv.FormatInt(holdID, 10), "hold_id": holdID,
+		"amount": amount, "available_after": reserve.AvailableAfter, "max_output_tokens": maxOutput,
+	}, nil
 }
 
 func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error) {

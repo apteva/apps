@@ -435,7 +435,10 @@ Account keys point llm's admission hook at SaaS:
   account cache, prices the worst case (estimated input + max output + one
   request) and calls `credits_reserve` with reference
   `<source_app>/request/<request_id>` and scope `project:<token_metadata.project>`.
-  Returns `{allow: true, admission_ref: <hold_id>}` or a refusal:
+  Returns `{allow: true, admission_ref: <hold_id>, max_output_tokens}` or a
+  refusal. `max_output_tokens` is the output limit the hold was priced on: the
+  request's own limit, else the plan's `max_output_tokens_estimate` (default
+  4096). llm caps the provider request at it, so output never overruns the hold.
 
   | Reason | HTTP | error_type |
   |---|---|---|
