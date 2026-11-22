@@ -101,6 +101,8 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Topic: "invoice.payment_failed", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "invoice.payment_action_required", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "payment_method.attached", Handler: a.handlePaymentMethodAttached},
+		{Topic: "credits.balance.low", Handler: a.handleCreditsBalanceLow},
+		{Topic: "credits.topup.paid", Handler: a.handleCreditsTopupPaid},
 	}
 }
 
@@ -224,7 +226,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_usage_get", Description: "Return live usage totals and plan limits.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "customer_id": intSchema(), "feature_key": strSchema()}, nil), Handler: a.toolUsageGet},
 		{Name: "saas_access_check", Description: "Check account status and usage limit for a feature.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolAccessCheck},
 	}
-	return append(tools, a.creditMCPTools()...)
+	tools = append(tools, a.creditMCPTools()...)
+	return append(tools, a.prepaidMCPTools()...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -400,6 +403,7 @@ type Account struct {
 	Customer        *Customer       `json:"customer,omitempty"`
 	Billing         *BillingSummary `json:"billing,omitempty"`
 	Credits         any             `json:"credits,omitempty"`
+	Wallet          any             `json:"wallet,omitempty"`
 	Entitlements    any             `json:"entitlements,omitempty"`
 	Usage           []UsageTotal    `json:"usage,omitempty"`
 }
@@ -960,7 +964,7 @@ func (a *App) toolAccountCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	if plan != nil && (plan.BillingMode != "free" || plan.SubscriptionRequired) {
+	if plan != nil && (plan.BillingMode == "paid" || plan.SubscriptionRequired) {
 		return nil, errors.New("paid and subscription plans must be created through saas_checkout_create")
 	}
 	acct, activated, err := a.createAccount(ctx, args)
@@ -989,6 +993,7 @@ func (a *App) toolAccountGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	_ = a.enrichAccountReport(ctx, acct)
+	a.attachWallets(ctx, pid, []*Account{acct})
 	return map[string]any{"account": acct}, nil
 }
 
@@ -1004,6 +1009,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	a.attachWallets(ctx, pid, out)
 	pending, err := dbBillingProjectionPendingCount(ctx.AppDB(), pid, "")
 	if err != nil {
 		return nil, err
@@ -1439,7 +1445,7 @@ func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	usageUnknown := len(staleSources) > 0
-	return map[string]any{
+	out := map[string]any{
 		"allowed":       allowedStatus && entitlement.Allowed && !overLimit && !usageUnknown,
 		"entitled":      entitlement.Allowed,
 		"status":        acct.Status,
@@ -1447,7 +1453,28 @@ func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		"usage_unknown": usageUnknown,
 		"stale_sources": staleSources,
 		"usage":         usage,
-	}, nil
+	}
+	// Prepaid accounts also need credit: access depends on the balance,
+	// not on a plan payment.
+	plan, err := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+	if err != nil {
+		return nil, err
+	}
+	if isPrepaidPlan(plan) {
+		walletOut, err := a.prepaidWallet(ctx, pid, acct.ID, prepaidSettingsFor(plan).CreditsUnit)
+		if err != nil {
+			return nil, err
+		}
+		wallet := unwrapMap(walletOut, "wallet")
+		available := int64FromAny(wallet["available"])
+		out["credit_available"] = available
+		out["credits_unit"] = prepaidSettingsFor(plan).CreditsUnit
+		if available <= 0 {
+			out["allowed"] = false
+			out["reason"] = "no_credit"
+		}
+	}
+	return out, nil
 }
 
 func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, bool, error) {
@@ -1593,6 +1620,13 @@ func (a *App) resumeProvisioning(ctx *sdk.AppCtx, pid string, acct *Account, cus
 	}); err != nil {
 		return false, err
 	}
+	if isPrepaidPlan(plan) {
+		if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "credits_wallet", func() (any, error) {
+			return a.ensurePrepaidWallet(ctx, pid, acct, customer, plan)
+		}); err != nil {
+			return false, err
+		}
+	}
 	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "fulfillment", func() (any, error) {
 		if boolArg(provisioning, "skip_fulfillment") {
 			return map[string]any{"skipped": true}, nil
@@ -1687,7 +1721,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	requiresCommerce := plan.BillingMode != "free" || plan.SubscriptionRequired
+	requiresCommerce := plan.BillingMode == "paid" || plan.SubscriptionRequired
 	if (discountID != 0 || discountCode != "") && !requiresCommerce {
 		return nil, errors.New("discounts require a Catalog-backed subscription plan")
 	}
@@ -2698,6 +2732,10 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 			return nil, err
 		}
 	}
+	pricing.invalidateAccount(pid, acct.ID)
+	if status == StatusCancelled {
+		a.revokeAllAccountKeys(ctx, pid, acct.ID)
+	}
 	acct, err = dbAccountGet(ctx.AppDB(), pid, acct.ID)
 	if err != nil {
 		return nil, err
@@ -3480,8 +3518,8 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 		return nil, errors.New("name required")
 	}
 	billingMode := firstNonEmpty(strArg(args, "billing_mode"), "free")
-	if billingMode != "free" && billingMode != "paid" {
-		return nil, errors.New("billing_mode must be free or paid")
+	if billingMode != "free" && billingMode != "paid" && billingMode != billingModePrepaid {
+		return nil, errors.New("billing_mode must be free, paid or prepaid")
 	}
 	priceID := int64Arg(args, "catalog_price_id")
 	discountID := int64Arg(args, "catalog_discount_id")
@@ -3495,6 +3533,11 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	metadata := mapFromAny(args["metadata"])
 	if metadata == nil {
 		metadata = map[string]any{}
+	}
+	if billingMode == billingModePrepaid {
+		if err := validatePrepaidPlan(args, metadata); err != nil {
+			return nil, err
+		}
 	}
 	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
 		var existingMetadata string
@@ -3527,6 +3570,7 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
+	pricing.invalidatePlan(pid, key)
 	return dbPlanGet(db, pid, key)
 }
 
