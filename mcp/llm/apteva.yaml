@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.6.0
+version: 0.6.1
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes text, image, audio, and
@@ -21,6 +21,9 @@ scopes: [project, global]
 min_apteva_version: "0.11.0"
 
 requires:
+  # Admission hooks name their billing app at runtime (token or policy
+  # config), so the target cannot be declared in requires.apps.
+  dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.connections.read

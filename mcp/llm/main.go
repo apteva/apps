@@ -28,13 +28,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.6.0
+version: 0.6.1
 description: Generic OpenAI-compatible text, image, audio, and embedding access with streaming, per-minute limits, admission hooks, and provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
 requires:
+  # Admission hooks name their billing app at runtime (token or policy
+  # config), so the target cannot be declared in requires.apps.
+  dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.connections.read
@@ -191,7 +194,7 @@ const (
 	imageTokenEstimate   = 1024
 )
 
-const appVersion = "0.6.0"
+const appVersion = "0.6.1"
 
 type App struct {
 	httpClient *http.Client
