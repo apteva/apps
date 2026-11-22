@@ -2286,12 +2286,16 @@ func buildSearchWhere(pid, q string, filters []any) ([]string, []any, error) {
 			COALESCE(first_name,'') LIKE ? OR
 			COALESCE(last_name,'')  LIKE ? OR
 			COALESCE(display_name,'') LIKE ? OR
+			TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) LIKE ? OR
+			TRIM(COALESCE(last_name,'') || ' ' || COALESCE(first_name,'')) LIKE ? OR
 			COALESCE(primary_email,'') LIKE ? OR
 			COALESCE(primary_phone,'') LIKE ? OR
 			COALESCE(company,'') LIKE ?
 		)`)
-		like := "%" + strings.ToLower(q) + "%"
-		args = append(args, like, like, like, like, like, like)
+		// Full-name queries ("Jordan Lee", "Lee Jordan") match the joined
+		// name; collapse internal whitespace so "Jordan  Lee" still hits.
+		like := "%" + strings.ToLower(strings.Join(strings.Fields(q), " ")) + "%"
+		args = append(args, like, like, like, like, like, like, like, like)
 	}
 
 	for _, f := range filters {

@@ -215,6 +215,10 @@ func TestSearch_FreeTextMatchesNameAndEmail(t *testing.T) {
 		{"alice", 1},
 		{"acme", 2}, // matches Alice's email + Charlie's company
 		{"dylan", 1},
+		{"Alice Cooper", 1}, // full name spans first_name + last_name
+		{"cooper alice", 1}, // reversed order
+		{"Bob  Dylan", 1},   // extra whitespace
+		{"Alice Dylan", 0},  // mixed names must not match
 		{"nonexistent", 0},
 	}
 	for _, c := range cases {

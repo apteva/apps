@@ -1,4 +1,11 @@
-# CRM v0.9.28
+# CRM v0.9.29
+
+Release `crm/v0.9.29`: free-text contact search (`contacts_search` and the HTTP
+search route) matches full names. A query also compares against the joined
+`first_name last_name` and `last_name first_name`, so "Jordan Lee" finds a
+contact created with only first and last name; repeated spaces in the query
+are collapsed. A first and last name from different contacts still match
+nothing. No migrations. Pins app-sdk v0.115.0.
 
 Release `crm/v0.9.28`: inbound email from an automated sender (bounces, DMARC
 reports, service notifications) no longer opens one conversation per message.
