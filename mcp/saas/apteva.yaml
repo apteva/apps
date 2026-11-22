@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.11.0
+version: 0.12.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -34,6 +34,13 @@ description: |
   defines metered one-time prices, Checkout preserves their metadata, Billing
   emits payment/refund events, and Entitlements owns the append-only credit
   ledger and reservations.
+  v0.12.0 adds prepaid plans (billing_mode: prepaid): accounts run on a
+  Credits wallet instead of a subscription, with optional signup credit and
+  a low-balance threshold. Plan meters link usage (e.g. llm model:text-fast)
+  to Catalog metered prices, saas_usage_authorize / saas_usage_settle act as
+  the per-request admission hook (hold, then commit or release), account API
+  keys are issued through the plan's credential provider (llm by default),
+  and low-balance and top-up receipt emails go out through messaging.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -89,6 +96,17 @@ requires:
     - name: crm
       reason: Optionally sync SaaS customers as duplicate-safe CRM contacts without coupling Auth identities to CRM.
       optional: true
+    - name: credits
+      version: ">=0.1.0"
+      reason: prepaid plans — account wallets, per-request holds and commits, spending caps, top-ups; only needed for billing_mode prepaid
+      optional: true
+      events:
+        - credits.balance.low
+        - credits.topup.paid
+    - name: llm
+      version: ">=0.6.0"
+      reason: default credential provider for prepaid account API keys, with SaaS as the token's admission hook
+      optional: true
     - name: messaging
       reason: transactional email — payment links, receipts, failed-payment notices, and trial-ending reminders; sends are best-effort and never block collection
       optional: true
@@ -105,6 +123,8 @@ provides:
       description: Start customer checkouts using configured SaaS plans.
     - name: saas.admin
       description: Configure plans and fulfillment, manage accounts, and record administrative payments.
+    - name: saas.usage
+      description: Authorize and settle metered usage against prepaid account credit (the admission hook other apps call).
   publishes:
     - name: saas.quota.approaching
       description: Account usage entered the configured warning range below a plan quota.
@@ -239,6 +259,27 @@ provides:
     - name: saas_credit_transactions
       description: List prepaid credit ledger transactions for a SaaS account.
       requires: saas.read
+    - name: saas_plan_meter_set
+      description: Link a prepaid plan's usage meter to Catalog metered prices for input, output, cached input and per request.
+      requires: saas.admin
+    - name: saas_plan_meters_list
+      description: List a plan's usage meters and their Catalog price links.
+      requires: saas.read
+    - name: saas_usage_authorize
+      description: Admission hook — price a request's worst case and hold that much of the account's credit, or refuse it.
+      requires: saas.usage
+    - name: saas_usage_settle
+      description: Admission hook settlement — commit the actual price of a finished request, or release the hold if it failed.
+      requires: saas.usage
+    - name: saas_account_keys_create
+      description: Issue an account API key through the plan's credential provider; the secret is returned once.
+      requires: saas.admin
+    - name: saas_account_keys_list
+      description: List an account's API keys without secrets.
+      requires: saas.read
+    - name: saas_account_keys_revoke
+      description: Revoke one of an account's API keys.
+      requires: saas.admin
   ui_panels:
     - slot: project.page
       label: SaaS

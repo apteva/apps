@@ -372,6 +372,81 @@ An `invoice.paid` event activates access only after Billing confirms that the
 invoice status is actually `paid`. Partial payments update the reporting
 projection but leave the subscription and account payment state unchanged.
 
+## Prepaid Plans
+
+`billing_mode: prepaid` accounts are active without a subscription; access
+depends on the balance of a Credits wallet. Plan metadata:
+
+| Key | Meaning |
+|---|---|
+| `credits_unit` | Required. Wallet unit, e.g. `usd` (Credits keeps currencies in micro-units: 1 usd = 1,000,000). |
+| `signup_credit` | Optional promo credit granted once at activation (idempotent by `saas:signup:<account>`). |
+| `signup_credit_expires_days` | Optional expiry for the signup credit. |
+| `low_balance_threshold` | Wallet `low_threshold`; Credits emits `credits.balance.low` below it. |
+| `max_output_tokens_estimate` | Output tokens assumed when a request sets no limit (default 4096). |
+| `credential_provider` | `{app, create_tool, list_tool, revoke_tool}` for account API keys. Defaults to llm's `llm_tokens_*`. |
+
+Activation adds a `credits_wallet` provisioning step (wallet ensure plus the
+signup grant). `saas_access_check` also reads the wallet and returns
+`allowed: false, reason: no_credit` when nothing is available.
+
+### Meters
+
+`saas_plan_meter_set` links `(plan_key, source_app, meter)` to Catalog
+metered prices for `input`, `output`, `cached_input` and `per_request`. SaaS
+only links; Catalog owns the prices, and SaaS caches them for the process
+because they never change once created. `meter` is usually `model:<name>`;
+`model:*` is the plan's default when no exact meter matches. Prices must be
+metered, active and in the plan's `credits_unit`.
+
+Catalog stores whole cents, so token prices use a large `unit_size` (for
+$0.075 per million tokens: 75 cents per 10,000,000). A price of C cents per
+U units costs `C * 10000 / U` micro-units each; every request is rounded up
+once to whole micro-units. Cached input tokens are part of the input count
+and use the cached price when set, otherwise the input price.
+
+### Admission hook
+
+Account keys point llm's admission hook at SaaS:
+
+- `saas_usage_authorize` — reads `token_metadata.account_id` from a 5-second
+  account cache, prices the worst case (estimated input + max output + one
+  request) and calls `credits_reserve` with reference
+  `<source_app>/request/<request_id>` and scope `project:<token_metadata.project>`.
+  Returns `{allow: true, admission_ref: <hold_id>}` or a refusal:
+
+  | Reason | HTTP | error_type |
+  |---|---|---|
+  | No credit (`no_credit`) or cap reached (`cap_reached`) | 429 | `insufficient_quota` |
+  | Account not active, wallet frozen, key not linked | 403 | `permission_error` |
+  | Model has no price (`no_price`) | 400 | `invalid_request_error` |
+
+- `saas_usage_settle` — prices the actual counts and calls `credits_commit`,
+  or `credits_release` when the request failed. Retries are safe: Credits
+  deduplicates by hold. If the meter disappeared since authorize, the hold is
+  committed in full.
+
+Each call is one cached lookup plus one Credits call: no Entitlements check,
+usage sync or CRM. Both are generic: another app with the same hook passes
+its own `source_app` (and optionally `meter`) and adds meters for it.
+
+### Account API keys
+
+`saas_account_keys_create` (label, optional `project` such as Production,
+optional `prefix`/`scopes`) calls the credential provider with
+`metadata: {account_id, project}` and the SaaS admission hook, stores only
+the token id, and returns the secret once. `saas_account_keys_list` and
+`saas_account_keys_revoke` are scoped to the account. Suspended accounts are
+refused at authorize; cancelling an account revokes its keys.
+
+Account spaces (Production / Staging / Development) are not modelled in SaaS:
+`project` is a free-text label carried in token metadata and used as the
+Credits cap scope, so caps per space work through `credits_caps_set`.
+
+`saas_account_get` and `saas_account_list` include the Credits wallet for
+prepaid accounts. Top-ups, caps and the statement are called on Credits
+directly (`credits_topup_create`, `credits_caps_set`, `credits_entries_list`).
+
 ## Transactional Email
 
 When the optional messaging app is installed, SaaS emails the account owner
@@ -382,6 +457,9 @@ a receipt when an invoice is paid, a failed-payment notice on
 refunded invoices are operator actions and stay silent), and a trial-ending
 reminder swept every 10 minutes for active accounts whose `trial_ends_at`
 falls within the next 48 hours.
+
+Prepaid accounts also get a low-balance notice on `credits.balance.low` (at
+most one per account per day) and a top-up receipt on `credits.topup.paid`.
 
 Every send is best-effort. Delivery goes through `messaging.send_message`
 with an idempotency key, outcomes are recorded as `notification.sent` or
