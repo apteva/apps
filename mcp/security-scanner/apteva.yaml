@@ -1,0 +1,82 @@
+schema: apteva-app/v1
+
+name: security-scanner
+display_name: Security Scanner
+version: 0.1.0
+description: |
+  Network exposure scanning for systems you own or are authorised to test.
+  Discover live hosts in IP ranges, find open TCP ports (plus DNS, NTP and
+  SNMP on UDP), fingerprint services and versions, match them to known CVEs
+  (NVD, CISA KEV, EPSS) and flag risky exposures such as unauthenticated
+  Redis or Docker APIs. Findings are deduplicated, triaged and summarised
+  by severity.
+
+  Every scan is checked against a project allowlist that only people can
+  edit in the panel. Scans detect only: no exploit payloads, no credential
+  guessing, no disruptive load. Rate limits and a stop button are built in.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/security-scanner
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [security, scanning, vulnerabilities, ports, network]
+
+scopes: [project]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: security_overview, description: "Open findings by severity, running scans and allowlist size." }
+    - { name: security_targets_list, description: "Read the scan allowlist, exclusions and rate limits. Agents cannot change them." }
+    - { name: security_scope_check, description: "Dry run: expand targets and show which addresses are allowed or dropped. Sends nothing." }
+    - { name: security_scan_start, description: "REAL SCAN: start a scan of allowlisted targets with a profile (quick, standard, full, custom)." }
+    - { name: security_scan_status, description: "Progress and counts for one scan." }
+    - { name: security_scan_cancel, description: "Stop a running scan." }
+    - { name: security_scans_list, description: "List past and running scans." }
+    - { name: security_hosts_search, description: "Hosts with their open ports, services and versions." }
+    - { name: security_findings_search, description: "Filter findings by severity, status, host, port or CVE." }
+    - { name: security_findings_update, description: "Triage a finding: confirm, false_positive, risk_accepted, open, with a note." }
+    - { name: security_report_generate, description: "Severity-grouped Markdown report for a scan or the whole project." }
+    - { name: security_diff, description: "What changed between a scan and the previous scan of the same targets." }
+  ui_panels:
+    - slot: project.page
+      label: Security
+      icon: shield
+      entry: /ui/SecurityPanel.mjs
+  skills:
+    - name: security-scanner
+      command: /security
+      body_file: skills/how-to-use-security-scanner.md
+      description: |
+        Teaches agents to check scope, pick a scan profile, run bounded
+        detection-only scans of allowlisted targets, triage findings and
+        report them by severity.
+      metadata:
+        category: security
+  publishes:
+    - { name: security.scan.started, description: "A scan started." }
+    - { name: security.scan.completed, description: "A scan finished, failed or was cancelled." }
+    - { name: security.finding.critical, description: "A new critical finding was recorded." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: security-scanner/v0.1.0
+    entry: mcp/security-scanner
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/security.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
