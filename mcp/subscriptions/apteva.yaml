@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.9.1
+version: 0.9.2
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -41,6 +41,9 @@ description: |
   validation, and monetary calculations. Lifecycle events use a durable
   outbox; global and paused-cancellation scheduling are supported, and
   subscription searches use indexed pagination.
+  v0.9.2 lets SaaS create the first checkout cycle on an unpaid past_due
+  subscription (no cycles yet, matching saas_checkout_id), which v0.9.1
+  rejected; renewals on past_due subscriptions stay blocked.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions

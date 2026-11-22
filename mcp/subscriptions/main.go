@@ -2158,6 +2158,25 @@ func callBillingInvoiceCreate(ctx *sdk.AppCtx, args map[string]any, finalize boo
 	return out, nil
 }
 
+// isInitialCheckoutCycle reports whether a cycle request is the first,
+// checkout-settling cycle of an unpaid subscription. SaaS deliberately creates
+// paid, no-trial checkouts as past_due (no access before payment) and then
+// asks for the cycle that its payment link settles. That request is allowed
+// only while the subscription has no cycles yet and the cycle carries the same
+// saas_checkout_id as the subscription, so renewals on genuinely past-due
+// subscriptions stay blocked.
+func isInitialCheckoutCycle(tx *sql.Tx, sub *Subscription, args map[string]any) (bool, error) {
+	checkoutID := strings.TrimSpace(strArg(mapFromAny(sub.Metadata), "saas_checkout_id"))
+	if checkoutID == "" || strings.TrimSpace(strArg(mapFromAny(args["metadata"]), "saas_checkout_id")) != checkoutID {
+		return false, nil
+	}
+	var cycles int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM subscription_cycles WHERE subscription_id=?`, sub.ID).Scan(&cycles); err != nil {
+		return false, err
+	}
+	return cycles == 0, nil
+}
+
 func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscription, error) {
 	args, err := cycleArgs(args)
 	if err != nil {
@@ -2183,7 +2202,11 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM subscription_lifecycle_attempts WHERE id=? AND subscription_id=? AND project_id=? AND action='trial_end'`, int64Arg(args, "lifecycle_attempt_id"), subID, pid).Scan(&valid); err != nil {
 			return nil, nil, err
 		}
-		if sub.Status != "past_due" || valid != 1 {
+		initial, err := isInitialCheckoutCycle(tx, sub, args)
+		if err != nil {
+			return nil, nil, err
+		}
+		if sub.Status != "past_due" || (valid != 1 && !initial) {
 			return nil, nil, errors.New("subscription cannot create renewals in its current state")
 		}
 	}

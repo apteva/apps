@@ -1,5 +1,14 @@
 # Subscriptions
 
+## v0.9.2 checkout cycle fix
+
+v0.9.1's cycle guard rejected the first cycle of a SaaS checkout, so every
+paid checkout without a trial failed. SaaS creates those subscriptions as
+`past_due` on purpose (no access before payment). A `past_due` subscription
+may now create a cycle when it has no cycles yet and the cycle's
+`metadata.saas_checkout_id` matches the subscription's. Renewals on
+`past_due` subscriptions are still rejected unless they come from a trial end.
+
 ## v0.9.1 reliability fixes
 
 This release preserves the v0.9.0 UI, metered usage, discounts, item-change
