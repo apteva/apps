@@ -177,7 +177,7 @@ func remarshal(in any, out any) error {
 
 // ─── time ───────────────────────────────────────────────────────────
 
-func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
+func nowUTC() string { return clock().UTC().Format(time.RFC3339) }
 
 var clock = func() time.Time { return time.Now().UTC() }
 

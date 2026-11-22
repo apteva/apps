@@ -37,6 +37,12 @@ type PriceContext struct {
 	DefaultDur  int
 	TypeReqs    []Requirement
 	AutoMax     int64 // 0 = use policy
+	// The contractor doing the work: its own rate items replace the
+	// shared ones. SettlementMode picks the margin check (resale) or the
+	// commission check (commission).
+	ResourceID     int64
+	SettlementMode string
+	Terms          Settlement
 }
 
 type PricedLine struct {
@@ -62,6 +68,12 @@ type PriceResult struct {
 	Materials     []Material    `json:"materials,omitempty"`
 	Flags         []string      `json:"flags"`
 	NeedsOwner    bool          `json:"needs_owner"`
+	// resale: margin_check "margin" against min_margin_pct. commission:
+	// "commission" against min_commission_cents, with the expected
+	// commission on this total.
+	SettlementMode          string `json:"settlement_mode"`
+	MarginCheck             string `json:"margin_check"`
+	ExpectedCommissionCents *int64 `json:"expected_commission_cents,omitempty"`
 }
 
 func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*PriceResult, error) {
@@ -69,7 +81,7 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 	reqs := append([]Requirement{}, pc.TypeReqs...)
 	duration := 0
 	for _, it := range items {
-		ri, err := getRateItem(db, pid, 0, it.Code, pc.BrandID)
+		ri, err := getRateItemFor(db, pid, it.Code, pc.BrandID, pc.ResourceID)
 		if err != nil {
 			return nil, notFound(err, "rate item "+it.Code)
 		}
@@ -135,11 +147,24 @@ func priceItems(db *sql.DB, pid string, items []ItemRequest, pc PriceContext) (*
 		total = 0
 	}
 	res.TotalCents = total
-	if total > 0 {
-		m := round2(float64(total-res.CostCents) / float64(total) * 100)
-		res.MarginPct = &m
-		if minMargin := policyInt(db, pid, pc.BrandID, "min_margin_pct", -1); minMargin >= 0 && m < float64(minMargin) {
-			res.Flags = append(res.Flags, fmt.Sprintf("below_min_margin:%d", minMargin))
+	res.SettlementMode = firstNonEmpty(pc.SettlementMode, modeResale)
+	if res.SettlementMode == modeCommission {
+		// The contractor bills the client; what the brand keeps is the
+		// commission, so margin rules don't apply.
+		res.MarginCheck = modeCommission
+		exp := commissionAmount(pc.Terms.normalized(), total)
+		res.ExpectedCommissionCents = &exp
+		if minC := policyInt(db, pid, pc.BrandID, "min_commission_cents", 0); minC > 0 && exp < minC {
+			res.Flags = append(res.Flags, fmt.Sprintf("below_min_commission:%d", minC))
+		}
+	} else {
+		res.MarginCheck = "margin"
+		if total > 0 {
+			m := round2(float64(total-res.CostCents) / float64(total) * 100)
+			res.MarginPct = &m
+			if minMargin := policyInt(db, pid, pc.BrandID, "min_margin_pct", -1); minMargin >= 0 && m < float64(minMargin) {
+				res.Flags = append(res.Flags, fmt.Sprintf("below_min_margin:%d", minMargin))
+			}
 		}
 	}
 	autoMax := pc.AutoMax

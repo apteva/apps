@@ -52,25 +52,49 @@ type Work struct {
 	CreatedAt       string          `json:"created_at"`
 	UpdatedAt       string          `json:"updated_at"`
 	ClosedAt        string          `json:"closed_at,omitempty"`
+	// Settlement: the contractor doing the job and its terms, copied
+	// when assigned. resale (default) or commission.
+	PartnerResourceID *int64          `json:"partner_resource_id,omitempty"`
+	Partner           string          `json:"partner,omitempty"`
+	SettlementMode    string          `json:"settlement_mode"`
+	Settlement        Settlement      `json:"settlement"`
+	PartnerInvoice    *PartnerInvoice `json:"partner_invoice,omitempty"`
 }
 
 const workCols = `w.id,w.number,w.work_type_id,t.key,w.mode,w.phase,w.status,w.hold_from_status,w.priority,w.source,w.crm_contact_id,
 	w.customer_name,w.customer_email,w.customer_phone,w.site_id,w.object_ids_json,w.party_size,w.summary,w.intake_json,w.custom_json,
 	w.agreement_id,w.parent_id,w.duration_min,w.currency,w.estimate_cents,w.quote_status,w.quote_accepted_at,w.invoice_ref,
-	w.invoiced_cents,w.paid_at,w.sla_due_at,w.created_at,w.updated_at,w.closed_at,w.brand_id,COALESCE(b.key,'')`
+	w.invoiced_cents,w.paid_at,w.sla_due_at,w.created_at,w.updated_at,w.closed_at,w.brand_id,COALESCE(b.key,''),
+	w.partner_resource_id,COALESCE(pr.name,''),w.settlement_mode,w.settlement_json,w.partner_invoice_json`
 
-const workFrom = ` FROM work w JOIN work_types t ON t.id=w.work_type_id LEFT JOIN brands b ON b.id=w.brand_id`
+const workFrom = ` FROM work w JOIN work_types t ON t.id=w.work_type_id LEFT JOIN brands b ON b.id=w.brand_id
+	LEFT JOIN resources pr ON pr.id=w.partner_resource_id`
 
 func scanWork(s scanner) (*Work, error) {
 	var w Work
-	var crm, site, agr, parent sql.NullInt64
-	var objs, intake, custom string
+	var crm, site, agr, parent, partner sql.NullInt64
+	var objs, intake, custom, settle, pinv string
 	var qa, paid, sla, closed sql.NullString
 	if err := s.Scan(&w.ID, &w.Number, &w.WorkTypeID, &w.WorkType, &w.Mode, &w.Phase, &w.Status, &w.HoldFromStatus, &w.Priority, &w.Source,
 		&crm, &w.CustomerName, &w.CustomerEmail, &w.CustomerPhone, &site, &objs, &w.PartySize, &w.Summary, &intake, &custom,
 		&agr, &parent, &w.DurationMin, &w.Currency, &w.EstimateCents, &w.QuoteStatus, &qa, &w.InvoiceRef,
-		&w.InvoicedCents, &paid, &sla, &w.CreatedAt, &w.UpdatedAt, &closed, &w.BrandID, &w.Brand); err != nil {
+		&w.InvoicedCents, &paid, &sla, &w.CreatedAt, &w.UpdatedAt, &closed, &w.BrandID, &w.Brand,
+		&partner, &w.Partner, &w.SettlementMode, &settle, &pinv); err != nil {
 		return nil, err
+	}
+	if partner.Valid {
+		w.PartnerResourceID = &partner.Int64
+	}
+	decodeInto(settle, &w.Settlement)
+	if w.SettlementMode == "" {
+		w.SettlementMode = modeResale
+	}
+	w.Settlement.Mode = w.SettlementMode
+	w.Settlement = w.Settlement.normalized()
+	var pi PartnerInvoice
+	decodeInto(pinv, &pi)
+	if pi.Ref != "" {
+		w.PartnerInvoice = &pi
 	}
 	if crm.Valid {
 		w.CRMContactID = &crm.Int64
@@ -248,6 +272,13 @@ func intakeWork(db *sql.DB, pid string, call appCaller, args map[string]any) (*I
 	if err != nil {
 		return nil, err
 	}
+	// A contractor named at intake: its terms and prices apply from the
+	// first estimate.
+	if rid := int64Arg(args, "partner_resource_id"); rid > 0 {
+		if w, err = assignPartner(db, pid, w, rid, stringArg(args, "actor"), "intake"); err != nil {
+			return nil, err
+		}
+	}
 	if items := parseItems(args["items"]); len(items) > 0 {
 		pr, err := buildEstimate(db, pid, w, wt, items, args)
 		if err != nil {
@@ -344,7 +375,11 @@ func policyString(db *sql.DB, pid string, brandID int64, key, def string) string
 
 func priceContextFor(db *sql.DB, pid string, w *Work, wt *WorkType, args map[string]any) PriceContext {
 	pc := PriceContext{BrandID: w.BrandID, WorkTypeKey: wt.Key, Priority: w.Priority, PartySize: w.PartySize, Answers: w.Intake,
-		DefaultDur: wt.DefaultDurationMin, TypeReqs: append([]Requirement{}, wt.Requirements...), AutoMax: wt.QuotePolicy.AutoApproveMaxCents}
+		DefaultDur: wt.DefaultDurationMin, TypeReqs: append([]Requirement{}, wt.Requirements...), AutoMax: wt.QuotePolicy.AutoApproveMaxCents,
+		SettlementMode: w.SettlementMode, Terms: w.Settlement}
+	if w.PartnerResourceID != nil {
+		pc.ResourceID = *w.PartnerResourceID
+	}
 	if extra := objectArg(args, "answers"); extra != nil {
 		merged := map[string]any{}
 		for k, v := range w.Intake {
@@ -464,7 +499,7 @@ func workRequirements(db *sql.DB, pid string, w *Work, wt *WorkType) []Requireme
 		if l.Kind != "item" {
 			continue
 		}
-		if ri, err := getRateItem(db, pid, 0, l.Code, w.BrandID); err == nil {
+		if ri, err := getRateItemFor(db, pid, l.Code, w.BrandID, partnerID(w)); err == nil {
 			reqs = mergeRequirements(reqs, ri.Requirements)
 		}
 	}
@@ -627,12 +662,29 @@ func completeWork(db *sql.DB, pid string, w *Work, args map[string]any) (*Comple
 		return nil, err
 	}
 	res.Work, res.Next = tr.Work, next
+	// Commission jobs owe their commission once the work is done.
+	if res.Work.SettlementMode == modeCommission {
+		if err := reconcileCommission(db, pid, res.Work, stringArg(args, "actor"), "work completed", false); err != nil {
+			return nil, err
+		}
+	}
 	return res, nil
+}
+
+func partnerID(w *Work) int64 {
+	if w.PartnerResourceID == nil {
+		return 0
+	}
+	return *w.PartnerResourceID
 }
 
 // ─── billing bridge ─────────────────────────────────────────────────
 
 func invoiceWork(db *sql.DB, pid string, call appCaller, w *Work, args map[string]any) (*Work, map[string]any, error) {
+	// Commission: the contractor invoices the client; record their invoice.
+	if w.SettlementMode == modeCommission {
+		return recordPartnerInvoice(db, pid, w, args)
+	}
 	if w.Phase != "bill" {
 		return nil, nil, errNotBillable
 	}
@@ -753,6 +805,12 @@ func searchWork(db *sql.DB, pid string, args map[string]any) ([]*Work, error) {
 	if v := int64Arg(args, "crm_contact_id"); v > 0 {
 		add("w.crm_contact_id=?", v)
 	}
+	if v := stringArg(args, "settlement_mode"); v != "" {
+		add("w.settlement_mode=?", v)
+	}
+	if v := int64Arg(args, "partner_resource_id"); v > 0 {
+		add("w.partner_resource_id=?", v)
+	}
 	if v := stringArg(args, "q"); v != "" {
 		like := "%" + strings.ToLower(v) + "%"
 		q += " AND (lower(w.summary) LIKE ? OR lower(w.customer_name) LIKE ? OR lower(w.customer_email) LIKE ? OR w.customer_phone LIKE ? OR w.number LIKE ?)"
@@ -824,13 +882,18 @@ func metrics(db *sql.DB, pid string, from, to time.Time, brandID int64) (map[str
 	}
 
 	var invoiced, cost int64
-	_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work w WHERE project_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`+bw, pid, f, t).Scan(&invoiced)
+	// invoiced_cents and margin_pct cover resale jobs, which the brand
+	// invoices itself; commission jobs are in gmv, revenue and commissions.
+	_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work w WHERE project_id=? AND settlement_mode<>'commission' AND invoice_ref<>''
+		AND updated_at>=? AND updated_at<?`+bw, pid, f, t).Scan(&invoiced)
 	_ = db.QueryRow(`SELECT COALESCE(SUM(l.cost_cents),0) FROM work_lines l JOIN work w ON w.id=l.work_id
-		WHERE w.project_id=? AND l.source='actual' AND w.invoice_ref<>'' AND w.updated_at>=? AND w.updated_at<?`+bw, pid, f, t).Scan(&cost)
+		WHERE w.project_id=? AND l.source='actual' AND w.settlement_mode<>'commission' AND w.invoice_ref<>'' AND w.updated_at>=? AND w.updated_at<?`+bw,
+		pid, f, t).Scan(&cost)
 	out["invoiced_cents"] = invoiced
 	if invoiced > 0 {
 		out["margin_pct"] = round2(float64(invoiced-cost) / float64(invoiced) * 100)
 	}
+	settlementMetrics(db, pid, f, t, bw, brandID, invoiced, out)
 
 	// Minutes from intake to first slot start, median.
 	lead := []float64{}
@@ -888,16 +951,21 @@ func brandBreakdown(db *sql.DB, pid, f, t string) []map[string]any {
 	out := []map[string]any{}
 	row := func(id int64, key, name string) {
 		var created, closed, open int
-		var invoiced int64
+		var invoiced, partnerNet, commission int64
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND created_at>=? AND created_at<?`, pid, id, f, t).Scan(&created)
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND phase='closed' AND closed_at>=? AND closed_at<?`, pid, id, f, t).Scan(&closed)
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work WHERE project_id=? AND brand_id=? AND phase NOT IN ('closed','cancelled')`, pid, id).Scan(&open)
-		_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work WHERE project_id=? AND brand_id=? AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`,
-			pid, id, f, t).Scan(&invoiced)
-		if id == 0 && created+closed+open == 0 && invoiced == 0 {
+		_ = db.QueryRow(`SELECT COALESCE(SUM(invoiced_cents),0) FROM work WHERE project_id=? AND brand_id=? AND settlement_mode<>'commission'
+			AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`, pid, id, f, t).Scan(&invoiced)
+		_ = db.QueryRow(`SELECT COALESCE(SUM(CAST(json_extract(partner_invoice_json,'$.net_cents') AS INTEGER)),0) FROM work WHERE project_id=? AND brand_id=?
+			AND settlement_mode='commission' AND invoice_ref<>'' AND updated_at>=? AND updated_at<?`, pid, id, f, t).Scan(&partnerNet)
+		_ = db.QueryRow(`SELECT COALESCE(SUM(amount_cents),0) FROM commission_lines WHERE project_id=? AND brand_id=? AND status<>'void'
+			AND created_at>=? AND created_at<?`, pid, id, f, t).Scan(&commission)
+		if id == 0 && created+closed+open == 0 && invoiced == 0 && commission == 0 {
 			return // no unbranded work: leave the row out
 		}
-		out = append(out, map[string]any{"brand": key, "name": name, "created": created, "closed": closed, "open": open, "invoiced_cents": invoiced})
+		out = append(out, map[string]any{"brand": key, "name": name, "created": created, "closed": closed, "open": open, "invoiced_cents": invoiced,
+			"gmv_cents": invoiced + partnerNet, "commission_cents": commission, "revenue_cents": invoiced + commission})
 	}
 	for _, b := range brands {
 		row(b.ID, b.Key, b.Name)

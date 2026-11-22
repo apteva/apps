@@ -174,6 +174,11 @@ func transition(db *sql.DB, pid string, w *Work, to, actor, reason string, paylo
 		if _, err := db.Exec(`UPDATE slots SET status='cancelled', updated_at=? WHERE work_id=? AND status IN ('booked','in_progress')`, now, w.ID); err != nil {
 			return nil, err
 		}
+		// Nothing is owed on a cancelled commission job: open lines are
+		// voided, invoiced ones get a credit adjustment.
+		if err := reconcileCommission(db, pid, w, actor, firstNonEmpty(reason, "work cancelled"), true); err != nil {
+			return nil, err
+		}
 	}
 	if payload == nil {
 		payload = map[string]any{}

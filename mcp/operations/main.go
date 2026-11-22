@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: operations
 display_name: Operations
-version: 0.3.1
+version: 0.4.0
 description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work, several brands on shared resources.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/operations
@@ -85,6 +86,11 @@ provides:
     - { name: agreements_list,     description: "List recurring work agreements." }
     - { name: agreements_update,   description: "Pause, resume or end an agreement." }
     - { name: agreements_generate, description: "Generate (and book) recurring work due up to a date." }
+    - { name: work_set_partner,    description: "Assign the contractor doing a job and copy its settlement terms." }
+    - { name: commissions_list,    description: "List commission lines and what each contractor owes." }
+    - { name: commissions_invoice, description: "Invoice accrued commissions to contractors through Billing." }
+    - { name: commissions_mark_paid, description: "Mark commission invoices or lines paid." }
+    - { name: commissions_void,    description: "Void accrued commission lines with a reason." }
     - { name: metrics,             description: "Operations metrics for a period." }
   publishes:
     - { name: work.created,        description: "A work item was created." }
@@ -134,9 +140,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "commission-autoclose", Schedule: "@every 1h", Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+		_, err := autoCloseCommissionJobs(ctx.AppDB(), func(pid string, w *Work) {
+			if nw, err := getWork(ctx.AppDB(), pid, w.ID); err == nil {
+				ctx.EmitWithProject("work.closed", pid, workEvent(nw))
+			}
+		})
+		return err
+	}}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -188,9 +203,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"pack": sObject("pack JSON"), "brand": brand}, []string{"pack"}), Handler: a.toolPacksValidate},
 		{Name: "config_get", Description: "Read this business's configuration: work types (phases, statuses, requirements, playbook), forms, rate items, modifiers, policies. Use section to read one part; q filters rate items. brand shows what applies to that brand (its own records and the shared ones, brand_id 0); without brand every record is listed.",
 			InputSchema: schemaObject(map[string]any{"section": sStringDesc("work_types | forms | rate_items | modifiers | policies"), "q": sString(), "work_type": sString(), "brand": brand}, nil), Handler: a.toolConfigGet},
-		{Name: "config_upsert", Description: "Create or update one configuration record by key/code. kind: work_type | form | rate_item | modifier; value: the record JSON as config_get returns it. brand makes it that brand's own record (e.g. a brand price that overrides the shared one with the same code); omit for a shared record.",
+		{Name: "config_upsert", Description: "Create or update one configuration record by key/code. kind: work_type | form | rate_item | modifier; value: the record JSON as config_get returns it. brand makes it that brand's own record (e.g. a brand price that overrides the shared one with the same code); omit for a shared record. A rate_item with resource_id is that contractor's own price for the code (and cost_cents what you pay them), used when that resource does the job.",
 			InputSchema: schemaObject(map[string]any{"kind": sString(), "value": sObject("record"), "brand": brand}, []string{"kind", "value"}), Handler: a.toolConfigUpsert},
-		{Name: "policies_set", Description: "Set an owner policy. Common keys: currency (\"EUR\"), timezone, auto_quote_max_cents, max_discount_pct, min_margin_pct. With brand it overrides the project value for that brand only (value null removes the override). Owner-only: agents should ask before changing.",
+		{Name: "policies_set", Description: "Set an owner policy. Common keys: currency (\"EUR\"), timezone, auto_quote_max_cents, max_discount_pct, min_margin_pct (resale jobs), min_commission_cents (commission jobs: quotes whose expected commission is lower go to the owner), commission_autoclose_days (commission jobs close this many days after the contractor's invoice is recorded; 0 = never). With brand it overrides the project value for that brand only (value null removes the override). Owner-only: agents should ask before changing.",
 			InputSchema: schemaObject(map[string]any{"key": sString(), "value": map[string]any{}, "brand": brand}, []string{"key", "value"}), Handler: a.toolPoliciesSet},
 
 		{Name: "sites_upsert", Description: "Create or update a site. kind own = the business's premises (with opening hours and timezone); customer = where field work happens. hours: {\"mon\":[[\"09:00\",\"18:00\"]], …}. brand ties the site to one brand (its shop); omit or \"\" to share it (a kitchen used by several brands). Args: id?, kind, name, address, lat, lng, timezone, hours, access, custom, crm_contact_id, brand.",
@@ -198,8 +213,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"timezone": sString(), "hours": sObject("opening hours"), "access": sObject("access notes, codes"), "custom": sObject(""), "crm_contact_id": sInteger()}, nil),
 			Handler: a.toolSitesUpsert},
 		{Name: "sites_list", Description: "List sites. Args: kind?, q?, brand? (that brand's sites and the shared ones).", InputSchema: schemaObject(map[string]any{"kind": sString(), "q": sString(), "brand": brand}, nil), Handler: a.toolSitesList},
-		{Name: "resources_upsert", Description: "Create or update a resource. kind: person | crew | space (chair, room, table, bay) | equipment (oven, lift) | vehicle. quals = qualifications or skills (e.g. gas_safe, colour). zone groups spaces (dining, terrace). capacity = seats or crew size. People only work inside their shifts (needs_shift) unless set false. Resources work for every brand unless brands lists the only ones they work for ([] = all again).",
-			InputSchema: schemaObject(map[string]any{"id": sInteger(), "brands": sArray("brand keys"), "kind": sString(), "name": sString(), "site_id": sInteger(), "zone": sString(), "capacity": sInteger(),
+		{Name: "resources_upsert", Description: "Create or update a resource. kind: person | crew | space (chair, room, table, bay) | equipment (oven, lift) | vehicle. quals = qualifications or skills (e.g. gas_safe, colour). zone groups spaces (dining, terrace). capacity = seats or crew size. People only work inside their shifts (needs_shift) unless set false. Resources work for every brand unless brands lists the only ones they work for ([] = all again). settlement: how jobs this resource does are settled — {mode: resale} (default: you invoice the client and pay them) or {mode: commission, commission_pct, commission_fixed_cents, commission_base: net|gross, invoice_cadence: per_job|monthly, billing_email, billing_name} (they invoice the client, you invoice them a commission). settlement_by_brand: {brand_key: terms} overrides per brand (null removes one).",
+			InputSchema: schemaObject(map[string]any{"id": sInteger(), "brands": sArray("brand keys"), "settlement": sObject("settlement terms"),
+				"settlement_by_brand": sObject("{brand_key: settlement terms}"), "kind": sString(), "name": sString(), "site_id": sInteger(), "zone": sString(), "capacity": sInteger(),
 				"quals": sArray("strings"), "crm_contact_id": sInteger(), "gigs_worker_id": sInteger(), "home_lat": sNumber(), "home_lng": sNumber(),
 				"cost_rate_cents": sIntDesc("cost per hour"), "needs_shift": sBool(), "active": sBool(), "custom": sObject("")}, nil),
 			Handler: a.toolResourcesUpsert},
@@ -215,15 +231,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"installed_on": sString(), "warranty_until": sString(), "last_serviced_at": sString()}, nil), Handler: a.toolObjectsUpsert},
 		{Name: "objects_list", Description: "List service objects. Args: site_id?, kind?.", InputSchema: schemaObject(map[string]any{"site_id": sInteger(), "kind": sString()}, nil), Handler: a.toolObjectsList},
 
-		{Name: "work_intake", Description: "Create a work item from a customer request or an internal need. work_type = a configured type key (config_get). answers = intake form answers (missing required ones are returned so you can keep asking). For field work give address (creates a customer site) or site_id. party_size for reservations/groups. items prices it immediately. Priority comes from the type's rules unless given. brand: which brand takes the work; otherwise it comes from the site, the work type or the only brand, and an error lists the brands when it is ambiguous. Returns the work (numbered in its brand's series), its price if items were given, and the type's and brand's playbooks.",
-			InputSchema: schemaObject(map[string]any{"work_type": sString(), "brand": brand, "customer": customer, "summary": sString(), "answers": sObject("intake answers"),
+		{Name: "work_intake", Description: "Create a work item from a customer request or an internal need. work_type = a configured type key (config_get). answers = intake form answers (missing required ones are returned so you can keep asking). For field work give address (creates a customer site) or site_id. party_size for reservations/groups. items prices it immediately. Priority comes from the type's rules unless given. brand: which brand takes the work; otherwise it comes from the site, the work type or the only brand, and an error lists the brands when it is ambiguous. partner_resource_id: the contractor doing the job, when already known (its terms and prices apply; otherwise booking decides). Returns the work (numbered in its brand's series), its price if items were given, and the type's and brand's playbooks.",
+			InputSchema: schemaObject(map[string]any{"work_type": sString(), "brand": brand, "partner_resource_id": sInteger(), "customer": customer, "summary": sString(), "answers": sObject("intake answers"),
 				"address": sString(), "lat": sNumber(), "lng": sNumber(), "site_id": sInteger(), "object_ids": sArray("ids"), "party_size": sInteger(),
 				"priority": sStringDesc("p1 (urgent) … p4"), "source": sStringDesc("call, sms, web, walk_in, agreement…"), "items": items, "currency": sString(), "custom": sObject("")},
 				[]string{"work_type"}), Handler: a.toolWorkIntake},
 		{Name: "work_get", Description: "Read a work item with estimate and actual lines, slots, form responses and the statuses it can move to. Args: work_id or number.",
 			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString()}, nil), Handler: a.toolWorkGet},
-		{Name: "work_search", Description: "Search work. Filters: brand, phase (or 'open'), status, work_type, mode, priority, site_id, crm_contact_id, q (summary, customer, number), sla_breached (no slot and past SLA). Urgent first.",
-			InputSchema: schemaObject(map[string]any{"brand": brand, "phase": sString(), "status": sString(), "work_type": sString(), "mode": sString(), "priority": sString(),
+		{Name: "work_search", Description: "Search work. Filters: brand, phase (or 'open'), status, work_type, mode, priority, site_id, crm_contact_id, settlement_mode (resale | commission), partner_resource_id, q (summary, customer, number), sla_breached (no slot and past SLA). Urgent first.",
+			InputSchema: schemaObject(map[string]any{"brand": brand, "settlement_mode": sString(), "partner_resource_id": sInteger(), "phase": sString(), "status": sString(), "work_type": sString(), "mode": sString(), "priority": sString(),
 				"site_id": sInteger(), "crm_contact_id": sInteger(), "q": sString(), "sla_breached": sBool(), "limit": sInteger()}, nil), Handler: a.toolWorkSearch},
 		{Name: "work_transition", Description: "Move a work item to a status (or a phase name). Guards are enforced (quote accepted before scheduling, a slot before execute, required forms, invoice before close). Special: on_hold, needs_owner (escalate to the owner), resume, cancelled. Returns the reasons when blocked.",
 			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "to": sString(), "reason": sString(), "actor": sString()}, []string{"to"}), Handler: a.toolWorkTransition},
@@ -232,8 +248,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "work_note", Description: "Add a note to a work item's timeline. Args: work_id, text, actor.",
 			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "text": sString(), "actor": sString()}, []string{"text"}), Handler: a.toolWorkNote},
 
-		{Name: "price_preview", Description: "Price rate items without saving: lines, total, margin, duration, the resources needed and policy flags. Args: items, answers, brand?, work_type?, priority?, party_size?, starts_at?, discount_pct?, flags?.",
-			InputSchema: schemaObject(map[string]any{"items": items, "brand": brand, "answers": sObject(""), "work_type": sString(), "priority": sString(), "party_size": sInteger(),
+		{Name: "price_preview", Description: "Price rate items without saving: lines, total, margin (resale) or expected commission (commission), duration, the resources needed and policy flags. resource_id prices as that contractor would do it (its prices and settlement terms). Args: items, answers, brand?, resource_id?, work_type?, priority?, party_size?, starts_at?, discount_pct?, flags?.",
+			InputSchema: schemaObject(map[string]any{"items": items, "brand": brand, "resource_id": sInteger(), "answers": sObject(""), "work_type": sString(), "priority": sString(), "party_size": sInteger(),
 				"starts_at": sString(), "discount_pct": sNumber(), "flags": sArray("strings")}, []string{"items"}), Handler: a.toolPricePreview},
 		{Name: "quote_build", Description: "Price a work item from rate items and store the estimate. Prices only come from the rate book: you choose items and quantities, never amounts. If a policy is hit (above auto-approve, low margin, big discount, quote-only item) the quote is needs_owner and the work waits for the owner.",
 			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "items": items, "answers": sObject("extra answers"), "discount_pct": sNumber(),
@@ -260,10 +276,23 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "forms_responses", Description: "List form responses by work_id, site_id, object_id, form_key, since.",
 			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "site_id": sInteger(), "object_id": sInteger(), "form_key": sString(), "since": sString(), "limit": sInteger()}, nil),
 			Handler:     a.toolFormsResponses},
-		{Name: "work_invoice", Description: "Invoice a work item in the bill phase through the Billing app (needs the customer's email), or record an invoice made elsewhere with external_ref. Idempotent.",
-			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "finalize": sBool(), "external_ref": sString(), "notes": sString(), "actor": sString()}, nil), Handler: a.toolWorkInvoice},
-		{Name: "work_mark_paid", Description: "Record that a work item is paid and close it.",
-			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "actor": sString()}, nil), Handler: a.toolWorkMarkPaid},
+		{Name: "work_invoice", Description: "Invoice a work item in the bill phase through the Billing app (needs the customer's email), or record an invoice made elsewhere with external_ref. Idempotent. Commission jobs (settlement_mode commission): the contractor invoices the client, so record their invoice: external_ref (its number), amount_net_cents (defaults to the actual lines), amount_gross_cents?, issued_by?, issued_on?. The commission is recomputed on it; recording again with new amounts corrects it.",
+			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "finalize": sBool(), "external_ref": sString(), "notes": sString(),
+				"amount_net_cents": sInteger(), "amount_gross_cents": sInteger(), "issued_by": sString(), "issued_on": sString(), "actor": sString()}, nil), Handler: a.toolWorkInvoice},
+		{Name: "work_mark_paid", Description: "Record that a work item is paid and close it. Commission jobs: records that the client paid the contractor (confirmed_by: who said so).",
+			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "confirmed_by": sString(), "actor": sString()}, nil), Handler: a.toolWorkMarkPaid},
+		{Name: "work_set_partner", Description: "Set the contractor (resource) doing a job and copy its settlement terms onto the job (booking does this too, from the lead resource). Not allowed once the work is done. An accepted quote keeps its price.",
+			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "resource_id": sInteger(), "reason": sString(), "actor": sString()}, []string{"resource_id"}), Handler: a.toolWorkSetPartner},
+		{Name: "commissions_list", Description: "List commission lines (commission jobs) with totals by status and what each contractor owes (accrued = not invoiced yet, receivable = invoiced, unpaid). Filters: resource_id, brand, status (accrued | invoiced | paid | void | open), work_id/number, from, to (created), limit.",
+			InputSchema: schemaObject(map[string]any{"resource_id": sInteger(), "brand": brand, "status": sString(), "work_id": sInteger(), "number": sString(),
+				"from": sString(), "to": sString(), "limit": sInteger()}, nil), Handler: a.toolCommissionsList},
+		{Name: "commissions_invoice", Description: "Invoice accrued commissions to contractors: one invoice per contractor, brand and currency, through Billing (to the billing_email in their terms) or recorded with external_ref. Select by work_id/number, resource_id (+ brand), or all: true. due_only (default true unless a job is named): per_job lines once the contractor's invoice is recorded or the job closed, monthly lines once their month is over. Lines already being invoiced are never billed twice.",
+			InputSchema: schemaObject(map[string]any{"work_id": sInteger(), "number": sString(), "resource_id": sInteger(), "brand": brand, "all": sBool(), "due_only": sBool(),
+				"external_ref": sString(), "finalize": sBool(), "notes": sString(), "actor": sString()}, nil), Handler: a.toolCommissionsInvoice},
+		{Name: "commissions_mark_paid", Description: "Mark invoiced commission lines paid: invoice_ref (all its lines) or line_id / line_ids.",
+			InputSchema: schemaObject(map[string]any{"invoice_ref": sString(), "line_id": sInteger(), "line_ids": sArray("ids"), "actor": sString()}, nil), Handler: a.toolCommissionsMarkPaid},
+		{Name: "commissions_void", Description: "Void accrued (not invoiced) commission lines. reason required. Invoiced lines are corrected by recording the contractor's invoice again or cancelling the job, which adds an adjustment.",
+			InputSchema: schemaObject(map[string]any{"line_id": sInteger(), "line_ids": sArray("ids"), "reason": sString(), "actor": sString()}, []string{"reason"}), Handler: a.toolCommissionsVoid},
 
 		{Name: "agreements_create", Description: "Create recurring work: a weekly clean, an annual service, a daily prep run, an opening checklist. recurrence: {every, unit: day|week|month, weekdays: [1..7], time: \"HH:MM\"}. auto_book books each occurrence, preferring preferred_resource_ids. brand as for work_intake.",
 			InputSchema: schemaObject(map[string]any{"name": sString(), "work_type": sString(), "brand": brand, "customer": customer, "site_id": sInteger(), "recurrence": sObject("recurrence"),
@@ -274,7 +303,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": sInteger(), "status": sString(), "ends_on": sString(), "preferred_resource_ids": sArray("ids")}, []string{"id"}), Handler: a.toolAgreementsUpdate},
 		{Name: "agreements_generate", Description: "Create the work for every occurrence due up to `until` (YYYY-MM-DD) and book it when auto_book. Safe to re-run; run daily.",
 			InputSchema: schemaObject(map[string]any{"until": sString(), "agreement_id": sInteger()}, []string{"until"}), Handler: a.toolAgreementsGenerate},
-		{Name: "metrics", Description: "Operations metrics between from and to (default last 30 days): open work by phase, created/closed, waiting on owner, quote acceptance, invoiced and margin, median minutes to first slot, utilisation per person (across brands). brand narrows the figures to one brand; without it, by_brand puts the brands side by side.",
+		{Name: "metrics", Description: "Operations metrics between from and to (default last 30 days): open work by phase, created/closed, waiting on owner, quote acceptance, invoiced and margin (resale jobs), gmv (resale invoiced + contractor invoices on commission jobs), revenue (resale invoiced + commissions), commissions by status, receivables and by_contractor, median minutes to first slot, utilisation per person (across brands). brand narrows the figures to one brand; without it, by_brand puts the brands side by side.",
 			InputSchema: schemaObject(map[string]any{"from": sString(), "to": sString(), "brand": brand}, nil), Handler: a.toolMetrics},
 	}
 }
@@ -529,10 +558,15 @@ func (a *App) toolConfigUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 			return nil, err
 		}
 		ri.BrandID = brandID
+		if ri.ResourceID > 0 {
+			if _, err := getResource(db, pid, ri.ResourceID); err != nil {
+				return nil, notFound(err, "resource")
+			}
+		}
 		if err := upsertRateItem(db, pid, ri); err != nil {
 			return nil, err
 		}
-		return getRateItem(db, pid, 0, ri.Code, brandID)
+		return getRateItemFor(db, pid, ri.Code, brandID, ri.ResourceID)
 	case "modifier":
 		var m Modifier
 		if err := remarshal(val, &m); err != nil {
@@ -604,6 +638,7 @@ func (a *App) toolResourcesUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	withBrandKeys(ctx.AppDB(), ctx.CurrentProject(), r)
 	return map[string]any{"resource": r}, nil
 }
 
@@ -625,6 +660,7 @@ func (a *App) toolResourcesList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		r = kept
 	}
+	withBrandKeys(ctx.AppDB(), ctx.CurrentProject(), r...)
 	return map[string]any{"resources": r}, nil
 }
 
@@ -729,6 +765,9 @@ func workDetail(db *sql.DB, pid string, w *Work) (map[string]any, error) {
 			out["brand"] = b // speak to the customer as this brand
 		}
 	}
+	if cl, err := workCommissions(db, pid, w.ID); err == nil && len(cl) > 0 {
+		out["commission_lines"] = cl
+	}
 	return out, nil
 }
 
@@ -809,6 +848,14 @@ func (a *App) toolPricePreview(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if s, ok := f.(string); ok {
 			pc.Flags = append(pc.Flags, s)
 		}
+	}
+	if rid := int64Arg(args, "resource_id"); rid > 0 {
+		r, err := getResource(db, pid, rid)
+		if err != nil {
+			return nil, notFound(err, "resource")
+		}
+		pc.ResourceID, pc.Terms = rid, r.termsFor(brandID)
+		pc.SettlementMode = pc.Terms.Mode
 	}
 	return priceItems(db, pid, parseItems(args["items"]), pc)
 }
@@ -1013,6 +1060,14 @@ func (a *App) toolWorkMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if w.SettlementMode == modeCommission {
+		if w.PartnerInvoice.empty() && w.Phase != "closed" {
+			return nil, errors.New("record the contractor's invoice first (work_invoice external_ref, amount_net_cents)")
+		}
+		if err := confirmClientPaid(db, pid, w, stringArg(args, "confirmed_by"), stringArg(args, "actor")); err != nil {
+			return nil, err
+		}
+	}
 	if w.PaidAt == "" {
 		if _, err := db.Exec(`UPDATE work SET paid_at=?, updated_at=? WHERE id=?`, nowUTC(), nowUTC(), w.ID); err != nil {
 			return nil, err
@@ -1144,4 +1199,44 @@ func (a *App) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// ─── settlement ─────────────────────────────────────────────────────
+
+func (a *App) toolWorkSetPartner(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db, pid := ctx.AppDB(), ctx.CurrentProject()
+	w, err := getWorkByRef(db, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	nw, err := assignPartner(db, pid, w, int64Arg(args, "resource_id"), stringArg(args, "actor"), stringArg(args, "reason"))
+	if err != nil {
+		return nil, err
+	}
+	emit(ctx, "work.status_changed", workEvent(nw))
+	return map[string]any{"work": nw}, nil
+}
+
+func (a *App) toolCommissionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return listCommissions(ctx.AppDB(), ctx.CurrentProject(), args)
+}
+
+func (a *App) toolCommissionsInvoice(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return invoiceCommissions(ctx.AppDB(), ctx.CurrentProject(), callerFor(ctx), args)
+}
+
+func (a *App) toolCommissionsMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	l, err := setCommissionStatus(ctx.AppDB(), ctx.CurrentProject(), args, "paid")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"lines": l}, nil
+}
+
+func (a *App) toolCommissionsVoid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	l, err := setCommissionStatus(ctx.AppDB(), ctx.CurrentProject(), args, "void")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"lines": l}, nil
 }

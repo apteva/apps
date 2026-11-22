@@ -220,22 +220,29 @@ type Resource struct {
 	NeedsShift    bool            `json:"needs_shift"`
 	Active        bool            `json:"active"`
 	Custom        json.RawMessage `json:"custom"`
-	CreatedAt     string          `json:"created_at"`
-	UpdatedAt     string          `json:"updated_at"`
+	// How jobs done by this resource are settled (resale by default),
+	// and per-brand overrides keyed by brand key.
+	Settlement        Settlement            `json:"settlement"`
+	SettlementByBrand map[string]Settlement `json:"settlement_by_brand,omitempty"`
+	CreatedAt         string                `json:"created_at"`
+	UpdatedAt         string                `json:"updated_at"`
+
+	settlementByBrandID map[int64]Settlement
 }
 
-const resourceCols = `id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,created_at,updated_at,brand_ids_json`
+const resourceCols = `id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,created_at,updated_at,brand_ids_json,settlement_json,settlement_by_brand_json`
 
 func scanResource(s scanner) (*Resource, error) {
 	var r Resource
 	var site, crm, gigs sql.NullInt64
 	var hlat, hlng sql.NullFloat64
-	var quals, custom, brands string
+	var quals, custom, brands, settle, settleByBrand string
 	var shift, active int
 	if err := s.Scan(&r.ID, &r.Kind, &r.Name, &site, &r.Zone, &r.Capacity, &quals, &crm, &gigs, &hlat, &hlng,
-		&r.CostRateCents, &shift, &active, &custom, &r.CreatedAt, &r.UpdatedAt, &brands); err != nil {
+		&r.CostRateCents, &shift, &active, &custom, &r.CreatedAt, &r.UpdatedAt, &brands, &settle, &settleByBrand); err != nil {
 		return nil, err
 	}
+	decodeResourceSettlement(&r, settle, settleByBrand)
 	if site.Valid {
 		r.SiteID = &site.Int64
 	}
@@ -346,6 +353,9 @@ func upsertResource(db *sql.DB, pid string, args map[string]any) (*Resource, err
 	if c := objectArg(args, "custom"); c != nil {
 		r.Custom = json.RawMessage(mustJSON(c))
 	}
+	if err := applySettlementArgs(db, pid, r, args); err != nil {
+		return nil, err
+	}
 	ptr := func(p *int64) any {
 		if p == nil {
 			return nil
@@ -355,18 +365,21 @@ func upsertResource(db *sql.DB, pid string, args map[string]any) (*Resource, err
 	now := nowUTC()
 	if id > 0 {
 		_, err := db.Exec(`UPDATE resources SET kind=?,name=?,site_id=?,zone=?,capacity=?,quals_json=?,crm_contact_id=?,gigs_worker_id=?,
-			home_lat=?,home_lng=?,cost_rate_cents=?,needs_shift=?,active=?,custom_json=?,brand_ids_json=?,updated_at=? WHERE project_id=? AND id=?`,
+			home_lat=?,home_lng=?,cost_rate_cents=?,needs_shift=?,active=?,custom_json=?,brand_ids_json=?,settlement_json=?,settlement_by_brand_json=?,updated_at=? WHERE project_id=? AND id=?`,
 			r.Kind, r.Name, ptr(r.SiteID), r.Zone, r.Capacity, mustJSON(r.Quals), ptr(r.CRMContactID), ptr(r.GigsWorkerID),
-			nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs), now, pid, id)
+			nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs),
+			mustJSON(r.Settlement), encodeByBrand(r.settlementByBrandID), now, pid, id)
 		if err != nil {
 			return nil, err
 		}
 		return getResource(db, pid, id)
 	}
 	res, err := db.Exec(`INSERT INTO resources(project_id,kind,name,site_id,zone,capacity,quals_json,crm_contact_id,gigs_worker_id,
-		home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,brand_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		home_lat,home_lng,cost_rate_cents,needs_shift,active,custom_json,brand_ids_json,settlement_json,settlement_by_brand_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		pid, r.Kind, r.Name, ptr(r.SiteID), r.Zone, r.Capacity, mustJSON(r.Quals), ptr(r.CRMContactID), ptr(r.GigsWorkerID),
-		nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs), now, now)
+		nullFloat(r.HomeLat), nullFloat(r.HomeLng), r.CostRateCents, boolInt(r.NeedsShift), boolInt(r.Active), string(r.Custom), mustJSON(r.BrandIDs),
+		mustJSON(r.Settlement), encodeByBrand(r.settlementByBrandID), now, now)
 	if err != nil {
 		return nil, err
 	}

@@ -28,7 +28,19 @@ interface Work {
   site_id: number | null; party_size: number; summary: string; intake: Record<string, unknown>; duration_min: number; currency: string;
   estimate_cents: number; quote_status: string; invoice_ref?: string; invoiced_cents: number; paid_at?: string; sla_due_at?: string;
   created_at: string; updated_at: string; closed_at?: string; agreement_id?: number;
+  partner_resource_id?: number; partner?: string; settlement_mode: string; settlement?: Settlement; partner_invoice?: PartnerInvoice;
 }
+interface Settlement {
+  mode: string; commission_pct?: number; commission_fixed_cents?: number; commission_base?: string; invoice_cadence?: string;
+  billing_email?: string; billing_name?: string;
+}
+interface PartnerInvoice { ref?: string; net_cents?: number; gross_cents?: number; issued_by?: string; issued_on?: string; recorded_at?: string; client_paid_at?: string; client_paid_confirmed_by?: string }
+interface CommissionLine {
+  id: number; work_id: number; work_number: string; brand?: string; resource_id: number; partner: string; kind: string; status: string;
+  base_cents: number; base_source: string; rate_pct: number; fixed_cents: number; amount_cents: number; currency: string; cadence: string;
+  invoice_ref?: string; reason?: string; created_at: string; invoiced_at?: string; paid_at?: string;
+}
+interface Owed { resource_id: number; name: string; currency: string; accrued_cents: number; receivable_cents: number }
 interface Line { code: string; kind: string; description: string; qty: number; unit?: string; unit_price_cents: number; total_cents: number; cost_cents: number }
 interface SlotResource { id: number; name: string; kind: string; role?: string }
 interface Slot {
@@ -40,7 +52,7 @@ interface Form { key: string; brand_id: number; name: string; purpose: string; s
 interface FormResponse { id: number; form_key: string; data: Record<string, unknown>; submitted_at: string; responder: string }
 interface WorkDetail {
   work: Work; phases: string[]; can_move_to: string[]; required_forms?: Record<string, string[]>; estimate_lines: Line[]; actual_lines: Line[];
-  slots: Slot[]; forms: FormResponse[]; playbook?: string; brand?: Brand;
+  slots: Slot[]; forms: FormResponse[]; playbook?: string; brand?: Brand; commission_lines?: CommissionLine[];
 }
 interface WorkEvent { id: number; at: string; actor: string; kind: string; from?: string; to?: string; payload?: Record<string, unknown> }
 interface WorkType { key: string; name: string; mode: string; brand_id: number; phases: string[]; intake_form_key?: string | null; active: boolean; default_duration_min?: number }
@@ -48,7 +60,7 @@ interface RateItem { code: string; name: string; brand_id: number; pricing: { mo
 interface Modifier { key: string; name?: string; brand_id: number; amount?: { pct?: number; cents?: number } }
 interface Resource {
   id: number; kind: string; name: string; site_id: number | null; zone: string; capacity: number; quals: string[]; brand_ids: number[];
-  cost_rate_cents: number; needs_shift: boolean; active: boolean;
+  cost_rate_cents: number; needs_shift: boolean; active: boolean; settlement?: Settlement; settlement_by_brand?: Record<string, Settlement>;
 }
 interface Site { id: number; brand_id: number; kind: string; name: string; address: string; timezone: string }
 interface Agreement { id: number; name: string; brand?: string; work_type: string; customer_name: string; recurrence: { every: number; unit: string; weekdays?: number[]; time?: string }; next_on: string; status: string; auto_book: boolean }
@@ -56,7 +68,11 @@ interface Metrics {
   open_by_phase?: Record<string, number>; created: number; closed: number; cancelled: number; waiting_on_owner: number;
   quote_acceptance_pct?: number; invoiced_cents: number; margin_pct?: number; median_minutes_to_first_slot?: number;
   utilisation?: { resource_id: number; name: string; utilisation_pct: number; booked_minutes: number; shift_minutes: number }[];
-  by_brand?: { brand: string; name: string; created: number; closed: number; open: number; invoiced_cents: number }[];
+  by_brand?: { brand: string; name: string; created: number; closed: number; open: number; invoiced_cents: number; gmv_cents?: number; commission_cents?: number; revenue_cents?: number }[];
+  gmv_cents?: number; revenue_cents?: number;
+  commissions?: { accrued_cents: number; invoiced_cents: number; paid_cents: number; total_cents: number };
+  by_mode?: { resale: { jobs_invoiced: number; invoiced_cents: number }; commission: { jobs_invoiced: number; client_invoiced_net_cents: number; commission_cents: number } };
+  by_contractor?: { resource_id: number; name: string; mode: string; jobs_invoiced: number; gmv_cents: number; commission_accrued_cents: number; commission_invoiced_cents: number; commission_paid_cents: number }[];
 }
 interface PackInfo { key: string; name: string; description: string; work_types: string[] }
 interface InstalledPack { key: string; name: string; version: string; brand?: string; installed_at: string }
@@ -69,7 +85,7 @@ interface Config {
 interface AppEventEnvelope { topic: string; seq: number; data: unknown }
 
 type Call = <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
-type Tab = "overview" | "work" | "agenda" | "resources" | "setup";
+type Tab = "overview" | "work" | "agenda" | "resources" | "commissions" | "setup";
 
 const API = "/api/apps/operations";
 const PHASES = ["intake", "quote", "schedule", "execute", "bill"];
@@ -86,6 +102,11 @@ const KIND_LABEL: Record<string, string> = { person: "People", crew: "Crews", sp
 
 // ─── helpers ───────────────────────────────────────────────────────
 
+function termsLabel(t?: Settlement, currency = "EUR"): string {
+  if (!t || t.mode !== "commission") return "Resale";
+  const parts = [t.commission_pct ? `${t.commission_pct}%` : "", t.commission_fixed_cents ? money(t.commission_fixed_cents, currency) : ""].filter(Boolean);
+  return `Commission ${parts.join(" + ")}${t.commission_base === "gross" ? " of gross" : ""}${t.invoice_cadence === "monthly" ? ", monthly" : ""}`;
+}
 const human = (s: string) => (s ? (s.charAt(0).toUpperCase() + s.slice(1)).replace(/_/g, " ") : "");
 function money(cents: number | undefined | null, currency = "EUR"): string {
   if (cents == null) return "—";
@@ -316,6 +337,7 @@ export default function OperationsPanel({ projectId, installId }: NativePanelPro
           <TabButton active={tab === "work"} onClick={() => setTab("work")}>Work</TabButton>
           <TabButton active={tab === "agenda"} onClick={() => setTab("agenda")}>Agenda</TabButton>
           <TabButton active={tab === "resources"} onClick={() => setTab("resources")}>Resources</TabButton>
+          <TabButton active={tab === "commissions"} onClick={() => setTab("commissions")}>Commissions</TabButton>
           <TabButton active={tab === "setup"} onClick={() => setTab("setup")}>Setup</TabButton>
         </nav>
         <div className="flex items-center gap-2 pb-1.5">
@@ -335,6 +357,7 @@ export default function OperationsPanel({ projectId, installId }: NativePanelPro
         {tab === "work" && <WorkTab ctx={ctx} />}
         {tab === "agenda" && <AgendaTab ctx={ctx} />}
         {tab === "resources" && <ResourcesTab ctx={ctx} />}
+        {tab === "commissions" && <CommissionsTab ctx={ctx} />}
         {tab === "setup" && <SetupTab ctx={ctx} />}
       </div>
 
@@ -397,13 +420,16 @@ function Overview({ ctx }: { ctx: Ctx }) {
 
   if (loading && !m) return <Empty>Loading…</Empty>;
   const openCount = work.length;
+  const hasCommission = (m?.commissions?.total_cents ?? 0) !== 0 || (m?.by_mode?.commission.jobs_invoiced ?? 0) > 0;
   return (
     <div className="p-4 space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Stat label="Open work" value={openCount} hint={`${m?.created ?? 0} new · ${m?.closed ?? 0} closed in 30 days`} />
         <Stat label="Waiting on you" value={m?.waiting_on_owner ?? 0} tone={(m?.waiting_on_owner ?? 0) > 0 ? "text-red" : undefined} hint="needs an owner decision" />
         <Stat label="Booked today" value={today.length} hint={today[0] ? `next ${when(today.find((s) => new Date(s.ends_at) > new Date())?.starts_at)}` : "nothing booked"} />
-        <Stat label="Invoiced (30 days)" value={money(m?.invoiced_cents ?? 0, currency)} hint={m?.margin_pct != null ? `${m.margin_pct}% margin` : "no margin yet"} />
+        {hasCommission
+          ? <Stat label="Revenue (30 days)" value={money(m?.revenue_cents ?? 0, currency)} hint={`${money(m?.gmv_cents ?? 0, currency)} billed to clients · ${money(m?.commissions?.total_cents ?? 0, currency)} commission`} />
+          : <Stat label="Invoiced (30 days)" value={money(m?.invoiced_cents ?? 0, currency)} hint={m?.margin_pct != null ? `${m.margin_pct}% margin` : "no margin yet"} />}
         <Stat label="Quotes accepted" value={m?.quote_acceptance_pct != null ? `${m.quote_acceptance_pct}%` : "—"} hint="of quotes sent" />
         <Stat label="Time to first slot" value={minutes(m?.median_minutes_to_first_slot)} hint="median, request to booking" />
       </div>
@@ -483,11 +509,36 @@ function Overview({ ctx }: { ctx: Ctx }) {
                 <th className="text-left px-3 py-2 font-normal">Brand</th><th className="text-right px-3 py-2 font-normal">Open</th>
                 <th className="text-right px-3 py-2 font-normal">New</th><th className="text-right px-3 py-2 font-normal">Closed</th>
                 <th className="text-right px-3 py-2 font-normal">Invoiced</th>
+                {hasCommission && <><th className="text-right px-3 py-2 font-normal">Billed to clients</th><th className="text-right px-3 py-2 font-normal">Commission</th></>}
               </tr></thead>
               <tbody>{m.by_brand.map((b) => (
                 <tr key={b.brand || "-"} className="border-t border-border">
                   <td className="px-3 py-2">{b.name}</td><td className="px-3 py-2 text-right">{b.open}</td><td className="px-3 py-2 text-right">{b.created}</td>
                   <td className="px-3 py-2 text-right">{b.closed}</td><td className="px-3 py-2 text-right">{money(b.invoiced_cents, currency)}</td>
+                  {hasCommission && <><td className="px-3 py-2 text-right">{money(b.gmv_cents ?? 0, currency)}</td><td className="px-3 py-2 text-right">{money(b.commission_cents ?? 0, currency)}</td></>}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {m?.by_contractor && m.by_contractor.length > 0 && (
+        <section>
+          <h2 className={sectionTitle}>Contractors, last 30 days</h2>
+          <div className="border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-bg-subtle text-xs text-text-muted"><tr>
+                <th className="text-left px-3 py-2 font-normal">Contractor</th><th className="text-left px-3 py-2 font-normal">Settlement</th>
+                <th className="text-right px-3 py-2 font-normal">Jobs invoiced</th><th className="text-right px-3 py-2 font-normal">Billed to clients</th>
+                <th className="text-right px-3 py-2 font-normal">Commission</th><th className="text-right px-3 py-2 font-normal">Unpaid</th>
+              </tr></thead>
+              <tbody>{m.by_contractor.map((c) => (
+                <tr key={`${c.resource_id}-${c.mode}`} className="border-t border-border">
+                  <td className="px-3 py-2">{c.name}</td><td className="px-3 py-2 text-text-muted">{human(c.mode)}</td>
+                  <td className="px-3 py-2 text-right">{c.jobs_invoiced}</td><td className="px-3 py-2 text-right">{money(c.gmv_cents, currency)}</td>
+                  <td className="px-3 py-2 text-right">{c.mode === "commission" ? money(c.commission_accrued_cents + c.commission_invoiced_cents + c.commission_paid_cents, currency) : "—"}</td>
+                  <td className="px-3 py-2 text-right">{c.mode === "commission" ? money(c.commission_accrued_cents + c.commission_invoiced_cents, currency) : "—"}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -743,7 +794,8 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<string[]>([]);
   const [note, setNote] = useState("");
-  const [panel, setPanel] = useState<"" | "quote" | "schedule" | "form" | "invoice">("");
+  const [panel, setPanel] = useState<"" | "quote" | "schedule" | "form" | "invoice" | "partner_invoice">("");
+  const [contractors, setContractors] = useState<Resource[]>([]);
   const [formKey, setFormKey] = useState("");
 
   const load = useCallback(() => {
@@ -755,6 +807,9 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
       return call<Config>("config_get", { section: "forms", ...(dd.work.brand ? { brand: dd.work.brand } : {}) });
     }).then((c) => setForms(c.forms ?? [])).catch(report);
   }, [call, number, report]);
+  useEffect(() => {
+    call<{ resources: Resource[] }>("resources_list", {}).then((r) => setContractors((r.resources ?? []).filter((x) => x.kind === "person" || x.kind === "crew"))).catch(() => undefined);
+  }, [call]);
   useEffect(load, [load, rev]);
 
   useEffect(() => {
@@ -788,6 +843,9 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
   const moves = d.can_move_to.filter((s) => s !== w.status);
   const intakeForm = forms.find((f) => f.purpose === "intake");
   const fieldLabel = (k: string) => intakeForm?.schema.fields.find((f) => f.key === k)?.label ?? human(k);
+  const commission = w.settlement_mode === "commission";
+  const done = w.phase === "bill" || !open;
+  const eligible = contractors.filter((r) => r.active && (!w.brand_id || !r.brand_ids?.length || r.brand_ids.includes(w.brand_id)));
 
   return (
     <Drawer onClose={onClose}>
@@ -829,8 +887,9 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
               {w.phase === "execute" && activeSlots.length === 0 && <button type="button" disabled={busy} className={btn} onClick={() => setPanel("schedule")}>Book again</button>}
               {missingForms.map((k) => <button key={k} type="button" disabled={busy} className={btn} onClick={() => { setFormKey(k); setPanel("form"); }}>Fill {forms.find((f) => f.key === k)?.name ?? human(k)}</button>)}
               {w.phase === "execute" && <button type="button" disabled={busy} className={btnPrimary} onClick={() => act("work_complete", {}, "Completed")}>Complete</button>}
-              {w.phase === "bill" && !w.invoice_ref && <button type="button" disabled={busy} className={btnPrimary} onClick={() => setPanel("invoice")}>Invoice</button>}
-              {w.phase === "bill" && <button type="button" disabled={busy} className={btn} onClick={() => act("work_mark_paid", {}, "Marked paid")}>Mark paid</button>}
+              {w.phase === "bill" && !commission && !w.invoice_ref && <button type="button" disabled={busy} className={btnPrimary} onClick={() => setPanel("invoice")}>Invoice</button>}
+              {w.phase === "bill" && commission && <button type="button" disabled={busy} className={w.partner_invoice ? btn : btnPrimary} onClick={() => setPanel("partner_invoice")}>{w.partner_invoice ? "Correct contractor invoice" : "Record contractor invoice"}</button>}
+              {w.phase === "bill" && (!commission || w.partner_invoice) && <button type="button" disabled={busy} className={btn} onClick={() => act("work_mark_paid", {}, commission ? "Client payment confirmed" : "Marked paid")}>{commission ? "Client paid contractor" : "Mark paid"}</button>}
               <MoveMenu moves={moves} status={w.status} busy={busy} onMove={(to, reason) => act("work_transition", { to, reason }, `Moved to ${human(to)}`)} />
             </div>
           </section>
@@ -854,6 +913,43 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
           </div>
         </section>
 
+        <section className="text-sm">
+          <h3 className={sectionTitle}>Settlement</h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`px-2 py-0.5 rounded text-xs ${commission ? "bg-blue/15 text-blue" : "bg-bg-input text-text-muted"}`}>{termsLabel(w.settlement, w.currency)}</span>
+            {done
+              ? <span className="text-text-muted">{w.partner || "No contractor"}</span>
+              : (
+                <select className={`${input} text-xs`} value={w.partner_resource_id ?? ""} disabled={busy} aria-label="Contractor"
+                  onChange={(e) => { if (e.target.value) void act("work_set_partner", { resource_id: Number(e.target.value) }, "Contractor set"); }}>
+                  <option value="">{w.partner_resource_id ? w.partner : "Contractor: decided at booking"}</option>
+                  {eligible.filter((r) => r.id !== w.partner_resource_id).map((r) => <option key={r.id} value={r.id}>{r.name} · {termsLabel(r.settlement, w.currency)}</option>)}
+                </select>
+              )}
+          </div>
+          {commission && <p className="text-xs text-text-dim mt-1">The contractor invoices the client; you invoice the contractor the commission.</p>}
+          {w.partner_invoice && (
+            <div className="text-xs text-text-muted mt-2">
+              Contractor invoice {w.partner_invoice.ref} · {money(w.partner_invoice.net_cents ?? 0, w.currency)} net
+              {w.partner_invoice.gross_cents ? ` · ${money(w.partner_invoice.gross_cents, w.currency)} gross` : ""}
+              {w.partner_invoice.issued_by ? ` · by ${w.partner_invoice.issued_by}` : ""}
+              {w.partner_invoice.client_paid_at ? ` · client paid ${when(w.partner_invoice.client_paid_at)}` : ""}
+            </div>
+          )}
+          {(d.commission_lines ?? []).length > 0 && (
+            <table className="w-full text-xs mt-2">
+              <tbody>{(d.commission_lines ?? []).map((l) => (
+                <tr key={l.id} className={`border-b border-border ${l.status === "void" ? "opacity-50" : ""}`}>
+                  <td className="py-1 pr-2">{l.kind === "adjustment" ? "Adjustment" : "Commission"}{l.reason ? <span className="text-text-dim"> · {l.reason}</span> : null}</td>
+                  <td className="py-1 px-2 text-text-muted whitespace-nowrap">{l.rate_pct ? `${l.rate_pct}% of ${money(l.base_cents, l.currency)}` : ""}{l.fixed_cents ? ` + ${money(l.fixed_cents, l.currency)}` : ""}</td>
+                  <td className="py-1 px-2 text-text-muted">{human(l.status)}{l.invoice_ref ? ` · ${l.invoice_ref}` : ""}</td>
+                  <td className="py-1 pl-2 text-right whitespace-nowrap">{money(l.amount_cents, l.currency)}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </section>
+
         {Object.keys(w.intake ?? {}).length > 0 && (
           <section>
             <h3 className={sectionTitle}>Request</h3>
@@ -869,7 +965,7 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
           <section>
             <h3 className={sectionTitle}>{d.actual_lines.length ? "Actual" : "Estimate"}{w.quote_status ? ` · quote ${human(w.quote_status).toLowerCase()}` : ""}</h3>
             <Lines lines={d.actual_lines.length ? d.actual_lines : d.estimate_lines} currency={w.currency} />
-            {w.invoice_ref && <div className="text-xs text-text-muted mt-2">Invoice {w.invoice_ref}{w.invoiced_cents ? ` · ${money(w.invoiced_cents, w.currency)}` : ""}{w.paid_at ? ` · paid ${when(w.paid_at)}` : ""}</div>}
+            {w.invoice_ref && !commission && <div className="text-xs text-text-muted mt-2">Invoice {w.invoice_ref}{w.invoiced_cents ? ` · ${money(w.invoiced_cents, w.currency)}` : ""}{w.paid_at ? ` · paid ${when(w.paid_at)}` : ""}</div>}
           </section>
         )}
 
@@ -945,6 +1041,8 @@ function WorkDrawer({ ctx, number, onClose }: { ctx: Ctx; number: string; onClos
       {panel === "schedule" && <ScheduleDialog ctx={ctx} work={w} onClose={() => setPanel("")} onDone={() => { setPanel(""); bump(); load(); }} />}
       {panel === "form" && <FormDialog ctx={ctx} work={w} form={forms.find((f) => f.key === formKey)} formKey={formKey} onClose={() => setPanel("")} onDone={() => { setPanel(""); bump(); load(); }} />}
       {panel === "invoice" && <InvoiceDialog work={w} busy={busy} onClose={() => setPanel("")} onSubmit={async (args) => { if (await act("work_invoice", args, "Invoiced")) setPanel(""); }} />}
+      {panel === "partner_invoice" && <PartnerInvoiceDialog work={w} actualCents={d.actual_lines.reduce((t, l) => t + l.total_cents, 0)} busy={busy} onClose={() => setPanel("")}
+        onSubmit={async (args) => { if (await act("work_invoice", args, "Contractor invoice recorded")) setPanel(""); }} />}
     </Drawer>
   );
 }
@@ -1018,6 +1116,15 @@ function eventLabel(ev: WorkEvent): string {
     case "completed": return "Completed";
     case "paid": return "Paid";
     case "invoiced": return "Invoiced";
+    case "partner_assigned": return `Contractor set${typeof ev.payload?.name === "string" ? `: ${ev.payload.name}` : ""}`;
+    case "partner_invoice_recorded": return "Contractor invoice recorded";
+    case "commission_accrued": return "Commission due";
+    case "commission_recalculated": return "Commission recalculated";
+    case "commission_adjusted": return "Commission adjusted";
+    case "commission_voided": return "Commission voided";
+    case "commission_invoiced": return "Commission invoiced";
+    case "commission_paid": return "Commission paid";
+    case "client_paid_confirmed": return "Client paid the contractor";
     default: return human(ev.kind);
   }
 }
@@ -1027,6 +1134,8 @@ function eventDetail(ev: WorkEvent): string {
   if (typeof p.reason === "string" && p.reason) return p.reason;
   if (Array.isArray(p.flags) && p.flags.length) return `Flags: ${p.flags.join(", ")}`;
   if (typeof p.starts_at === "string") return when(p.starts_at);
+  if (typeof p.amount_cents === "number") return money(p.amount_cents);
+  if (typeof p.ref === "string") return `${p.ref}${typeof p.net_cents === "number" ? ` · ${money(p.net_cents)} net` : ""}`;
   return "";
 }
 
@@ -1204,6 +1313,33 @@ function InvoiceDialog({ work, busy, onClose, onSubmit }: { work: Work; busy: bo
   );
 }
 
+function PartnerInvoiceDialog({ work, actualCents, busy, onClose, onSubmit }: { work: Work; actualCents: number; busy: boolean; onClose: () => void; onSubmit: (args: Record<string, unknown>) => void }) {
+  const pi = work.partner_invoice;
+  const [ref, setRef] = useState(pi?.ref ?? "");
+  const [net, setNet] = useState(((pi?.net_cents ?? actualCents) || 0) / 100);
+  const [gross, setGross] = useState((pi?.gross_cents ?? 0) / 100);
+  const [issuedBy, setIssuedBy] = useState(pi?.issued_by ?? work.partner ?? "");
+  const t = work.settlement;
+  const base = t?.commission_base === "gross" && gross > 0 ? gross : net;
+  const expected = Math.round(base * 100 * (t?.commission_pct ?? 0) / 100) + (t?.commission_fixed_cents ?? 0);
+  return (
+    <Modal title={`Contractor invoice for ${work.number}`} onClose={onClose} footer={<>
+      <button type="button" className={btn} onClick={onClose}>Cancel</button>
+      <button type="button" className={btnPrimary} disabled={busy || !ref.trim() || net <= 0}
+        onClick={() => onSubmit({ external_ref: ref.trim(), amount_net_cents: Math.round(net * 100), amount_gross_cents: gross > 0 ? Math.round(gross * 100) : undefined, issued_by: issuedBy.trim() || undefined })}>Record</button>
+    </>}>
+      <p className="text-text-muted">{work.partner || "The contractor"} invoices the client directly. Record their invoice; the commission is computed on it.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Invoice number"><input className={input} value={ref} onChange={(e) => setRef(e.target.value)} /></Field>
+        <Field label="Issued by"><input className={input} value={issuedBy} onChange={(e) => setIssuedBy(e.target.value)} /></Field>
+        <Field label="Amount before tax"><input className={input} type="number" min={0} step="0.01" value={net} onChange={(e) => setNet(Number(e.target.value))} /></Field>
+        <Field label="Amount with tax" hint="Optional"><input className={input} type="number" min={0} step="0.01" value={gross} onChange={(e) => setGross(Number(e.target.value))} /></Field>
+      </div>
+      <p className="text-xs text-text-muted">{termsLabel(t, work.currency)} · commission {money(expected, work.currency)}</p>
+    </Modal>
+  );
+}
+
 // ─── New work ──────────────────────────────────────────────────────
 
 function IntakeDialog({ ctx, onClose, onCreated }: { ctx: Ctx; onClose: () => void; onCreated: (number: string) => void }) {
@@ -1336,6 +1472,7 @@ function ResourcesTab({ ctx }: { ctx: Ctx }) {
                   {[r.zone && `Zone ${r.zone}`, r.capacity > 0 && `Capacity ${r.capacity}`, r.quals?.length && r.quals.map(human).join(", "),
                     r.site_id && sites.find((s) => s.id === r.site_id)?.name].filter(Boolean).join(" · ")}
                 </span>
+                {r.settlement?.mode === "commission" && <span className="text-xs px-1.5 py-0.5 rounded bg-blue/15 text-blue whitespace-nowrap">{termsLabel(r.settlement)}</span>}
                 {brands.length > 0 && <span className="text-xs text-text-dim truncate max-w-xs">{brandNames(r.brand_ids)}</span>}
                 {!r.active && <span className="text-xs text-text-dim">inactive</span>}
               </button>
@@ -1351,7 +1488,10 @@ function ResourcesTab({ ctx }: { ctx: Ctx }) {
 function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; value: Partial<Resource>; sites: Site[]; onClose: () => void; onSaved: () => void }) {
   const [r, setR] = useState<Partial<Resource>>(value);
   const [quals, setQuals] = useState((value.quals ?? []).join(", "));
+  const [terms, setTerms] = useState<Settlement>(value.settlement ?? { mode: "resale" });
   const [busy, setBusy] = useState(false);
+  const setT = (patch: Partial<Settlement>) => setTerms({ ...terms, ...patch });
+  const commissionOk = terms.mode !== "commission" || (terms.commission_pct ?? 0) > 0 || (terms.commission_fixed_cents ?? 0) > 0;
   const set = (patch: Partial<Resource>) => setR({ ...r, ...patch });
   const save = async () => {
     setBusy(true);
@@ -1361,6 +1501,7 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
         quals: quals.split(",").map((q) => q.trim()).filter(Boolean), cost_rate_cents: r.cost_rate_cents ?? 0,
         needs_shift: r.needs_shift ?? false, active: r.active ?? true,
         brands: (r.brand_ids ?? []).map((id) => ctx.brands.find((b) => b.id === id)?.key).filter(Boolean),
+        settlement: terms.mode === "commission" ? terms : { mode: "resale" },
       });
       ctx.notify("Saved"); onSaved();
     } catch (e) { ctx.report(e); } finally { setBusy(false); }
@@ -1372,7 +1513,7 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
   return (
     <Modal title={r.id ? `Edit ${value.name}` : "Add a resource"} onClose={onClose} wide footer={<>
       <button type="button" className={btn} onClick={onClose}>Cancel</button>
-      <button type="button" className={btnPrimary} disabled={busy || !r.name?.trim()} onClick={save}>Save</button>
+      <button type="button" className={btnPrimary} disabled={busy || !r.name?.trim() || !commissionOk} onClick={save}>Save</button>
     </>}>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Name"><input className={input} value={r.name ?? ""} onChange={(e) => set({ name: e.target.value })} /></Field>
@@ -1395,6 +1536,37 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={r.active ?? true} onChange={(e) => set({ active: e.target.checked })} />Active</label>
         </div>
       </div>
+      {(r.kind === "person" || r.kind === "crew") && (
+        <div className="pt-3 border-t border-border space-y-3">
+          <Field label="Settlement" hint={terms.mode === "commission" ? "They invoice the client; you invoice them a commission per job" : "You invoice the client and pay them"}>
+            <select className={input} value={terms.mode} onChange={(e) => setT({ mode: e.target.value })}>
+              <option value="resale">Resale</option><option value="commission">Commission</option>
+            </select>
+          </Field>
+          {terms.mode === "commission" && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Commission %"><input className={input} type="number" min={0} max={100} step="0.1" value={terms.commission_pct ?? 0} onChange={(e) => setT({ commission_pct: Number(e.target.value) })} /></Field>
+              <Field label="Fixed fee per job"><input className={input} type="number" min={0} step="0.01" value={(terms.commission_fixed_cents ?? 0) / 100} onChange={(e) => setT({ commission_fixed_cents: Math.round(Number(e.target.value) * 100) })} /></Field>
+              <Field label="Computed on">
+                <select className={input} value={terms.commission_base ?? "net"} onChange={(e) => setT({ commission_base: e.target.value })}>
+                  <option value="net">Amount before tax</option><option value="gross">Amount with tax</option>
+                </select>
+              </Field>
+              <Field label="Invoice commissions">
+                <select className={input} value={terms.invoice_cadence ?? "per_job"} onChange={(e) => setT({ invoice_cadence: e.target.value })}>
+                  <option value="per_job">Per job</option><option value="monthly">Monthly</option>
+                </select>
+              </Field>
+              <Field label="Billing email" hint="Where commission invoices go"><input className={input} type="email" value={terms.billing_email ?? ""} onChange={(e) => setT({ billing_email: e.target.value })} /></Field>
+              <Field label="Billing name" hint="Legal name on those invoices"><input className={input} value={terms.billing_name ?? ""} onChange={(e) => setT({ billing_name: e.target.value })} /></Field>
+            </div>
+          )}
+          {!commissionOk && <p className="text-xs text-yellow">Set a commission percentage, a fixed fee, or both.</p>}
+          {Object.keys(value.settlement_by_brand ?? {}).length > 0 && (
+            <p className="text-xs text-text-muted">Brand terms: {Object.entries(value.settlement_by_brand ?? {}).map(([k, t]) => `${ctx.brands.find((b) => b.key === k)?.name ?? k}: ${termsLabel(t)}`).join(" · ")}</p>
+          )}
+        </div>
+      )}
       {ctx.brands.length > 0 && (
         <div className="pt-3 border-t border-border">
           <div className="text-xs text-text-muted mb-2">Works for {(r.brand_ids ?? []).length === 0 ? "every brand" : "these brands only"}</div>
@@ -1407,6 +1579,115 @@ function ResourceDialog({ ctx, value, sites, onClose, onSaved }: { ctx: Ctx; val
         </div>
       )}
     </Modal>
+  );
+}
+
+// ─── Commissions ───────────────────────────────────────────────────
+
+interface InvoiceRun { invoices: { partner?: string; resource_id: number; total_cents?: number; invoice_ref?: string; invoice_number?: string; error?: string }[]; skipped: unknown[] }
+
+function CommissionsTab({ ctx }: { ctx: Ctx }) {
+  const { call, brand, rev, report, notify, bump } = ctx;
+  const [status, setStatus] = useState("open");
+  const [partner, setPartner] = useState(0);
+  const [lines, setLines] = useState<CommissionLine[]>([]);
+  const [owed, setOwed] = useState<Owed[]>([]);
+  const [totals, setTotals] = useState<Record<string, number>>({});
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    call<{ lines: CommissionLine[]; owed_by_partner: Owed[]; totals: Record<string, number> }>("commissions_list",
+      withBrand(ctx, { status: status || undefined, resource_id: partner || undefined, limit: 500 }))
+      .then((r) => { setLines(r.lines ?? []); setOwed(r.owed_by_partner ?? []); setTotals(r.totals ?? {}); }).catch(report);
+  }, [call, brand, rev, status, partner]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const run = async (tool: string, args: Record<string, unknown>, done: string) => {
+    setBusy(true);
+    try {
+      const r = await call<InvoiceRun>(tool, { actor: "owner", ...args });
+      const failed = (r.invoices ?? []).filter((i) => i.error);
+      if (failed.length) report(new Error(failed.map((f) => `${f.partner ?? `#${f.resource_id}`}: ${f.error}`).join("; ")));
+      else if (tool === "commissions_invoice" && (r.invoices ?? []).length === 0) notify("Nothing due to invoice yet");
+      else notify(done);
+      bump();
+    } catch (e) { report(e); } finally { setBusy(false); }
+  };
+
+  const partners = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const o of owed) m.set(o.resource_id, o.name);
+    for (const l of lines) m.set(l.resource_id, l.partner);
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [owed, lines]);
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h2 className="text-sm font-medium">Commissions</h2>
+        <span className="text-xs text-text-dim">What contractors on commission owe you for the jobs they invoice themselves.</span>
+        <div className="ml-auto flex items-center gap-2">
+          <select className={`${input} text-xs`} value={partner} onChange={(e) => setPartner(Number(e.target.value))} aria-label="Contractor">
+            <option value={0}>All contractors</option>{partners.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+          <select className={`${input} text-xs`} value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
+            <option value="open">Unpaid</option><option value="accrued">Not invoiced</option><option value="invoiced">Invoiced</option>
+            <option value="paid">Paid</option><option value="void">Void</option><option value="">All</option>
+          </select>
+        </div>
+      </div>
+
+      {owed.length > 0 && (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {owed.map((o) => (
+            <div key={`${o.resource_id}-${o.currency}`} className="border border-border rounded-lg bg-bg-card p-3 space-y-2">
+              <div className="flex items-center gap-2"><span className="font-medium text-sm flex-1 truncate">{o.name}</span><span className="text-xs text-text-dim">{o.currency}</span></div>
+              <div className="flex gap-4 text-sm">
+                <div><div className="text-xs text-text-muted">Not invoiced</div><div>{money(o.accrued_cents, o.currency)}</div></div>
+                <div><div className="text-xs text-text-muted">Invoiced, unpaid</div><div className={o.receivable_cents > 0 ? "text-yellow" : ""}>{money(o.receivable_cents, o.currency)}</div></div>
+              </div>
+              {o.accrued_cents !== 0 && (
+                <button type="button" className={btn} disabled={busy} onClick={() => run("commissions_invoice", withBrand(ctx, { resource_id: o.resource_id, finalize: true }), `Commissions invoiced to ${o.name}`)}>
+                  Invoice what is due
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-4 text-xs text-text-muted">
+        {["accrued", "invoiced", "paid"].map((k) => <span key={k}>{k === "accrued" ? "Not invoiced" : human(k)}: <span className="text-text">{money(totals[k] ?? 0)}</span></span>)}
+      </div>
+
+      {lines.length === 0 ? <Empty>No commission lines. They appear when a job settled by commission is completed.</Empty> : (
+        <div className="border border-border rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-bg-subtle text-xs text-text-muted"><tr>
+              <th className="text-left px-3 py-2 font-normal">Job</th><th className="text-left px-3 py-2 font-normal">Contractor</th>
+              <th className="text-left px-3 py-2 font-normal">Basis</th><th className="text-right px-3 py-2 font-normal">Amount</th>
+              <th className="text-left px-3 py-2 font-normal">Status</th><th className="px-3 py-2" />
+            </tr></thead>
+            <tbody>{lines.map((l) => (
+              <tr key={l.id} className={`border-t border-border ${l.status === "void" ? "opacity-50" : ""}`}>
+                <td className="px-3 py-2"><button type="button" className="font-mono text-xs text-accent hover:underline" onClick={() => ctx.open(l.work_number)}>{l.work_number}</button>
+                  {l.kind === "adjustment" && <span className="text-xs text-text-dim"> · adjustment</span>}</td>
+                <td className="px-3 py-2">{l.partner}</td>
+                <td className="px-3 py-2 text-xs text-text-muted">{l.rate_pct ? `${l.rate_pct}% of ${money(l.base_cents, l.currency)}` : ""}{l.fixed_cents ? `${l.rate_pct ? " + " : ""}${money(l.fixed_cents, l.currency)} fixed` : ""}{l.cadence === "monthly" ? " · monthly" : ""}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">{money(l.amount_cents, l.currency)}</td>
+                <td className="px-3 py-2 text-xs text-text-muted">{l.status === "accrued" ? "Not invoiced" : human(l.status)}{l.invoice_ref ? ` · ${l.invoice_ref}` : ""}<div className="text-text-dim">{ago(l.created_at)}</div></td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">
+                  {l.status === "accrued" && <>
+                    <button type="button" className={btn} disabled={busy} onClick={() => run("commissions_invoice", { work_id: l.work_id, resource_id: l.resource_id, finalize: true }, "Commission invoiced")}>Invoice</button>{" "}
+                    <button type="button" className={btnDanger} disabled={busy} onClick={() => { const reason = window.prompt("Why void this commission?"); if (reason) void run("commissions_void", { line_id: l.id, reason }, "Commission voided"); }}>Void</button>
+                  </>}
+                  {l.status === "invoiced" && l.invoice_ref && <button type="button" className={btn} disabled={busy} onClick={() => run("commissions_mark_paid", { invoice_ref: l.invoice_ref }, "Marked paid")}>Mark paid</button>}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

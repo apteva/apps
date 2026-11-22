@@ -635,7 +635,7 @@ func TestUpgradeFromV01KeepsData(t *testing.T) {
 	migrate(t, db, "")
 
 	w := must(getWork(db, pid, 1))
-	if w.WorkType != "visit" || w.BrandID != 0 || w.Brand != "" {
+	if w.WorkType != "visit" || w.BrandID != 0 || w.Brand != "" || w.SettlementMode != modeResale || w.PartnerResourceID != nil {
 		t.Fatalf("work after upgrade: %+v", w)
 	}
 	ag := must(getAgreement(db, pid, 1))

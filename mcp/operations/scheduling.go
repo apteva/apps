@@ -282,6 +282,10 @@ type suggestParams struct {
 
 func suggestSlots(db *sql.DB, pid string, w *Work, wt *WorkType, p suggestParams) ([]SlotOption, []Requirement, error) {
 	reqs := workRequirements(db, pid, w, wt)
+	// The job's contractor is tried first.
+	if w.PartnerResourceID != nil {
+		p.Preferred = append([]int64{*w.PartnerResourceID}, p.Preferred...)
+	}
 	if len(reqs) == 0 {
 		return nil, nil, fmt.Errorf("work type %s has no resource requirements; add requirements to the type or its rate items", wt.Key)
 	}
@@ -553,6 +557,8 @@ func bookSlot(db *sql.DB, pid string, w *Work, args map[string]any) (*BookResult
 	}
 	actor := stringArg(args, "actor")
 	_ = logEvent(db, pid, w.ID, actor, "booked", "", "", map[string]any{"slot_id": slotID, "starts_at": opt.StartsAt, "resources": opt.Resources})
+	// Whoever leads the booking does the job: their terms apply.
+	assignFromBooking(db, pid, w, opt.Resources, actor, "booked")
 	// Walk the lifecycle forward to execute/scheduled.
 	for w.Phase != "execute" {
 		next := nextPhase(wt, w.Phase)
@@ -634,6 +640,7 @@ func updateSlot(db *sql.DB, pid string, args map[string]any) (*Slot, *Work, erro
 			return nil, nil, err
 		}
 		_ = logEvent(db, pid, w.ID, actor, "rescheduled", "", "", map[string]any{"slot_id": s.ID, "from": s.StartsAt, "to": opts[0].StartsAt})
+		assignFromBooking(db, pid, w, opts[0].Resources, actor, "rescheduled")
 	case "cancel", "missed":
 		if s.Status != "booked" && s.Status != "in_progress" {
 			return nil, nil, fmt.Errorf("slot is %s", s.Status)

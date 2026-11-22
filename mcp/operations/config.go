@@ -127,6 +127,7 @@ type Material struct {
 type RateItem struct {
 	ID             int64         `json:"id,omitempty"`
 	BrandID        int64         `json:"brand_id"`
+	ResourceID     int64         `json:"resource_id,omitempty"` // >0: this resource's price and cost for the item
 	PackKey        string        `json:"pack_key,omitempty"`
 	Code           string        `json:"code"`
 	Name           string        `json:"name"`
@@ -484,12 +485,12 @@ func upsertRateItem(db execer, pid string, ri RateItem) error {
 	if ri.CatalogPriceID != nil {
 		catalog = *ri.CatalogPriceID
 	}
-	_, err := db.Exec(`INSERT INTO rate_items(project_id,brand_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,
-		requirements_json,materials_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,brand_id,code) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,catalog_price_id=excluded.catalog_price_id,
+	_, err := db.Exec(`INSERT INTO rate_items(project_id,brand_id,resource_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,
+		requirements_json,materials_json,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id,brand_id,resource_id,code) DO UPDATE SET pack_key=excluded.pack_key,name=excluded.name,catalog_price_id=excluded.catalog_price_id,
 		pricing_json=excluded.pricing_json,cost_cents=excluded.cost_cents,duration_json=excluded.duration_json,
 		requirements_json=excluded.requirements_json,materials_json=excluded.materials_json,active=excluded.active,updated_at=excluded.updated_at`,
-		pid, ri.BrandID, ri.PackKey, ri.Code, ri.Name, catalog, mustJSON(ri.Pricing), ri.CostCents, mustJSON(ri.Duration),
+		pid, ri.BrandID, ri.ResourceID, ri.PackKey, ri.Code, ri.Name, catalog, mustJSON(ri.Pricing), ri.CostCents, mustJSON(ri.Duration),
 		jsonOr(ri.Requirements, "[]"), jsonOr(ri.Materials, "[]"), boolInt(ri.Active), nowUTC())
 	return err
 }
@@ -641,14 +642,14 @@ func listForms(db *sql.DB, pid string, brandID int64) ([]*Form, error) {
 	return out, rows.Err()
 }
 
-const rateItemCols = `id,brand_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,requirements_json,materials_json,active,updated_at`
+const rateItemCols = `id,brand_id,resource_id,pack_key,code,name,catalog_price_id,pricing_json,cost_cents,duration_json,requirements_json,materials_json,active,updated_at`
 
 func scanRateItem(s scanner) (*RateItem, error) {
 	var ri RateItem
 	var catalog sql.NullInt64
 	var pricing, dur, reqs, mats string
 	var active int
-	if err := s.Scan(&ri.ID, &ri.BrandID, &ri.PackKey, &ri.Code, &ri.Name, &catalog, &pricing, &ri.CostCents, &dur, &reqs, &mats, &active, &ri.UpdatedAt); err != nil {
+	if err := s.Scan(&ri.ID, &ri.BrandID, &ri.ResourceID, &ri.PackKey, &ri.Code, &ri.Name, &catalog, &pricing, &ri.CostCents, &dur, &reqs, &mats, &active, &ri.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if catalog.Valid {
@@ -668,8 +669,15 @@ func getRateItem(db *sql.DB, pid string, id int64, code string, brandID int64) (
 	if id > 0 {
 		return scanRateItem(db.QueryRow(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND id=?`, pid, id))
 	}
+	return getRateItemFor(db, pid, code, brandID, 0)
+}
+
+// getRateItemFor reads the rate item that applies when resourceID does
+// the work for brandID: the resource's own row for the brand, then its
+// row shared by all brands, then the brand's row, then the shared one.
+func getRateItemFor(db *sql.DB, pid, code string, brandID, resourceID int64) (*RateItem, error) {
 	return scanRateItem(db.QueryRow(`SELECT `+rateItemCols+` FROM rate_items WHERE project_id=? AND code=? AND brand_id IN (?,0)
-		ORDER BY brand_id DESC LIMIT 1`, pid, code, brandID))
+		AND resource_id IN (?,0) ORDER BY resource_id DESC, brand_id DESC LIMIT 1`, pid, code, brandID, resourceID))
 }
 
 func listRateItems(db *sql.DB, pid, q, pack string, brandID int64) ([]*RateItem, error) {
@@ -683,7 +691,7 @@ func listRateItems(db *sql.DB, pid, q, pack string, brandID int64) ([]*RateItem,
 		query += ` AND pack_key=?`
 		args = append(args, pack)
 	}
-	rows, err := db.Query(query+` ORDER BY brand_id, pack_key, code`, args...)
+	rows, err := db.Query(query+` ORDER BY brand_id, resource_id, pack_key, code`, args...)
 	if err != nil {
 		return nil, err
 	}

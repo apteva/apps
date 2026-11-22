@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: operations
 display_name: Operations
-version: 0.3.1
+version: 0.4.0
 description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work, several brands on shared resources.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/operations
@@ -69,6 +69,11 @@ provides:
     - { name: agreements_list,     description: "List recurring work agreements." }
     - { name: agreements_update,   description: "Pause, resume or end an agreement." }
     - { name: agreements_generate, description: "Generate (and book) recurring work due up to a date." }
+    - { name: work_set_partner,    description: "Assign the contractor doing a job and copy its settlement terms." }
+    - { name: commissions_list,    description: "List commission lines and what each contractor owes." }
+    - { name: commissions_invoice, description: "Invoice accrued commissions to contractors through Billing." }
+    - { name: commissions_mark_paid, description: "Mark commission invoices or lines paid." }
+    - { name: commissions_void,    description: "Void accrued commission lines with a reason." }
     - { name: metrics,             description: "Operations metrics for a period." }
   publishes:
     - { name: work.created,        description: "A work item was created." }
