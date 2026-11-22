@@ -29,14 +29,36 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	}
 }
 
-// requireSession lets only signed-in dashboard users (who carry the
-// platform session cookie) change scope or limits. Agents and API-key
-// callers can read these settings but not edit them.
-func requireSession(w http.ResponseWriter, r *http.Request) bool {
-	if c, err := r.Cookie("session"); err == nil && c.Value != "" {
+// operatorID returns the platform operator (dashboard session or the
+// user's own API key) the server authenticated for this request, or 0.
+// apteva-server strips client-supplied X-Apteva-Operator-ID and sets it
+// only for sessions and user API keys; agent gateway calls, app-to-app
+// calls and delegated application users never carry it. Requests that
+// also carry agent, app or delegated-user identity are not operators.
+func operatorID(r *http.Request) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	for _, h := range []string{
+		"X-Apteva-Caller-Agent", "X-Apteva-Caller-Instance",
+		"X-Apteva-Bound-Caller-Install-ID", "X-Apteva-Subject-Type",
+	} {
+		if strings.TrimSpace(r.Header.Get(h)) != "" {
+			return 0
+		}
+	}
+	return id
+}
+
+// requireOperator lets only the person operating the platform (signed in
+// to the dashboard, or using their own API key) change scope or limits.
+// Agents, other apps and delegated users can read these but not edit them.
+func requireOperator(w http.ResponseWriter, r *http.Request) bool {
+	if operatorID(r) > 0 {
 		return true
 	}
-	http.Error(w, "only a signed-in person can change the allowlist or limits (use the Security panel)", http.StatusForbidden)
+	http.Error(w, "only the platform operator (dashboard session or your own API key) can change the allowlist or limits; agents cannot", http.StatusForbidden)
 	return false
 }
 
@@ -62,7 +84,7 @@ func (a *App) handleTargets(w http.ResponseWriter, r *http.Request) {
 		out, err := a.toolTargetsList(ctx, nil)
 		respond(w, out, err)
 	case http.MethodPost:
-		if !requireSession(w, r) {
+		if !requireOperator(w, r) {
 			return
 		}
 		args, err := decodeBody(r)
@@ -99,7 +121,7 @@ func (a *App) handleTargetItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireSession(w, r) {
+	if !requireOperator(w, r) {
 		return
 	}
 	ctx := requestCtx(r)
@@ -115,7 +137,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		s, err := getSettings(ctx.AppDB(), ctx.CurrentProject())
 		respond(w, map[string]any{"settings": s, "ceilings": map[string]int{"rate_pps": maxRatePPS, "parallel_hosts": maxParallelHosts, "max_addresses": maxAddressLimit}}, err)
 	case http.MethodPut, http.MethodPatch:
-		if !requireSession(w, r) {
+		if !requireOperator(w, r) {
 			return
 		}
 		args, err := decodeBody(r)
@@ -162,8 +184,8 @@ func (a *App) handleScans(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		startedBy := "API"
-		if c, err := r.Cookie("session"); err == nil && c.Value != "" {
-			startedBy = "panel user"
+		if id := operatorID(r); id > 0 {
+			startedBy = "operator " + strconv.FormatInt(id, 10)
 		}
 		out, err := a.startScan(ctx, args, startedBy)
 		if err != nil {

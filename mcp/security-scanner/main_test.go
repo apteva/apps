@@ -440,23 +440,37 @@ func TestCancelStopsScan(t *testing.T) {
 	}
 }
 
-func TestAllowlistEditsNeedSession(t *testing.T) {
+func TestAllowlistEditsNeedOperator(t *testing.T) {
 	app, ctx := newTestApp(t)
 	globalCtx = ctx
 	body := `{"kind":"allow","value":"10.1.0.0/24"}`
-
-	rec := httptest.NewRecorder()
-	app.handleTargets(rec, httptest.NewRequest(http.MethodPost, "/targets", strings.NewReader(body)))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("without session: status %d", rec.Code)
+	post := func(mut func(*http.Request)) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/targets", strings.NewReader(body))
+		if mut != nil {
+			mut(req)
+		}
+		rec := httptest.NewRecorder()
+		app.handleTargets(rec, req)
+		return rec
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/targets", strings.NewReader(body))
-	req.AddCookie(&http.Cookie{Name: "session", Value: "s1"})
-	rec = httptest.NewRecorder()
-	app.handleTargets(rec, req)
+	if rec := post(nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("anonymous: status %d", rec.Code)
+	}
+	// A bare cookie is not proof of anything; only the server-set operator counts.
+	if rec := post(func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "session", Value: "s1"}) }); rec.Code != http.StatusForbidden {
+		t.Fatalf("cookie only: status %d", rec.Code)
+	}
+	for _, h := range []string{"X-Apteva-Caller-Agent", "X-Apteva-Bound-Caller-Install-ID", "X-Apteva-Subject-Type"} {
+		h := h
+		if rec := post(func(r *http.Request) { r.Header.Set("X-Apteva-Operator-ID", "1"); r.Header.Set(h, "7") }); rec.Code != http.StatusForbidden {
+			t.Fatalf("operator + %s: status %d", h, rec.Code)
+		}
+	}
+
+	rec := post(func(r *http.Request) { r.Header.Set("X-Apteva-Operator-ID", "1") })
 	if rec.Code != http.StatusOK {
-		t.Fatalf("with session: status %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("operator: status %d %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
 		Added []Target `json:"added"`
@@ -469,6 +483,6 @@ func TestAllowlistEditsNeedSession(t *testing.T) {
 	rec = httptest.NewRecorder()
 	app.handleSettings(rec, httptest.NewRequest(http.MethodPut, "/settings", strings.NewReader(`{"rate_pps":900}`)))
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("settings without session: status %d", rec.Code)
+		t.Fatalf("settings without operator: status %d", rec.Code)
 	}
 }

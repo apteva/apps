@@ -69,7 +69,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "security_overview", Description: "Open findings by severity, running and recent scans, allowlist size and rate limits. Args: none.",
 			InputSchema: schemaObject(nil, nil), Handler: a.toolOverview},
-		{Name: "security_targets_list", Description: "Read the scan allowlist, exclusions and rate limits. Only people can change them, in the Security panel. Args: none.",
+		{Name: "security_targets_list", Description: "Read the scan allowlist, exclusions and rate limits. Only the platform operator can change them (Security panel or their own API key); agents cannot. Args: none.",
 			InputSchema: schemaObject(nil, nil), Handler: a.toolTargetsList},
 		{Name: "security_scope_check", Description: "Dry run. Expand targets (IPs, CIDRs, hostnames) and show which addresses are allowed or dropped and why, plus the port plan for a profile. Sends no traffic to targets (DNS lookups only). Args: targets (array), profile?, tcp_ports?, udp_ports?.",
 			InputSchema: schemaObject(map[string]any{"targets": sStringArray(), "profile": sString(), "tcp_ports": sString(), "udp_ports": sString()}, []string{"targets"}), Handler: a.toolScopeCheck},
@@ -147,7 +147,7 @@ func (a *App) toolTargetsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		}
 	}
 	return map[string]any{"allowlist": allow, "exclusions": exclude, "settings": settings,
-		"note": "Only people can edit the allowlist, exclusions and limits in the Security panel."}, err
+		"note": "Only the platform operator can edit the allowlist, exclusions and limits (Security panel or their own API key); agents cannot."}, err
 }
 
 func (a *App) toolScopeCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -172,7 +172,7 @@ func (a *App) toolScopeCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolScanStart(c context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	startedBy := "agent"
+	startedBy := "MCP client"
 	if caller := sdk.CallerFrom(c); caller != nil {
 		switch {
 		case caller.AgentID > 0:

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: security-scanner
 display_name: Security Scanner
-version: 0.1.0
+version: 0.1.1
 description: |
   Network exposure scanning for systems you own or are authorised to test.
   Discover live hosts in IP ranges, find open TCP ports (plus DNS, NTP and
@@ -69,7 +69,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: security-scanner/v0.1.0
+    ref: security-scanner/v0.1.1
     entry: mcp/security-scanner
   port: 8080
   health_check: /health

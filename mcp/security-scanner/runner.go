@@ -57,7 +57,7 @@ func (m *scanManager) prepare(ctx context.Context, db *sql.DB, pid string, targe
 		return nil, nil, portPlan{}, err
 	}
 	if allowCount == 0 {
-		return nil, nil, portPlan{}, errors.New("the allowlist is empty: a person must add targets in the Security panel before scanning")
+		return nil, nil, portPlan{}, errors.New("the allowlist is empty: the platform operator must add targets (Security panel or API) before scanning")
 	}
 	plan, err := planForProfile(opt.Profile, opt.TCPSpec, opt.UDPSpec)
 	if err != nil {

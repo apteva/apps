@@ -24,8 +24,11 @@ targets on a per-project allowlist that people edit in the panel.
 
 ## Safety
 
-- Allowlist, exclusions and limits can only be changed from a signed-in
-  dashboard session (the panel). MCP tools are read-only for scope.
+- Allowlist, exclusions and limits can only be changed by the platform
+  operator: a signed-in dashboard session (the panel) or the operator's own
+  API key through `/api/apps/security-scanner/...`. The app trusts the
+  server-set `X-Apteva-Operator-ID` and refuses requests carrying agent,
+  app-to-app or delegated-user identity. MCP tools are read-only for scope.
 - Rate limit (default 100 probes/s, ceiling 1,000), parallel hosts
   (default 10, ceiling 64), max addresses per scan (default 1,024).
 - One scan per project at a time; "Stop all scans" in the panel.

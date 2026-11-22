@@ -8,7 +8,7 @@ Security panel. Scans detect only: no exploits, no password guessing.
 ## Workflow
 
 1. Run `security_targets_list` to see what you may scan. If the allowlist is
-   empty, stop and ask a person to add targets in the Security panel. Never
+   empty, stop and ask the platform operator to add targets (Security panel or API). Never
    try to scan systems that are not on the list.
 2. Run `security_scope_check` with the targets you plan to scan. It sends
    nothing and shows which addresses are allowed or dropped and why.
