@@ -131,8 +131,12 @@ func setupPrepaidAccount(t *testing.T) (*App, *sdk.AppCtx, *prepaidStub, *Accoun
 	if _, err := app.toolPlanMeterSet(ctx, map[string]any{"plan_key": "api", "source_app": "llm", "meter": "model:text-fast", "input_price_id": 15}); err == nil || !strings.Contains(err.Error(), "metered") {
 		t.Fatalf("flat price as meter: err=%v", err)
 	}
-	if _, err := app.toolPlanMeterSet(ctx, map[string]any{"plan_key": "api", "source_app": "llm", "meter": "model:text-fast", "input_price_id": 11, "output_price_id": 12}); err != nil {
+	meterOut, err := app.toolPlanMeterSet(ctx, map[string]any{"plan_key": "api", "source_app": "llm", "meter": "model:text-fast", "input_price_id": 11, "output_price_id": 12})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if meta := string(asMap(t, meterOut)["meter"].(*PlanMeter).Metadata); meta != "{}" {
+		t.Fatalf("meter metadata = %s, want {}", meta)
 	}
 	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "dev@example.com", "slug": "runlane-dev", "plan_key": "api"})
 	if err != nil {

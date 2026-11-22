@@ -204,7 +204,10 @@ func scanPlanMeter(r interface{ Scan(...any) error }) (*PlanMeter, error) {
 		return nil, err
 	}
 	m.InputPriceID, m.OutputPriceID, m.CachedInputPriceID, m.PerRequestPriceID = nullInt(in), nullInt(out), nullInt(cached), nullInt(per)
-	m.Metadata = json.RawMessage(firstNonEmpty(meta, "{}"))
+	if meta == "" || meta == "null" {
+		meta = "{}"
+	}
+	m.Metadata = json.RawMessage(meta)
 	return &m, nil
 }
 
@@ -280,6 +283,10 @@ func (a *App) toolPlanMeterSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if len(ids) == 0 {
 		return nil, errors.New("at least one of input_price_id, output_price_id, cached_input_price_id or per_request_price_id is required")
 	}
+	meterMetadata := mapFromAny(args["metadata"])
+	if meterMetadata == nil {
+		meterMetadata = map[string]any{}
+	}
 	_, err = ctx.AppDB().Exec(`INSERT INTO saas_plan_meters
 		(project_id, plan_key, source_app, meter, input_price_id, output_price_id, cached_input_price_id, per_request_price_id, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -293,7 +300,7 @@ func (a *App) toolPlanMeterSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 		pid, plan.Key, sourceApp, meter,
 		nullableInt64(ids["input_price_id"]), nullableInt64(ids["output_price_id"]),
 		nullableInt64(ids["cached_input_price_id"]), nullableInt64(ids["per_request_price_id"]),
-		jsonOrEmpty(mapFromAny(args["metadata"]), "{}"))
+		jsonOrEmpty(meterMetadata, "{}"))
 	if err != nil {
 		return nil, err
 	}
