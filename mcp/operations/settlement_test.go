@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // cleanJob takes a regular clean from intake to completion, booked with
@@ -329,5 +330,29 @@ func TestCommissionAutoClose(t *testing.T) {
 	}
 	if l := must(workCommissions(db, pid, w.ID)); len(l) != 1 || l[0].AmountCents != 1000 {
 		t.Fatalf("fixed commission: %+v", l)
+	}
+}
+
+// A contractor with commission lines but no invoiced job in the period
+// (the test DB, like the app, has one connection): metrics must not
+// query inside an open cursor.
+func TestMetricsContractorWithoutInvoicedJob(t *testing.T) {
+	db := testDB(t)
+	fixClock(t, testNow)
+	install(t, db, "cleaning")
+	p := must(upsertResource(db, pid, map[string]any{"kind": "person", "name": "Late Ltd", "quals": []any{"cleaner"},
+		"settlement": map[string]any{"mode": "commission", "commission_pct": 10}}))
+	shift(t, db, p.ID, "2026-11-16T08:00:00Z", "2026-11-16T18:00:00Z")
+	cleanJob(t, db, nil, p.ID, "2026-11-16T10:00:00Z") // accrued, not invoiced
+	done := make(chan map[string]any, 1)
+	go func() { done <- must(metrics(db, pid, testNow.AddDate(0, 0, -1), testNow.AddDate(0, 0, 1), 0)) }()
+	select {
+	case m := <-done:
+		bc := m["by_contractor"].([]map[string]any)
+		if len(bc) != 1 || bc[0]["name"] != "Late Ltd" || bc[0]["commission_accrued_cents"].(int64) != 840 {
+			t.Fatalf("by_contractor: %+v", bc)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("metrics deadlocked")
 	}
 }

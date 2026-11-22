@@ -1072,27 +1072,36 @@ func contractorBreakdown(db *sql.DB, pid, f, t, bw string) []map[string]any {
 		out = append(out, m)
 	}
 	rows.Close()
+	// Read every row before querying again: the app's connection pool
+	// can be a single connection, and a query inside an open cursor
+	// waits for it forever.
+	type cl struct {
+		id, v int64
+		s     string
+	}
+	var cls []cl
 	crow, err := db.Query(`SELECT c.resource_id, c.status, COALESCE(SUM(c.amount_cents),0) FROM commission_lines c JOIN work w ON w.id=c.work_id
 		WHERE c.project_id=? AND c.status<>'void' AND c.created_at>=? AND c.created_at<?`+bw+` GROUP BY c.resource_id, c.status`, pid, f, t)
 	if err == nil {
 		for crow.Next() {
-			var id, v int64
-			var s string
-			if crow.Scan(&id, &s, &v) != nil {
-				continue
+			var x cl
+			if crow.Scan(&x.id, &x.s, &x.v) == nil {
+				cls = append(cls, x)
 			}
-			m := idx[key{id, modeCommission}]
-			if m == nil {
-				var name string
-				_ = db.QueryRow(`SELECT name FROM resources WHERE id=?`, id).Scan(&name)
-				m = map[string]any{"resource_id": id, "name": name, "mode": modeCommission, "jobs_invoiced": 0, "gmv_cents": int64(0),
-					"commission_accrued_cents": int64(0), "commission_invoiced_cents": int64(0), "commission_paid_cents": int64(0)}
-				idx[key{id, modeCommission}] = m
-				out = append(out, m)
-			}
-			m["commission_"+s+"_cents"] = v
 		}
 		crow.Close()
+	}
+	for _, x := range cls {
+		m := idx[key{x.id, modeCommission}]
+		if m == nil {
+			var name string
+			_ = db.QueryRow(`SELECT name FROM resources WHERE id=?`, x.id).Scan(&name)
+			m = map[string]any{"resource_id": x.id, "name": name, "mode": modeCommission, "jobs_invoiced": 0, "gmv_cents": int64(0),
+				"commission_accrued_cents": int64(0), "commission_invoiced_cents": int64(0), "commission_paid_cents": int64(0)}
+			idx[key{x.id, modeCommission}] = m
+			out = append(out, m)
+		}
+		m["commission_"+x.s+"_cents"] = x.v
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i]["gmv_cents"].(int64) > out[j]["gmv_cents"].(int64) })
 	return out

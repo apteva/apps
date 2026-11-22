@@ -1,5 +1,13 @@
 # Operations release notes
 
+## 0.4.1
+
+- Fix `metrics` hanging, and the app with it, when a contractor had
+  commission lines but no job invoiced in the period (for example a job
+  closed in the last second of the window). `by_contractor` ran a query while
+  another was still open, and the app's single database connection waited
+  for itself. No tool or schema changes.
+
 ## 0.4.0
 
 Commission settlement: jobs done by a contractor can now be settled in one of
