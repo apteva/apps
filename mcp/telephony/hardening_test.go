@@ -562,7 +562,7 @@ func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
 		"CallSid": {"CAdirect"}, "From": {"+34648257793"}, "To": {route.PhoneNumber},
 		"ForwardedFrom": {"+34930494946"},
 	}
-	endpoint := strings.TrimPrefix(a.inboundRouteURL(route), a.publicAppURL())
+	endpoint := strings.TrimPrefix(a.inboundRouteURL(route), a.carrierCallbackBase())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	signTwilioTestRequest(t, a, req, form)
 	rec := httptest.NewRecorder()
@@ -611,7 +611,7 @@ func TestTwilioStreamErrorPreservesCarrierStatusAndRealtimeThread(t *testing.T) 
 		"CallSid": {call.CarrierSID}, "StreamEvent": {"stream-error"}, "StreamError": {"handshake rejected"},
 	}
 	fullURL := a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID)
-	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	endpoint := strings.TrimPrefix(fullURL, a.carrierCallbackBase())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	signTwilioTestRequest(t, a, req, form)
 	rec := httptest.NewRecorder()
@@ -664,7 +664,7 @@ func TestTwilioStreamErrorAfterCompletionDoesNotRegressCall(t *testing.T) {
 		"CallSid": {call.CarrierSID}, "StreamEvent": {"stream-error"}, "StreamError": {"late transport error"},
 	}
 	fullURL := a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID)
-	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	endpoint := strings.TrimPrefix(fullURL, a.carrierCallbackBase())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	signTwilioTestRequest(t, a, req, form)
 	rec := httptest.NewRecorder()
@@ -705,7 +705,7 @@ func TestTwilioInboundStatusCallbackCompletesCall(t *testing.T) {
 	}
 	form := url.Values{"CallSid": {call.CarrierSID}, "CallStatus": {"completed"}, "To": {route.PhoneNumber}}
 	fullURL := a.twilioRouteStatusURL(route)
-	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	endpoint := strings.TrimPrefix(fullURL, a.carrierCallbackBase())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	signTwilioTestRequest(t, a, req, form)
 	rec := httptest.NewRecorder()

@@ -55,12 +55,12 @@ func (a *App) configureBandwidthRoute(ctx *sdk.AppCtx, route *routeRow) error {
 
 func (a *App) bandwidthWaitURL(route routeRow, callID string) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}, "call_id": {callID}}.Encode()
-	return a.publicAppURL() + "/inbound/bandwidth/" + url.PathEscape(route.ID) + "/wait?" + query
+	return a.carrierCallbackBase() + "/inbound/bandwidth/" + url.PathEscape(route.ID) + "/wait?" + query
 }
 
 func (a *App) bandwidthRouteStatusURL(route routeRow) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}}.Encode()
-	return a.publicAppURL() + "/inbound/bandwidth/" + url.PathEscape(route.ID) + "/status?" + query
+	return a.carrierCallbackBase() + "/inbound/bandwidth/" + url.PathEscape(route.ID) + "/status?" + query
 }
 
 func writeBandwidthHold(w http.ResponseWriter, waitURL, secret, initialPrompt string) {

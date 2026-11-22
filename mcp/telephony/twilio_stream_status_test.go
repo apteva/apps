@@ -20,7 +20,7 @@ func streamStatusTestApp(t *testing.T) *App {
 
 func sendTestStreamStatus(a *App, call callRow, event string) *httptest.ResponseRecorder {
 	form := url.Values{"CallSid": {call.CarrierSID}, "StreamSid": {"MZ-test"}, "StreamEvent": {event}}
-	endpoint := strings.TrimPrefix(a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID), a.publicAppURL())
+	endpoint := strings.TrimPrefix(a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID), a.carrierCallbackBase())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Twilio-Signature", twilioTestSignature(a.publicRequestURL(req), form, "test-auth-token"))

@@ -100,7 +100,7 @@ func preparationFixture(t *testing.T, routed bool) (*App, *sdk.AppCtx, *preparat
 func preparationWebhook(t *testing.T, a *App, route *routeRow) *httptest.ResponseRecorder {
 	t.Helper()
 	form := url.Values{"CallSid": {"CA-preparation"}, "From": {"+14155550102"}, "To": {route.PhoneNumber}}
-	req := httptest.NewRequest("POST", strings.TrimPrefix(a.inboundRouteURL(*route), a.publicAppURL()), strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", strings.TrimPrefix(a.inboundRouteURL(*route), a.carrierCallbackBase()), strings.NewReader(form.Encode()))
 	signTwilioTestRequest(t, a, req, form)
 	rec := httptest.NewRecorder()
 	a.handleTwilioInbound(rec, req)

@@ -1882,7 +1882,7 @@ func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan,
 
 func (a *App) twilioIVRActionURL(row *callRow, nodeID string) string {
 	query := url.Values{"token": {row.CallbackSecret}, "project_id": {row.ProjectID}, "node": {nodeID}}.Encode()
-	return a.publicAppURL() + "/ivr/twilio/" + url.PathEscape(row.ID) + "?" + query
+	return a.carrierCallbackBase() + "/ivr/twilio/" + url.PathEscape(row.ID) + "?" + query
 }
 
 func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route *routeRow, plan *inboundRoutingPlan, waitContexts ...context.Context) error {

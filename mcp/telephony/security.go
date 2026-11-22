@@ -182,11 +182,13 @@ func (a *App) verifyPlivoRequest(r *http.Request, connectionID int64) error {
 			params[key] = values[0]
 		}
 	}
-	if !verifyPlivoSignatureV3(a.publicRequestURL(r), r.Method, r.Header.Get("X-Plivo-Signature-V3-Nonce"),
-		r.Header.Get("X-Plivo-Signature-V3"), authToken, params) {
-		return errors.New("invalid Plivo request signature")
+	for _, fullURL := range a.publicRequestURLs(r) {
+		if verifyPlivoSignatureV3(fullURL, r.Method, r.Header.Get("X-Plivo-Signature-V3-Nonce"),
+			r.Header.Get("X-Plivo-Signature-V3"), authToken, params) {
+			return nil
+		}
 	}
-	return nil
+	return errors.New("invalid Plivo request signature")
 }
 
 func verifyPlivoSignatureV3(fullURL, method, nonce, expected, authToken string, params map[string]string) bool {
@@ -275,7 +277,7 @@ func (a *App) verifyTwilioRequest(r *http.Request, connectionID int64) error {
 	if authToken == "" {
 		return errors.New("Twilio connection has no auth_token for request verification")
 	}
-	fullURL := a.publicRequestURL(r)
+	candidates := a.publicRequestURLs(r)
 	signature := strings.TrimSpace(r.Header.Get("X-Twilio-Signature"))
 	validator := twilioclient.NewRequestValidator(authToken)
 	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
@@ -284,10 +286,12 @@ func (a *App) verifyTwilioRequest(r *http.Request, connectionID int64) error {
 			return errors.New("read Twilio request body")
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		if !validator.ValidateBody(fullURL, body, signature) {
-			return errors.New("invalid Twilio request signature")
+		for _, fullURL := range candidates {
+			if validator.ValidateBody(fullURL, body, signature) {
+				return nil
+			}
 		}
-		return nil
+		return errors.New("invalid Twilio request signature")
 	}
 	if err := r.ParseForm(); err != nil {
 		return fmt.Errorf("parse Twilio request: %w", err)
@@ -298,18 +302,32 @@ func (a *App) verifyTwilioRequest(r *http.Request, connectionID int64) error {
 			params[key] = values[0]
 		}
 	}
-	if !validator.Validate(fullURL, params, signature) {
-		return errors.New("invalid Twilio request signature")
+	for _, fullURL := range candidates {
+		if validator.Validate(fullURL, params, signature) {
+			return nil
+		}
 	}
-	return nil
+	return errors.New("invalid Twilio request signature")
 }
 
 func (a *App) publicRequestURL(r *http.Request) string {
-	baseURL := a.publicAppURL()
+	return a.publicRequestURLs(r)[0]
+}
+
+// publicRequestURLs lists the public URLs a carrier may have signed for this
+// request. The platform proxy strips the mount prefix, so the app cannot tell
+// whether the carrier called the install-scoped form (current) or the
+// name-only form (routes configured before 0.28.0). Both are this app's own
+// URLs; a signature must validate against one of them.
+func (a *App) publicRequestURLs(r *http.Request) []string {
 	if strings.HasPrefix(r.URL.Path, "/media/") {
-		baseURL = a.publicWSMediaBase()
+		return []string{a.publicWSMediaBase() + r.URL.RequestURI()}
 	}
-	return baseURL + r.URL.RequestURI()
+	out := []string{a.carrierCallbackBase() + r.URL.RequestURI()}
+	if legacy := a.publicAppURL() + r.URL.RequestURI(); legacy != out[0] {
+		out = append(out, legacy)
+	}
+	return out
 }
 
 func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected string) bool {

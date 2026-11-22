@@ -317,12 +317,12 @@ func (a *App) handlePlivoInboundStatus(w http.ResponseWriter, r *http.Request, r
 
 func (a *App) plivoRouteStatusURL(route routeRow) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}}.Encode()
-	return fmt.Sprintf("%s/inbound/plivo/%s/status?%s", a.publicAppURL(), route.ID, query)
+	return fmt.Sprintf("%s/inbound/plivo/%s/status?%s", a.carrierCallbackBase(), route.ID, query)
 }
 
 func (a *App) plivoWaitURL(route routeRow, callID string) string {
 	query := url.Values{"secret": {route.Secret}, "call_id": {callID}, "project_id": {route.ProjectID}}.Encode()
-	return fmt.Sprintf("%s/inbound/plivo/%s/wait?%s", a.publicAppURL(), route.ID, query)
+	return fmt.Sprintf("%s/inbound/plivo/%s/wait?%s", a.carrierCallbackBase(), route.ID, query)
 }
 
 func writePlivoWait(w http.ResponseWriter, waitURL string) {

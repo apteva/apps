@@ -75,7 +75,7 @@ func (a *App) handleBandwidthXML(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) bandwidthRecordingStatusURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/webhook/recording/bandwidth/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/webhook/recording/bandwidth/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) handleBandwidthRecordingStatus(w http.ResponseWriter, r *http.Request) {

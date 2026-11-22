@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.27.1
+version: 0.28.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -424,7 +424,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.27.1
+    ref: telephony/v0.28.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -3995,6 +3995,18 @@ func (a *App) publicAppURL() string {
 	return base + "/api/apps/telephony"
 }
 
+// carrierCallbackBase is the base for every URL handed to a carrier (inbound
+// route webhooks, status, recording, IVR and XML callbacks). It targets this
+// exact installation (/_install/<id>) so a project with several telephony
+// installs routes each carrier callback to the install that owns the call or
+// route; the name-only form resolves to the project's default install.
+func (a *App) carrierCallbackBase() string {
+	if base := a.publicInstalledAppURL(); base != "" {
+		return base
+	}
+	return a.publicAppURL()
+}
+
 func (a *App) publicInstalledAppURL() string {
 	if endpoint := a.runtimeEndpoint("callbacks", ""); endpoint != "" {
 		return runtimeHTTPURL(endpoint)
@@ -4029,22 +4041,22 @@ func (a *App) publicWSMediaBase() string {
 
 func (a *App) statusCallbackURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/webhook/status/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/webhook/status/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) twilioStreamStatusURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/webhook/stream/twilio/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/webhook/stream/twilio/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) twilioRecordingStatusURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/webhook/recording/twilio/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/webhook/recording/twilio/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) plivoRecordingStatusURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/webhook/recording/plivo/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/webhook/recording/plivo/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) twilioStreamTwiML(row *callRow) string {
@@ -4071,18 +4083,18 @@ func (a *App) twilioConnectStreamTwiML(row *callRow) string {
 
 func (a *App) plivoXMLURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/xml/plivo/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/xml/plivo/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) bandwidthXMLURL(callID, secret, projectID string) string {
 	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
-	return a.publicAppURL() + "/xml/bandwidth/" + url.PathEscape(callID) + "?" + query
+	return a.carrierCallbackBase() + "/xml/bandwidth/" + url.PathEscape(callID) + "?" + query
 }
 
 func (a *App) inboundRouteURL(route routeRow) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}}.Encode()
 	return fmt.Sprintf("%s/inbound/%s/%s?%s",
-		a.publicAppURL(),
+		a.carrierCallbackBase(),
 		route.CarrierSlug,
 		route.ID,
 		query,
@@ -4091,13 +4103,13 @@ func (a *App) inboundRouteURL(route routeRow) string {
 
 func (a *App) twilioRouteStatusURL(route routeRow) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}}.Encode()
-	return fmt.Sprintf("%s/inbound/twilio/%s/status?%s", a.publicAppURL(), route.ID, query)
+	return fmt.Sprintf("%s/inbound/twilio/%s/status?%s", a.carrierCallbackBase(), route.ID, query)
 }
 
 func (a *App) twilioWaitURL(route routeRow, callID string) string {
 	query := url.Values{"secret": {route.Secret}, "call_id": {callID}, "project_id": {route.ProjectID}}.Encode()
 	return fmt.Sprintf("%s/inbound/twilio/%s/wait?%s",
-		a.publicAppURL(),
+		a.carrierCallbackBase(),
 		route.ID,
 		query,
 	)
