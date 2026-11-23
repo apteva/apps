@@ -318,6 +318,19 @@ func (a *App) toolProfileUpsert(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			p.PresaleLimit = &n
 		}
 	}
+	if v, ok := args["presale_ready_days"]; ok {
+		// null removes the promise; waiting tenants keep the due_at they got.
+		if v == nil || strFromAny(v) == "" {
+			p.PresaleReadyDays = nil
+		} else {
+			f, err := strconv.ParseFloat(strFromAny(v), 64)
+			if err != nil || f < 1 || f != float64(int64(f)) {
+				return nil, errors.New("presale_ready_days must be a whole number of days, 1 or more, or null to remove it")
+			}
+			n := int64(f)
+			p.PresaleReadyDays = &n
+		}
+	}
 	if v, ok := args["presale_note"]; ok {
 		p.PresaleNote = strings.TrimSpace(strFromAny(v))
 	}
@@ -338,8 +351,8 @@ func validateProfile(db *sql.DB, p *Profile) error {
 	if p.Status != "active" && p.Status != "archived" {
 		return errors.New("status must be active or archived")
 	}
-	if p.PresaleLimit != nil && p.Backend != BackendMachinePool {
-		return errors.New("presale_limit is only for machine_pool profiles")
+	if (p.PresaleLimit != nil || p.PresaleReadyDays != nil) && p.Backend != BackendMachinePool {
+		return errors.New("presale_limit and presale_ready_days are only for machine_pool profiles")
 	}
 	product, err := dbProductGet(db, p.ProductKey)
 	if err != nil {
@@ -913,6 +926,7 @@ func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) {
 	if err != nil {
 		if m.Online {
 			_, _ = db.Exec(`UPDATE hosting_machines SET online=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID)
+			emitMachineOnline(ctx, m, false, m.LastSeenAt, "instance not found: "+err.Error())
 		}
 		return
 	}
@@ -933,10 +947,29 @@ func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) {
 			_ = recordEvent(db, m.TenantID, "access.endpoint_changed", "instances", map[string]any{"machine_id": m.ID, "host": host, "port": port, "issue": issue})
 		}
 	}
-	_, _ = db.Exec(`UPDATE hosting_machines SET online=?, last_seen_at=NULLIF(?, ''), connect_mode=?, public_host=?, public_port=?, endpoint_issue=?,
+	res, _ := db.Exec(`UPDATE hosting_machines SET online=?, last_seen_at=NULLIF(?, ''), connect_mode=?, public_host=?, public_port=?, endpoint_issue=?,
 		updated_at=CASE WHEN online!=? OR public_host!=? OR public_port!=? OR endpoint_issue!=? OR connect_mode!=? THEN CURRENT_TIMESTAMP ELSE updated_at END
 		WHERE id=?`, boolToInt(online), seen, inst.ConnectMode, host, port, issue,
 		boolToInt(online), host, port, issue, inst.ConnectMode, m.ID)
+	if res != nil && online != m.Online {
+		emitMachineOnline(ctx, m, online, seen, inst.Status)
+	}
+}
+
+// emitMachineOnline tells operators a machine went offline or came back.
+// A machine being erased (state cleaning) is expected to drop off: its run
+// has its own time limits and reports hosting.operation.failed instead.
+func emitMachineOnline(ctx *sdk.AppCtx, m *Machine, online bool, lastSeen, detail string) {
+	if m.State == MachineCleaning {
+		return
+	}
+	event := "hosting.machine.offline"
+	if online {
+		event = "hosting.machine.online"
+	}
+	ctx.Logger().Info("hosting machine "+map[bool]string{true: "online", false: "offline"}[online], "machine_id", m.ID, "state", m.State)
+	ctx.Emit(event, map[string]any{"machine_id": m.ID, "pool_key": m.PoolKey, "instance_id": m.InstanceID, "state": m.State,
+		"tenant_id": m.TenantID, "last_seen_at": lastSeen, "detail": detail})
 }
 
 // ─── Runs ────────────────────────────────────────────────────────────────

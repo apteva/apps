@@ -29,6 +29,7 @@ interface Tenant {
   access?: Access;
   created_at: string;
   released_at?: string;
+  due_at?: string;
 }
 
 interface OperationLog {
@@ -92,6 +93,7 @@ interface Availability {
   presale?: number;
   presale_limit?: number;
   presale_note?: string;
+  presale_ready_days?: number;
   waiting?: number;
   reason?: string;
 }
@@ -425,6 +427,11 @@ export default function HostingPanel(_props: NativePanelProps) {
                       <span className="ml-auto"><Badge value={t.status} /></span>
                     </div>
                     <div className="text-xs text-text-dim truncate">{t.profile_key} · {t.external_ref || t.slug}</div>
+                    {t.status === "waiting_for_machine" && t.due_at && (
+                      <div className={`text-xs ${new Date(t.due_at.replace(" ", "T") + (t.due_at.endsWith("Z") ? "" : "Z")) < new Date() ? "text-red" : "text-text-dim"}`}>
+                        Promised by {t.due_at.slice(0, 10)}
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -668,6 +675,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                         {av?.machines != null && <span className="text-text-dim"> {av.machines} free</span>}
                         {av?.presale_limit != null && <span className="text-text-dim"> · presale {av.presale ?? 0} of {av.presale_limit} left</span>}
                         {av?.presale_note && <div className="text-text-dim">{av.presale_note}</div>}
+                        {av?.presale_ready_days != null && <div className="text-text-dim">Promise: ready within {av.presale_ready_days} days</div>}
                         {av?.waiting ? <span className="text-text-dim"> · {av.waiting} waiting</span> : null}
                         {av?.reason && <div className="text-text-dim">{av.reason}</div>}
                       </td>

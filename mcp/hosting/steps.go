@@ -395,10 +395,10 @@ func (a *App) stepReset(ctx *sdk.AppCtx, env *stepEnv, step string) error {
 	if step == "verify_clean" {
 		// The Mac is erasing, rebooting or re-enrolling: keep polling.
 		if err != nil {
-			return pending("machine unreachable while it resets: " + err.Error())
+			return pending("Mac unreachable: still erasing or restarting, or stopped at the setup screens (it needs device-management enrollment to come back on its own): " + err.Error())
 		}
 		if res.ExitCode != 0 || !strings.Contains(res.Output, m) {
-			return pending(fmt.Sprintf("verify-clean not satisfied yet (exit %d)", res.ExitCode))
+			return pending(fmt.Sprintf("%s (verify-clean exit %d)", resetExitReason(step, res.ExitCode), res.ExitCode))
 		}
 		return nil
 	}
@@ -406,9 +406,51 @@ func (a *App) stepReset(ctx *sdk.AppCtx, env *stepEnv, step string) error {
 		return err
 	}
 	if res.ExitCode != 0 || !strings.Contains(res.Output, m) {
-		return fmt.Errorf("%s exited %d: %s", name, res.ExitCode, tail(firstNonEmpty(res.Output, res.Error), 400))
+		return fmt.Errorf("%s (%s exit %d): %s", resetExitReason(step, res.ExitCode), name, res.ExitCode, tail(firstNonEmpty(res.Output, res.Error), 300))
 	}
 	return nil
+}
+
+// resetExitReason explains the exit codes of scripts/macos/wipe.sh,
+// reinstall.sh and verify-clean.sh in plain words for the run log and
+// hosting.operation.failed.
+func resetExitReason(step string, code int) string {
+	common := map[int]string{
+		10: "the script must run as root on macOS",
+		11: "invalid operation id",
+		12: "invalid operation id",
+		13: "the Mac's serial number does not match the machine record",
+	}
+	byStep := map[int]string{
+		14: "recovery setup missing: /var/root/.apteva-hosting/recovery.plist is absent or not root-only",
+		15: "recovery setup not marked validated (RecoveryValidated) on the Mac",
+		16: "the management password file is missing or not root-only",
+		17: "the macOS installer app is missing",
+		18: "the recovery helper /usr/local/libexec/apteva-hosting/recovery-handoff is missing or not root-only",
+		19: "the recovery helper does not match RecoveryHandoffSHA256",
+	}
+	if step == "verify_clean" {
+		byStep = map[int]string{
+			14: "no receipt yet: the erase or the device-management re-enrollment has not finished",
+			15: "the receipt is for another operation or Mac",
+			16: "device-management re-enrollment not verified in the receipt",
+			17: "the data volume did not change: the erase has not happened yet",
+			18: "the data volume differs from the one in the receipt",
+			19: "the macOS version differs from the one in the receipt",
+			20: "a customer home folder is still on the Mac",
+			21: "a customer SSH key is still on the Mac",
+			1:  "a customer account is still on the Mac, or the SSH configuration is invalid",
+		}
+	} else {
+		byStep[1] = "the installer signature, Gatekeeper or the management user's secure token check failed"
+	}
+	if r, ok := common[code]; ok {
+		return r
+	}
+	if r, ok := byStep[code]; ok {
+		return r
+	}
+	return "unexpected failure"
 }
 
 // ─── On-demand instances ─────────────────────────────────────────────────
@@ -617,7 +659,15 @@ func findWorkloadByName(ctx *sdk.AppCtx, name string) *containerWorkload {
 // prefix such as "15" or "15.3" on macOS, "ubuntu 24.04" on Linux). Machines
 // without expected_os skip it.
 func (a *App) stepCheckOS(ctx *sdk.AppCtx, env *stepEnv) error {
-	if env.machine == nil || strings.TrimSpace(env.machine.ExpectedOS) == "" {
+	if env.machine == nil {
+		return nil
+	}
+	if env.platform == "macos" {
+		if err := a.checkActivationLock(ctx, env); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(env.machine.ExpectedOS) == "" {
 		return nil
 	}
 	cmd := `/usr/bin/sw_vers -productVersion`
@@ -634,6 +684,20 @@ func (a *App) stepCheckOS(ctx *sdk.AppCtx, env *stepEnv) error {
 	}
 	if !osMatches(got, env.machine.ExpectedOS) {
 		return fmt.Errorf("machine runs %q, expected %q", got, env.machine.ExpectedOS)
+	}
+	return nil
+}
+
+// checkActivationLock refuses a Mac whose Activation Lock is on: after an
+// erase it would stop at the lock screen until the Apple Account that owns
+// it signs in. Macs that do not report the status (older models) pass.
+func (a *App) checkActivationLock(ctx *sdk.AppCtx, env *stepEnv) error {
+	res, err := runCommand(ctx, env, asRoot(`/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | /usr/bin/awk -F': ' '/Activation Lock Status/{print $2}'`), 60)
+	if err != nil {
+		return err
+	}
+	if status := strings.TrimSpace(res.Output); strings.EqualFold(status, "enabled") {
+		return errors.New("Activation Lock is enabled: turn off Find My (or clear the lock in Apple Business Manager) before selling this Mac")
 	}
 	return nil
 }

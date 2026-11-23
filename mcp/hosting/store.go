@@ -93,8 +93,11 @@ type Profile struct {
 	// hardware. nil: no limit on the waiting line and nothing sold ahead.
 	PresaleLimit *int64 `json:"presale_limit,omitempty"`
 	PresaleNote  string `json:"presale_note,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	// PresaleReadyDays is the promise made to customers who wait: a waiting
+	// tenant's due_at is its order time plus this many days.
+	PresaleReadyDays *int64 `json:"presale_ready_days,omitempty"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 // OnDemandSettings is the machine_on_demand part of a profile's settings.
@@ -118,14 +121,18 @@ func (p *Profile) isMachine() bool {
 	return p.Backend == BackendMachinePool || p.Backend == BackendMachineOnDemand
 }
 
-const profileSelect = `SELECT key, name, backend, product_key, COALESCE(pool_key,''), image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note, created_at, updated_at FROM hosting_profiles`
+const profileSelect = `SELECT key, name, backend, product_key, COALESCE(pool_key,''), image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note, presale_ready_days, created_at, updated_at FROM hosting_profiles`
 
 func scanProfile(row rowScanner) (*Profile, error) {
 	var p Profile
 	var settings, meta string
-	var presale sql.NullInt64
-	if err := row.Scan(&p.Key, &p.Name, &p.Backend, &p.ProductKey, &p.PoolKey, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &settings, &p.Status, &meta, &presale, &p.PresaleNote, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var presale, readyDays sql.NullInt64
+	if err := row.Scan(&p.Key, &p.Name, &p.Backend, &p.ProductKey, &p.PoolKey, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &settings, &p.Status, &meta, &presale, &p.PresaleNote, &readyDays, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
+	}
+	if readyDays.Valid {
+		v := readyDays.Int64
+		p.PresaleReadyDays = &v
 	}
 	if presale.Valid {
 		v := presale.Int64
@@ -181,16 +188,16 @@ func dbProfileList(db *sql.DB, includeArchived bool) ([]*Profile, error) {
 
 func dbProfileUpsert(db *sql.DB, p *Profile) error {
 	_, err := db.Exec(`
-		INSERT INTO hosting_profiles (key, name, backend, product_key, pool_key, image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO hosting_profiles (key, name, backend, product_key, pool_key, image, cpu, memory_mb, storage_mb, settings_json, status, metadata_json, presale_limit, presale_note, presale_ready_days)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			name=excluded.name, backend=excluded.backend, product_key=excluded.product_key, pool_key=excluded.pool_key,
 			image=excluded.image, cpu=excluded.cpu, memory_mb=excluded.memory_mb, storage_mb=excluded.storage_mb,
 			settings_json=excluded.settings_json, status=excluded.status, metadata_json=excluded.metadata_json,
-			presale_limit=excluded.presale_limit, presale_note=excluded.presale_note,
+			presale_limit=excluded.presale_limit, presale_note=excluded.presale_note, presale_ready_days=excluded.presale_ready_days,
 			updated_at=CURRENT_TIMESTAMP`,
 		p.Key, p.Name, p.Backend, p.ProductKey, nullStr(p.PoolKey), p.Image, p.CPU, p.MemoryMB, p.StorageMB,
-		stringOrJSON(p.Settings, "{}"), firstNonEmpty(p.Status, "active"), stringOrJSON(p.Metadata, "{}"), p.PresaleLimit, p.PresaleNote)
+		stringOrJSON(p.Settings, "{}"), firstNonEmpty(p.Status, "active"), stringOrJSON(p.Metadata, "{}"), p.PresaleLimit, p.PresaleNote, p.PresaleReadyDays)
 	return err
 }
 
@@ -407,8 +414,11 @@ type Tenant struct {
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
 	Access           *TenantAccess   `json:"access,omitempty"`
 	ReleasedAt       string          `json:"released_at,omitempty"`
-	CreatedAt        string          `json:"created_at"`
-	UpdatedAt        string          `json:"updated_at"`
+	// DueAt is when a tenant that had to wait was promised its machine
+	// (order time + the profile's presale_ready_days).
+	DueAt     string `json:"due_at,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // TenantAccess is what storefronts show the customer.
@@ -423,7 +433,7 @@ type TenantAccess struct {
 
 const tenantSelect = `SELECT id, external_ref, profile_key, backend, workload_id, COALESCE(machine_id,0), COALESCE(instance_id,0), COALESCE(reservation_id,''),
 	slug, COALESCE(default_hostname,''), owner_email, ssh_user, access_keys_json, status, apteva_version, image, last_health_status, last_error,
-	metadata_json, COALESCE(released_at,''), created_at, updated_at,
+	metadata_json, COALESCE(released_at,''), created_at, updated_at, COALESCE(due_at,''),
 	COALESCE((SELECT hm.public_host FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
 	COALESCE((SELECT hm.public_port FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), 0),
 	COALESCE((SELECT hm.endpoint_issue FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), '')
@@ -435,7 +445,7 @@ func scanTenant(row rowScanner) (*Tenant, error) {
 	var machinePort int
 	if err := row.Scan(&t.ID, &t.ExternalRef, &t.ProfileKey, &t.Backend, &t.WorkloadID, &t.MachineID, &t.InstanceID, &t.ReservationID,
 		&t.Slug, &t.DefaultHostname, &t.OwnerEmail, &t.SSHUser, &keys, &t.Status, &t.AptevaVersion, &t.Image, &t.LastHealthStatus, &t.LastError,
-		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt, &machineHost, &machinePort, &machineIssue); err != nil {
+		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt, &t.DueAt, &machineHost, &machinePort, &machineIssue); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(keys), &t.AccessKeys)
@@ -538,10 +548,10 @@ func dbTenantInsert(db querier, t *Tenant) error {
 	}
 	_, err := db.Exec(`INSERT INTO hosting_tenants
 		(id, external_ref, profile_key, backend, workload_id, machine_id, instance_id, reservation_id, slug, default_hostname, owner_email,
-		 ssh_user, access_keys_json, status, apteva_version, image, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 ssh_user, access_keys_json, status, apteva_version, image, metadata_json, due_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
 		t.ID, t.ExternalRef, t.ProfileKey, t.Backend, t.WorkloadID, nullInt(t.MachineID), nullInt(t.InstanceID), nullStr(t.ReservationID),
-		t.Slug, host, t.OwnerEmail, t.SSHUser, jsonOrEmpty(t.AccessKeys, "[]"), t.Status, t.AptevaVersion, t.Image, stringOrJSON(t.Metadata, "{}"))
+		t.Slug, host, t.OwnerEmail, t.SSHUser, jsonOrEmpty(t.AccessKeys, "[]"), t.Status, t.AptevaVersion, t.Image, stringOrJSON(t.Metadata, "{}"), t.DueAt)
 	return err
 }
 
