@@ -763,6 +763,7 @@ type Message struct {
 	ProviderMessageID    string              `json:"provider_message_id,omitempty"`
 	ProviderSlug         string              `json:"provider_slug,omitempty"`
 	ProviderConnectionID int64               `json:"provider_connection_id,omitempty"`
+	ProviderThreadID     string              `json:"provider_thread_id,omitempty"` // Gmail thread id
 	EnvelopeRecipients   []string            `json:"envelope_recipients,omitempty"`
 	ReceivingIdentity    string              `json:"receiving_identity,omitempty"`
 	IdempotencyKey       string              `json:"idempotency_key,omitempty"`
@@ -6342,7 +6343,7 @@ const messageSelectColumns = `id, project_id, channel, direction, from_addr, to_
 	COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
 	COALESCE(template_id,0), COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
 	COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,''),
-	COALESCE(envelope_recipients,'[]'), COALESCE(receiving_identity,''), COALESCE(provider_slug,''), COALESCE(provider_connection_id,0), COALESCE(template_snapshot,'')`
+	COALESCE(envelope_recipients,'[]'), COALESCE(receiving_identity,''), COALESCE(provider_slug,''), COALESCE(provider_connection_id,0), COALESCE(provider_thread_id,''), COALESCE(template_snapshot,'')`
 
 func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE id = ?`
@@ -6563,7 +6564,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 		&templateID,
 		&verdicts, &m.S3Key,
 		&m.CreatedAt, &m.SentAt, &m.ReceivedAt, &m.LastEventAt,
-		&envelope, &m.ReceivingIdentity, &m.ProviderSlug, &m.ProviderConnectionID,
+		&envelope, &m.ReceivingIdentity, &m.ProviderSlug, &m.ProviderConnectionID, &m.ProviderThreadID,
 		&snapshotJSON,
 	)
 	if err == sql.ErrNoRows {
