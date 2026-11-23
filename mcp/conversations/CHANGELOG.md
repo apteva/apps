@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.28.0 — 2026-11-23
+
+- Redesign the message composer after Intercom's: a rounded box with the draft on top at full width and a slim tools row beneath it, `+` and the microphone on the left and send/pause on the right. On phones, in the Helper dock and in other chats 480px wide or narrower (the automatic layout), and wherever `composer_layout: compact` is set, `+`, the text and send used to share one row, so a long draft wrapped in a narrow, indented column between the buttons. The text now always gets the full width. Compact keeps the same shape with tighter spacing: one text line that grows as you type.
+- Show a quiet grey send button until there is something to send, instead of a faded accent.
+- Phones keep the composer closer to the bottom edge (12px, or the home-bar inset plus 8px, instead of 24px).
+- `single-line` is unchanged: one fixed row for hosts that ask for it.
+
 ## 0.27.8 — 2026-11-23
 
 - Never route a chat led by the Apteva Helper to its main thread. Main routing gives an agent's first operator chat to the agent's own main thread. The Helper has no project and serves every project, so its main thread is shared platform-wide, yet its first chat in a project took main. When a chat is created, Conversations now records whether its lead agent has no project, using the agent list that creation already reads. Those chats always get their own chat thread. Sending a message makes no extra platform call.

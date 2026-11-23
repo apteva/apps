@@ -248,7 +248,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             data-layout={layout}
           >
             <ComposerAttachments controller={props.attachments}/>
-            <div className="chat-composer-entry">
+            <div className="chat-composer-entry" onMouseDown={event=>{if(event.target===event.currentTarget){event.preventDefault();props.inputRef.current?.focus()}}}>
             <textarea
               ref={props.inputRef}
               value={props.draft}

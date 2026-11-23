@@ -198,7 +198,9 @@ for (const surface of ["dashboard", "external", "panel"] as const) {
     const edge = footer.getBoundingClientRect();
     return {gap:edge.bottom-box.bottom, footerBottom:edge.bottom};
    });
-   expect(geometry.gap).toBeGreaterThanOrEqual(23);
+   // Phones keep the composer near the edge; wider screens keep 1.5rem.
+   expect(geometry.gap).toBeGreaterThanOrEqual(width===390?11:23);
+   if(width===390)expect(geometry.gap).toBeLessThanOrEqual(16);
    expect(geometry.footerBottom).toBeLessThanOrEqual(800);
   }
  });
@@ -334,10 +336,16 @@ for (const host of ["dashboard", "external"]) {
   const input=page.getByRole("textbox");await input.fill("Keep this draft");
   const geometry=()=>page.locator(".chat-composer-box").evaluate(el=>{const input=el.querySelector("textarea")!,add=el.querySelector(".chat-composer-add")!,send=el.querySelector(".chat-composer-send")!;return {input:input.getBoundingClientRect().toJSON(),add:add.getBoundingClientRect().toJSON(),send:send.getBoundingClientRect().toJSON(),box:el.getBoundingClientRect().toJSON()};});
   expect((await geometry()).input.top).toBeLessThan((await geometry()).add.top);
-  // Narrow the embed itself while the browser remains desktop-sized.
+  const wideHeight=(await geometry()).box.height;
+  // Narrow the embed itself while the browser remains desktop-sized. The draft
+  // keeps the full width on its own row; the tools stay in the row beneath.
   await page.locator("main").evaluate(el=>{el.style.width="420px";});
-  await expect.poll(async()=>Math.abs((await geometry()).input.top-(await geometry()).add.top)).toBeLessThan(2);
-  expect((await geometry()).box.height).toBeLessThan(65);await expect(input).toHaveValue("Keep this draft");
+  await expect.poll(async()=>(await geometry()).box.height).toBeLessThan(wideHeight);
+  const narrow=await geometry();
+  expect(narrow.input.bottom).toBeLessThanOrEqual(narrow.add.top+1);
+  expect(narrow.input.left).toBeLessThan(narrow.add.right);
+  expect(narrow.input.right).toBeGreaterThan(narrow.send.left);
+  expect(narrow.box.height).toBeLessThan(90);await expect(input).toHaveValue("Keep this draft");
   await page.locator(".chat-composer-box").screenshot({path:test.info().outputPath("compact-composer.png")});
   await input.fill("First line\nSecond line\nThird line");await expect.poll(async()=>(await geometry()).input.height).toBeGreaterThan(60);
   await page.locator("main").evaluate(el=>{el.style.width="";});await expect(input).toHaveValue("First line\nSecond line\nThird line");
@@ -347,8 +355,9 @@ for (const host of ["dashboard", "external"]) {
   for(const layout of ["compact","expanded"]){
    await page.setViewportSize(layout==="compact"?{width:1280,height:800}:{width:390,height:800});await page.goto(`/?host=${host}&layout=${layout}`);await page.getByRole("textbox").fill("Hello");
    const box=page.locator(".chat-composer-box");await expect(box).toHaveAttribute("data-layout",layout);
-   const distance=await box.evaluate(el=>el.querySelector(".chat-composer-add")!.getBoundingClientRect().top-el.querySelector("textarea")!.getBoundingClientRect().top);
-   if(layout==="compact")expect(Math.abs(distance)).toBeLessThan(2);else expect(distance).toBeGreaterThan(30);
+   const g=await box.evaluate(el=>({distance:el.querySelector(".chat-composer-add")!.getBoundingClientRect().top-el.querySelector("textarea")!.getBoundingClientRect().top,height:el.getBoundingClientRect().height}));
+   // Both layouts put the tools under the draft; compact is the tighter one.
+   if(layout==="compact"){expect(g.distance).toBeGreaterThan(20);expect(g.height).toBeLessThan(90);}else{expect(g.distance).toBeGreaterThan(40);expect(g.height).toBeGreaterThan(95);}
   }
  });
 }
@@ -403,10 +412,10 @@ const withVoiceOffline=(page:import("@playwright/test").Page)=>page.route(url=>/
  await route.fulfill({response,body:(await response.text()).replaceAll('"audience":"public"','"audience":"private"')});
 });
 for (const host of ["dashboard", "external"]) for (const layout of ["compact","single-line"]) {
- test(`${host}: ${layout} keeps add, mic, input and send on one row in narrow docks`, async ({page,request}) => {
+ test(`${host}: ${layout} lays out add, mic, input and send in narrow docks`, async ({page,request}) => {
   await request.post("/reset");await withVoiceOffline(page);
   await page.addInitScript(layout=>{(window as any).COMPOSER_OPTIONS={layout};},layout);
-  const height=layout==="single-line"?24:36;
+  const height=24;
   for(const width of [500,320]){
    await page.setViewportSize({width,height:800});await page.goto(`/?host=${host}&theme=terminal`);
    const input=page.getByRole("textbox");await expect(input).toHaveAttribute("placeholder","Reconnecting — messages still send");
@@ -417,9 +426,18 @@ for (const host of ["dashboard", "external"]) for (const layout of ["compact","s
    // The monospace placeholder wraps here; an empty draft must still be one row.
    expect(box.input.height).toBe(height);
    expect(box.add.right).toBeLessThanOrEqual(box.mic.x);
-   expect(box.mic.right).toBeLessThanOrEqual(box.input.x);
-   expect(box.input.right).toBeLessThanOrEqual(box.send.x);
-   for(const item of [box.add,box.mic,box.send])expect(Math.abs(item.y+item.height/2-box.input.y-box.input.height/2)).toBeLessThan(2);
+   if(layout==="single-line"){
+    // The one fixed row: add, mic, input, send.
+    expect(box.mic.right).toBeLessThanOrEqual(box.input.x);
+    expect(box.input.right).toBeLessThanOrEqual(box.send.x);
+    for(const item of [box.add,box.mic,box.send])expect(Math.abs(item.y+item.height/2-box.input.y-box.input.height/2)).toBeLessThan(2);
+   }else{
+    // Compact: the draft spans the box; add, mic and send share the row beneath.
+    expect(box.input.width).toBeGreaterThan(box.send.right-box.add.x-40);
+    for(const item of [box.add,box.mic,box.send])expect(item.y).toBeGreaterThanOrEqual(box.input.bottom-1);
+    expect(Math.abs(box.add.y+box.add.height/2-box.send.y-box.send.height/2)).toBeLessThan(2);
+    expect(box.send.x).toBeGreaterThan(box.mic.right);
+   }
    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   }
   await page.unrouteAll({behavior:"ignoreErrors"});
