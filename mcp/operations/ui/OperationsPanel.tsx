@@ -88,6 +88,11 @@ type Call = <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
 type Tab = "overview" | "work" | "agenda" | "resources" | "commissions" | "setup";
 
 const API = "/api/apps/operations";
+// Dashboard widgets link here with ?tab=, ?work= (a job number) or ?phase=.
+const TABS: Tab[] = ["overview", "work", "agenda", "resources", "commissions", "setup"];
+function linkParam(key: string): string {
+  try { return new URLSearchParams(window.location.search).get(key) ?? ""; } catch { return ""; }
+}
 const PHASES = ["intake", "quote", "schedule", "execute", "bill"];
 const PHASE_LABEL: Record<string, string> = { intake: "Intake", quote: "Quote", schedule: "To schedule", execute: "Scheduled", bill: "To bill", closed: "Closed", cancelled: "Cancelled" };
 const PHASE_TONE: Record<string, string> = {
@@ -302,10 +307,13 @@ function FormFields({ fields, values, onChange }: { fields: FormField[]; values:
 
 export default function OperationsPanel({ projectId, installId }: NativePanelProps) {
   const call = useCall(projectId, installId);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(() => {
+    const t = linkParam("tab") as Tab;
+    return TABS.includes(t) ? t : linkParam("phase") ? "work" : "overview";
+  });
   const [brands, setBrands] = useState<Brand[]>([]);
   const [brand, setBrand] = useState("");
-  const [openWork, setOpenWork] = useState<string | null>(null);
+  const [openWork, setOpenWork] = useState<string | null>(() => linkParam("work") || null);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -587,7 +595,10 @@ function WorkCard({ w, ctx }: { w: Work; ctx: Ctx }) {
 function WorkTab({ ctx }: { ctx: Ctx }) {
   const { call, brand, rev, report, brands } = ctx;
   const [q, setQ] = useState("");
-  const [phase, setPhase] = useState("open");
+  const [phase, setPhase] = useState(() => {
+    const p = linkParam("phase");
+    return ["intake", "quote", "schedule", "execute", "bill", "closed", "cancelled"].includes(p) ? p : "open";
+  });
   const [workType, setWorkType] = useState("");
   const [priority, setPriority] = useState("");
   const [late, setLate] = useState(false);

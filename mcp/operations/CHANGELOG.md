@@ -1,5 +1,32 @@
 # Operations release notes
 
+## 0.5.0
+
+Three dashboard widgets (`ui_components`, slot `dashboard.home`, half and
+full size), for any kind of business:
+
+- **Work in progress** (`work-in-progress`, suggested): open work counted
+  by phase, plus the jobs that need attention (owner decisions, past their
+  deadline, urgent, on hold), are in progress, or changed recently. At full
+  size, the phases are columns. Settings: brand, list, maximum jobs.
+- **Operations stats** (`operations-stats`, suggested): revenue, billed to
+  clients (when contractors are on commission), jobs created and closed,
+  owner decisions, quote acceptance, time to first booking, unpaid
+  commission and utilisation for the last 7, 30 or 90 days. At full size,
+  by brand and by contractor. Settings: brand, period.
+- **Agenda** (`operations-agenda`): upcoming bookings with status and ETA,
+  today or the next 7 days, optionally for one resource. At full size,
+  today is a timeline with a lane per resource. Settings: brand, range,
+  resource, maximum bookings.
+
+Also:
+
+- New events `commission.accrued`, `commission.invoiced` and
+  `commission.paid`, so the stats widget refreshes when commissions change.
+- The Operations page opens on `?tab=`, `?phase=` or a job with `?work=`,
+  which the widgets link to.
+- No tool, schema or migration changes.
+
 ## 0.4.1
 
 - Fix `metrics` hanging, and the app with it, when a contractor had

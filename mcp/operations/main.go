@@ -18,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: operations
 display_name: Operations
-version: 0.4.1
+version: 0.5.0
 description: Generic operations core for any physical business — work, scheduling, resources, pricing, forms, recurring work, several brands on shared resources.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/operations
@@ -47,6 +47,97 @@ provides:
       label: Operations
       icon: clipboard-check
       entry: /ui/OperationsPanel.mjs
+  ui_components:
+    - name: work-in-progress
+      label: Work in progress
+      description: Open work by phase, with the jobs that need attention, are in progress or changed recently.
+      entry: /ui/OperationsWorkWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [work.created, work.status_changed, work.phase_changed, work.needs_owner, work.closed, quote.accepted, slot.booked, slot.updated]
+      settings_schema:
+        type: object
+        properties:
+          brand:
+            type: string
+            title: Brand key
+            description: Show one brand only. Leave empty for every brand.
+            default: ""
+          list:
+            type: string
+            title: List
+            enum: [attention, active, recent]
+            enum_names: [Needs attention, In progress, Recently updated]
+            default: attention
+          max_items:
+            type: integer
+            title: Maximum jobs
+            default: 8
+            minimum: 3
+            maximum: 20
+    - name: operations-stats
+      label: Operations stats
+      description: Revenue, jobs created and closed, owner decisions, quote acceptance, time to first booking, commissions and utilisation for a period.
+      entry: /ui/OperationsStatsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [work.created, work.status_changed, work.closed, quote.accepted, commission.accrued, commission.invoiced, commission.paid]
+      settings_schema:
+        type: object
+        properties:
+          brand:
+            type: string
+            title: Brand key
+            description: Show one brand only. Leave empty for every brand.
+            default: ""
+          period_days:
+            type: integer
+            title: Period
+            enum: [7, 30, 90]
+            enum_names: [Last 7 days, Last 30 days, Last 90 days]
+            default: 30
+    - name: operations-agenda
+      label: Agenda
+      description: Upcoming bookings across people, spaces and equipment, with status and ETA; at full size, today as a timeline per resource.
+      entry: /ui/OperationsAgendaWidget.mjs
+      slots: [dashboard.home]
+      suggested: false
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [slot.booked, slot.updated, work.status_changed, work.closed]
+      settings_schema:
+        type: object
+        properties:
+          brand:
+            type: string
+            title: Brand key
+            description: Show one brand only. Leave empty for every brand.
+            default: ""
+          range:
+            type: string
+            title: Range
+            enum: [today, week]
+            enum_names: [Today, Next 7 days]
+            default: today
+          resource_id:
+            type: integer
+            title: Resource id
+            description: Show one resource's bookings. 0 shows every resource.
+            default: 0
+            minimum: 0
+          max_items:
+            type: integer
+            title: Maximum bookings
+            default: 8
+            minimum: 3
+            maximum: 30
   mcp_tools:
     - { name: brands_upsert,       description: "Create or update a brand (name, contacts, job-number prefix, voice)." }
     - { name: brands_list,         description: "List brands." }
@@ -102,6 +193,9 @@ provides:
     - { name: slot.booked,         description: "A slot was booked." }
     - { name: slot.updated,        description: "A slot was rescheduled, cancelled, missed or started." }
     - { name: form.submitted,      description: "A form was submitted." }
+    - { name: commission.accrued,  description: "A commission job's commission was accrued, recalculated, credited or voided." }
+    - { name: commission.invoiced, description: "Commissions were invoiced to a contractor." }
+    - { name: commission.paid,     description: "Commission lines were marked paid." }
 runtime:
   kind: source
   source: { repo: github.com/apteva/apps, ref: main, entry: mcp/operations }
@@ -794,6 +888,9 @@ func (a *App) toolWorkTransition(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	emit(ctx, tr.Event, workEvent(tr.Work))
+	if tr.Work.Phase == statusCancelled {
+		commissionEvent(ctx, "commission.accrued", tr.Work)
+	}
 	return map[string]any{"ok": true, "transition": tr}, nil
 }
 
@@ -1020,6 +1117,7 @@ func (a *App) toolWorkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error
 		ev = "work.closed"
 	}
 	emit(ctx, ev, workEvent(res.Work))
+	commissionEvent(ctx, "commission.accrued", res.Work)
 	return res, nil
 }
 
@@ -1051,6 +1149,7 @@ func (a *App) toolWorkInvoice(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	emit(ctx, "work.status_changed", workEvent(nw))
+	commissionEvent(ctx, "commission.accrued", nw)
 	return map[string]any{"work": nw, "invoice": info}, nil
 }
 
@@ -1222,7 +1321,17 @@ func (a *App) toolCommissionsList(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolCommissionsInvoice(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return invoiceCommissions(ctx.AppDB(), ctx.CurrentProject(), callerFor(ctx), args)
+	res, err := invoiceCommissions(ctx.AppDB(), ctx.CurrentProject(), callerFor(ctx), args)
+	if err != nil {
+		return nil, err
+	}
+	for _, inv := range res["invoices"].([]map[string]any) {
+		if inv["error"] == nil {
+			emit(ctx, "commission.invoiced", map[string]any{"resource_id": inv["resource_id"], "partner": inv["partner"], "invoice_ref": inv["invoice_ref"],
+				"total_cents": inv["total_cents"], "currency": inv["currency"], "line_ids": inv["line_ids"]})
+		}
+	}
+	return res, nil
 }
 
 func (a *App) toolCommissionsMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1230,6 +1339,7 @@ func (a *App) toolCommissionsMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	emit(ctx, "commission.paid", map[string]any{"line_ids": commissionIDs(l), "invoice_ref": stringArg(args, "invoice_ref")})
 	return map[string]any{"lines": l}, nil
 }
 
@@ -1238,5 +1348,19 @@ func (a *App) toolCommissionsVoid(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	emit(ctx, "commission.accrued", map[string]any{"line_ids": commissionIDs(l), "voided": true})
 	return map[string]any{"lines": l}, nil
+}
+
+// commissionEvent tells listeners (the stats widget) that a commission
+// job's commission was accrued, recalculated or credited.
+func commissionEvent(ctx *sdk.AppCtx, topic string, w *Work) {
+	if w == nil || w.SettlementMode != modeCommission {
+		return
+	}
+	emit(ctx, topic, map[string]any{"work_id": w.ID, "number": w.Number, "brand": w.Brand, "resource_id": partnerID(w), "partner": w.Partner})
+}
+
+func commissionIDs(ls []*CommissionLine) []int64 {
+	return lineIDs(ls)
 }
