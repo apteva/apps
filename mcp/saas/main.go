@@ -153,6 +153,12 @@ func (a *App) Workers() []sdk.Worker {
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.retryPendingSubscriptionCancels(ctx)
 		},
+	}, {
+		Name:     "email-outbox",
+		Schedule: "@every 2m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.retryOutboxEmails(ctx)
+		},
 	}}
 }
 
@@ -2770,7 +2776,14 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 	if err != nil {
 		return nil, err
 	}
-	if transition.Status != "completed" && fe != "" {
+	skipFulfillment := fe == "account_past_due" && accountAwaitingFirstPayment(acct)
+	if transition.Status != "completed" && skipFulfillment {
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.skipped", actor(args), map[string]any{
+			"event": fe, "lifecycle_event": event, "reason": "awaiting_first_payment",
+			"checkout_status": strArg(mapFromAny(acct.Metadata), "checkout_status"), "transition_id": transition.ID,
+		})
+	}
+	if transition.Status != "completed" && fe != "" && !skipFulfillment {
 		if _, err := a.runFulfillment(ctx, pid, acct, fe, transition.ID); err != nil {
 			if errors.Is(err, errFulfillmentInProgress) {
 				return map[string]any{"account": acct, "changed": false, "in_progress": true, "transition_id": transition.ID}, nil
@@ -3621,6 +3634,9 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 		}
 	}
 	if err := validatePlanAuthOrg(db, pid, key, metadata); err != nil {
+		return nil, err
+	}
+	if err := validatePlanEmailSender(metadata); err != nil {
 		return nil, err
 	}
 	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
@@ -6321,4 +6337,26 @@ func newID(prefix string) string {
 		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 	}
 	return prefix + "_" + hex.EncodeToString(b[:])
+}
+
+// accountAwaitingFirstPayment reports whether the account is still in its
+// initial paid checkout: the checkout is processing or waiting for the first
+// invoice, and there was no trial. Such an account never had access, so its
+// past_due actions (suspend, revoke) must not run. checkout_status becomes
+// "active" once the first invoice is paid, so later renewal failures still run
+// them. A trial account had access, so a failed first charge after the trial
+// still runs them too.
+func accountAwaitingFirstPayment(acct *Account) bool {
+	if acct == nil {
+		return false
+	}
+	meta := mapFromAny(acct.Metadata)
+	if strArg(meta, "trial_ends_at") != "" {
+		return false
+	}
+	switch strArg(meta, "checkout_status") {
+	case "processing", "awaiting_payment":
+		return true
+	}
+	return false
 }

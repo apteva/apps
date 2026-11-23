@@ -211,6 +211,14 @@ default to `once_per_transition`; set `execution_policy` to `always` only
 for operations that are explicitly safe to repeat. SaaS reserves each run
 before calling the target and passes a deterministic `idempotency_key`.
 
+`account_past_due` actions do not run while the account is still in its
+initial paid checkout (`checkout_status` is `processing` or
+`awaiting_payment` and there was no trial): such an account never had
+access, so there is nothing to suspend. SaaS records a
+`fulfillment.skipped` event instead. Once the first invoice is paid, later
+renewal failures run them as usual, and so does a failed first charge after
+a trial (v0.13.1).
+
 ```json
 {
   "plan_key": "container-pro",
@@ -516,13 +524,26 @@ falls within the next 48 hours.
 Prepaid accounts also get a low-balance notice on `credits.balance.low` (at
 most one per account per day) and a top-up receipt on `credits.topup.paid`.
 
-Every send is best-effort. Delivery goes through `messaging.send_message`
-with an idempotency key, outcomes are recorded as `notification.sent` or
-`notification.failed` account events, and a failure never blocks payment
-collection or activation. Installs without messaging behave exactly as
-before. The sender address is whatever default email sender is configured
-in messaging; SaaS does not pass `from`.
+Every send is best-effort and never blocks payment collection or activation.
+
+Since v0.13.1 every email is first stored in an outbox (`saas_email_outbox`),
+then sent through `messaging.send_message` with `channel: "email"`, the
+owner's plain address and an idempotency key:
+
+- **Sender.** Set `email_from` (and optionally `email_from_name`) in the
+  plan metadata. Without it, messaging uses the project's default email
+  sender. Either way the address must be a verified, sending-enabled sender
+  in messaging for that project, or the send fails.
+- **Outcome.** A messaging status of `failed` (or an error) is recorded as
+  `notification.failed`; anything else, including `pending`, is recorded as
+  `notification.sent`. A `pending` email is never retried, so the customer
+  never gets it twice.
+- **Retries.** The `email-outbox` worker (every 2 minutes) retries failed
+  emails with backoff from 2 minutes up to 6 hours, and gives up after 10
+  attempts (outbox status `abandoned`). After an error it reuses the same
+  idempotency key; after a stored `failed` message it uses `<key>:retry:N`,
+  because messaging returns the stored failed row for a repeated key.
 
 The trial reminder marks `trial_reminder_sent_at` in account metadata once
 delivered; failed attempts are throttled to one per six hours until the
-window closes.
+window closes, on top of the outbox backoff.

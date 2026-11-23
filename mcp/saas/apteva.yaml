@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.13.0
+version: 0.13.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -55,6 +55,11 @@ description: |
   ends when cancelling on a cancel_at_period_end plan (immediate: true cuts
   it now), validates saas_checkout_mark_paid methods up front, and emits
   saas.checkout.paid once per paid checkout for conversion tracking.
+  v0.13.1 fixes account emails (channel email, plan email_from /
+  email_from_name sender, messaging status failed recorded as
+  notification.failed, retried from an outbox by the email-outbox worker)
+  and stops account_past_due actions from running during the initial paid
+  checkout.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas

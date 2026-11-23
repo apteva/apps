@@ -54,8 +54,8 @@ func TestCycleDue_ManualCollectionEmailsPaymentLink(t *testing.T) {
 	if send == nil {
 		t.Fatalf("manual-collection cycle should email the payment link: %+v", pf.calls)
 	}
-	if send.Input["to"] != "mailto:buyer@example.com" {
-		t.Fatalf("payment link email to=%v, want mailto:buyer@example.com", send.Input["to"])
+	if send.Input["to"] != "buyer@example.com" {
+		t.Fatalf("payment link email to=%v, want buyer@example.com", send.Input["to"])
 	}
 	if subject := strFromAny(send.Input["subject"]); !strings.Contains(subject, "Payment due for CRM Pro") {
 		t.Fatalf("payment link email subject=%q", subject)
@@ -238,7 +238,7 @@ func TestTrialReminder_SendsOnceWithinWindow(t *testing.T) {
 		t.Fatalf("in-window trial should email once, got %d", got)
 	}
 	send := findCall(pf.calls, "messaging", "send_message")
-	if send.Input["to"] != "mailto:trial@example.com" {
+	if send.Input["to"] != "trial@example.com" {
 		t.Fatalf("reminder to=%v", send.Input["to"])
 	}
 	if subject := strFromAny(send.Input["subject"]); !strings.Contains(subject, "trial ends on") {
@@ -296,6 +296,10 @@ func TestTrialReminder_FailedSendRetriesAfterThrottle(t *testing.T) {
 	meta = mapFromAny(acct.Metadata)
 	meta["trial_reminder_attempted_at"] = time.Now().UTC().Add(-7 * time.Hour).Format(time.RFC3339)
 	if err := dbAccountSetMetadata(db, "proj-test", acct.ID, meta); err != nil {
+		t.Fatal(err)
+	}
+	// The outbox backoff has passed too.
+	if _, err := db.Exec(`UPDATE saas_email_outbox SET next_attempt_at=datetime('now', '-1 minute')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.runTrialReminders(ctx); err != nil {
