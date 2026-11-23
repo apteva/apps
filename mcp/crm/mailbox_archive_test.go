@@ -78,16 +78,16 @@ func TestCloseEmailConversation_ArchivesMailboxThreads(t *testing.T) {
 	out := setStatus(t, ctx, convoID, "closed")
 
 	calls := pf.archiveCalls()
-	if len(calls) != 1 || calls[0].AppName != "messaging" || calls[0].Input["_project_id"] != "test-proj" {
+	if len(calls) != 1 || calls[0].AppName != "messaging" || calls[0].Input["_project_id"] != "test-proj" || calls[0].Input["action"] != "mark_read" {
 		t.Fatalf("archive calls=%+v", calls)
 	}
 	ids, _ := calls[0].Input["message_ids"].([]int64)
 	if len(ids) != 3 || ids[0] != 503 || ids[1] != 502 || ids[2] != 501 {
 		t.Fatalf("message_ids=%v, want this install's and legacy rows, newest first", calls[0].Input["message_ids"])
 	}
-	archive, ok := out["mailbox_archive"].(*mailboxArchiveResult)
+	archive, ok := out["mailbox_update"].(*mailboxArchiveResult)
 	if !ok || len(archive.Archived) != 1 || archive.Skipped != 1 || archive.Error != "" {
-		t.Fatalf("mailbox_archive=%#v", out["mailbox_archive"])
+		t.Fatalf("mailbox_update=%#v", out["mailbox_update"])
 	}
 	if got := out["conversation"].(*Conversation).Status; got != "closed" {
 		t.Fatalf("status=%s", got)
@@ -124,9 +124,9 @@ func TestCloseConversation_ArchiveErrorsNeverBlockClose(t *testing.T) {
 	pf := &archivePlatform{archiveErr: errors.New("messaging: gmail token expired")}
 	ctx, convoID := archiveFixture(t, pf, "email")
 	out := setStatus(t, ctx, convoID, "closed")
-	archive, ok := out["mailbox_archive"].(*mailboxArchiveResult)
+	archive, ok := out["mailbox_update"].(*mailboxArchiveResult)
 	if !ok || archive.Error == "" {
-		t.Fatalf("mailbox_archive=%#v", out["mailbox_archive"])
+		t.Fatalf("mailbox_update=%#v", out["mailbox_update"])
 	}
 	if got := out["conversation"].(*Conversation).Status; got != "closed" {
 		t.Fatalf("status=%s", got)
@@ -137,8 +137,8 @@ func TestCloseConversation_OlderMessagingWithoutToolIsSilent(t *testing.T) {
 	pf := &archivePlatform{archiveErr: errors.New(`call messaging: {"code":-32601,"message":"tool not found: message_thread_archive"}`)}
 	ctx, convoID := archiveFixture(t, pf, "email")
 	out := setStatus(t, ctx, convoID, "closed")
-	if _, present := out["mailbox_archive"]; present {
-		t.Fatalf("mailbox_archive=%#v, want omitted", out["mailbox_archive"])
+	if _, present := out["mailbox_update"]; present {
+		t.Fatalf("mailbox_update=%#v, want omitted", out["mailbox_update"])
 	}
 }
 
@@ -146,7 +146,7 @@ func TestCloseConversation_NothingArchivableIsOmitted(t *testing.T) {
 	pf := &archivePlatform{archiveReply: map[string]any{"archived": []any{}, "skipped": 3}}
 	ctx, convoID := archiveFixture(t, pf, "email")
 	out := setStatus(t, ctx, convoID, "closed")
-	if _, present := out["mailbox_archive"]; present {
-		t.Fatalf("SES-only conversation should not report mailbox_archive: %#v", out["mailbox_archive"])
+	if _, present := out["mailbox_update"]; present {
+		t.Fatalf("SES-only conversation should not report mailbox_update: %#v", out["mailbox_update"])
 	}
 }

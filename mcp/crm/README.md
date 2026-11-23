@@ -1,4 +1,11 @@
-# CRM v0.9.30
+# CRM v0.9.31
+
+Release `crm/v0.9.31`: closing an email conversation marks its Gmail threads
+read instead of archiving them. The thread stays in the inbox with its labels;
+only UNREAD is removed. Uses `message_thread_archive` with `action: mark_read`,
+which needs Messaging 0.17.2 (upgrade Messaging first: older Messaging ignores
+the action and archives). The close result key is now `mailbox_update`
+(was `mailbox_archive`). No migrations.
 
 Release `crm/v0.9.30`: closing an email conversation archives its Gmail
 threads. When `contacts_set_conversation_status` moves an email conversation to
