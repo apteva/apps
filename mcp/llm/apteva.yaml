@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.6.1
+version: 0.6.2
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes text, image, audio, and
@@ -147,6 +147,8 @@ provides:
       description: A provider route returned a retryable or terminal failure.
     - name: llm.request.denied
       description: The admission hook denied a request, or could not be reached and the hook fails closed.
+    - name: llm.settlement.stuck
+      description: A settlement has failed repeatedly and is now retried hourly. Carries the admission ref, app, and last error.
 
 runtime:
   kind: source
