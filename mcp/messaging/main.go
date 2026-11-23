@@ -286,6 +286,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolMessageList,
 		},
 		{
+			Name:        "message_thread_archive",
+			Description: "Archive the mailbox threads holding these messages. Gmail only: removes the INBOX label from each thread (nothing is deleted; a new reply returns it to the inbox). Messages from other providers, or from a Gmail connection this project no longer owns, are skipped. At most 50 threads per call, most recent first; remaining reports the rest. Args: message_ids (Messaging message ids). Returns {archived, failed, skipped, remaining}.",
+			InputSchema: schemaObject(map[string]any{
+				"message_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxArchiveMessageIDs},
+			}, []string{"message_ids"}),
+			Handler: a.toolMessageThreadArchive,
+		},
+		{
 			Name:        "inbound_redispatch",
 			Description: "Re-attempt routing for an inbound message with the same normalized attachment IDs and metadata. Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
