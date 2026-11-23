@@ -162,7 +162,7 @@ func TestRecoveryEmailUsesMessagingApp(t *testing.T) {
 		tk.WithPlatform(platform),
 		tk.WithConfig(map[string]string{"from_email": "courses@example.test"}),
 	)
-	err := sendRecoveryEmail(ctx, "test-proj", "learner@example.test", "Makecademy", "Verify your email",
+	err := sendRecoveryEmail(ctx, "test-proj", "courses@example.test", "learner@example.test", "Makecademy", "Verify your email",
 		"Finish setting up your account.", "Verify email", "https://courses.example.test/#verify=secret", "verify-once")
 	if err != nil {
 		t.Fatal(err)
