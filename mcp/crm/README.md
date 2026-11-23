@@ -1,4 +1,14 @@
-# CRM v0.9.29
+# CRM v0.9.30
+
+Release `crm/v0.9.30`: closing an email conversation archives its Gmail
+threads. When `contacts_set_conversation_status` moves an email conversation to
+`closed`, CRM asks Messaging (`message_thread_archive`, Messaging 0.17.0) to
+archive the mailbox threads behind its messages. Gmail threads lose the INBOX
+label; nothing is deleted, and a new reply returns the thread to the inbox and
+reopens the conversation. SES and other providers are untouched. It is best
+effort: the close always succeeds, and the result carries `mailbox_archive`
+(archived, failed, skipped, remaining, or error) when anything was attempted.
+Older Messaging versions without the tool are ignored. No migrations.
 
 Release `crm/v0.9.29`: free-text contact search (`contacts_search` and the HTTP
 search route) matches full names. A query also compares against the joined
