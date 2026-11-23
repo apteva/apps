@@ -161,6 +161,11 @@ func capabilities(slug string) recordCapabilities {
 		c.WriteTypes = strings.Fields("A AAAA CNAME MX TXT NS SRV CAA ALIAS PTR")
 	case "ionos":
 		c.WriteTypes = strings.Fields("A AAAA CNAME MX TXT NS SRV CAA")
+	case "ovhcloud":
+		c.WriteTypes = strings.Fields("A AAAA CNAME MX TXT NS SRV CAA PTR HTTPS SVCB TLSA")
+	case "gandi":
+		c.MinTTL = 300
+		c.MaxTTL = 2592000
 	}
 	c.DeleteTypes = append([]string(nil), c.WriteTypes...)
 	if slug == "spaceship" {

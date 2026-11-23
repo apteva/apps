@@ -108,6 +108,8 @@ function providerLabel(slug: string): string {
   if (slug === "dynadot") return "Dynadot";
   if (slug === "cloudflare") return "Cloudflare";
   if (slug === "hostinger") return "Hostinger";
+  if (slug === "ovhcloud") return "OVHcloud";
+  if (slug === "gandi") return "Gandi";
   if (slug === "rdap") return "Public RDAP";
   return slug;
 }

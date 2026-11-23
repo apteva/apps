@@ -1,3 +1,14 @@
+## 1.4.0
+
+- Add OVHcloud and Gandi LiveDNS as DNS providers (`dns_provider` compatible slugs `ovhcloud` and `gandi`). Both support list, create, update and delete through `domain_records_*`, and appear in the connection picker.
+- OVHcloud: records are read by id (bounded parallel fetch), MX/SRV priorities are split from the target, SPF/DKIM/DMARC pseudo-types are shown as TXT, and each change calls `zone_refresh`. A refresh failure is reported as an error because the change is saved at OVH but not live.
+- Gandi: RRsets are expanded into one record per value with value-derived IDs. Single-value edits and deletes rewrite the RRset and keep the other values verbatim; TXT values are quoted and split into 255-byte strings. TTL is per RRset (300–2592000).
+- Registration, availability and sales are unchanged; OVHcloud and Gandi are not registrar providers in this release. No database migrations.
+
+Requires the `ovhcloud` catalog entry with the `zone_*` DNS tools and the `gandi` catalog entry with the LiveDNS record tools.
+
+Validation: Go tests with stubbed providers. No live OVHcloud or Gandi zone was changed.
+
 ## 1.3.0
 
 - Extend existing MCP tools for agent-led domain exploration without adding tools or workflows. `domain_availability_check` accepts `domains[]` (max 50), deduplicates names, limits concurrency to four, and returns ordered per-domain results/errors and check times. Legacy single-domain responses remain unchanged. Prices remain unknown when the provider does not return them.

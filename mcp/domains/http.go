@@ -117,7 +117,7 @@ func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, c := range rows {
-			if !includes([]string{"porkbun", "namecheap", "ionos", "spaceship", "dynadot", "cloudflare", "hostinger"}, c.AppSlug) {
+			if !includes([]string{"porkbun", "namecheap", "ionos", "spaceship", "dynadot", "cloudflare", "hostinger", "ovhcloud", "gandi"}, c.AppSlug) {
 				continue
 			}
 			out = append(out, conn{
