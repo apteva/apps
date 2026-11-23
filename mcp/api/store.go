@@ -35,6 +35,8 @@ type API struct {
 	UpdatedAt             string `json:"updated_at,omitempty"`
 	StageID               int64  `json:"-"`
 	ConfigurationID       int64  `json:"-"`
+	StageName             string `json:"-"`
+	StageVarsJSON         string `json:"-"`
 }
 
 type APIRoute struct {
@@ -548,14 +550,19 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if err := validateTarget(kind, in.TargetRef); err != nil {
+	// Stage placeholders are validated for syntax here and substituted only
+	// for stage-served requests; structural checks run on a sample value.
+	if err := routeStageVarRefs(in.TargetRef, in.TargetPath, in.EventsJSON, map[string]struct{}{}); err != nil {
+		return nil, "", err
+	}
+	if err := validateTemplatedTarget(kind, in.TargetRef); err != nil {
 		return nil, "", err
 	}
 	if kind == "app_events" {
 		if method != "GET" {
 			return nil, "", errors.New("app_events routes must use GET")
 		}
-		if _, err := parseAppEventsConfig(in.EventsJSON); err != nil {
+		if _, err := parseAppEventsConfig(sampleStageJSON(in.EventsJSON)); err != nil {
 			return nil, "", err
 		}
 	} else {
@@ -570,7 +577,7 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	if err := validateAuthPolicy(defaultJSON(in.AuthJSON)); err != nil {
 		return nil, "", err
 	}
-	if in.TargetPath != "" && (!strings.HasPrefix(in.TargetPath, "/") || strings.ContainsAny(in.TargetPath, "?#\\\r\n")) {
+	if samplePath := sampleStageValue(in.TargetPath); samplePath != "" && (!strings.HasPrefix(samplePath, "/") || strings.ContainsAny(samplePath, "?#\\\r\n")) {
 		return nil, "", errors.New("target_path must be an absolute path without query or fragment")
 	}
 	if in.Priority == 0 && !in.PrioritySet {

@@ -3,6 +3,48 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Stage variables and rollback (0.14.0)
+
+A stage may carry `vars`, a JSON object of string values set with
+`api_stage_create` or `api_stage_update` (an update replaces the whole map).
+For requests served by a stage hostname, a route's `target_ref`, `target_path`
+and the string values of its `events` configuration may reference:
+
+- `{{stage.name}}` — the stage's name
+- `{{stage.vars.<key>}}` — a stage variable; keys use letters, digits, `_` or
+  `-` and start with a letter or `_`
+
+So one immutable configuration can serve `staging` and `production` with
+different backends:
+
+```json
+{ "target_kind": "http", "target_ref": "{{stage.vars.backend}}", "target_path": "/{{stage.name}}/orders" }
+```
+
+Placeholders are checked when routes are written and when configurations are
+snapshotted; any `{{stage...}}` other than the two forms above is rejected.
+Other `{{...}}` text is left alone. Creating, updating, promoting or rolling
+back a stage fails when its configuration references a variable the stage
+does not define. If a variable is still missing at request time, or the
+resolved target is not a valid target, the request fails with HTTP 500 and
+`error_code: stage_config_error` (logged) and never substitutes an empty
+string. Values are plain strings (at most 2048 bytes, no line breaks, no
+placeholders) and are not re-expanded. Requests that do not go through a stage
+leave placeholders untouched. Vars are configuration, not secrets: they are
+returned by stage reads and resolved targets appear in request logs.
+
+Every promote or rollback records the replaced configuration in
+`previous_configuration_id`. `api_stage_rollback` with only `stage_id` returns
+to it (a second rollback goes forward again) and errors when the stage has no
+previous configuration; pass `configuration_id` to pick one. Promoting to the
+configuration the stage already serves changes nothing.
+
+Each stage has a `rev`, bumped on every change. `api_stage_update`,
+`api_stage_promote` and `api_stage_rollback` accept an optional `expected_rev`;
+on a mismatch they return a rev conflict and change nothing. Promote and
+rollback read, check and move the stage in one transaction. Snapshot restore
+rewrites old runtime URLs inside stage vars like other stored URLs.
+
 ## Snapshot restore (0.13.0)
 
 When an Apteva runtime is restored from a snapshot, the app SDK moves every

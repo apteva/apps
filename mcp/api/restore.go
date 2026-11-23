@@ -9,7 +9,8 @@ import (
 
 // restoreOriginColumns hold stored URLs or issuer strings that can embed the
 // runtime's public base URL: HTTP route targets and route/API/stage auth
-// policies (app authorizer issuers).
+// policies (app authorizer issuers), and stage vars, which commonly hold
+// target base URLs.
 var restoreOriginColumns = []string{
 	"api_routes.target_ref",
 	"api_configuration_routes.target_ref",
@@ -18,6 +19,7 @@ var restoreOriginColumns = []string{
 	"api_configurations.auth_json",
 	"api_configuration_routes.auth_json",
 	"api_stages.auth_json",
+	"api_stages.vars_json",
 }
 
 // OnRestore runs before the API Gateway serves data restored from a snapshot.

@@ -379,7 +379,16 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		route = freshRoute
 		authCtx = verified
 	}
-	status, err := a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
+	// Stage-served requests resolve {{stage.*}} placeholders in route targets.
+	// A missing or invalid variable fails closed with stage_config_error.
+	var status int
+	if resolved, resolveErr := resolveStageRoute(api, route); resolveErr != nil {
+		status, err = writeGatewayFailure(w, r.Context(), resolveErr)
+	} else {
+		route = resolved
+		logRow.TargetRef = route.TargetRef
+		status, err = a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
+	}
 	logRow.StatusCode = status
 	if err != nil {
 		logRow.Error = safeUpstreamError(err)

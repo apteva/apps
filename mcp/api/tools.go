@@ -137,14 +137,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"configuration_id"}), Handler: a.toolConfigClone},
 		{Name: "api_config_list", Description: "List immutable API configurations.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}}, nil), Handler: a.toolConfigList},
 		{Name: "api_config_diff", Description: "Compare the routes in two immutable API configurations.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "left_configuration_id": map[string]any{"type": "integer"}, "right_configuration_id": map[string]any{"type": "integer"}}, []string{"left_configuration_id", "right_configuration_id"}), Handler: a.toolConfigDiff},
-		{Name: "api_stage_create", Description: "Create an opt-in stage pointing at an immutable configuration. Existing APIs remain legacy unless a stage is created.", InputSchema: schemaObject(map[string]any{
-			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "configuration_id": map[string]any{"type": "integer"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema(),
+		{Name: "api_stage_create", Description: "Create an opt-in stage pointing at an immutable configuration. Existing APIs remain legacy unless a stage is created. vars fill {{stage.vars.<key>}} placeholders in route targets for requests served by this stage.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "configuration_id": map[string]any{"type": "integer"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema(), "vars": stageVarsSchema(),
 		}, []string{"name"}), Handler: a.toolStageCreate},
 		{Name: "api_stage_list", Description: "List stages for an API.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}}, nil), Handler: a.toolStageList},
 		{Name: "api_stage_get", Description: "Fetch a stage by id.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}}, []string{"stage_id"}), Handler: a.toolStageGet},
-		{Name: "api_stage_update", Description: "Update stage metadata, hostname, enabled state, or optional CORS/auth defaults.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema()}, []string{"stage_id"}), Handler: a.toolStageUpdate},
-		{Name: "api_stage_promote", Description: "Atomically point a stage at an immutable configuration.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer"}}, []string{"stage_id", "configuration_id"}), Handler: a.toolStagePromote},
-		{Name: "api_stage_rollback", Description: "Roll a stage back to a prior immutable configuration.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer"}}, []string{"stage_id", "configuration_id"}), Handler: a.toolStagePromote},
+		{Name: "api_stage_update", Description: "Update stage metadata, hostname, enabled state, vars, or optional CORS/auth defaults. vars replaces the whole variable map. Pass expected_rev to fail with a conflict if the stage changed since it was read.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema(), "vars": stageVarsSchema(), "expected_rev": expectedRevSchema()}, []string{"stage_id"}), Handler: a.toolStageUpdate},
+		{Name: "api_stage_promote", Description: "Atomically point a stage at an immutable configuration, recording the replaced one as previous_configuration_id.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer"}, "expected_rev": expectedRevSchema()}, []string{"stage_id", "configuration_id"}), Handler: a.toolStagePromote},
+		{Name: "api_stage_rollback", Description: "Roll a stage back to its previous configuration, or to configuration_id when given. Errors when the stage has no previous configuration.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer", "description": "Optional; defaults to the stage's previous_configuration_id."}, "expected_rev": expectedRevSchema()}, []string{"stage_id"}), Handler: a.toolStageRollback},
 	}
 }
 
@@ -325,10 +325,14 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateEffectivePolicies(ctx.AppDB(), api, candidate, 0); err != nil {
 		return nil, err
 	}
-	if err := validateRouteTargetPath(stringArg(args, "target_path", "")); err != nil {
+	if err := routeStageVarRefs(stringArg(args, "target_ref", ""), stringArg(args, "target_path", ""), eventsJSON, map[string]struct{}{}); err != nil {
 		return nil, err
 	}
-	if candidate.TargetKind == "app" && enabled {
+	if err := validateRouteTargetPath(sampleStageValue(stringArg(args, "target_path", ""))); err != nil {
+		return nil, err
+	}
+	// A templated app target resolves per stage; it is checked at request time.
+	if candidate.TargetKind == "app" && enabled && sampleStageValue(stringArg(args, "target_ref", "")) == stringArg(args, "target_ref", "") {
 		if err := a.validateAppTarget(api.ProjectID, stringArg(args, "target_ref", "")); err != nil {
 			return nil, err
 		}
@@ -626,7 +630,11 @@ func (a *App) toolStageCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		configID = c.ID
 	}
-	stage := APIStage{ProjectID: api.ProjectID, APIID: api.ID, Name: stringArg(args, "name", ""), ConfigurationID: configID, Hostname: stringArg(args, "hostname", ""), Status: stringArg(args, "status", "active")}
+	vars, _, err := normalizeStageVars(args["vars"])
+	if err != nil {
+		return nil, err
+	}
+	stage := APIStage{ProjectID: api.ProjectID, APIID: api.ID, Name: stringArg(args, "name", ""), ConfigurationID: configID, Hostname: stringArg(args, "hostname", ""), Status: stringArg(args, "status", "active"), Vars: vars}
 	if _, ok := args["cors"]; ok {
 		stage.CORSJSON, err = jsonTextArg(args, "cors", "")
 		if err != nil {
@@ -681,7 +689,7 @@ func (a *App) toolStageUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		return nil, err
 	}
-	updated, err := dbUpdateStage(ctx.AppDB(), s, args)
+	updated, err := dbUpdateStage(ctx.AppDB(), s, args, int64(intArg(args, "expected_rev", 0)))
 	if err == nil {
 		a.configureStageExposure(ctx, updated)
 	}
@@ -695,8 +703,31 @@ func (a *App) toolStagePromote(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	s, err := dbPromoteStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)), int64(intArg(args, "configuration_id", 0)))
+	s, err := dbPromoteStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)), int64(intArg(args, "configuration_id", 0)), int64(intArg(args, "expected_rev", 0)))
 	return map[string]any{"stage": s}, err
+}
+
+func (a *App) toolStageRollback(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	s, err := dbRollbackStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)), int64(intArg(args, "configuration_id", 0)), int64(intArg(args, "expected_rev", 0)))
+	return map[string]any{"stage": s}, err
+}
+
+func stageVarsSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"description":          "Stage variables (string values) substituted into {{stage.vars.<key>}} placeholders in route target_ref, target_path and events for requests served by this stage. Keys: letters, digits, _ or -, starting with a letter or _.",
+		"additionalProperties": map[string]any{"type": "string"},
+	}
+}
+
+func expectedRevSchema() map[string]any {
+	return map[string]any{"type": "integer", "minimum": 1, "description": "Optional optimistic concurrency guard: the stage rev you last read. A mismatch fails with a conflict and changes nothing."}
 }
 
 func (a *App) resolveAPI(ctx *sdk.AppCtx, args map[string]any) (*API, error) {

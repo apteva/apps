@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.13.0
+version: 0.14.0
 description: |
+  v0.14.0 Stages carry string vars substituted into {{stage.name}} and
+  {{stage.vars.<key>}} placeholders in route targets, so one configuration can
+  serve several stages. Missing vars fail closed. Rollback without an id returns
+  to the previous configuration, and stage writes accept expected_rev to reject
+  concurrent changes.
+
   v0.13.0 Keeps APIs, routes, keys, configurations and stages when a runtime is
   restored from a snapshot. Routes still reach their functions, and URLs that
   pointed at the old runtime follow the new one.
@@ -158,17 +164,17 @@ provides:
     - name: api_config_diff
       description: "Compare two immutable API configurations."
     - name: api_stage_create
-      description: "Create an opt-in stage pointing at an immutable configuration."
+      description: "Create an opt-in stage pointing at an immutable configuration. vars fill {{stage.vars.<key>}} route target placeholders."
     - name: api_stage_list
       description: "List stages for an API."
     - name: api_stage_get
       description: "Fetch a stage by id."
     - name: api_stage_update
-      description: "Update stage metadata, hostname, status, or optional defaults."
+      description: "Update stage metadata, hostname, status, vars, or optional defaults. Optional expected_rev guards against concurrent changes."
     - name: api_stage_promote
-      description: "Atomically point a stage at an immutable configuration."
+      description: "Atomically point a stage at an immutable configuration, recording the previous one. Optional expected_rev."
     - name: api_stage_rollback
-      description: "Roll a stage back to an earlier immutable configuration."
+      description: "Roll a stage back to its previous configuration, or to configuration_id when given. Optional expected_rev."
   ui_panels:
     - slot: project.page
       label: API Gateway
@@ -179,7 +185,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.13.0
+    ref: api/v0.14.0
     entry: mcp/api
   port: 8080
   health_check: /health
