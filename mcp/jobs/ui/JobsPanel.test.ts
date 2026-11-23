@@ -85,3 +85,19 @@ test("global requests omit the project query", async () => {
   globalThis.fetch = (async (url: string) => {query = url;return Response.json({jobs: []});}) as typeof fetch;
   await callbacks[2]();expect(query).toContain("scope=global");expect(query).not.toContain("project_id=");
 });
+test("pause toggle posts pause for active jobs and resume for paused jobs", async () => {
+  const calls: string[] = [];let current: any = jobs[0];
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    const p = path(url);if (init?.method === "POST") calls.push(p);
+    if (p.endsWith("/pause")) current = {...jobs[0], status: "paused", paused: true};
+    if (p.endsWith("/resume")) current = {...jobs[0], status: "pending", paused: false};
+    if (p.endsWith("/jobs")) return Response.json({jobs});
+    if (p.endsWith("/runs")) return Response.json({runs: []});
+    return Response.json({job: current});
+  }) as typeof fetch;
+  const h = setup();await seedList();select(h.render(), 1);await flush();
+  await detail(h.render())!.props.onPauseToggle();await flush();
+  expect(detail(h.render())!.props.job.paused).toBe(true);
+  await detail(h.render())!.props.onPauseToggle();await flush();
+  expect(calls).toEqual(["/api/apps/jobs/jobs/1/pause", "/api/apps/jobs/jobs/1/resume"]);
+});

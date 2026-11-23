@@ -233,6 +233,9 @@ func queueManualRun(db *sql.DB, pid string, id int64, parents ...context.Context
 	if status == "cancelled" {
 		return conflict("cannot run a cancelled job")
 	}
+	if status == "paused" {
+		return conflict("job is paused; resume it first")
+	}
 	var pending int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE parent_job_id=? AND status IN ('pending','running')`, id).Scan(&pending); err != nil {
 		return err
@@ -314,7 +317,7 @@ func validateListQuery(r *http.Request, maxLimit int) error {
 		return badRequest("filter is too long")
 	}
 	switch q.Get("status") {
-	case "", "pending", "running", "done", "failed", "cancelled":
+	case "", "pending", "running", "paused", "done", "failed", "cancelled":
 	default:
 		return badRequest("invalid status")
 	}

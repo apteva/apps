@@ -122,7 +122,7 @@ func (a *App) handleHTTPJobsCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHTTPJobItem dispatches /jobs/<id>, /jobs/<id>/runs,
-// /jobs/<id>/run-now.
+// /jobs/<id>/run-now, /jobs/<id>/pause, /jobs/<id>/resume.
 func (a *App) handleHTTPJobItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/jobs/")
 	parts := strings.SplitN(rest, "/", 2)
@@ -132,6 +132,14 @@ func (a *App) handleHTTPJobItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleHTTPJobRuns(w, r, parts[0])
+		return
+	}
+	if len(parts) == 2 && (parts[1] == "pause" || parts[1] == "resume") {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.handleHTTPPauseResume(w, r, parts[0], parts[1] == "pause")
 		return
 	}
 	if len(parts) == 2 && parts[1] == "run-now" {
@@ -414,7 +422,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "jobs_list",
-			Description: "List jobs. Args: owner_app, owner_instance, status (pending|running|done|failed|cancelled), limit (default 100, max 500).",
+			Description: "List jobs. Args: owner_app, owner_instance, status (pending|running|paused|done|failed|cancelled), limit (default 100, max 500). Each job reports status and paused.",
 			InputSchema: schemaObject(map[string]any{
 				"owner_app":      map[string]any{"type": "string"},
 				"owner_instance": map[string]any{"type": "integer"},
@@ -450,6 +458,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			HandlerCtx: a.scopedTool(a.toolRunNow),
+		},
+		{
+			Name:        "jobs_pause",
+			Description: "Pause a scheduled job by id. A paused job never dispatches and keeps its configuration until resumed or cancelled. Idempotent — pausing a paused job returns its current state. An attempt already in flight finishes, then the job parks as paused.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			HandlerCtx: a.scopedTool(a.toolPause),
+		},
+		{
+			Name:        "jobs_resume",
+			Description: "Resume a paused job by id. The next run is recomputed from now; runs missed while paused are skipped (a one-time job whose time passed runs once, promptly). Idempotent — resuming an active job returns its current state.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			HandlerCtx: a.scopedTool(a.toolResume),
 		},
 		{
 			Name:        "jobs_preview",
@@ -535,8 +559,13 @@ type Job struct {
 	CreatedAt      string          `json:"created_at,omitempty"`
 	UpdatedAt      string          `json:"updated_at,omitempty"`
 	CancelledAt    string          `json:"cancelled_at,omitempty"`
-	LeaseToken     string          `json:"-"`
-	ScheduleSeed   string          `json:"-"`
+	// Paused is true once a pause was requested. A pending job reports
+	// status "paused"; an attempt already in flight keeps status "running"
+	// with paused=true and parks as "paused" when it finalizes.
+	Paused       bool   `json:"paused"`
+	PausedAt     string `json:"paused_at,omitempty"`
+	LeaseToken   string `json:"-"`
+	ScheduleSeed string `json:"-"`
 }
 
 type JobRun struct {
@@ -914,7 +943,7 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any, parents ...conte
 		return nil, err
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE project_id=? AND status IN ('pending','running')`, pid).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE project_id=? AND status IN ('pending','running','paused')`, pid).Scan(&active); err != nil {
 		return nil, err
 	}
 	if active >= maxActiveJobs {
@@ -954,7 +983,7 @@ func dbGetJob(db *sql.DB, pid string, id int64, parents ...context.Context) (*Jo
 			target_json,
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
 			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
-			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0)
+			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0), paused_at
 		 FROM jobs WHERE id = ? AND project_id = ?`,
 		id, pid)
 	job, err := scanJob(row)
@@ -974,7 +1003,7 @@ func scanJob(row scanRow) (*Job, error) {
 	j := &Job{}
 	var ownerInst sql.NullInt64
 	var everySecs sql.NullInt64
-	var runAt, nextRun, scheduledFor, lastRun, cancelledAt sql.NullString
+	var runAt, nextRun, scheduledFor, lastRun, cancelledAt, pausedAt sql.NullString
 	var targetJSON, randomConfigJSON string
 	err := row.Scan(
 		&j.ID, &j.ProjectID, &j.Name, &j.OwnerApp, &ownerInst,
@@ -983,7 +1012,7 @@ func scanJob(row scanRow) (*Job, error) {
 		&targetJSON,
 		&j.IdempotencyKey, &j.MaxRetries, &j.BackoffSeconds,
 		&j.Status, &nextRun, &scheduledFor, &lastRun, &j.LastStatus, &j.LastError,
-		&j.Attempt, &j.CreatedAt, &j.UpdatedAt, &cancelledAt, &j.ParentJobID)
+		&j.Attempt, &j.CreatedAt, &j.UpdatedAt, &cancelledAt, &j.ParentJobID, &pausedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1000,6 +1029,8 @@ func scanJob(row scanRow) (*Job, error) {
 	j.ScheduledFor = scheduledFor.String
 	j.LastRunAt = lastRun.String
 	j.CancelledAt = cancelledAt.String
+	j.PausedAt = pausedAt.String
+	j.Paused = pausedAt.Valid
 	if targetJSON != "" {
 		if err := json.Unmarshal([]byte(targetJSON), &j.Target); err != nil {
 			return nil, fmt.Errorf("decode target for job %d: %w", j.ID, err)
@@ -1049,7 +1080,7 @@ func dbListJobs(db *sql.DB, pid string, f JobFilter, parents ...context.Context)
 			json_object('kind',target_kind),
 			'', max_retries, backoff_seconds,
 			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
-			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0)
+			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0), paused_at
 		 FROM jobs WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY id DESC LIMIT ?`
 	if f.Page {
@@ -1267,21 +1298,21 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) error {
 	if _, err = tx.ExecContext(finalCtx, `UPDATE job_runs SET finished_at=?,duration_ms=?,status=?,http_status=?,response_body=NULL,error=? WHERE id=? AND lease_token=? AND status='running'`, finished.Format(time.RFC3339Nano), finished.Sub(started).Milliseconds(), status, code, nullStr(errStr), runID, j.LeaseToken); err != nil {
 		return fmt.Errorf("record outcome: %w", err)
 	}
-	res, err := tx.ExecContext(finalCtx, `UPDATE jobs SET status=?,last_run_at=?,last_status=?,last_error=?,attempt=?,lease_until=NULL,lease_token=NULL,next_run_at=?,scheduled_for=?,updated_at=? WHERE id=? AND project_id=? AND status='running' AND lease_token=?`, nextStatus, finished.Format(time.RFC3339Nano), lastStatus, nullStr(errStr), nextAttempt, nullableTime(nextRun), nextScheduled, finished.Format(time.RFC3339Nano), j.ID, j.ProjectID, j.LeaseToken)
-	if err != nil {
+	// A pause requested while this attempt was in flight parks the schedule
+	// instead of re-arming it; terminal outcomes (done/failed) still win.
+	var finalStatus string
+	err = tx.QueryRowContext(finalCtx, `UPDATE jobs SET status=CASE WHEN paused_at IS NOT NULL AND ?='pending' THEN 'paused' ELSE ? END,last_run_at=?,last_status=?,last_error=?,attempt=?,lease_until=NULL,lease_token=NULL,next_run_at=CASE WHEN paused_at IS NOT NULL AND ?='pending' THEN NULL ELSE ? END,scheduled_for=?,updated_at=? WHERE id=? AND project_id=? AND status='running' AND lease_token=? RETURNING status`, nextStatus, nextStatus, finished.Format(time.RFC3339Nano), lastStatus, nullStr(errStr), nextAttempt, nextStatus, nullableTime(nextRun), nextScheduled, finished.Format(time.RFC3339Nano), j.ID, j.ProjectID, j.LeaseToken).Scan(&finalStatus)
+	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("finalize schedule: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
+	updated := err == nil
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit outcome: %w", err)
 	}
-	if n > 0 {
-		payload := map[string]any{"id": j.ID, "status": nextStatus, "last_status": lastStatus}
+	if updated {
+		payload := map[string]any{"id": j.ID, "status": finalStatus, "last_status": lastStatus}
 		if j.ParentJobID != 0 {
-			payload = map[string]any{"id": j.ParentJobID, "manual_run_id": j.ID, "manual_run_status": nextStatus}
+			payload = map[string]any{"id": j.ParentJobID, "manual_run_id": j.ID, "manual_run_status": finalStatus}
 		}
 		app.EmitWithProject("job.updated", j.ProjectID, payload)
 	}
@@ -1331,7 +1362,7 @@ func pruneHistory(parent context.Context, db *sql.DB, pid string, scoped bool, c
 		condition             string
 	}{
 		{"job_runs", "started_at", "history_retention_days", 30, "status <> 'running'"},
-		{"jobs", "updated_at", "terminal_job_retention_days", 90, "status IN ('done','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM jobs child WHERE child.parent_job_id=jobs.id AND child.status IN ('pending','running'))"},
+		{"jobs", "updated_at", "terminal_job_retention_days", 90, "status IN ('done','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM jobs child WHERE child.parent_job_id=jobs.id AND child.status IN ('pending','running','paused'))"},
 	} {
 		days := item.days
 		if raw := strings.TrimSpace(cfg.Get(item.config)); raw != "" {

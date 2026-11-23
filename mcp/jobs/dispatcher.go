@@ -57,6 +57,9 @@ func (d *dispatcher) run() {
 		case <-ticker.C:
 			d.fill()
 		case <-maintenance.C:
+			if err := parkAbandonedPausedJobs(d.ctx, d.app.AppDB(), "", false); err != nil {
+				d.failure(err)
+			}
 			if err := pruneHistory(d.ctx, d.app.AppDB(), "", false, d.app.Config(), time.Now().UTC()); err != nil {
 				d.failure(err)
 			}
@@ -153,7 +156,7 @@ func claimJob(ctx context.Context, db *sql.DB, pid string, id int64) (*Job, erro
  SELECT id FROM (
  SELECT id,next_run_at AS due FROM jobs WHERE project_id=? AND status='pending' AND next_run_at<=? AND (?=0 OR id=?)
  UNION ALL
- SELECT id,COALESCE(lease_until,'') AS due FROM jobs WHERE project_id=? AND status='running' AND (lease_until IS NULL OR lease_until<?) AND (?=0 OR id=?)
+ SELECT id,COALESCE(lease_until,'') AS due FROM jobs WHERE project_id=? AND status='running' AND (lease_until IS NULL OR lease_until<?) AND paused_at IS NULL AND (?=0 OR id=?)
  ) ORDER BY due,id LIMIT 1) RETURNING id`
 	var claimed int64
 	err = db.QueryRowContext(ctx, query, now.Add(leaseTTL).Format(time.RFC3339), token, stamp, pid, stamp, id, id, pid, stamp, id, id).Scan(&claimed)
@@ -178,6 +181,9 @@ func claimJob(ctx context.Context, db *sql.DB, pid string, id int64) (*Job, erro
 // Synchronous single-project tick used by tests and explicit maintenance.
 // Snapshot IDs only; each job is claimed after a slot becomes available.
 func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
+	if err := parkAbandonedPausedJobs(ctx, app.AppDB(), app.CurrentProject(), true); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := app.AppDB().QueryContext(ctx, `SELECT id FROM jobs WHERE project_id=? AND ((status='pending' AND next_run_at<=?) OR (status='running' AND (lease_until IS NULL OR lease_until<?))) ORDER BY next_run_at,id LIMIT ?`, app.CurrentProject(), now, now, atoiDefault(app.Config().Get("dispatch_batch_size"), 20, 200))
 	if err != nil {
@@ -235,13 +241,21 @@ func beginAttempt(ctx context.Context, db *sql.DB, j *Job, started time.Time) (i
 		return 0, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE jobs SET lease_until=? WHERE id=? AND project_id=? AND status='running' AND lease_token=? AND lease_until>=?`, started.Add(leaseTTL).Format(time.RFC3339), j.ID, j.ProjectID, j.LeaseToken, started.Format(time.RFC3339))
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET lease_until=? WHERE id=? AND project_id=? AND status='running' AND lease_token=? AND lease_until>=? AND paused_at IS NULL`, started.Add(leaseTTL).Format(time.RFC3339), j.ID, j.ProjectID, j.LeaseToken, started.Format(time.RFC3339))
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
-	if err != nil || n == 0 {
+	if err != nil {
 		return 0, err
+	}
+	if n == 0 {
+		// A pause that committed after the claim but before delivery started
+		// wins: park the job without attempting delivery.
+		if _, err = tx.ExecContext(ctx, `UPDATE jobs SET status='paused',lease_until=NULL,lease_token=NULL,next_run_at=NULL,updated_at=? WHERE id=? AND project_id=? AND status='running' AND lease_token=? AND paused_at IS NOT NULL`, started.Format(time.RFC3339), j.ID, j.ProjectID, j.LeaseToken); err != nil {
+			return 0, err
+		}
+		return 0, tx.Commit()
 	}
 	logID := j.ID
 	if j.ParentJobID != 0 {
@@ -309,4 +323,19 @@ func retryDelay(seconds, attempt int) time.Duration {
 		delay = 24 * time.Hour
 	}
 	return delay
+}
+
+// parkAbandonedPausedJobs moves pause-requested jobs whose in-flight owner
+// vanished (expired lease) to 'paused'. The claim path never reclaims them, so
+// a crash between pause and finalization cannot re-deliver the occurrence.
+func parkAbandonedPausedJobs(ctx context.Context, db *sql.DB, pid string, scoped bool) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `UPDATE jobs SET status='paused',lease_until=NULL,lease_token=NULL,next_run_at=NULL,updated_at=? WHERE status='running' AND paused_at IS NOT NULL AND (lease_until IS NULL OR lease_until<?)`
+	args := []any{now, now}
+	if scoped {
+		q += ` AND project_id=?`
+		args = append(args, pid)
+	}
+	_, err := db.ExecContext(ctx, q, args...)
+	return err
 }

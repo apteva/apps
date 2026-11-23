@@ -206,7 +206,7 @@ func checkExecutionLease(ctx context.Context, app *sdk.AppCtx, j *Job) error {
 		return nil
 	}
 	var valid int
-	if err := app.AppDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE id=? AND project_id=? AND status='running' AND lease_token=? AND lease_until>=?`, j.ID, j.ProjectID, j.LeaseToken, time.Now().UTC().Format(time.RFC3339)).Scan(&valid); err != nil {
+	if err := app.AppDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE id=? AND project_id=? AND status='running' AND lease_token=? AND lease_until>=? AND paused_at IS NULL`, j.ID, j.ProjectID, j.LeaseToken, time.Now().UTC().Format(time.RFC3339)).Scan(&valid); err != nil {
 		return err
 	}
 	if valid != 1 {

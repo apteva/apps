@@ -11,8 +11,11 @@ app uses to schedule work without reimplementing a scheduler.
 - **Three target kinds:** `app_tool` (platform-authorized sibling app
   call), `http` (absolute external URL gated by `net.egress`), and
   `event` (a project-validated platform event to an agent).
-- **7 MCP tools:** `jobs_schedule`, `jobs_cancel`, `jobs_list`,
-  `jobs_get`, `jobs_runs`, `jobs_run_now`, `jobs_preview`.
+- **9 MCP tools:** `jobs_schedule`, `jobs_cancel`, `jobs_pause`,
+  `jobs_resume`, `jobs_list`, `jobs_get`, `jobs_runs`, `jobs_run_now`,
+  `jobs_preview`.
+- **Pause / resume** without losing the schedule — e.g. hold a staging
+  copy of a production schedule while keeping its configuration.
 - **REST surface** at `/api/apps/jobs/*` for the dashboard panel and
   for other apps to enqueue without going through MCP.
 - **Native React Jobs panel** in the `project.page` slot.
@@ -113,6 +116,7 @@ POST /api/apps/jobs/jobs?project_id=proj-1
 - `every` advances from completion by the configured interval. `cron` selects the next matching real minute after completion in the chosen IANA timezone. Missed interval/cron occurrences are skipped, not replayed. Nonexistent DST wall times are skipped; repeated matching wall times represent two distinct instants. Leap-day expressions are supported, and impossible expressions are rejected.
 - `random` preserves its deterministic logical occurrence sequence. After downtime, missed occurrences are replayed in order; minimum spacing describes scheduled times, not physical delivery spacing during recovery.
 - `run-now` queues a separate, one-time child occurrence with its own retry identity and logs it under the original job. It preserves the normal next occurrence. Concurrent duplicate manual requests return 409. Completed/failed jobs can be run manually; cancelled or currently running jobs cannot. Cancelling a job also cancels its queued children.
+- **Pause / resume** (`jobs_pause {id}`, `jobs_resume {id}`, or `POST /jobs/:id/pause` / `POST /jobs/:id/resume`). Both are idempotent and return `{job}`; pausing or resuming a done/failed/cancelled job returns 409. A paused job has `status: "paused"`, `paused: true`, no `next_run_at`, and never dispatches. Its queued manual runs are held with it, and `run-now` on a paused job returns 409. The pause is checked inside the same database write that owns the row: a pause that commits before delivery starts — even after the dispatcher claimed the due row — prevents delivery. An attempt whose delivery already started completes (reported as `status: "running"`, `paused: true`, shown as "pausing" in the panel) and then parks as `paused` instead of re-arming. **Resume recomputes the next run from now**: missed `every`/`cron`/`random` occurrences are skipped, never replayed as a burst (unlike recovery after downtime), and retry state from before the pause is reset. A `once` job whose time passed while paused runs once, promptly, with its original occurrence identity. Cancel works on paused jobs unchanged. Filter with `status=paused`.
 - Delivery is **at least once**. A process failure after a recipient acts but before Jobs commits can cause a retry. Recipients should deduplicate using the supplied occurrence key. `idempotency_key` identifies delivery attempts; it does not deduplicate job creation. Cancellation cannot undo work already accepted by a recipient.
 - The installation has one execution pool (default 8, max 50), shared fairly across stored project partitions including `""`. Capacity is acquired before claims; ten-minute claims renew every 15 seconds. HTTP requests are capped at five minutes and platform calls at ten minutes. Shutdown cancels network I/O and records an interrupted outcome using a bounded finalization context.
 
@@ -132,9 +136,11 @@ HTTP targets retain private-network access by default (`allow_private_http=true`
 
 `jobs_list` / `GET /jobs` accept `before` (exclusive job-ID cursor), `search` (name or exact ID), owner and status filters, and `limit` (1–500). `jobs_runs`, `GET /jobs/:id/runs`, and `GET /runs` accept `before` and a 1–200 limit. Pages return `has_more` and, when needed, `next_cursor`. The native and legacy panels expose additional pages.
 
-Requests are limited to 128 KiB; targets to 64 KiB; names to 200 bytes. Each project may have 10,000 pending/running occurrences. Numeric inputs must be integral: intervals 1 second–365 days, retries 0–20, retry base 1–86,400 seconds, random runs 1–100/day, spacing 0–1,440 minutes. Exponential backoff is capped at 24 hours. Responses from targets are limited to 1 MiB. Database operations inherit request cancellation and have a five-second ceiling.
+Requests are limited to 128 KiB; targets to 64 KiB; names to 200 bytes. Each project may have 10,000 pending/running/paused occurrences. Numeric inputs must be integral: intervals 1 second–365 days, retries 0–20, retry base 1–86,400 seconds, random runs 1–100/day, spacing 0–1,440 minutes. Exponential backoff is capped at 24 hours. Responses from targets are limited to 1 MiB. Database operations inherit request cancellation and have a five-second ceiling.
 
-Run history (`history_retention_days`, default 30) and terminal jobs (`terminal_job_retention_days`, default 90) are pruned in bounded batches. Deleting terminal jobs also removes their remaining history; active children protect their parent from deletion. Set either option to `0` to retain that data indefinitely. Job and run IDs remain monotonic after pruning. Pending/running rows are not subject to terminal retention.
+Run history (`history_retention_days`, default 30) and terminal jobs (`terminal_job_retention_days`, default 90) are pruned in bounded batches. Deleting terminal jobs also removes their remaining history; active children protect their parent from deletion. Set either option to `0` to retain that data indefinitely. Job and run IDs remain monotonic after pruning. Pending/running/paused rows are not subject to terminal retention.
+
+Migration 005 adds the nullable `paused_at` column; existing rows stay active.
 
 Migration 004 normalizes due/lease times to UTC, preserves existing retry identity strings, marks pending rows with no valid next occurrence failed, and adds manual occurrences and indexes. Apply migrations through the SDK; back up the database before a production upgrade. No production upgrade is performed by the test suite.
 

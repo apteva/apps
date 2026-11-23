@@ -48,7 +48,7 @@ func fileDB(t *testing.T, upto int) *sql.DB {
 }
 func TestConcurrentFileDBClaimsAndCreation(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "test-proj")
-	db := fileDB(t, 4)
+	db := fileDB(t, 99)
 	m := (&App{}).Manifest()
 	app := sdk.NewAppCtxForTest(&m, db, sdk.Config{"dispatch_batch_size": "50"}, &eventTestPlatform{project: "test-proj"}, nil)
 	var wg sync.WaitGroup
@@ -92,6 +92,10 @@ func TestMigrationPreservesRetryIdentityAndNormalizesTimes(t *testing.T) {
 	paths, _ := filepath.Glob("migrations/004*")
 	migration, _ := os.ReadFile(paths[0])
 	if _, err = db.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
+	pause, _ := os.ReadFile("migrations/005_pause.sql")
+	if _, err = db.Exec(string(pause)); err != nil {
 		t.Fatal(err)
 	}
 	j, err := dbGetJob(db, "p", 1)

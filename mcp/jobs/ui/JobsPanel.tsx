@@ -90,7 +90,7 @@ interface NativePanelProps {
 }
 
 type ScheduleKind = "once" | "every" | "cron" | "random";
-type Status = "pending" | "running" | "done" | "failed" | "cancelled";
+type Status = "pending" | "running" | "paused" | "done" | "failed" | "cancelled";
 
 interface Job {
   id: number;
@@ -110,6 +110,8 @@ interface Job {
     min_spacing_minutes: number;
   };
   status: Status;
+  // True once a pause was requested; a running attempt finishes first.
+  paused?: boolean;
   target: unknown;
   owner_app?: string;
   owner_instance?: number;
@@ -156,12 +158,35 @@ function relTime(s?: string): string {
   return d.toLocaleString();
 }
 
+// A running attempt with a pending pause request reads as "pausing".
+function statusLabel(j: Job): string {
+  return j.paused && j.status === "running" ? "pausing" : j.status;
+}
+
+function PauseIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+      <rect x="2.5" y="2" width="2.5" height="8" rx="0.5" fill="currentColor" />
+      <rect x="7" y="2" width="2.5" height="8" rx="0.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ResumeIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+      <path d="M3 2 L10 6 L3 10 Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function statusTone(s: Status): string {
   switch (s) {
     case "running":   return "bg-accent/15 text-accent";
     case "done":      return "bg-green/15 text-green";
     case "failed":    return "bg-red/15 text-red";
     case "cancelled": return "bg-border text-text-muted";
+    case "paused":    return "bg-yellow/15 text-yellow";
     default:          return "bg-border text-text-muted";
   }
 }
@@ -282,6 +307,7 @@ function ScopedJobsPanel({ projectId, installId }: NativePanelProps) {
   };
   const handleRunNow = () => act("POST", "/run-now");
   const handleCancel = () => act("DELETE", "");
+  const handlePauseToggle = () => act("POST", detail?.paused ? "/resume" : "/pause");
   const select = (id: number) => {
     selectedRef.current = id; detailVersion.current++;setSelectedId(id);setDetail(null);setRuns([]);setRunsCursor(null);loadDetail(id);
   };
@@ -306,6 +332,7 @@ function ScopedJobsPanel({ projectId, installId }: NativePanelProps) {
           <option value="">all</option>
           <option value="pending">pending</option>
           <option value="running">running</option>
+          <option value="paused">paused</option>
           <option value="done">done</option>
           <option value="failed">failed</option>
           <option value="cancelled">cancelled</option>
@@ -359,7 +386,7 @@ function ScopedJobsPanel({ projectId, installId }: NativePanelProps) {
                   <td className="px-4 py-2 text-text-muted">{humaniseSchedule(j)}</td>
                   <td className="px-4 py-2">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusTone(j.status)}`}>
-                      {j.status}
+                      {statusLabel(j)}
                     </span>
                   </td>
                   <td className="px-4 py-2 text-text-muted">{relTime(j.next_run_at)}</td>
@@ -395,6 +422,7 @@ function ScopedJobsPanel({ projectId, installId }: NativePanelProps) {
           onClose={closeDetail}
           onRunNow={handleRunNow}
           onCancel={handleCancel}
+          onPauseToggle={handlePauseToggle}
         />
       )}
     </div>
@@ -427,7 +455,7 @@ function useModal(onClose: () => void) {
 // run-now / cancel actions. Replaces the old right-pane detail view.
 
 function DetailDialog({
-  job, runs, onClose, onRunNow, onCancel, busy, error, hasMoreRuns, onMoreRuns,
+  job, runs, onClose, onRunNow, onCancel, onPauseToggle, busy, error, hasMoreRuns, onMoreRuns,
 }: {
   job: Job;
   runs: JobRun[];
@@ -435,6 +463,7 @@ function DetailDialog({
   onClose: () => void;
   onRunNow: () => void | Promise<void>;
   onCancel: () => void | Promise<void>;
+  onPauseToggle: () => void | Promise<void>;
 }) {
   const modalRef = useModal(onClose);
   const [confirming, setConfirming] = useState(false);
@@ -459,11 +488,11 @@ function DetailDialog({
             <div className="flex items-center gap-2 mb-1">
               <h2 className="text-lg text-text font-semibold truncate">{job.name}</h2>
               <span className={`text-[11px] px-2 py-0.5 rounded ${statusTone(job.status)}`}>
-                {job.status}
+                {statusLabel(job)}
               </span>
             </div>
             <p className="text-text-muted text-sm">
-              {humaniseSchedule(job)} · next {relTime(job.next_run_at)}
+              {humaniseSchedule(job)} · {job.paused ? "paused; resuming schedules the next run from now" : `next ${relTime(job.next_run_at)}`}
             </p>
             {job.owner_app && (
               <p className="text-text-dim text-xs mt-1">
@@ -488,9 +517,20 @@ function DetailDialog({
           <button
             type="button"
             onClick={onRunNow}
-            disabled={cancelled || job.status === "running" || cancelling || busy}
+            disabled={cancelled || job.paused || job.status === "running" || cancelling || busy}
             className="px-3 py-1 text-sm border border-accent text-accent rounded disabled:opacity-50"
           >Run now</button>
+          {!terminal && (
+            <button
+              type="button"
+              onClick={onPauseToggle}
+              disabled={cancelling || busy}
+              className="px-3 py-1 text-sm border border-border text-text-muted rounded inline-flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {job.paused ? <ResumeIcon /> : <PauseIcon />}
+              {job.paused ? "Resume" : "Pause"}
+            </button>
+          )}
           {terminal ? (
             <span className="ml-auto text-text-dim text-xs">Job is {job.status}</span>
           ) : confirming ? (
