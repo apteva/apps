@@ -20,6 +20,16 @@ import (
 type runOptions struct {
 	fromStep    string // skip step ids until reaching this one (empty = start at first step)
 	triggerKind string
+	// stage, when set, marks a staged run: the workflow passed in
+	// already carries the stage's frozen version; the stage name and
+	// vars are recorded on the run and exposed as {{ stage.* }}.
+	stage *runStage
+}
+
+// runStage is the stage identity a run executes under.
+type runStage struct {
+	Name string
+	Vars map[string]any
 }
 
 // RunWorkflow executes a workflow synchronously. All step
@@ -73,7 +83,7 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 
 	// Insert the run row up-front so observers see "running" while
 	// we're walking steps. The status flips at the end.
-	runID, err := dbInsertRun(app.AppDB(), pid, &Run{
+	runRow := &Run{
 		WorkflowID:      w.ID,
 		WorkflowName:    w.Name,
 		WorkflowVersion: w.Version,
@@ -81,7 +91,22 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 		InputJSON:       truncate(inputJSON, maxInputJSON),
 		Status:          "running",
 		StartedAt:       now.Format(time.RFC3339Nano),
-	})
+	}
+	var stageCtx map[string]any
+	if opts.stage != nil {
+		vars := opts.stage.Vars
+		if vars == nil {
+			vars = map[string]any{}
+		}
+		runRow.Stage = opts.stage.Name
+		runRow.StageVarsJSON = mustJSON(vars)
+		stageCtx = map[string]any{
+			"name":    opts.stage.Name,
+			"vars":    vars,
+			"version": float64(w.Version),
+		}
+	}
+	runID, err := dbInsertRun(app.AppDB(), pid, runRow)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
@@ -97,6 +122,7 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 		Steps: map[string]any{},
 		Env:   readEnv(),
 		Now:   now.Format(time.RFC3339),
+		Stage: stageCtx,
 	}
 
 	// Walk the steps. The next-index logic supports goto / on_error
@@ -254,13 +280,18 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 	// duration computed locally so the emit doesn't depend on the
 	// just-read row (which can be nil if the DB write raced).
 	durationMS := time.Since(now).Milliseconds()
-	app.Emit("workflow.run.finished", map[string]any{
+	finished := map[string]any{
 		"run_id":      runID,
 		"workflow_id": w.ID,
 		"name":        w.Name,
 		"status":      finalStatus,
 		"duration_ms": durationMS,
-	})
+	}
+	if opts.stage != nil {
+		finished["stage"] = opts.stage.Name
+		finished["version"] = w.Version
+	}
+	app.Emit("workflow.run.finished", finished)
 	return out, nil
 }
 

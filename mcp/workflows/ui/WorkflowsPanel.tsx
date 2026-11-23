@@ -125,7 +125,24 @@ interface Run {
   started_at: string;
   finished_at?: string;
   duration_ms: number;
+  stage?: string;
   steps?: StepExecution[];
+}
+
+// Stage = named pointer (staging, production, ...) at a frozen
+// workflow version. Workflows with no stages run their live head.
+interface Stage {
+  id: number;
+  workflow_id: number;
+  workflow_name?: string;
+  name: string;
+  version: number;
+  previous_version?: number;
+  vars: Record<string, unknown>;
+  filter?: { when?: string; source_install_id?: number };
+  status: "active" | "paused" | string;
+  rev: number;
+  updated_at?: string;
 }
 
 interface SubscriberLaneStatus {
@@ -216,6 +233,8 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [selectedWf, setSelectedWf] = useState<Workflow | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [stages, setStages] = useState<Stage[]>([]);
+  const [runStageFilter, setRunStageFilter] = useState<string>("");
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [err, setErr] = useState<string>("");
   const [showRunModal, setShowRunModal] = useState(false);
@@ -255,6 +274,8 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
       if (filter) extra.status = filter;
       const r = await apiCall<{ workflows: Workflow[] }>("GET", "/workflows", undefined, extra);
       setWorkflows(r.workflows || []);
+      const st = await apiCall<{ stages: Stage[] }>("GET", "/stages");
+      setStages(st.stages || []);
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
@@ -265,7 +286,12 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
     async (id: number) => {
       try {
         const wf = await apiCall<{ workflow: Workflow }>("GET", `/workflows/${id}`);
-        const rs = await apiCall<{ runs: Run[] }>("GET", `/workflows/${id}/runs`);
+        const rs = await apiCall<{ runs: Run[] }>(
+          "GET",
+          `/workflows/${id}/runs`,
+          undefined,
+          runStageFilter ? { stage: runStageFilter } : {},
+        );
         setSelectedWf(wf.workflow);
         setRuns(rs.runs || []);
       } catch (e) {
@@ -273,8 +299,19 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
         setErr((e as Error).message);
       }
     },
-    [apiCall],
+    [apiCall, runStageFilter],
   );
+
+  const stagesByWorkflow = useMemo(() => {
+    const m: Record<number, Stage[]> = {};
+    for (const s of stages) (m[s.workflow_id] ||= []).push(s);
+    return m;
+  }, [stages]);
+
+  // Re-query runs when the stage filter changes.
+  useEffect(() => {
+    if (selectedID) loadDetail(selectedID);
+  }, [runStageFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadRunSteps = useCallback(
     async (runID: number) => {
@@ -339,7 +376,8 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
       ev.topic === "workflow.updated" ||
       ev.topic === "workflow.deleted" ||
       ev.topic === "workflow.run.finished" ||
-      ev.topic === "workflow.run.cancelled"
+      ev.topic === "workflow.run.cancelled" ||
+      ev.topic === "workflow.stage.changed"
     ) {
       loadWorkflows();
       if (selectedID) loadDetail(selectedID);
@@ -370,12 +408,14 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
 
   const select = (id: number) => {
     setSelectedID(id);
-    loadDetail(id);
+    if (runStageFilter) setRunStageFilter("");
+    else loadDetail(id);
   };
   const closeDetail = () => {
     setSelectedID(null);
     setSelectedWf(null);
     setRuns([]);
+    setRunStageFilter("");
   };
 
   const replayRun = async (runID: number) => {
@@ -526,6 +566,7 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
                 <th className="text-left px-4 py-2 font-normal">Name</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Version</th>
                 <th className="text-left px-4 py-2 font-normal w-32">Trigger</th>
+                <th className="text-left px-4 py-2 font-normal">Stages</th>
                 <th className="text-left px-4 py-2 font-normal w-32">Status</th>
                 <th className="text-left px-4 py-2 font-normal w-40">Updated</th>
               </tr>
@@ -540,6 +581,9 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
                   <td className="px-4 py-2 text-text font-medium truncate max-w-md">{w.name}</td>
                   <td className="px-4 py-2 text-text-muted">v{w.version}</td>
                   <td className="px-4 py-2 text-text-muted">{w.trigger_kind}</td>
+                  <td className="px-4 py-2">
+                    <StageBadges stages={stagesByWorkflow[w.id] || []} />
+                  </td>
                   <td className="px-4 py-2">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusClass(w.status)}`}>
                       {w.status}
@@ -557,6 +601,9 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
         <WorkflowDetail
           wf={selectedWf}
           runs={runs}
+          stages={stagesByWorkflow[selectedWf.id] || []}
+          runStageFilter={runStageFilter}
+          onRunStageFilter={setRunStageFilter}
           liveStatuses={liveStatuses}
           projectId={projectId}
           onClose={closeDetail}
@@ -850,6 +897,9 @@ function slugify(s: string): string {
 function WorkflowDetail({
   wf,
   runs,
+  stages,
+  runStageFilter,
+  onRunStageFilter,
   liveStatuses,
   projectId,
   onClose,
@@ -860,6 +910,9 @@ function WorkflowDetail({
 }: {
   wf: Workflow;
   runs: Run[];
+  stages: Stage[];
+  runStageFilter: string;
+  onRunStageFilter: (stage: string) => void;
   liveStatuses: Record<string, StepStatus>;
   projectId: string;
   onClose: () => void;
@@ -1041,6 +1094,10 @@ function WorkflowDetail({
                 ) : (
                   <RunsList
                     runs={runs}
+                    headVersion={wf.version}
+                    stages={stages}
+                    stageFilter={runStageFilter}
+                    onStageFilter={onRunStageFilter}
                     onOpenRun={onOpenRun}
                     onReplay={onReplay}
                   />
@@ -1076,20 +1133,119 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
+// StageBadges renders compact "name vN" pills; paused stages are
+// muted and marked with a pause glyph (SVG, no emoji).
+function StageBadges({ stages }: { stages: Stage[] }) {
+  if (stages.length === 0) return <span className="text-text-dim text-xs">none</span>;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {stages.map((s) => (
+        <span
+          key={s.id}
+          title={`${s.name}: version ${s.version}${s.previous_version ? ` (previous ${s.previous_version})` : ""} · ${s.status} · rev ${s.rev}`}
+          className={
+            "inline-flex items-center gap-1 text-xs px-1.5 rounded border border-border " +
+            (s.status === "active" ? "text-text" : "text-text-dim")
+          }
+        >
+          {s.status !== "active" && <PauseIcon />}
+          {s.name}
+          <span className="text-text-muted">v{s.version}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-label="paused" role="img">
+      <rect x="2" y="1.5" width="2" height="7" rx="0.5" fill="currentColor" />
+      <rect x="6" y="1.5" width="2" height="7" rx="0.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+function StagesSummary({ stages, headVersion }: { stages: Stage[]; headVersion: number }) {
+  if (stages.length === 0) {
+    return (
+      <p className="text-text-dim text-xs mb-4">
+        No stages: events run the live definition (v{headVersion}).
+      </p>
+    );
+  }
+  return (
+    <div className="mb-4">
+      <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Stages</h3>
+      <ul className="flex flex-col gap-1">
+        {stages.map((s) => (
+          <li key={s.id} className="flex items-center gap-2 text-xs border border-border rounded px-2 py-1">
+            <span className={s.status === "active" ? "text-text font-medium" : "text-text-dim font-medium"}>
+              {s.name}
+            </span>
+            <span className="text-text-muted">v{s.version}</span>
+            {s.version !== headVersion && (
+              <span className="text-text-dim" title="Head (latest edit) is not live for this stage">
+                head v{headVersion}
+              </span>
+            )}
+            {s.status !== "active" && (
+              <span className="inline-flex items-center gap-1 text-text-dim">
+                <PauseIcon /> paused
+              </span>
+            )}
+            {Object.keys(s.vars || {}).length > 0 && (
+              <span className="text-text-dim ml-auto truncate" title={JSON.stringify(s.vars)}>
+                {Object.keys(s.vars).length} var{Object.keys(s.vars).length === 1 ? "" : "s"}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function RunsList({
   runs,
+  headVersion,
+  stages,
+  stageFilter,
+  onStageFilter,
   onOpenRun,
   onReplay,
 }: {
   runs: Run[];
+  headVersion: number;
+  stages: Stage[];
+  stageFilter: string;
+  onStageFilter: (stage: string) => void;
   onOpenRun: (runID: number) => void;
   onReplay: (runID: number) => void;
 }) {
   return (
     <div className="p-4">
-      <h3 className="text-xs uppercase tracking-wide text-text-dim mb-3">
-        Recent runs ({runs.length})
-      </h3>
+      <StagesSummary stages={stages} headVersion={headVersion} />
+      <div className="flex items-center gap-2 mb-3">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">
+          Recent runs ({runs.length})
+        </h3>
+        {stages.length > 0 && (
+          <select
+            value={stageFilter}
+            onChange={(e) => onStageFilter(e.target.value)}
+            className="ml-auto bg-bg-input border border-border rounded px-1 py-0.5 text-xs"
+            title="Filter runs by stage"
+          >
+            <option value="">all stages</option>
+            {stages.map((s) => (
+              <option key={s.id} value={s.name}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
       {runs.length === 0 ? (
         <p className="text-text-muted text-sm">No runs yet. Click Run… in the toolbar to fire one.</p>
       ) : (
@@ -1101,6 +1257,11 @@ function RunsList({
                   {r.status}
                 </span>
                 <span className="text-text-muted text-xs">{fmtTime(r.started_at)}</span>
+                {r.stage && (
+                  <span className="text-xs px-1 rounded border border-border text-text-muted" title={`stage ${r.stage}, version ${r.workflow_version}`}>
+                    {r.stage} v{r.workflow_version}
+                  </span>
+                )}
                 <span className="text-text-dim text-xs ml-auto">{fmtDuration(r.duration_ms)}</span>
               </div>
               {r.error && (

@@ -16,11 +16,18 @@ import (
 //	{{ steps.lookup.contact.id }}          → prior step output
 //	{{ env.SLACK_WEBHOOK }}                → spawn env var (read-only)
 //	{{ now }}                              → run-start time, RFC3339
+//	{{ stage.name }}                       → stage this run executes for
+//	{{ stage.vars.<key> }}                 → that stage's vars
+//	{{ stage.version }}                    → definition version being run
+//
+// Stage is nil for unstaged (head) runs, so stage.* resolves to a
+// miss (nil) exactly like any other absent path.
 type TemplateContext struct {
 	Input any
 	Steps map[string]any
 	Env   map[string]string
 	Now   string
+	Stage map[string]any
 }
 
 // resolvePath walks a dot-separated path against a context. Returns
@@ -45,6 +52,11 @@ func resolvePath(ctx TemplateContext, path string) (any, bool) {
 			envAny[k] = v
 		}
 		cur = envAny
+	case "stage":
+		if ctx.Stage == nil {
+			return nil, false
+		}
+		cur = ctx.Stage
 	case "now":
 		if len(parts) > 1 {
 			return nil, false // now has no sub-fields

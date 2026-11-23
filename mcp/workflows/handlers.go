@@ -82,6 +82,13 @@ func (a *App) handleHTTPWorkflowItem(w http.ResponseWriter, r *http.Request) {
 			}
 			a.handleHTTPRunByID(w, r, id)
 			return
+		case "stages":
+			if r.Method != http.MethodGet {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			a.handleHTTPWorkflowStages(w, r, id)
+			return
 		}
 		httpErr(w, http.StatusNotFound, "not found")
 		return
@@ -199,7 +206,11 @@ func (a *App) handleHTTPWorkflowRuns(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	out, err := dbListRuns(globalCtx.AppDB(), pid, id, limit)
+	var stage *string
+	if v := r.URL.Query().Get("stage"); v != "" {
+		stage = &v
+	}
+	out, err := dbListRunsForStage(globalCtx.AppDB(), pid, id, stage, limit)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -235,6 +246,46 @@ func (a *App) handleHTTPRunByName(w http.ResponseWriter, r *http.Request) {
 	a.runAndWrite(w, r, wf, input, "http")
 }
 
+// handleHTTPWorkflowStages returns a workflow's stages plus its
+// recent frozen versions (metadata only).
+func (a *App) handleHTTPWorkflowStages(w http.ResponseWriter, r *http.Request, id int64) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stages, err := dbListStages(globalCtx.AppDB(), pid, id, "")
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	versions, err := dbListVersions(globalCtx.AppDB(), id, 50)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"stages": stages, "versions": versions})
+}
+
+// handleHTTPStages lists every stage in the project (GET /stages).
+func (a *App) handleHTTPStages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stages, err := dbListStages(globalCtx.AppDB(), pid, 0, r.URL.Query().Get("stage"))
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"stages": stages})
+}
+
 func (a *App) handleHTTPRunByID(w http.ResponseWriter, r *http.Request, id int64) {
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
@@ -256,7 +307,12 @@ func (a *App) handleHTTPRunByID(w http.ResponseWriter, r *http.Request, id int64
 
 func (a *App) runAndWrite(w http.ResponseWriter, r *http.Request, wf *Workflow, input any, trigger string) {
 	pid, _ := resolveProjectFromRequest(r)
-	run, err := RunWorkflow(r.Context(), globalCtx, pid, wf, input, runOptions{triggerKind: trigger})
+	runWf, opts, err := resolveRunTarget(globalCtx.AppDB(), wf, r.URL.Query().Get("stage"), trigger)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	run, err := RunWorkflow(r.Context(), globalCtx, pid, runWf, input, opts)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -473,7 +529,26 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if wf == nil {
 		return map[string]any{"workflow": nil, "found": false}, nil
 	}
-	return map[string]any{"workflow": wf, "found": true}, nil
+	stages, err := dbListStagesForWorkflow(dbFor(ctx), wf.ID)
+	if err != nil {
+		return nil, err
+	}
+	versions, err := dbListVersions(dbFor(ctx), wf.ID, 50)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"workflow": wf, "found": true, "stages": stages, "versions": versions}
+	if v := intArg(args, "version", 0); v > 0 {
+		ver, err := dbGetVersion(dbFor(ctx), wf.ID, v)
+		if err != nil {
+			return nil, err
+		}
+		if ver == nil {
+			return nil, fmt.Errorf("workflow %q has no version %d", wf.Name, v)
+		}
+		out["version"] = ver
+	}
+	return out, nil
 }
 
 func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -488,7 +563,11 @@ func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if wf == nil {
 		return nil, errors.New("workflow not found")
 	}
-	run, err := RunWorkflow(context.Background(), ctx, pid, wf, args["input"], runOptions{triggerKind: "manual"})
+	runWf, opts, err := resolveRunTarget(dbFor(ctx), wf, strArg(args, "stage"), "manual")
+	if err != nil {
+		return nil, err
+	}
+	run, err := RunWorkflow(context.Background(), ctx, pid, runWf, args["input"], opts)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +583,11 @@ func (a *App) toolRuns(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbListRuns(dbFor(ctx), pid, id, intArg(args, "limit", 50))
+	var stage *string
+	if v := strArg(args, "stage"); v != "" {
+		stage = &v
+	}
+	out, err := dbListRunsForStage(dbFor(ctx), pid, id, stage, intArg(args, "limit", 50))
 	if err != nil {
 		return nil, err
 	}
@@ -567,10 +650,27 @@ func replayWorkflowRun(runCtx context.Context, ctx *sdk.AppCtx, pid string, id i
 	if prev.InputJSON != "" {
 		_ = json.Unmarshal([]byte(prev.InputJSON), &input)
 	}
-	run, err := RunWorkflow(runCtx, ctx, pid, wf, input, runOptions{
-		triggerKind: "manual",
-		fromStep:    fromStep,
-	})
+	opts := runOptions{triggerKind: "manual", fromStep: fromStep}
+	// A staged run replays on the exact version and stage vars it
+	// originally ran with, regardless of where the stage points now.
+	if prev.Stage != "" {
+		v, err := dbGetVersion(dbFor(ctx), wf.ID, prev.WorkflowVersion)
+		if err != nil {
+			return nil, err
+		}
+		if v == nil {
+			return nil, fmt.Errorf("version %d of workflow %q no longer exists", prev.WorkflowVersion, wf.Name)
+		}
+		if wf, err = stagedWorkflow(wf, v); err != nil {
+			return nil, err
+		}
+		vars := map[string]any{}
+		if prev.StageVarsJSON != "" {
+			_ = json.Unmarshal([]byte(prev.StageVarsJSON), &vars)
+		}
+		opts.stage = &runStage{Name: prev.Stage, Vars: vars}
+	}
+	run, err := RunWorkflow(runCtx, ctx, pid, wf, input, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -644,6 +744,7 @@ func buildAndCreateWorkflow(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 		return nil, err
 	}
 	wf.SourceHash = hashSource(bytes)
+	wf.resolved = bytes
 
 	// Validate the source parses + structural checks pass before
 	// committing the row. Catches typos / bad ids at create time
@@ -685,6 +786,7 @@ func updateAndRehashWorkflow(ctx *sdk.AppCtx, pid string, id int64, patch map[st
 	}
 
 	newHash := ""
+	var resolved []byte
 	if rehash {
 		merged := *cur
 		if v, ok := patch["source_kind"].(string); ok && v != "" {
@@ -717,9 +819,10 @@ func updateAndRehashWorkflow(ctx *sdk.AppCtx, pid string, id int64, patch map[st
 		patch["trigger_kind"] = def.Trigger.Kind
 		patch["trigger_json"] = string(triggerJSON)
 		newHash = hashSource(bytes)
+		resolved = bytes
 	}
 
-	return dbUpdateWorkflow(dbFor(ctx), pid, id, patch, newHash)
+	return dbUpdateWorkflowResolved(dbFor(ctx), pid, id, patch, newHash, resolved)
 }
 
 func preCreateResolveSource(ctx *sdk.AppCtx, wf *Workflow) ([]byte, error) {

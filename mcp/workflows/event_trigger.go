@@ -205,12 +205,15 @@ func (m *eventTrigger) reconcile() {
 
 	desired := map[laneKey][]*Workflow{}
 	for _, wf := range workflows {
-		trig, ok := workflowTrigger(wf)
-		if !ok || trig.Kind != "event" || trig.Source == "" {
+		sources, err := eventSourcesForWorkflow(m.ctx.AppDB(), wf)
+		if err != nil {
+			log.Printf("[WF-EVENT] reconcile workflow=%s sources: %v", wf.Name, err)
 			continue
 		}
-		k := laneKey{source: trig.Source, projectID: wf.ProjectID}
-		desired[k] = append(desired[k], wf)
+		for _, source := range sources {
+			k := laneKey{source: source, projectID: wf.ProjectID}
+			desired[k] = append(desired[k], wf)
+		}
 	}
 
 	m.mu.Lock()
@@ -378,6 +381,10 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		Seq       uint64          `json:"seq"`
 		Time      string          `json:"time"`
 		Data      json.RawMessage `json:"data"`
+		// SourceInstallID identifies the emitting install when the
+		// platform includes it. Optional: stage filters on it are
+		// ignored for frames that do not carry it.
+		SourceInstallID any `json:"source_install_id,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(dataStr), &ev); err != nil {
 		m.setLaneState(ln, "connected", fmt.Errorf("invalid event JSON: %w", err))
@@ -418,8 +425,24 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		"time":       ev.Time,
 		"data":       data,
 	}
+	sourceInstallID, hasInstallID := parseInstallID(ev.SourceInstallID)
+	if hasInstallID {
+		input["source_install_id"] = float64(*sourceInstallID)
+	}
 
 	for _, wf := range workflows {
+		// Staged workflows fan out per active stage, each on its own
+		// frozen version. Looked up at dispatch time so a promote /
+		// pause takes effect on the very next event.
+		stages, err := dbListStagesForWorkflow(m.ctx.AppDB(), wf.ID)
+		if err != nil {
+			log.Printf("[WF-EVENT] stages workflow=%s err: %v", wf.Name, err)
+			continue
+		}
+		if len(stages) > 0 {
+			m.dispatchStaged(ln, wf, stages, ev.Topic, ev.Time, input, sourceInstallID)
+			continue
+		}
 		trig, ok := workflowTrigger(wf)
 		if !ok {
 			continue
@@ -446,11 +469,73 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 	}
 }
 
+// dispatchStaged evaluates one event against every active stage of a
+// staged workflow. Each stage must pass its version's own trigger
+// (source, topic, when) and its stage filter before a run is created;
+// matching stages each get exactly one run on their own version.
+func (m *eventTrigger) dispatchStaged(ln *eventLane, wf *Workflow, stages []*Stage, topic, evTime string, input map[string]any, sourceInstallID *int64) {
+	for _, st := range stages {
+		if st.Status != "active" {
+			continue
+		}
+		v, err := dbGetVersion(m.ctx.AppDB(), wf.ID, st.Version)
+		if err != nil || v == nil {
+			log.Printf("[WF-EVENT] workflow=%s stage=%s version=%d missing: %v", wf.Name, st.Name, st.Version, err)
+			continue
+		}
+		trig, ok := versionTrigger(v)
+		if !ok || trig.Kind != "event" || trig.Source != ln.key.source {
+			continue
+		}
+		if !topicMatches(trig.Topic, topic) {
+			continue
+		}
+		tctx := TemplateContext{
+			Input: input,
+			Steps: map[string]any{},
+			Env:   map[string]string{},
+			Now:   evTime,
+			Stage: stageTemplateCtx(st),
+		}
+		if strings.TrimSpace(trig.When) != "" {
+			matched, err := EvalTriggerCondition(trig.When, tctx)
+			if err != nil {
+				log.Printf("[WF-EVENT] trigger predicate workflow=%s stage=%s err: %v", wf.Name, st.Name, err)
+				continue
+			}
+			if !matched {
+				continue
+			}
+		}
+		matched, err := stageFilterMatches(st.Filter, sourceInstallID, tctx)
+		if err != nil {
+			log.Printf("[WF-EVENT] stage filter workflow=%s stage=%s err: %v", wf.Name, st.Name, err)
+			continue
+		}
+		if !matched {
+			continue
+		}
+		sw, err := stagedWorkflow(wf, v)
+		if err != nil {
+			log.Printf("[WF-EVENT] workflow=%s stage=%s: %v", wf.Name, st.Name, err)
+			continue
+		}
+		m.runMatchedOpts(sw, input, runOptions{
+			triggerKind: "event",
+			stage:       &runStage{Name: st.Name, Vars: st.Vars},
+		})
+	}
+}
+
 // runMatched fires off RunWorkflow in a goroutine so the read loop
 // stays free for the next event. The workflow's project pins the
 // run context; the trigger kind is recorded as "event" in the runs
 // table.
 func (m *eventTrigger) runMatched(wf *Workflow, input map[string]any) {
+	m.runMatchedOpts(wf, input, runOptions{triggerKind: "event"})
+}
+
+func (m *eventTrigger) runMatchedOpts(wf *Workflow, input map[string]any, opts runOptions) {
 	runCtx := m.ctx
 	if wf.ProjectID != "" {
 		runCtx = m.ctx.WithProject(wf.ProjectID)
@@ -462,8 +547,7 @@ func (m *eventTrigger) runMatched(wf *Workflow, input map[string]any) {
 	}
 	go func() {
 		defer func() { <-m.runSlots }()
-		if _, err := RunWorkflow(context.Background(), runCtx, wf.ProjectID, wf, input,
-			runOptions{triggerKind: "event"}); err != nil {
+		if _, err := RunWorkflow(context.Background(), runCtx, wf.ProjectID, wf, input, opts); err != nil {
 			log.Printf("[WF-EVENT] run workflow=%s err: %v", wf.Name, err)
 		}
 	}()

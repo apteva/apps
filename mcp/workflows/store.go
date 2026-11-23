@@ -33,6 +33,10 @@ type Workflow struct {
 	// that need to execute the workflow. Not persisted; recomputed
 	// from Source on read.
 	Definition *WorkflowDef `json:"definition,omitempty"`
+	// resolved carries the resolved source bytes from create/update
+	// down to the store so the frozen version snapshot holds the
+	// exact bytes that were validated (repo sources included).
+	resolved []byte
 }
 
 type Run struct {
@@ -49,6 +53,9 @@ type Run struct {
 	StartedAt       string `json:"started_at,omitempty"`
 	FinishedAt      string `json:"finished_at,omitempty"`
 	DurationMS      int64  `json:"duration_ms"`
+	// Stage is the stage this run executed for ("" = head / unstaged).
+	Stage         string `json:"stage,omitempty"`
+	StageVarsJSON string `json:"stage_vars_json,omitempty"`
 	// Steps is populated by Run-status / replay views; not stored
 	// inline on the runs table.
 	Steps []*StepExecution `json:"steps,omitempty"`
@@ -124,7 +131,12 @@ func dbCreateWorkflow(db *sql.DB, pid string, w *Workflow) (*Workflow, error) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO workflows (
 			project_id, name, version, source_kind, source, repo_id, repo_path,
 			source_hash, trigger_kind, trigger_json, status,
@@ -138,12 +150,26 @@ func dbCreateWorkflow(db *sql.DB, pid string, w *Workflow) (*Workflow, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if err := txSnapshotVersion(tx, pid, id, w.resolved); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return dbGetWorkflow(db, pid, id, "")
 }
 
 // dbUpdateWorkflow merges patch fields. Source-affecting changes
 // bump version and set source_hash; non-source changes keep version.
 func dbUpdateWorkflow(db *sql.DB, pid string, id int64, patch map[string]any, newSourceHash string) (*Workflow, error) {
+	return dbUpdateWorkflowResolved(db, pid, id, patch, newSourceHash, nil)
+}
+
+// dbUpdateWorkflowResolved is dbUpdateWorkflow plus the resolved
+// source bytes for the frozen version snapshot. A source change
+// bumps the head version and writes an immutable workflow_versions
+// row in the same transaction; it never moves a stage pointer.
+func dbUpdateWorkflowResolved(db *sql.DB, pid string, id int64, patch map[string]any, newSourceHash string, resolved []byte) (*Workflow, error) {
 	cur, err := dbGetWorkflow(db, pid, id, "")
 	if err != nil {
 		return nil, err
@@ -203,7 +229,20 @@ func dbUpdateWorkflow(db *sql.DB, pid string, id int64, patch map[string]any, ne
 	args = append(args, id, pid)
 
 	q := `UPDATE workflows SET ` + strings.Join(sets, ", ") + ` WHERE id = ? AND project_id = ?`
-	if _, err := db.Exec(q, args...); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(q, args...); err != nil {
+		return nil, err
+	}
+	if newSourceHash != "" {
+		if err := txSnapshotVersion(tx, pid, id, resolved); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbGetWorkflow(db, pid, id, "")
@@ -267,14 +306,17 @@ func dbListWorkflows(db *sql.DB, pid string, f WorkflowFilter) ([]*Workflow, err
 }
 
 // dbListEventTriggeredWorkflowsAll returns every active workflow
-// across every project whose trigger_kind is "event". Used by the
+// across every project whose trigger_kind is "event", plus every
+// active workflow with an active stage (a stage's frozen version may
+// carry an event trigger the head no longer has). Used by the
 // event-trigger manager at reconcile time to decide which SSE lanes
 // to open. Skips the per-project filter dbListWorkflows enforces —
 // a global workflows install needs to see every project's set.
 func dbListEventTriggeredWorkflowsAll(db *sql.DB) ([]*Workflow, error) {
 	rows, err := db.Query(
 		`SELECT ` + wfColumns + ` FROM workflows
-		 WHERE trigger_kind = 'event' AND status = 'active'`,
+		 WHERE status = 'active' AND (trigger_kind = 'event'
+		    OR id IN (SELECT workflow_id FROM workflow_stages WHERE status = 'active'))`,
 	)
 	if err != nil {
 		return nil, err
@@ -292,8 +334,33 @@ func dbListEventTriggeredWorkflowsAll(db *sql.DB) ([]*Workflow, error) {
 }
 
 func dbDeleteWorkflow(db *sql.DB, pid string, id int64) error {
-	_, err := db.Exec(`DELETE FROM workflows WHERE id = ? AND project_id = ?`, id, pid)
-	return err
+	// FK cascades drop runs, versions and stages; the explicit
+	// deletes keep that true even on a connection without
+	// foreign_keys enabled.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM workflows WHERE id = ? AND project_id = ?`, id, pid).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return nil
+	}
+	for _, q := range []string{
+		`DELETE FROM workflow_stages WHERE workflow_id = ?`,
+		`DELETE FROM workflow_versions WHERE workflow_id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM workflows WHERE id = ? AND project_id = ?`, id, pid); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type scanRow interface {
@@ -332,11 +399,11 @@ func dbInsertRun(db *sql.DB, pid string, r *Run) (int64, error) {
 		`INSERT INTO workflow_runs (
 			project_id, workflow_id, workflow_name, workflow_version,
 			trigger_kind, input_json, status, current_step_id,
-			started_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, stage, stage_vars_json
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, r.WorkflowID, r.WorkflowName, r.WorkflowVersion,
 		r.TriggerKind, nullStr(r.InputJSON), r.Status, nullStr(r.CurrentStepID),
-		r.StartedAt)
+		r.StartedAt, nullStr(r.Stage), nullStr(r.StageVarsJSON))
 	if err != nil {
 		return 0, err
 	}
@@ -361,7 +428,7 @@ func dbUpdateRunState(db *sql.DB, pid string, id int64, status, currentStep, err
 const runColumns = `id, project_id, workflow_id, workflow_name, workflow_version,
 		trigger_kind, COALESCE(input_json,''), status, COALESCE(current_step_id,''),
 		COALESCE(error,''), started_at, COALESCE(finished_at,''),
-		COALESCE(duration_ms,0)`
+		COALESCE(duration_ms,0), COALESCE(stage,''), COALESCE(stage_vars_json,'')`
 
 func dbGetRun(db *sql.DB, pid string, id int64) (*Run, error) {
 	row := db.QueryRow(`SELECT `+runColumns+` FROM workflow_runs WHERE id = ? AND project_id = ?`, id, pid)
@@ -373,12 +440,24 @@ func dbGetRun(db *sql.DB, pid string, id int64) (*Run, error) {
 }
 
 func dbListRuns(db *sql.DB, pid string, workflowID int64, limit int) ([]*Run, error) {
+	return dbListRunsForStage(db, pid, workflowID, nil, limit)
+}
+
+// dbListRunsForStage filters by stage when stage != nil. An empty
+// stage string selects head (unstaged) runs.
+func dbListRunsForStage(db *sql.DB, pid string, workflowID int64, stage *string, limit int) ([]*Run, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q := `SELECT ` + runColumns + ` FROM workflow_runs WHERE project_id = ? AND workflow_id = ?
-		   ORDER BY started_at DESC LIMIT ?`
-	rows, err := db.Query(q, pid, workflowID, limit)
+	q := `SELECT ` + runColumns + ` FROM workflow_runs WHERE project_id = ? AND workflow_id = ?`
+	args := []any{pid, workflowID}
+	if stage != nil {
+		q += ` AND COALESCE(stage,'') = ?`
+		args = append(args, *stage)
+	}
+	q += ` ORDER BY started_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +477,7 @@ func scanRun(row scanRow) (*Run, error) {
 	err := row.Scan(
 		&r.ID, &r.ProjectID, &r.WorkflowID, &r.WorkflowName, &r.WorkflowVersion,
 		&r.TriggerKind, &r.InputJSON, &r.Status, &r.CurrentStepID,
-		&r.Error, &r.StartedAt, &r.FinishedAt, &r.DurationMS)
+		&r.Error, &r.StartedAt, &r.FinishedAt, &r.DurationMS, &r.Stage, &r.StageVarsJSON)
 	if err != nil {
 		return nil, err
 	}

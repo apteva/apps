@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: workflows
 display_name: Workflows
-version: 0.4.9
+version: 0.5.0
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
   graph of typed steps (http, function, app, integration, emit,
@@ -70,6 +70,16 @@ provides:
       description: Re-run a past run, optionally skipping ahead to a specific step.
     - name: workflows_cancel
       description: Cancel an in-flight run.
+    - name: workflows_stage_set
+      description: Create or update a named stage (version pointer, vars, filter, status).
+    - name: workflows_stage_list
+      description: List stages, optionally for one workflow or one stage name.
+    - name: workflows_stage_delete
+      description: Delete a stage from a workflow.
+    - name: workflows_stage_promote_many
+      description: Point one stage at given versions across many workflows, all-or-nothing.
+    - name: workflows_stage_rollback
+      description: Move a stage back to its previous version across workflows, all-or-nothing.
   publishes:
     - { name: workflow.created, description: "A workflow was created." }
     - { name: workflow.updated, description: "A workflow was updated." }
@@ -78,6 +88,7 @@ provides:
     - { name: workflow.step.completed, description: "A workflow step completed." }
     - { name: workflow.run.finished, description: "A workflow run reached a terminal state." }
     - { name: workflow.run.cancelled, description: "Cancellation was requested for a workflow run." }
+    - { name: workflow.stage.changed, description: "A workflow stage was set, promoted, rolled back or deleted." }
   ui_panels:
     - slot: project.page
       label: Workflows
@@ -168,6 +179,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// already project-checked at lookup.
 		{Pattern: "/runs", Handler: a.handleHTTPRunsCollection},
 		{Pattern: "/runs/", Handler: a.handleHTTPRunItem},
+		{Pattern: "/stages", Handler: a.handleHTTPStages},
 		{Method: http.MethodGet, Pattern: "/subscriber/status", Handler: a.handleSubscriberStatus},
 		// The platform supervisor probes without a sidecar bearer. This
 		// response contains no credentials and the process binds loopback.
@@ -229,29 +241,32 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "workflows_get",
-			Description: "Fetch a workflow by id or name.",
+			Description: "Fetch a workflow by id or name, with its stages and recent frozen versions. Args: id (or name), version? (also return that version's source).",
 			InputSchema: schemaObject(map[string]any{
-				"id":   map[string]any{"type": "integer"},
-				"name": map[string]any{"type": "string"},
+				"id":      map[string]any{"type": "integer"},
+				"name":    map[string]any{"type": "string"},
+				"version": map[string]any{"type": "integer", "description": "Return this frozen version's source too."},
 			}, nil),
 			Handler: a.toolGet,
 		},
 		{
 			Name:        "workflows_run",
-			Description: "Synchronously run a workflow. Args: id (or name), input (any JSON).",
+			Description: "Synchronously run a workflow. Args: id (or name), input (any JSON), stage? (run that stage's version with its vars; omitted = live head definition).",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"name":  map[string]any{"type": "string"},
 				"input": map[string]any{"description": "Trigger payload, available as {{ input.* }} in steps."},
+				"stage": map[string]any{"type": "string", "description": "Stage name; the run uses the stage's version and exposes {{ stage.name }} / {{ stage.vars.* }}."},
 			}, nil),
 			Handler: a.toolRun,
 		},
 		{
 			Name:        "workflows_runs",
-			Description: "List recent runs for a workflow. Args: id (or name), limit (default 50, max 200).",
+			Description: "List recent runs for a workflow. Args: id (or name), stage? (only runs for that stage), limit (default 50, max 200).",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"name":  map[string]any{"type": "string"},
+				"stage": map[string]any{"type": "string"},
 				"limit": map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolRuns,
@@ -280,6 +295,72 @@ func (a *App) MCPTools() []sdk.Tool {
 				"run_id": map[string]any{"type": "integer"},
 			}, []string{"run_id"}),
 			Handler: a.toolCancel,
+		},
+		{
+			Name: "workflows_stage_set",
+			Description: "Create or update a named stage of a workflow. Args: workflow (id or name), stage (^[a-z0-9][a-z0-9-]{0,39}$), " +
+				"version? (required to create; validated), vars? (object, replaces all vars), filter? ({when?, source_install_id?}; null clears), " +
+				"status? (active|paused), expected_rev? (optimistic lock; 0 = must not exist yet). Same values again = no-op.",
+			InputSchema: schemaObject(map[string]any{
+				"workflow":     map[string]any{"description": "Workflow id or name."},
+				"stage":        map[string]any{"type": "string"},
+				"version":      map[string]any{"type": "integer"},
+				"vars":         map[string]any{"type": "object"},
+				"filter":       map[string]any{"type": "object", "description": "{when: condition over input.* / stage.*, source_install_id: integer}"},
+				"status":       map[string]any{"type": "string", "enum": []any{"active", "paused"}},
+				"expected_rev": map[string]any{"type": "integer"},
+			}, []string{"workflow", "stage"}),
+			Handler: a.toolStageSet,
+		},
+		{
+			Name:        "workflows_stage_list",
+			Description: "List stages. Args: workflow? (id or name), stage? (name across all workflows).",
+			InputSchema: schemaObject(map[string]any{
+				"workflow": map[string]any{"description": "Workflow id or name."},
+				"stage":    map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolStageList,
+		},
+		{
+			Name:        "workflows_stage_delete",
+			Description: "Delete a stage from a workflow (no-op if absent). Args: workflow, stage, expected_rev?.",
+			InputSchema: schemaObject(map[string]any{
+				"workflow":     map[string]any{"description": "Workflow id or name."},
+				"stage":        map[string]any{"type": "string"},
+				"expected_rev": map[string]any{"type": "integer"},
+			}, []string{"workflow", "stage"}),
+			Handler: a.toolStageDelete,
+		},
+		{
+			Name: "workflows_stage_promote_many",
+			Description: "Point one stage at the given versions across many workflows in one transaction; missing stages are created. " +
+				"Every version is validated first; any error or rev conflict changes nothing. Args: stage, items: [{workflow, version, expected_rev?}].",
+			InputSchema: schemaObject(map[string]any{
+				"stage": map[string]any{"type": "string"},
+				"items": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"workflow":     map[string]any{"description": "Workflow id or name."},
+							"version":      map[string]any{"type": "integer"},
+							"expected_rev": map[string]any{"type": "integer"},
+						},
+						"required": []any{"workflow", "version"},
+					},
+				},
+			}, []string{"stage", "items"}),
+			Handler: a.toolStagePromoteMany,
+		},
+		{
+			Name: "workflows_stage_rollback",
+			Description: "Swap a stage back to its previous_version across workflows in one transaction. " +
+				"Args: stage, workflows: [id | name | {workflow, expected_rev?}]. Pass expected_rev to make retries safe.",
+			InputSchema: schemaObject(map[string]any{
+				"stage":     map[string]any{"type": "string"},
+				"workflows": map[string]any{"type": "array"},
+			}, []string{"stage", "workflows"}),
+			Handler: a.toolStageRollback,
 		},
 	}
 }

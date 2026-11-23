@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workflows
 display_name: Workflows
-version: 0.4.9
+version: 0.5.0
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
   graph of steps (http, function, app, integration, emit, branch).
@@ -51,7 +51,7 @@ provides:
     - name: workflows_get
       description: "Fetch one workflow by id or name."
     - name: workflows_run
-      description: "Synchronously execute a workflow. Args: name (or id), input (any JSON). Returns the run row + per-step trace."
+      description: "Synchronously execute a workflow. Args: name (or id), input (any JSON), stage? (run that stage's frozen version + vars). Returns the run row + per-step trace."
     - name: workflows_runs
       description: "Recent runs for a workflow. Args: id (or name), limit (default 50, max 200)."
     - name: workflows_run_status
@@ -60,6 +60,16 @@ provides:
       description: "Re-run a workflow against the same input. Args: run_id, from_step? (skip ahead to this step id)."
     - name: workflows_cancel
       description: "Cancel an in-flight run. Args: run_id."
+    - name: workflows_stage_set
+      description: "Create or update a named stage. Args: workflow, stage, version? (required to create), vars?, filter? ({when?, source_install_id?}), status? (active|paused), expected_rev?."
+    - name: workflows_stage_list
+      description: "List stages. Args: workflow?, stage?."
+    - name: workflows_stage_delete
+      description: "Delete a stage (no-op if absent). Args: workflow, stage, expected_rev?."
+    - name: workflows_stage_promote_many
+      description: "Point one stage at versions across many workflows, all-or-nothing. Args: stage, items: [{workflow, version, expected_rev?}]."
+    - name: workflows_stage_rollback
+      description: "Move a stage back to previous_version across workflows, all-or-nothing. Args: stage, workflows: [id|name|{workflow, expected_rev?}]."
   publishes:
     - { name: workflow.created, description: "A workflow was created." }
     - { name: workflow.updated, description: "A workflow was updated." }
@@ -68,6 +78,7 @@ provides:
     - { name: workflow.step.completed, description: "A workflow step completed." }
     - { name: workflow.run.finished, description: "A workflow run reached a terminal state." }
     - { name: workflow.run.cancelled, description: "Cancellation was requested for a workflow run." }
+    - { name: workflow.stage.changed, description: "A workflow stage was set, promoted, rolled back or deleted." }
   ui_panels:
     - slot: project.page
       label: Workflows

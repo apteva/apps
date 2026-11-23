@@ -18,7 +18,7 @@ import (
 // Operands are either dot-paths (resolved against ctx) or JSON
 // literals (strings in single OR double quotes, numbers, true,
 // false, null). The dot-path heuristic: if the trimmed token starts
-// with "input.", "steps.", "env.", or equals "now", it's a path.
+// with "input.", "steps.", "env.", "stage.", or equals "now", it's a path.
 // Otherwise it's parsed as JSON.
 //
 // Deliberately tiny. Anything more complex is "make it a function
@@ -260,7 +260,7 @@ func isPathLike(tok string) bool {
 	if tok == "now" {
 		return true
 	}
-	for _, prefix := range []string{"input.", "input", "steps.", "steps", "env.", "env"} {
+	for _, prefix := range []string{"input", "steps", "env", "stage"} {
 		if tok == prefix || strings.HasPrefix(tok, prefix+".") {
 			return true
 		}
