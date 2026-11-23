@@ -210,7 +210,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"with phase=acknowledgement and approval_message_id from approval.result.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id":     map[string]any{"type": "string"},
-				"text":                map[string]any{"type": "string", "description": "Markdown. In a numbered list the list supplies the number: write \"1. Define the goal\", never \"1. 01. Define the goal\" (that shows two numbers). Use bullets for items whose titles already carry numbers."},
+				"text":                map[string]any{"type": "string", "description": "Markdown. In a numbered list the list supplies the number: write \"1. Define the goal\", never \"1. 01. Define the goal\" (that shows two numbers). When item titles carry their own sequence numbers (todos named \"01. ...\"), drop that prefix and use a plain numbered list."},
 				"idempotency_key":     map[string]any{"type": "string"},
 				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}, "description": "final completes the current visible response without cancelling future work. Use final for a confirmation followed only by pace/timed waiting; acknowledgement/progress mean work remains now."},
 				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Resolved approval being acknowledged by its originating main thread."},

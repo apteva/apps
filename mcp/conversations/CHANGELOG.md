@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.7 — 2026-11-23
+
+- Ask agents for a plain numbered list when item titles carry their own sequence numbers: `1. Define the concept`, not `- 01. Define the concept`. 0.27.5 said to use bullets and keep the numbered titles, which put a bullet and a number on every line. The `conversations_send` text field and the skill both say so. Rendering is unchanged from 0.27.6.
+
 ## 0.27.6 — 2026-11-23
 
 - Show list items' own numbers as written. A bullet such as `- 01. Define the concept` showed "• 1. Define the concept", and `1. 01. Define the goal` showed "1. 1.": Markdown read the number that starts the item's text as a nested numbered list and renumbered it. That number is now kept as text in messages and Inbox cards, outside code blocks. 0.27.5's advice (use bullets for titles that carry numbers) led agents straight into this.
