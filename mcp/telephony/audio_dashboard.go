@@ -529,6 +529,14 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 		a.serveCallStatistics(w, r, project)
 		return
 	}
+	switch r.URL.Query().Get("view") {
+	case "live":
+		a.serveLiveCallsWidget(w, r, project)
+		return
+	case "overview":
+		a.serveCallsOverviewWidget(w, r, project)
+		return
+	}
 	if r.URL.Query().Get("view") == "incident" {
 		a.serveAudioIncident(w, r, project)
 		return

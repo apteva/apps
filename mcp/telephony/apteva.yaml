@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.28.0
+version: 0.29.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -331,6 +331,58 @@ provides:
             default: 6
             minimum: 3
             maximum: 12
+    - name: live-calls
+      label: Live calls
+      description: Calls ringing, in progress or on hold now, with who answered, a running timer and which destinations can answer.
+      entry: /ui/LiveCallsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [call.incoming, call.offered, call.initiated, call.ringing, call.answered, call.completed, call.failed, call.busy, call.no_answer, call.canceled]
+      settings_schema:
+        type: object
+        properties:
+          direction:
+            type: string
+            title: Direction
+            enum: ["", inbound, outbound]
+            enum_names: [All directions, Inbound, Outbound]
+            default: ""
+          number:
+            type: string
+            title: Number (blank for all)
+            default: ""
+    - name: calls-overview
+      label: Telephony stats
+      description: Call volume and outcomes (answered by a person or AI, missed, abandoned), answer rate, wait and call length over time.
+      entry: /ui/CallsOverviewWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [call.answered, call.completed, call.failed, call.busy, call.no_answer, call.canceled]
+      settings_schema:
+        type: object
+        properties:
+          time_range:
+            type: string
+            title: Period
+            enum: [today, 7d, 30d]
+            enum_names: [Today, Last 7 days, Last 30 days]
+            default: today
+          direction:
+            type: string
+            title: Direction
+            enum: ["", inbound, outbound]
+            enum_names: [All directions, Inbound, Outbound]
+            default: ""
+          number:
+            type: string
+            title: Number (blank for all)
+            default: ""
 
 runtime:
   resource_policy:
@@ -377,7 +429,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.28.0
+    ref: telephony/v0.29.0
     entry: mcp/telephony
   port: 8080
   health_check: /health

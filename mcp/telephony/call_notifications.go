@@ -115,6 +115,9 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer close()
+	if p := phoneUserFrom(r); p != nil {
+		defer a.softphoneStreams.enter(project, p.Identity)()
+	}
 	control := http.NewResponseController(w)
 	// A slow or abandoned browser must not retain a stream worker indefinitely.
 	write := func(payload string) error {

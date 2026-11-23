@@ -244,8 +244,13 @@ func TestAudioDashboardAlertPersistenceAndWidgetManifest(t *testing.T) {
 	if !reflect.DeepEqual(disk.Provides.UIComponents, embedded.Provides.UIComponents) || !reflect.DeepEqual(disk.Provides.HTTPRoutes, embedded.Provides.HTTPRoutes) {
 		t.Fatalf("widget/routes manifest drift: widgets disk=%+v embed=%+v routes disk=%+v embed=%+v", disk.Provides.UIComponents, embedded.Provides.UIComponents, disk.Provides.HTTPRoutes, embedded.Provides.HTTPRoutes)
 	}
-	if len(disk.Provides.UIComponents) != 1 || disk.Provides.UIComponents[0].Entry != "/ui/AudioHealthWidget.mjs" {
-		t.Fatal("missing widget")
+	entries := map[string]string{}
+	for _, c := range disk.Provides.UIComponents {
+		entries[c.Name] = c.Entry
+	}
+	want := map[string]string{"audio-health": "/ui/AudioHealthWidget.mjs", "live-calls": "/ui/LiveCallsWidget.mjs", "calls-overview": "/ui/CallsOverviewWidget.mjs"}
+	if !reflect.DeepEqual(entries, want) {
+		t.Fatal("unexpected widgets", entries)
 	}
 }
 
