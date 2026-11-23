@@ -148,6 +148,10 @@ func (a *App) admit(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentit
 		return nil, err
 	}
 	adm.policies = policies
+	if err := checkCustomerModel(db, ident, req.Model); err != nil {
+		_ = dbAudit(db, ident, "request.denied", providerFromModel(req.Model), req.Model, "denied", err.Error(), map[string]any{"endpoint": req.Endpoint, "reason": "customer_key_model"})
+		return nil, err
+	}
 	hook := effectiveAdmission(ident, policies)
 	adm.req.EstimatedInput = applyInputMargin(req.EstimatedInput, hook)
 	public, attempts, err := resolveAttempts(db, ident.ProjectID, req.Model, policies, requestedOutput)
