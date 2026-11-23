@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: workflows
 display_name: Workflows
-version: 0.5.0
+version: 0.5.1
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
   graph of typed steps (http, function, app, integration, emit,

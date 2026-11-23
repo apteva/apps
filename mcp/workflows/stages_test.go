@@ -521,6 +521,34 @@ func TestStages_FilterWhenAndSourceInstallID(t *testing.T) {
 	if len(runs) != 5 || stages["pinned"] != 2 || stages["production"] != 0 {
 		t.Fatalf("install id 42: %+v", stages)
 	}
+	// The platform stamps the publisher as install_id (AppEvent.install_id).
+	// install_id 7 ≠ 42: pinned filtered out, staging matches.
+	dispatch(ctx, wf, 4, `,"install_id":7`)
+	waitRuns(t, ctx, wf.ID, 6)
+	time.Sleep(100 * time.Millisecond)
+	runs, _ = dbListRuns(ctx.AppDB(), testProj, wf.ID, 20)
+	stages = map[string]int{}
+	for _, r := range runs {
+		stages[r.Stage]++
+	}
+	if len(runs) != 6 || stages["pinned"] != 2 || stages["staging"] != 4 {
+		t.Fatalf("platform install_id 7: %+v", stages)
+	}
+	if !strings.Contains(runs[0].InputJSON, `"source_install_id":7`) {
+		t.Fatalf("input should carry the platform install_id as source_install_id: %s", runs[0].InputJSON)
+	}
+	// install_id 0 (older platforms) counts as absent: pinned matches.
+	dispatch(ctx, wf, 5, `,"install_id":0`)
+	waitRuns(t, ctx, wf.ID, 8)
+	time.Sleep(100 * time.Millisecond)
+	runs, _ = dbListRuns(ctx.AppDB(), testProj, wf.ID, 20)
+	stages = map[string]int{}
+	for _, r := range runs {
+		stages[r.Stage]++
+	}
+	if len(runs) != 8 || stages["pinned"] != 3 || stages["staging"] != 5 {
+		t.Fatalf("platform install_id 0: %+v", stages)
+	}
 }
 
 func TestStages_VersionTriggerDrivesStagedDispatch(t *testing.T) {
@@ -762,7 +790,7 @@ func TestStages_ManifestListsEveryTool(t *testing.T) {
 			t.Errorf("manifest declares %d tools, code registers %d", len(declared), len(tools))
 		}
 	}
-	if disk.Version != "0.5.0" {
-		t.Errorf("apteva.yaml version = %s, want 0.5.0", disk.Version)
+	if disk.Version != "0.5.1" {
+		t.Errorf("apteva.yaml version = %s, want 0.5.1", disk.Version)
 	}
 }

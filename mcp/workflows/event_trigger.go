@@ -385,6 +385,10 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		// platform includes it. Optional: stage filters on it are
 		// ignored for frames that do not carry it.
 		SourceInstallID any `json:"source_install_id,omitempty"`
+		// InstallID is the publishing installation as the platform stamps
+		// it on every AppBus event (AppEvent.install_id). Used when the
+		// frame has no explicit source_install_id.
+		InstallID any `json:"install_id,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(dataStr), &ev); err != nil {
 		m.setLaneState(ln, "connected", fmt.Errorf("invalid event JSON: %w", err))
@@ -426,6 +430,12 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		"data":       data,
 	}
 	sourceInstallID, hasInstallID := parseInstallID(ev.SourceInstallID)
+	if !hasInstallID {
+		// Older platforms serialise install_id as 0 when unknown: absent.
+		if id, ok := parseInstallID(ev.InstallID); ok && *id > 0 {
+			sourceInstallID, hasInstallID = id, true
+		}
+	}
 	if hasInstallID {
 		input["source_install_id"] = float64(*sourceInstallID)
 	}

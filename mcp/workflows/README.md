@@ -62,8 +62,10 @@ nothing runs. Filters run before any run row is created:
 ```
 
 `when` uses the trigger-predicate grammar (paths `input.*`, `stage.*`).
-`source_install_id` only applies when the event frame carries one;
-frames without it are not filtered by it.
+`source_install_id` matches the publishing installation: the frame's
+`source_install_id`, else the `install_id` the platform stamps on every
+AppBus event (0.5.1). Frames without either (or with `install_id` 0, from
+older platforms) are not filtered by it.
 
 **Templates.** Step inputs and conditions can use `{{ stage.name }}`,
 `{{ stage.vars.<key> }}` and `{{ stage.version }}`. They resolve to
