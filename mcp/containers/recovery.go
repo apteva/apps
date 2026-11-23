@@ -12,10 +12,11 @@ import (
 
 // Record before pausing so a sidecar crash leaves a durable resume job.
 func (a *App) pauseArchive(ctx context.Context, app *sdk.AppCtx, w *Workload) (func() error, error) {
-	if _, ok := a.backend.(LocalDocker); !ok {
+	run, ok := a.archiveDocker(app, w)
+	if !ok {
 		return func() error { return nil }, nil
 	}
-	state, err := docker(ctx, "inspect", "--format", "{{.State.Running}} {{.State.Paused}}", w.ContainerName)
+	state, err := run(ctx, "inspect", "--format", "{{.State.Running}} {{.State.Paused}}", w.ContainerName)
 	if dockerExecUnavailable(err) {
 		return func() error { return nil }, nil
 	}
@@ -34,20 +35,50 @@ func (a *App) pauseArchive(ctx context.Context, app *sdk.AppCtx, w *Workload) (f
 	resume := func() error {
 		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return a.resumeArchive(c, app, w.ID, w.ContainerName)
+		return a.resumeArchiveWith(c, app, run, w.ID, w.ContainerName)
 	}
-	if _, err = docker(ctx, "pause", w.ContainerName); err != nil {
+	if _, err = run(ctx, "pause", w.ContainerName); err != nil {
 		return nil, errors.Join(err, resume())
 	}
 	return resume, nil
 }
+
+// archiveDocker returns the docker command runner for a workload's host, or
+// false when its backend cannot pause (test fakes).
+func (a *App) archiveDocker(app *sdk.AppCtx, w *Workload) (dockerCmdFunc, bool) {
+	if workloadTargetID(w) == 0 {
+		if _, ok := a.backend.(LocalDocker); ok {
+			return docker, true
+		}
+		return nil, false
+	}
+	backend, err := a.backendForWorkload(app, w)
+	if err != nil {
+		return nil, false
+	}
+	if remote, ok := backend.(*RemoteDocker); ok {
+		return remote.sandboxDocker(), true
+	}
+	return nil, false
+}
+
 func (a *App) resumeArchive(ctx context.Context, app *sdk.AppCtx, id, name string) error {
-	state, err := docker(ctx, "inspect", "--format", "{{.State.Paused}}", name)
+	run := dockerCmdFunc(docker)
+	if w, err := getWorkloadBase(app.AppDB(), "WHERE id=?", id); err == nil && w != nil {
+		if r, ok := a.archiveDocker(app, w); ok {
+			run = r
+		}
+	}
+	return a.resumeArchiveWith(ctx, app, run, id, name)
+}
+
+func (a *App) resumeArchiveWith(ctx context.Context, app *sdk.AppCtx, run dockerCmdFunc, id, name string) error {
+	state, err := run(ctx, "inspect", "--format", "{{.State.Paused}}", name)
 	if err != nil && !isDockerMissingResourceError(err, "container") {
 		return err
 	}
 	if strings.TrimSpace(state) == "true" {
-		if _, err = docker(ctx, "unpause", name); err != nil {
+		if _, err = run(ctx, "unpause", name); err != nil {
 			return err
 		}
 	}

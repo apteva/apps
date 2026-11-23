@@ -422,6 +422,12 @@ func (d *RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...s
 	return out, nil
 }
 
+// remoteReadyTTL is how long a host stays known-ready before the Docker setup
+// script runs again. Every status check builds a new RemoteDocker, so a short
+// TTL re-ran setup about once a minute per host while runs were active; a
+// host whose Docker stops still fails the commands themselves.
+const remoteReadyTTL = 10 * time.Minute
+
 func (d *RemoteDocker) ensureDocker(ctx context.Context) error {
 	d.ensureOnce.Do(func() {
 		key := fmt.Sprintf("%p/%s/%d", d.app.AppDB(), d.app.CurrentProject(), d.instanceID)
@@ -431,7 +437,7 @@ func (d *RemoteDocker) ensureDocker(ctx context.Context) error {
 		remoteCapabilities.mu.Lock()
 		ready := remoteCapabilities.ready[key]
 		remoteCapabilities.mu.Unlock()
-		if time.Since(ready) < time.Minute {
+		if time.Since(ready) < remoteReadyTTL {
 			return
 		}
 		_, _, err := d.runRemote(ctx, remoteDockerBootstrapScript, 360)
@@ -443,7 +449,7 @@ func (d *RemoteDocker) ensureDocker(ctx context.Context) error {
 				remoteCapabilities.ready = map[string]time.Time{}
 			}
 			for k, t := range remoteCapabilities.ready {
-				if time.Since(t) > time.Minute {
+				if time.Since(t) > remoteReadyTTL {
 					delete(remoteCapabilities.ready, k)
 				}
 			}
@@ -490,6 +496,11 @@ func (d *RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) 
 		return res.Output, res.ExitCode, fmt.Errorf("instance_run_command instance_id=%d: %w", d.instanceID, res.err)
 	}
 	if res.Err != "" {
+		// Keep the command's own output: it carries Docker's message (for
+		// example "No such container"), which callers match on.
+		if out := strings.TrimSpace(res.Output); out != "" {
+			return res.Output, res.ExitCode, fmt.Errorf("%s: %s", res.Err, truncateOutput(out, maxDockerErrorBytes))
+		}
 		return res.Output, res.ExitCode, errors.New(res.Err)
 	}
 	if res.ExitCode != 0 {

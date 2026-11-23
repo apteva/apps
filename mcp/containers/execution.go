@@ -223,8 +223,8 @@ func (a *App) startExecution(callCtx context.Context, app *sdk.AppCtx, workload 
 	if active >= 64 {
 		return nil, fmt.Errorf("%w: active execution limit reached", errConflict)
 	}
-	if workload.HostID != 0 || workload.InstanceID != 0 {
-		return nil, errors.New("container execution currently supports local workloads only")
+	if workloadTargetID(workload) != 0 && strings.TrimSpace(in.SessionKey) != "" {
+		return nil, typedInputError(errRemoteSession)
 	}
 	if workload.Status != StatusRunning {
 		return nil, fmt.Errorf("workload is not executable in status %q", workload.Status)
@@ -360,6 +360,10 @@ func (a *App) superviseExecution(app *sdk.AppCtx, id string) {
 	defer func() { a.executionMu.Lock(); delete(a.supervisors, id); a.executionMu.Unlock() }()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	// Each remote check is an SSH round trip; check those less often, backing
+	// off from 1 s to 5 s while the run keeps going.
+	var nextRemoteCheck time.Time
+	remoteInterval := time.Second
 	for {
 		execution, err := getExecution(app.AppDB(), id)
 		if err != nil || execution == nil || executionTerminal(execution.Status) {
@@ -410,8 +414,17 @@ func (a *App) superviseExecution(app *sdk.AppCtx, id string) {
 			<-ticker.C
 			continue
 		}
-		inspectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, remote := backend.(*RemoteDocker)
+		if remote && time.Now().Before(nextRemoteCheck) {
+			<-ticker.C
+			continue
+		}
+		inspectCtx, cancel := context.WithTimeout(context.Background(), executionCallTimeout(backend, 10*time.Second))
 		state, err := backend.InspectExecution(inspectCtx, execution)
+		if remote {
+			nextRemoteCheck = time.Now().Add(remoteInterval)
+			remoteInterval = min(remoteInterval*3/2, 5*time.Second)
+		}
 		cancel()
 		if err != nil {
 			_, _ = transitionExecution(app.AppDB(), id, []string{executionRunning}, map[string]any{"error": err.Error()})
@@ -434,7 +447,7 @@ func (a *App) superviseExecution(app *sdk.AppCtx, id string) {
 func (a *App) finishExecution(app *sdk.AppCtx, execution *Execution, status string, exitCode *int, errorCode, message string) {
 	backend, _ := a.executionBackendFor(app, execution)
 	if errorCode == "timeout" && backend != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		stopCtx, cancel := context.WithTimeout(context.Background(), executionCallTimeout(backend, 15*time.Second))
 		_ = backend.StopExecution(stopCtx, execution)
 		cancel()
 	}
@@ -442,7 +455,7 @@ func (a *App) finishExecution(app *sdk.AppCtx, execution *Execution, status stri
 	total := 0
 	wasTruncated := false
 	if backend != nil {
-		logsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		logsCtx, cancel := context.WithTimeout(context.Background(), executionCallTimeout(backend, 15*time.Second))
 		var err error
 		output, total, wasTruncated, err = readExecutionOutput(logsCtx, backend, execution)
 		cancel()
@@ -550,7 +563,7 @@ func (a *App) cancelExecution(app *sdk.AppCtx, execution *Execution) (*Execution
 	if err != nil {
 		return current, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), executionCallTimeout(backend, 15*time.Second))
 	defer cancel()
 	if err = backend.StopExecution(ctx, current); err != nil && !isDockerMissingResourceError(err, "container") {
 		return current, err
@@ -625,7 +638,7 @@ func retainExecutionLogs(ctx context.Context, app *sdk.AppCtx, containerApp *App
 			if err != nil {
 				continue
 			}
-			rmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			rmCtx, cancel := context.WithTimeout(ctx, executionCallTimeout(backend, 15*time.Second))
 			err = backend.RemoveExecution(rmCtx, execution)
 			cancel()
 			if err != nil {
@@ -960,4 +973,14 @@ func configInt(app *sdk.AppCtx, key string, fallback int) int {
 
 func newExecutionID() string {
 	return strings.Replace(newWorkloadID(), "wrk_", "exe_", 1)
+}
+
+// executionCallTimeout gives remote backends room for an SSH round trip (or a
+// few, for paged output). The Instances call cannot be cancelled, so a short
+// deadline would only turn a slow answer into an error.
+func executionCallTimeout(backend any, local time.Duration) time.Duration {
+	if _, ok := backend.(*RemoteDocker); ok {
+		return 2 * time.Minute
+	}
+	return local
 }
