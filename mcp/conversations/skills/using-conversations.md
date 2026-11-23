@@ -77,8 +77,12 @@ response active merely because a future follow-up remains scheduled.
 
 Write portable chat text: lead with the answer, use short paragraphs and
 simple bullets or numbered lists, and avoid Markdown tables, raw HTML, or
-transport-specific syntax. Basic emphasis, links, inline/fenced code, quotes,
-and headings are adapted to each bound surface; Telegram receives native
+transport-specific syntax. In a numbered list, the list supplies the number:
+write `1. Define the goal`, never `1. 01. Define the goal`, because a number at
+the start of an item renders as a second, nested list. When item titles carry
+their own numbers (such as todos named `01. ...`), use bullets and keep the
+titles as written. Basic emphasis, links, inline/fenced code, quotes, and
+headings are adapted to each bound surface; Telegram receives native
 Telegram formatting while the dashboard renders the stored Markdown. When
 showing a specific supported entity for the first time, attach the matching
 component card in the SAME send call as the text. Once presented, refer to its

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.5 — 2026-11-23
+
+- Tell agents how to write numbered lists. A reply such as `1. 01. Define the goal` rendered as "1. 1." because the leading `01.` starts a second, nested list. The `conversations_send` text field and the skill now say the list supplies the number, and items whose titles already carry numbers go in a bulleted list. Rendering is unchanged.
+
 ## 0.27.4 — 2026-11-22
 
 - Let agents without a project, such as the Apteva Helper, reply in conversations they were added to. Their `conversations_send` failed with "authenticated project required", so the reply never arrived. Their calls now run in the conversation's project. They still cannot list or create conversations, and their conversation threads still cannot write to any other conversation.
