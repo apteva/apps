@@ -40,10 +40,13 @@ const (
 	accountSubjectType     = "saas_account"
 	microUnitsPerCent      = 10000
 	defaultMaxOutputTokens = 4096
-	accountSnapshotTTL     = 5 * time.Second
-	planMetersTTL          = 30 * time.Second
-	keyStatusActive        = "active"
-	keyStatusRevoked       = "revoked"
+	// defaultInputMarginPct pads the input-token estimate when pricing a hold,
+	// so a request whose real prompt is larger than llm estimated still fits.
+	defaultInputMarginPct = 20
+	accountSnapshotTTL    = 5 * time.Second
+	planMetersTTL         = 30 * time.Second
+	keyStatusActive       = "active"
+	keyStatusRevoked      = "revoked"
 )
 
 type credentialProvider struct {
@@ -59,6 +62,7 @@ type prepaidSettings struct {
 	SignupCreditExpiresDays int64
 	LowBalanceThreshold     int64
 	MaxOutputTokens         int64
+	InputMarginPct          int64
 	Provider                credentialProvider
 }
 
@@ -73,7 +77,15 @@ func prepaidSettingsFromMetadata(meta map[string]any) prepaidSettings {
 		SignupCreditExpiresDays: int64Arg(meta, "signup_credit_expires_days"),
 		LowBalanceThreshold:     int64Arg(meta, "low_balance_threshold"),
 		MaxOutputTokens:         int64Arg(meta, "max_output_tokens_estimate"),
+		InputMarginPct:          defaultInputMarginPct,
 		Provider:                defaultCredentialProvider(),
+	}
+	// Presence check: an explicit 0 turns the margin off; a missing key keeps the default.
+	if raw, ok := meta["input_estimate_margin_pct"]; ok && raw != nil {
+		s.InputMarginPct = int64Arg(meta, "input_estimate_margin_pct")
+	}
+	if s.InputMarginPct < 0 {
+		s.InputMarginPct = 0
 	}
 	if raw := mapFromAny(meta["credential_provider"]); len(raw) > 0 {
 		s.Provider = credentialProvider{
@@ -109,7 +121,7 @@ func validatePrepaidPlan(args map[string]any, metadata map[string]any) error {
 	if strings.TrimSpace(strArg(metadata, "credits_unit")) == "" {
 		return errors.New("prepaid plans require metadata.credits_unit (e.g. usd)")
 	}
-	for _, key := range []string{"signup_credit", "signup_credit_expires_days", "low_balance_threshold", "max_output_tokens_estimate"} {
+	for _, key := range []string{"signup_credit", "signup_credit_expires_days", "low_balance_threshold", "max_output_tokens_estimate", "input_estimate_margin_pct"} {
 		if int64Arg(metadata, key) < 0 {
 			return fmt.Errorf("metadata.%s must not be negative", key)
 		}
@@ -631,7 +643,8 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if maxOutput <= 0 {
 		maxOutput = snap.Settings.MaxOutputTokens
 	}
-	amount := priceUsage(meter, usageQuantities{Input: int64Arg(args, "estimated_input_tokens"), Output: maxOutput, Requests: 1})
+	estimatedInput := inputWithMargin(int64Arg(args, "estimated_input_tokens"), snap.Settings.InputMarginPct)
+	amount := priceUsage(meter, usageQuantities{Input: estimatedInput, Output: maxOutput, Requests: 1})
 	if amount <= 0 {
 		return map[string]any{"allow": true, "admission_ref": "", "amount": 0}, nil
 	}
@@ -1075,4 +1088,13 @@ func (a *App) prepaidMCPTools() []sdk.Tool {
 		{Name: "saas_account_keys_list", Description: "List an account's API keys without secrets.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "include_revoked": boolSchema()}, []string{"account_id"}), Handler: a.toolAccountKeysList},
 		{Name: "saas_account_keys_revoke", Description: "Revoke one of an account's API keys.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "key_id": strSchema()}, []string{"account_id", "key_id"}), Handler: a.toolAccountKeysRevoke},
 	}
+}
+
+// inputWithMargin pads an input-token estimate by pct percent, rounding the
+// token count up once (15 tokens at 20% -> 18).
+func inputWithMargin(tokens, pct int64) int64 {
+	if tokens <= 0 || pct <= 0 {
+		return tokens
+	}
+	return (tokens*(100+pct) + 99) / 100
 }

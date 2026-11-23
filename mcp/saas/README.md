@@ -406,6 +406,7 @@ depends on the balance of a Credits wallet. Plan metadata:
 | `signup_credit_expires_days` | Optional expiry for the signup credit. |
 | `low_balance_threshold` | Wallet `low_threshold`; Credits emits `credits.balance.low` below it. |
 | `max_output_tokens_estimate` | Output tokens assumed when a request sets no limit (default 4096). |
+| `input_estimate_margin_pct` | Percent added to the estimated input tokens when pricing a hold (default 20; 0 turns it off; must not be negative). |
 | `credential_provider` | `{app, create_tool, list_tool, revoke_tool}` for account API keys. Defaults to llm's `llm_tokens_*`. |
 
 Activation adds a `credits_wallet` provisioning step (wallet ensure plus the
@@ -432,7 +433,8 @@ and use the cached price when set, otherwise the input price.
 Account keys point llm's admission hook at SaaS:
 
 - `saas_usage_authorize` — reads `token_metadata.account_id` from a 5-second
-  account cache, prices the worst case (estimated input + max output + one
+  account cache, prices the worst case (estimated input plus the plan's
+  `input_estimate_margin_pct`, default 20%, rounded up once; max output; one
   request) and calls `credits_reserve` with reference
   `<source_app>/request/<request_id>` and scope `project:<token_metadata.project>`.
   Returns `{allow: true, admission_ref: <hold_id>, max_output_tokens}` or a

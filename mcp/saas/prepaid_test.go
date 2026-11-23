@@ -13,14 +13,16 @@ import (
 // and llm tokens on top of the shared platformStub.
 type prepaidStub struct {
 	*platformStub
-	available   int64
-	denyReason  string
-	nextHold    int64
-	holds       map[int64]int64
-	committed   map[int64]int64
-	released    map[int64]bool
-	nextTokenID int64
-	revoked     []int64
+	available  int64
+	denyReason string
+	// enforceBalance denies a reserve larger than available, like Credits.
+	enforceBalance bool
+	nextHold       int64
+	holds          map[int64]int64
+	committed      map[int64]int64
+	released       map[int64]bool
+	nextTokenID    int64
+	revoked        []int64
 }
 
 var prepaidPrices = map[int64]map[string]any{
@@ -53,6 +55,10 @@ func (p *prepaidStub) CallAppResult(appName, tool string, input map[string]any, 
 	case "credits:credits_reserve":
 		if p.denyReason != "" {
 			body = map[string]any{"denied": true, "reason": p.denyReason}
+			break
+		}
+		if p.enforceBalance && int64FromAny(input["amount"]) > p.available {
+			body = map[string]any{"denied": true, "reason": "insufficient_balance", "available_after": p.available}
 			break
 		}
 		p.nextHold++
@@ -219,11 +225,11 @@ func TestPrepaid_AuthorizeAndSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := asMap(t, out)
-	if res["allow"] != true || res["admission_ref"] != "9001" || int64FromAny(res["amount"]) != 225 {
+	if res["allow"] != true || res["admission_ref"] != "9001" || int64FromAny(res["amount"]) != 240 {
 		t.Fatalf("authorize = %#v", res)
 	}
 	reserve := pf.lastCall("credits", "credits_reserve")
-	if reserve["reference"] != "llm/request/req_1" || reserve["scope"] != "project:production" || reserve["subject_id"] != acct.ID || int64FromAny(reserve["amount"]) != 225 {
+	if reserve["reference"] != "llm/request/req_1" || reserve["scope"] != "project:production" || reserve["subject_id"] != acct.ID || int64FromAny(reserve["amount"]) != 240 {
 		t.Fatalf("reserve input = %#v", reserve)
 	}
 
@@ -438,5 +444,73 @@ func TestPrepaid_AuthorizeReturnsPricedOutputLimit(t *testing.T) {
 	}
 	if res := asMap(t, out); int64FromAny(res["max_output_tokens"]) != 500 {
 		t.Fatalf("authorize with 500 = %#v", res)
+	}
+}
+
+func TestInputWithMargin_RoundsUpOnce(t *testing.T) {
+	cases := []struct{ tokens, pct, want int64 }{
+		{15, 20, 18}, {1000, 20, 1200}, {1, 20, 2}, {10, 0, 10}, {0, 20, 0}, {7, 15, 9},
+	}
+	for _, c := range cases {
+		if got := inputWithMargin(c.tokens, c.pct); got != c.want {
+			t.Errorf("inputWithMargin(%d, %d) = %d, want %d", c.tokens, c.pct, got, c.want)
+		}
+	}
+}
+
+func TestPrepaid_InputMarginSettingAndValidation(t *testing.T) {
+	if s := prepaidSettingsFromMetadata(map[string]any{"credits_unit": "usd"}); s.InputMarginPct != defaultInputMarginPct {
+		t.Fatalf("missing margin = %d, want default %d", s.InputMarginPct, defaultInputMarginPct)
+	}
+	if s := prepaidSettingsFromMetadata(map[string]any{"credits_unit": "usd", "input_estimate_margin_pct": 0}); s.InputMarginPct != 0 {
+		t.Fatalf("explicit 0 margin = %d, want 0", s.InputMarginPct)
+	}
+	app, ctx, _, _ := setupPrepaidAccount(t)
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API", "billing_mode": "prepaid", "metadata": map[string]any{
+		"credits_unit": "usd", "input_estimate_margin_pct": -5,
+	}}); err == nil || !strings.Contains(err.Error(), "input_estimate_margin_pct") {
+		t.Fatalf("negative margin: err=%v", err)
+	}
+}
+
+func TestPrepaid_InputMarginRefusesOldHoldBalance(t *testing.T) {
+	app, ctx, pf, acct := setupPrepaidAccount(t)
+	meta := map[string]any{"account_id": acct.ID}
+	// Without a margin, 1000 input + 500 output holds 225 micro-units.
+	// With the default 20% margin the input is priced as 1200 tokens: 240.
+	pf.enforceBalance = true
+	pf.available = 225
+	out, err := app.toolUsageAuthorize(ctx, map[string]any{
+		"request_id": "req_margin", "token_metadata": meta, "model": "text-fast",
+		"estimated_input_tokens": 1000, "max_output_tokens": 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := asMap(t, out)
+	if res["allow"] != false || res["reason"] != "no_credit" {
+		t.Fatalf("authorize at the old hold amount = %#v, want refused no_credit", res)
+	}
+	if amount := int64FromAny(pf.lastCall("credits", "credits_reserve")["amount"]); amount != 240 {
+		t.Fatalf("reserve amount = %d, want 240 (input priced for 1200 tokens)", amount)
+	}
+
+	// The margin is plan metadata: 0 turns it off and the old amount fits.
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API", "billing_mode": "prepaid", "metadata": map[string]any{
+		"credits_unit": "usd", "signup_credit": 5_000_000, "signup_credit_expires_days": 30, "low_balance_threshold": 1_000_000,
+		"input_estimate_margin_pct": 0,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	pricing = &pricingCache{}
+	out, err = app.toolUsageAuthorize(ctx, map[string]any{
+		"request_id": "req_no_margin", "token_metadata": meta, "model": "text-fast",
+		"estimated_input_tokens": 1000, "max_output_tokens": 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := asMap(t, out); res["allow"] != true || int64FromAny(res["amount"]) != 225 {
+		t.Fatalf("authorize with margin 0 = %#v, want allowed at 225", res)
 	}
 }
