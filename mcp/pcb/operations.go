@@ -235,6 +235,8 @@ func applyOperation(def *Definition, op Operation) error {
 		def.NetClasses = append(def.NetClasses[:idx], def.NetClasses[idx+1:]...)
 	case "simulation.set":
 		def.Simulation = op.Simulation
+	case "mechanical.set":
+		def.Mechanical = op.Mechanical
 	case "wiring.set":
 		def.Wiring = op.Wiring
 	case "wiring.part.add":

@@ -52,15 +52,16 @@ type WiringSimulation struct {
 
 func wiringCatalog() map[string]WiringLibraryPart {
 	pins := []WiringLibraryPin{
-		{ID: "D13", Label: "13", X: 282, Y: 25, ElectricalType: "digital"}, {ID: "D12", Label: "12", X: 264, Y: 25, ElectricalType: "digital"}, {ID: "D11", Label: "~11", X: 246, Y: 25, ElectricalType: "digital"}, {ID: "D10", Label: "~10", X: 228, Y: 25, ElectricalType: "digital"}, {ID: "D9", Label: "~9", X: 210, Y: 25, ElectricalType: "digital"}, {ID: "D8", Label: "8", X: 192, Y: 25, ElectricalType: "digital"},
-		{ID: "D7", Label: "7", X: 174, Y: 25, ElectricalType: "digital"}, {ID: "D6", Label: "~6", X: 156, Y: 25, ElectricalType: "digital"}, {ID: "D5", Label: "~5", X: 138, Y: 25, ElectricalType: "digital"}, {ID: "D4", Label: "4", X: 120, Y: 25, ElectricalType: "digital"}, {ID: "D3", Label: "~3", X: 102, Y: 25, ElectricalType: "digital"}, {ID: "D2", Label: "2", X: 84, Y: 25, ElectricalType: "digital"},
-		{ID: "5V", Label: "5V", X: 110, Y: 385, ElectricalType: "power", VoltageV: 5}, {ID: "3V3", Label: "3.3V", X: 92, Y: 385, ElectricalType: "power", VoltageV: 3.3}, {ID: "GND", Label: "GND", X: 128, Y: 385, ElectricalType: "ground"}, {ID: "A0", Label: "A0", X: 190, Y: 385, ElectricalType: "analog"}, {ID: "A1", Label: "A1", X: 208, Y: 385, ElectricalType: "analog"}, {ID: "A2", Label: "A2", X: 226, Y: 385, ElectricalType: "analog"}, {ID: "A3", Label: "A3", X: 244, Y: 385, ElectricalType: "analog"}, {ID: "A4", Label: "A4", X: 262, Y: 385, ElectricalType: "analog"}, {ID: "A5", Label: "A5", X: 280, Y: 385, ElectricalType: "analog"},
+		{ID: "D13", Label: "13", X: 185, Y: 25, ElectricalType: "digital"}, {ID: "D12", Label: "12", X: 203, Y: 25, ElectricalType: "digital"}, {ID: "D11", Label: "~11", X: 221, Y: 25, ElectricalType: "digital"}, {ID: "D10", Label: "~10", X: 239, Y: 25, ElectricalType: "digital"}, {ID: "D9", Label: "~9", X: 257, Y: 25, ElectricalType: "digital"}, {ID: "D8", Label: "8", X: 275, Y: 25, ElectricalType: "digital"},
+		{ID: "D7", Label: "7", X: 301, Y: 25, ElectricalType: "digital"}, {ID: "D6", Label: "~6", X: 319, Y: 25, ElectricalType: "digital"}, {ID: "D5", Label: "~5", X: 337, Y: 25, ElectricalType: "digital"}, {ID: "D4", Label: "4", X: 355, Y: 25, ElectricalType: "digital"}, {ID: "D3", Label: "~3", X: 373, Y: 25, ElectricalType: "digital"}, {ID: "D2", Label: "2", X: 391, Y: 25, ElectricalType: "digital"},
+		{ID: "3V3", Label: "3.3V", X: 118, Y: 294, ElectricalType: "power", VoltageV: 3.3}, {ID: "5V", Label: "5V", X: 136, Y: 294, ElectricalType: "power", VoltageV: 5}, {ID: "GND", Label: "GND", X: 154, Y: 294, ElectricalType: "ground"}, {ID: "A0", Label: "A0", X: 293, Y: 294, ElectricalType: "analog"}, {ID: "A1", Label: "A1", X: 311, Y: 294, ElectricalType: "analog"}, {ID: "A2", Label: "A2", X: 329, Y: 294, ElectricalType: "analog"}, {ID: "A3", Label: "A3", X: 347, Y: 294, ElectricalType: "analog"}, {ID: "A4", Label: "A4", X: 365, Y: 294, ElectricalType: "analog"}, {ID: "A5", Label: "A5", X: 383, Y: 294, ElectricalType: "analog"},
 	}
 	return map[string]WiringLibraryPart{
-		"arduino.uno.r3":  {ID: "arduino.uno.r3", Name: "Arduino Uno R3", Kind: "microcontroller", Width: 330, Height: 410, Pins: pins, Properties: map[string]any{"platform": "arduino", "logic_voltage_v": 5}},
+		// 410:319 preserves the physical Uno R3 board ratio (68.6 mm × 53.4 mm).
+		"arduino.uno.r3":  {ID: "arduino.uno.r3", Name: "Arduino Uno R3", Kind: "microcontroller", Width: 410, Height: 319, Pins: pins, Properties: map[string]any{"platform": "arduino", "logic_voltage_v": 5, "physical_width_mm": 68.6, "physical_height_mm": 53.4}},
 		"breadboard.half": {ID: "breadboard.half", Name: "Half-size breadboard", Kind: "breadboard", Width: 610, Height: 390, Pins: []WiringLibraryPin{{ID: "rail+", Label: "+", X: 25, Y: 45, ElectricalType: "power"}, {ID: "rail-", Label: "−", X: 25, Y: 345, ElectricalType: "ground"}}},
 		"resistor.axial":  {ID: "resistor.axial", Name: "Axial resistor", Kind: "resistor", Width: 130, Height: 32, Pins: []WiringLibraryPin{{ID: "1", Label: "1", X: 0, Y: 16, ElectricalType: "passive"}, {ID: "2", Label: "2", X: 130, Y: 16, ElectricalType: "passive"}}, Properties: map[string]any{"resistance_ohms": 220}},
-		"led.5mm.red":     {ID: "led.5mm.red", Name: "5 mm red LED", Kind: "led", Width: 54, Height: 88, Pins: []WiringLibraryPin{{ID: "anode", Label: "A (+)", X: 17, Y: 88, ElectricalType: "anode"}, {ID: "cathode", Label: "K (−)", X: 37, Y: 88, ElectricalType: "cathode"}}, Properties: map[string]any{"forward_voltage_v": 2, "color": "red"}},
+		"led.5mm.red":     {ID: "led.5mm.red", Name: "5 mm red LED", Kind: "led", Width: 54, Height: 120, Pins: []WiringLibraryPin{{ID: "anode", Label: "A (+)", X: 17, Y: 120, ElectricalType: "anode"}, {ID: "cathode", Label: "K (−)", X: 37, Y: 120, ElectricalType: "cathode"}}, Properties: map[string]any{"forward_voltage_v": 2, "color": "red"}},
 	}
 }
 
@@ -76,21 +77,21 @@ func wiringLibraryResponse() map[string]any {
 
 func arduinoLEDExample() Definition {
 	def := emptyDefinition("Arduino Uno LED breadboard tutorial")
-	def.Wiring = &WiringSpec{Schema: wiringSchema, Canvas: WiringCanvas{Width: 1280, Height: 760, Grid: 10},
+	def.Wiring = &WiringSpec{Schema: wiringSchema, Canvas: WiringCanvas{Width: 1440, Height: 760, Grid: 10},
 		Parts: []WiringPart{
-			{ID: "arduino", LibraryID: "arduino.uno.r3", Label: "Arduino Uno R3", X: 70, Y: 170},
-			{ID: "breadboard", LibraryID: "breadboard.half", Label: "Half breadboard", X: 565, Y: 170},
-			{ID: "r1", LibraryID: "resistor.axial", Label: "R1 · 220 Ω", X: 700, Y: 330, Properties: map[string]any{"resistance_ohms": 220}},
-			{ID: "led1", LibraryID: "led.5mm.red", Label: "LED1 · red", X: 930, Y: 300},
+			{ID: "arduino", LibraryID: "arduino.uno.r3", Label: "Arduino Uno R3", X: 65, Y: 230},
+			{ID: "breadboard", LibraryID: "breadboard.half", Label: "Half breadboard", X: 555, Y: 190},
+			{ID: "r1", LibraryID: "resistor.axial", Label: "R1 · 220 Ω", X: 725, Y: 338, Properties: map[string]any{"resistance_ohms": 220}},
+			{ID: "led1", LibraryID: "led.5mm.red", Label: "LED1 · red", X: 930, Y: 316},
 		},
 		Wires: []WiringWire{
-			{ID: "wire-d9-r1", NetID: "drive", Color: "#e16b32", From: WiringEndpoint{PartID: "arduino", PinID: "D9"}, To: WiringEndpoint{PartID: "r1", PinID: "1"}, Points: []WiringPoint{{X: 410, Y: 95}, {X: 520, Y: 95}, {X: 620, Y: 346}}},
-			{ID: "wire-r1-led", NetID: "led-anode", Color: "#d79a24", From: WiringEndpoint{PartID: "r1", PinID: "2"}, To: WiringEndpoint{PartID: "led1", PinID: "anode"}, Points: []WiringPoint{{X: 865, Y: 346}, {X: 900, Y: 388}}},
-			{ID: "wire-led-gnd", NetID: "ground", Color: "#26282b", From: WiringEndpoint{PartID: "led1", PinID: "cathode"}, To: WiringEndpoint{PartID: "arduino", PinID: "GND"}, Points: []WiringPoint{{X: 967, Y: 438}, {X: 1010, Y: 625}, {X: 470, Y: 625}, {X: 198, Y: 555}}},
-			{ID: "wire-5v-rail", NetID: "power-5v", Color: "#c9433d", From: WiringEndpoint{PartID: "arduino", PinID: "5V"}, To: WiringEndpoint{PartID: "breadboard", PinID: "rail+"}, Points: []WiringPoint{{X: 180, Y: 620}, {X: 520, Y: 650}, {X: 590, Y: 215}}},
-			{ID: "wire-gnd-rail", NetID: "ground", Color: "#34373b", From: WiringEndpoint{PartID: "arduino", PinID: "GND"}, To: WiringEndpoint{PartID: "breadboard", PinID: "rail-"}, Points: []WiringPoint{{X: 198, Y: 646}, {X: 540, Y: 680}, {X: 590, Y: 515}}},
+			{ID: "wire-d9-r1", NetID: "drive", Color: "#e9652c", From: WiringEndpoint{PartID: "arduino", PinID: "D9"}, To: WiringEndpoint{PartID: "r1", PinID: "1"}, Points: []WiringPoint{{X: 395, Y: 255}, {X: 480, Y: 310}, {X: 680, Y: 354}}},
+			{ID: "wire-r1-led", NetID: "led-anode", Color: "#e1a326", From: WiringEndpoint{PartID: "r1", PinID: "2"}, To: WiringEndpoint{PartID: "led1", PinID: "anode"}, Points: []WiringPoint{{X: 880, Y: 354}, {X: 910, Y: 410}}},
+			{ID: "wire-led-gnd", NetID: "ground", Color: "#25282b", From: WiringEndpoint{PartID: "led1", PinID: "cathode"}, To: WiringEndpoint{PartID: "breadboard", PinID: "rail-"}, Points: []WiringPoint{{X: 985, Y: 465}, {X: 965, Y: 535}, {X: 650, Y: 535}}},
+			{ID: "wire-5v-rail", NetID: "power-5v", Color: "#d94841", From: WiringEndpoint{PartID: "arduino", PinID: "5V"}, To: WiringEndpoint{PartID: "breadboard", PinID: "rail+"}, Points: []WiringPoint{{X: 185, Y: 600}, {X: 510, Y: 600}, {X: 525, Y: 235}}},
+			{ID: "wire-gnd-rail", NetID: "ground", Color: "#34373b", From: WiringEndpoint{PartID: "arduino", PinID: "GND"}, To: WiringEndpoint{PartID: "breadboard", PinID: "rail-"}, Points: []WiringPoint{{X: 255, Y: 635}, {X: 535, Y: 635}, {X: 545, Y: 535}}},
 		},
-		Annotations: []WiringAnnotation{{ID: "note-safety", Text: "220 Ω limits LED current", X: 725, Y: 290}, {ID: "note-pin", Text: "Arduino digital pin 9", X: 355, Y: 65}},
+		Annotations: []WiringAnnotation{{ID: "note-safety", Text: "220 Ω current limiter", X: 725, Y: 300}, {ID: "note-pin", Text: "D9 output", X: 355, Y: 197}},
 		Steps: []WiringStep{
 			{ID: "step-1", Title: "Place the parts", Instruction: "Place the Arduino Uno beside the breadboard. Insert the 220 Ω resistor and red LED as shown.", PartIDs: []string{"arduino", "breadboard", "r1", "led1"}},
 			{ID: "step-2", Title: "Connect the rails", Instruction: "Connect Arduino 5V to the red rail and GND to the ground rail.", WireIDs: []string{"wire-5v-rail", "wire-gnd-rail"}},

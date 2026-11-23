@@ -12,6 +12,7 @@ type placedPad struct {
 	Pad         Pad
 	Center      Point
 	Corners     []Point
+	Polygon     []Point
 	NetID       string
 }
 
@@ -123,17 +124,15 @@ func validateManufacturing(def *Definition) []Check {
 		}
 	}
 
-	// Approximate pad/trace clearance with each pad's circumscribed radius.
-	// It is conservative and deterministic; polygon-level clearance can replace
-	// this without changing the source model.
+	// Polygon-level pad clearance uses the actual rotated native land pattern,
+	// including sampled circles/ovals, rather than a circumscribed-radius proxy.
 	for i := 0; i < len(allPads); i++ {
 		for j := i + 1; j < len(allPads); j++ {
 			a, b := allPads[i], allPads[j]
 			if a.NetID == "" || b.NetID == "" || a.NetID == b.NetID || !shareLayer(a.Pad.Layers, b.Pad.Layers) {
 				continue
 			}
-			minimum := padRadius(a.Pad) + padRadius(b.Pad) + float64(def.Rules.MinClearanceNM)
-			if pointDistance(a.Center, b.Center) < minimum {
+			if polygonDistance(a.Polygon, b.Polygon) < float64(def.Rules.MinClearanceNM) {
 				add("PAD_CLEARANCE", "error", "Different-net pads violate copper clearance", a.ComponentID+":"+a.Pad.ID, b.ComponentID+":"+b.Pad.ID)
 			}
 		}
@@ -146,8 +145,7 @@ func validateManufacturing(def *Definition) []Check {
 			if trace.NetID == pad.NetID || !containsString(pad.Pad.Layers, trace.Layer) {
 				continue
 			}
-			minimum := padRadius(pad.Pad) + float64(trace.WidthNM)/2 + float64(def.Rules.MinClearanceNM)
-			if pointToTraceDistance(pad.Center, trace) < minimum {
+			if tracePolygonDistance(trace, pad.Polygon)-float64(trace.WidthNM)/2 < float64(def.Rules.MinClearanceNM) {
 				add("PAD_TRACE_CLEARANCE", "error", "Trace violates clearance to a different-net pad", pad.ComponentID+":"+pad.Pad.ID, trace.ID)
 			}
 		}
@@ -207,17 +205,38 @@ func placePad(component Component, pad Pad) *placedPad {
 		fx, fy := float64(x), float64(y)
 		return Point{XNM: component.Position.XNM + int64(math.Round(fx*math.Cos(angle)-fy*math.Sin(angle))), YNM: component.Position.YNM + int64(math.Round(fx*math.Sin(angle)+fy*math.Cos(angle)))}
 	}
+	local := padLocalPolygon(pad)
+	polygon := make([]Point, 0, len(local))
+	for _, point := range local {
+		polygon = append(polygon, rotate(pad.XNM+point.XNM, pad.YNM+point.YNM))
+	}
 	hw, hh := pad.WidthNM/2, pad.HeightNM/2
 	return &placedPad{
 		ComponentID: component.ID, PinID: pad.PinID, Pad: pad,
 		Center:  rotate(pad.XNM, pad.YNM),
 		Corners: []Point{rotate(pad.XNM-hw, pad.YNM-hh), rotate(pad.XNM+hw, pad.YNM-hh), rotate(pad.XNM+hw, pad.YNM+hh), rotate(pad.XNM-hw, pad.YNM+hh)},
+		Polygon: polygon,
 	}
+}
+
+func padLocalPolygon(pad Pad) []Point {
+	shape := strings.ToLower(strings.TrimSpace(pad.Shape))
+	if shape == "circle" || shape == "oval" || shape == "roundrect" {
+		points := make([]Point, 0, 32)
+		rx, ry := float64(pad.WidthNM)/2, float64(pad.HeightNM)/2
+		for index := 0; index < 32; index++ {
+			angle := float64(index) * 2 * math.Pi / 32
+			points = append(points, Point{XNM: int64(math.Round(rx * math.Cos(angle))), YNM: int64(math.Round(ry * math.Sin(angle)))})
+		}
+		return points
+	}
+	hw, hh := pad.WidthNM/2, pad.HeightNM/2
+	return []Point{{XNM: -hw, YNM: -hh}, {XNM: hw, YNM: -hh}, {XNM: hw, YNM: hh}, {XNM: -hw, YNM: hh}}
 }
 
 func padConnected(def *Definition, netID string, pad *placedPad) bool {
 	for _, trace := range def.Traces {
-		if trace.NetID == netID && containsString(pad.Pad.Layers, trace.Layer) && pointToTraceDistance(pad.Center, trace) <= padRadius(pad.Pad)+float64(trace.WidthNM)/2 {
+		if trace.NetID == netID && containsString(pad.Pad.Layers, trace.Layer) && tracePolygonDistance(trace, pad.Polygon) <= float64(trace.WidthNM)/2 {
 			return true
 		}
 	}
@@ -287,7 +306,7 @@ func netCopperConnected(def *Definition, netID string, pads []*placedPad) bool {
 	u := newUnionFind(len(pads) + len(traces) + len(zones) + len(vias))
 	for pi, pad := range pads {
 		for ti, trace := range traces {
-			if containsString(pad.Pad.Layers, trace.Layer) && pointToTraceDistance(pad.Center, trace) <= padRadius(pad.Pad)+float64(trace.WidthNM)/2 {
+			if containsString(pad.Pad.Layers, trace.Layer) && tracePolygonDistance(trace, pad.Polygon) <= float64(trace.WidthNM)/2 {
 				u.join(pi, traceBase+ti)
 			}
 		}

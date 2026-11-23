@@ -22,19 +22,23 @@ func emptyDefinition(name string) Definition {
 		Schema: pcbSchema,
 		Name:   strings.TrimSpace(name),
 		Board: Board{
-			WidthNM:  50_000_000,
-			HeightNM: 30_000_000,
+			WidthNM:     50_000_000,
+			HeightNM:    30_000_000,
+			ThicknessNM: 1_600_000,
 			Layers: []Layer{
 				{ID: "F.Cu", Kind: "copper", Order: 0},
 				{ID: "B.Cu", Kind: "copper", Order: 1},
 			},
 		},
 		Rules: Rules{
-			MinClearanceNM:     defaultClearance,
-			MinTraceWidthNM:    defaultTraceWidth,
-			MinEdgeClearanceNM: defaultEdgeClearance,
-			MinDrillNM:         defaultMinDrill,
-			MinAnnularRingNM:   defaultAnnularRing,
+			MinClearanceNM:          defaultClearance,
+			MinTraceWidthNM:         defaultTraceWidth,
+			MinEdgeClearanceNM:      defaultEdgeClearance,
+			MinDrillNM:              defaultMinDrill,
+			MinAnnularRingNM:        defaultAnnularRing,
+			MinSolderMaskSliverNM:   defaultMaskSliver,
+			MinCopperToHoleNM:       defaultCopperToHole,
+			MinCourtyardClearanceNM: defaultCourtyardGap,
 		},
 		Components:        []Component{},
 		Nets:              []Net{},
@@ -76,6 +80,12 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	if len(def.Board.Layers) == 0 {
 		def.Board.Layers = emptyDefinition("").Board.Layers
 	}
+	if def.Board.ThicknessNM == 0 {
+		def.Board.ThicknessNM = 1_600_000
+	}
+	if def.Board.Cutouts == nil {
+		def.Board.Cutouts = []BoardCutout{}
+	}
 	if def.Rules.MinClearanceNM == 0 {
 		def.Rules.MinClearanceNM = defaultClearance
 	}
@@ -90,6 +100,15 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	}
 	if def.Rules.MinAnnularRingNM == 0 {
 		def.Rules.MinAnnularRingNM = defaultAnnularRing
+	}
+	if def.Rules.MinSolderMaskSliverNM == 0 {
+		def.Rules.MinSolderMaskSliverNM = defaultMaskSliver
+	}
+	if def.Rules.MinCopperToHoleNM == 0 {
+		def.Rules.MinCopperToHoleNM = defaultCopperToHole
+	}
+	if def.Rules.MinCourtyardClearanceNM == 0 {
+		def.Rules.MinCourtyardClearanceNM = defaultCourtyardGap
 	}
 	if def.Components == nil {
 		def.Components = []Component{}
@@ -141,6 +160,38 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 			def.Wiring.Steps = []WiringStep{}
 		}
 	}
+	if def.Mechanical != nil {
+		if def.Mechanical.Schema == "" {
+			def.Mechanical.Schema = mechanicalSchema
+		}
+		if def.Mechanical.Datum.Origin == "" {
+			def.Mechanical.Datum = defaultMechanicalDatum()
+		}
+		if def.Mechanical.Tolerances.XYNM == 0 {
+			def.Mechanical.Tolerances.XYNM = 200_000
+		}
+		if def.Mechanical.Tolerances.ZNM == 0 {
+			def.Mechanical.Tolerances.ZNM = 200_000
+		}
+		if def.Mechanical.Tolerances.PanelOpeningFitNM == 0 {
+			def.Mechanical.Tolerances.PanelOpeningFitNM = 300_000
+		}
+		if def.Mechanical.Tolerances.FastenerFitNM == 0 {
+			def.Mechanical.Tolerances.FastenerFitNM = 150_000
+		}
+		if def.Mechanical.MountingHoles == nil {
+			def.Mechanical.MountingHoles = []MechanicalHole{}
+		}
+		if def.Mechanical.ComponentEnvelopes == nil {
+			def.Mechanical.ComponentEnvelopes = []ComponentEnvelope{}
+		}
+		if def.Mechanical.PanelOpenings == nil {
+			def.Mechanical.PanelOpenings = []PanelOpening{}
+		}
+		if def.Mechanical.ClearanceZones == nil {
+			def.Mechanical.ClearanceZones = []MechanicalClearance{}
+		}
+	}
 	if err := structuralLimits(&def); err != nil {
 		return nil, nil, "", err
 	}
@@ -176,6 +227,20 @@ func structuralLimits(def *Definition) error {
 	}
 	if def.Wiring != nil && (len(def.Wiring.Parts) > 1_000 || len(def.Wiring.Wires) > 5_000 || len(def.Wiring.Steps) > 1_000) {
 		return errors.New("wiring definition exceeds native v1 object limits")
+	}
+	if def.Mechanical != nil && (len(def.Mechanical.MountingHoles) > 1_000 || len(def.Mechanical.ComponentEnvelopes) > 10_000 || len(def.Mechanical.PanelOpenings) > 2_000 || len(def.Mechanical.ClearanceZones) > 2_000) {
+		return errors.New("mechanical definition exceeds native v1 object limits")
+	}
+	if len(def.Board.Outline) > 16_384 {
+		return errors.New("board outline exceeds point limit")
+	}
+	if len(def.Board.Cutouts) > 2_000 {
+		return errors.New("board cutouts exceed limit")
+	}
+	for _, cutout := range def.Board.Cutouts {
+		if len(cutout.Polygon) > 16_384 {
+			return fmt.Errorf("board cutout %q exceeds point limit", cutout.ID)
+		}
 	}
 	for _, t := range def.Traces {
 		if len(t.Points) > 4_096 {
@@ -219,6 +284,7 @@ func semanticDiff(fromID, toID int64, a, b *Definition, fromHash, toHash string)
 		NetClasses:        diffByID(a.NetClasses, b.NetClasses, func(v NetClass) string { return v.ID }),
 		SimulationChanged: !equalJSON(a.Simulation, b.Simulation),
 		WiringChanged:     !equalJSON(a.Wiring, b.Wiring),
+		MechanicalChanged: !equalJSON(a.Mechanical, b.Mechanical),
 	}
 }
 

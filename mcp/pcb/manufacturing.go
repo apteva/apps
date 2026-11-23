@@ -113,15 +113,42 @@ func renderSilkscreenGerber(def *Definition, layerID string) []byte {
 }
 
 func renderEdgeGerber(def *Definition) []byte {
-	points := []Point{{XNM: 0, YNM: 0}, {XNM: def.Board.WidthNM, YNM: 0}, {XNM: def.Board.WidthNM, YNM: def.Board.HeightNM}, {XNM: 0, YNM: def.Board.HeightNM}, {XNM: 0, YNM: 0}}
 	var b strings.Builder
 	b.WriteString("G04 Apteva PCB Studio board outline*\n%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n%ADD10C,0.100000*%\nD10*\n")
-	fmt.Fprintf(&b, "%sD02*\n", gerberPoint(points[0]))
-	for _, point := range points[1:] {
-		fmt.Fprintf(&b, "%sD01*\n", gerberPoint(point))
+	writeContour := func(points []Point) {
+		if len(points) < 2 {
+			return
+		}
+		fmt.Fprintf(&b, "%sD02*\n", gerberPoint(points[0]))
+		for _, point := range append(points[1:], points[0]) {
+			fmt.Fprintf(&b, "%sD01*\n", gerberPoint(point))
+		}
+	}
+	writeContour(boardOutline(def.Board))
+	for _, cutout := range def.Board.Cutouts {
+		writeContour(boardCutoutContour(cutout))
 	}
 	b.WriteString("M02*\n")
 	return []byte(b.String())
+}
+
+func boardCutoutContour(cutout BoardCutout) []Point {
+	if cutout.Kind == "polygon" {
+		return cutout.Polygon
+	}
+	const segments = 32
+	rx, ry := float64(cutout.DiameterNM)/2, float64(cutout.DiameterNM)/2
+	if cutout.Kind == "slot" {
+		rx, ry = float64(cutout.WidthNM)/2, float64(cutout.HeightNM)/2
+	}
+	angle := float64(cutout.RotationUdeg) / 1e6 * math.Pi / 180
+	points := make([]Point, 0, segments)
+	for i := 0; i < segments; i++ {
+		t := 2 * math.Pi * float64(i) / segments
+		x, y := rx*math.Cos(t), ry*math.Sin(t)
+		points = append(points, Point{XNM: cutout.XNM + int64(math.Round(x*math.Cos(angle)-y*math.Sin(angle))), YNM: cutout.YNM + int64(math.Round(x*math.Sin(angle)+y*math.Cos(angle)))})
+	}
+	return points
 }
 
 func renderExcellon(def *Definition) []byte {
@@ -140,6 +167,13 @@ func renderExcellon(def *Definition) []byte {
 	for _, via := range def.Vias {
 		if via.DrillNM > 0 {
 			holes = append(holes, hole{Point: Point{XNM: via.XNM, YNM: via.YNM}, Drill: via.DrillNM})
+		}
+	}
+	if def.Mechanical != nil {
+		for _, mounting := range def.Mechanical.MountingHoles {
+			if mounting.DiameterNM > 0 {
+				holes = append(holes, hole{Point: Point{XNM: mounting.XNM, YNM: mounting.YNM}, Drill: mounting.DiameterNM})
+			}
 		}
 	}
 	drills := map[int64]bool{}

@@ -40,8 +40,8 @@ func renderSVG(def *Definition) []byte {
 	fmt.Fprintf(&b, `<g font-family="ui-sans-serif,system-ui,sans-serif"><text x="0" y="-2.25" font-size=".72" font-weight="700" fill="#f5f2ef">%s</text><text x="0" y="-1.25" font-size=".38" letter-spacing=".08" fill="#9f9993">APTEVA PCB · NATIVE LAYOUT</text><circle cx="%s" cy="-2.18" r=".18" fill="#f97316"/><text x="%s" y="-2.02" text-anchor="end" font-size=".38" fill="#d0ccc8">%d COMPONENTS · %d NETS</text></g>`, html.EscapeString(shortLabel(label, 48)), mm(def.Board.WidthNM-100_000), mm(def.Board.WidthNM-500_000), len(def.Components), len(def.Nets))
 	b.WriteByte('\n')
 	b.WriteString(`<g filter="url(#board-shadow)">` + "\n")
-	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#board-fill)" stroke="#f97316" stroke-width=".20"/>`, width, height)
-	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#grid)"/>`, width, height)
+	fmt.Fprintf(&b, `<polygon points="%s" fill="url(#board-fill)" stroke="#f97316" stroke-width=".20"/>`, svgPoints(boardOutline(def.Board)))
+	fmt.Fprintf(&b, `<polygon points="%s" fill="url(#grid)"/>`, svgPoints(boardOutline(def.Board)))
 	b.WriteByte('\n')
 
 	// Filled copper is drawn below routed traces and footprints.

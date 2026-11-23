@@ -46,6 +46,15 @@ func validateDefinition(def *Definition) ValidationReport {
 	if def.Rules.MinAnnularRingNM <= 0 {
 		add("RULE_ANNULAR_RING_INVALID", "error", "Minimum annular ring must be positive")
 	}
+	if def.Rules.MinSolderMaskSliverNM <= 0 {
+		add("RULE_MASK_SLIVER_INVALID", "error", "Minimum solder-mask sliver must be positive")
+	}
+	if def.Rules.MinCopperToHoleNM <= 0 {
+		add("RULE_COPPER_HOLE_INVALID", "error", "Minimum copper-to-hole clearance must be positive")
+	}
+	if def.Rules.MinCourtyardClearanceNM < 0 {
+		add("RULE_COURTYARD_INVALID", "error", "Courtyard clearance cannot be negative")
+	}
 
 	layers := map[string]Layer{}
 	orders := map[int]string{}
@@ -307,6 +316,9 @@ func validateDefinition(def *Definition) ValidationReport {
 	}
 
 	for _, check := range validateManufacturing(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
+	for _, check := range validateProductionGeometry(def) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
 	for _, check := range wiringChecks(def.Wiring) {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"image/png"
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,21 @@ func TestArduinoLEDWiringExampleIsNativeAndValid(t *testing.T) {
 	}
 	if decoded.Wiring == nil || !bytes.Contains(canonical, []byte(`"library_id":"arduino.uno.r3"`)) {
 		t.Fatal("wiring lost during normalization")
+	}
+}
+
+func TestArduinoUnoLibraryUsesPhysicalLandscapeProportions(t *testing.T) {
+	uno := wiringCatalog()["arduino.uno.r3"]
+	if uno.Width != 410 || uno.Height != 319 || uno.Width <= uno.Height {
+		t.Fatalf("Uno illustration dimensions=%gx%g", uno.Width, uno.Height)
+	}
+	if uno.Properties["physical_width_mm"] != 68.6 || uno.Properties["physical_height_mm"] != 53.4 {
+		t.Fatalf("Uno physical dimensions=%v x %v mm", uno.Properties["physical_width_mm"], uno.Properties["physical_height_mm"])
+	}
+	renderedRatio := uno.Width / uno.Height
+	physicalRatio := 68.6 / 53.4
+	if delta := renderedRatio - physicalRatio; delta < -0.002 || delta > 0.002 {
+		t.Fatalf("Uno aspect ratio=%g; want %g", renderedRatio, physicalRatio)
 	}
 }
 
@@ -60,7 +76,12 @@ func TestWiringValidationRejectsLEDWithoutSeriesResistor(t *testing.T) {
 func TestWiringRendersAndExports(t *testing.T) {
 	def := arduinoLEDExample()
 	svg := renderWiringSVG(&def, map[string]map[string]any{"led1": {"active": true}})
-	for _, want := range []string{"ARDUINO", "UNO R3", "Pin-connected native model", "wireShadow"} {
+	if path := os.Getenv("PCB_WIRING_SNAPSHOT"); path != "" {
+		if err := os.WriteFile(path, svg, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, want := range []string{"ARDUINO", "UNO R3", "Native physical connection model", "wireShadow"} {
 		if !strings.Contains(string(svg), want) {
 			t.Fatalf("SVG missing %q", want)
 		}
