@@ -287,9 +287,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "message_thread_archive",
-			Description: "Archive the mailbox threads holding these messages. Gmail only: removes the INBOX label from each thread (nothing is deleted; a new reply returns it to the inbox). Messages from other providers, or from a Gmail connection this project no longer owns, are skipped. At most 50 threads per call, most recent first; remaining reports the rest. Args: message_ids (Messaging message ids). Returns {archived, failed, skipped, remaining}.",
+			Description: "Update the mailbox threads holding these messages. Gmail only. action: archive (default; removes INBOX, a new reply returns the thread to the inbox) or mark_read (removes UNREAD, the thread stays in the inbox). Nothing is deleted. Messages from other providers, or from a Gmail connection this project no longer owns, are skipped. At most 50 threads per call, most recent first; remaining reports the rest. Args: message_ids (Messaging message ids), action?. Returns {action, archived (threads updated), failed, skipped, remaining}.",
 			InputSchema: schemaObject(map[string]any{
 				"message_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxArchiveMessageIDs},
+				"action":      map[string]any{"type": "string", "enum": []string{"archive", "mark_read"}},
 			}, []string{"message_ids"}),
 			Handler: a.toolMessageThreadArchive,
 		},
