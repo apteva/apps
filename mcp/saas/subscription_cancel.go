@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
@@ -186,9 +187,12 @@ func dbAccountsPendingSubscriptionCancel(db *sql.DB, pid string, limit int) ([]*
 	if limit <= 0 || limit > 500 {
 		limit = subscriptionCancelSweepLimit
 	}
-	query := accountSelect() + ` WHERE status=? AND subscription_id IS NOT NULL AND subscription_id > 0
+	// Cancelled accounts, plus active accounts with a cancel scheduled for
+	// the end of the paid period (v0.13.0), whose request is not done yet.
+	query := accountSelect() + ` WHERE (status=? OR (status<>? AND json_extract(metadata_json, '$.` + cancelScheduledKey + `.requested_at') IS NOT NULL))
+		AND subscription_id IS NOT NULL AND subscription_id > 0
 		AND COALESCE(json_extract(metadata_json, '$.` + subscriptionCancelKey + `.status'), '') <> ?`
-	args := []any{StatusCancelled, subscriptionCancelDone}
+	args := []any{StatusCancelled, StatusCancelled, subscriptionCancelDone}
 	if pid != "" {
 		query += ` AND project_id=?`
 		args = append(args, pid)
@@ -209,4 +213,72 @@ func dbAccountsPendingSubscriptionCancel(db *sql.DB, pid string, limit int) ([]*
 		out = append(out, acct)
 	}
 	return out, rows.Err()
+}
+
+// ─── v0.13.0: cancel at the end of the paid period ───────────────────
+
+const cancelScheduledKey = "cancel_scheduled"
+
+func cancelScheduledState(acct *Account) map[string]any {
+	if acct == nil {
+		return nil
+	}
+	return mapFromAny(mapFromAny(acct.Metadata)[cancelScheduledKey])
+}
+
+// scheduleAccountCancel handles an explicit cancel on a plan with
+// cancel_at_period_end: the subscription is cancelled at period end and the
+// account keeps access until Subscriptions reports subscription.ended, which
+// runs the cancelled transition and its actions. It returns scheduled=false
+// when the cancel should happen now instead (no subscription, plan without
+// cancel_at_period_end, or the account is already cancelled).
+func (a *App) scheduleAccountCancel(ctx *sdk.AppCtx, args map[string]any) (map[string]any, bool, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, false, err
+	}
+	acct, err := dbAccountGet(ctx.AppDB(), pid, strArg(args, "account_id"))
+	if err != nil || acct == nil {
+		return nil, false, firstErr(err, errors.New("account not found"))
+	}
+	if acct.Status == StatusCancelled || int64PtrValue(acct.SubscriptionID) == 0 || !a.accountCancelAtPeriodEnd(ctx, pid, acct) {
+		return nil, false, nil
+	}
+	db := ctx.AppDB()
+	scheduled := cancelScheduledState(acct)
+	if len(scheduled) == 0 {
+		scheduled = map[string]any{
+			"requested_at": time.Now().UTC().Format(time.RFC3339),
+			"reason":       firstNonEmpty(strings.TrimSpace(strArg(args, "reason")), subscriptionCancelReason),
+			"actor":        actor(args),
+		}
+		meta := mapFromAny(acct.Metadata)
+		meta[cancelScheduledKey] = scheduled
+		if err := dbAccountSetMetadata(db, pid, acct.ID, meta); err != nil {
+			return nil, false, err
+		}
+		_ = recordEvent(db, pid, acct.ID, "cancel.scheduled", actor(args), map[string]any{"subscription_id": int64PtrValue(acct.SubscriptionID), "reason": scheduled["reason"]})
+	}
+	state := a.cancelAccountSubscription(ctx, pid, acct, subscriptionCancelOpts{
+		AtPeriodEnd: true,
+		Reason:      strArg(scheduled, "reason"),
+		Actor:       firstNonEmpty(strArg(scheduled, "actor"), actor(args)),
+	})
+	if cancelAt := strArg(state, "cancel_at"); cancelAt != "" && strArg(scheduled, "cancel_at") != cancelAt {
+		if fresh, err := dbAccountGet(db, pid, acct.ID); err == nil && fresh != nil {
+			meta := mapFromAny(fresh.Metadata)
+			sched := mapFromAny(meta[cancelScheduledKey])
+			sched["cancel_at"] = cancelAt
+			meta[cancelScheduledKey] = sched
+			_ = dbAccountSetMetadata(db, pid, acct.ID, meta)
+		}
+	}
+	updated, err := dbAccountGet(db, pid, acct.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	return map[string]any{
+		"account": updated, "changed": false, "scheduled": true,
+		"cancel_scheduled": cancelScheduledState(updated), "subscription_cancel": state,
+	}, true, nil
 }
