@@ -45,6 +45,10 @@ type platformStub struct {
 	managedGrantRequests        []sdk.ManagedConnectionGrantRequest
 	integrationCalls            []integrationToolCall
 	integrationResult           *sdk.ExecuteResult
+	// messagingStatuses are the send_message statuses returned in order;
+	// once empty, sends return "sent".
+	messagingStatuses []string
+	messagingSends    int64
 }
 
 type callAppCall struct {
@@ -116,6 +120,17 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	}
 	var body map[string]any
 	switch tool {
+	case "send_message":
+		p.messagingSends++
+		status := "sent"
+		if len(p.messagingStatuses) > 0 {
+			status = p.messagingStatuses[0]
+			p.messagingStatuses = p.messagingStatuses[1:]
+		}
+		body = map[string]any{"id": 900 + p.messagingSends, "channel": input["channel"], "status": status}
+		if status == "failed" {
+			body["status_reason"] = "provider rejected the message"
+		}
 	case "auth_orgs_create":
 		body = map[string]any{"organization": map[string]any{"id": 101, "slug": input["slug"], "name": input["name"]}}
 	case "auth_users_create":
@@ -299,8 +314,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.13.0" {
-		t.Errorf("manifest.Version=%q, want 0.13.0", m.Version)
+	if m.Version != "0.13.1" {
+		t.Errorf("manifest.Version=%q, want 0.13.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")

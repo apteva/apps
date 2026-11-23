@@ -36,36 +36,31 @@ type accountEmail struct {
 	Detail         map[string]any
 }
 
-// sendAccountEmail delivers one email to the account owner via the
-// messaging app. Returns true only when messaging accepted the send.
+// sendAccountEmail stores one email to the account owner in the outbox and
+// tries to send it through the messaging app. It returns true only when
+// messaging accepted the send. A failed send stays in the outbox and is
+// retried by the email-outbox worker; it never fails the caller.
 func (a *App) sendAccountEmail(ctx *sdk.AppCtx, pid string, acct *Account, msg accountEmail) bool {
 	if acct == nil || strings.TrimSpace(acct.OwnerEmail) == "" {
 		return false
 	}
-	input := map[string]any{
-		"_project_id": pid,
-		"to":          "mailto:" + strings.TrimSpace(acct.OwnerEmail),
-		"subject":     msg.Subject,
-		"body":        msg.Body,
-	}
-	if msg.BodyHTML != "" {
-		input["body_html"] = msg.BodyHTML
-	}
-	if msg.IdempotencyKey != "" {
-		input["idempotency_key"] = msg.IdempotencyKey
-	}
-	detail := map[string]any{"kind": msg.Kind, "recipient_email": acct.OwnerEmail}
-	for k, v := range msg.Detail {
-		detail[k] = v
-	}
-	var out map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("messaging", "send_message", input, &out); err != nil {
-		detail["error"] = err.Error()
+	row, err := dbEmailOutboxEnqueue(ctx.AppDB(), pid, acct, msg)
+	if err != nil {
+		detail := emailEventDetail(msg.Kind, acct.OwnerEmail, msg.Detail)
+		detail["error"] = "outbox: " + err.Error()
 		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "notification.failed", "saas", detail)
 		return false
 	}
-	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "notification.sent", "saas", detail)
-	return true
+	switch row.Status {
+	case emailOutboxSent:
+		return true
+	case emailOutboxAbandoned:
+		return false
+	}
+	if !row.Due {
+		return false
+	}
+	return a.attemptOutboxEmail(ctx, row)
 }
 
 // planDisplayName resolves a human-readable plan name for email copy,
