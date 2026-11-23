@@ -10,9 +10,13 @@ import (
 // archives at most 50 threads, most recent first.
 const mailboxArchiveMessageLimit = 2000
 
+// Closing marks the mailbox thread read; it stays in the inbox.
+const closeMailboxAction = "mark_read"
+
 // mailboxArchiveResult is Messaging's message_thread_archive reply, or the
 // error that stopped it. Closing never fails because of it.
 type mailboxArchiveResult struct {
+	Action    string           `json:"action,omitempty"`
 	Archived  []map[string]any `json:"archived,omitempty"`
 	Failed    []map[string]any `json:"failed,omitempty"`
 	Skipped   int              `json:"skipped,omitempty"`
@@ -20,12 +24,12 @@ type mailboxArchiveResult struct {
 	Error     string           `json:"error,omitempty"`
 }
 
-// archiveConversationMailbox archives the provider mailbox threads behind an
-// email conversation that was just closed. Messaging decides what can be
-// archived (today Gmail threads from a mailbox this project owns); other
-// providers are skipped there. Returns nil when there is nothing to ask:
-// no Messaging binding, not email, no messages from the bound install, or a
-// Messaging version without the tool.
+// archiveConversationMailbox marks read the provider mailbox threads behind
+// an email conversation that was just closed (closeMailboxAction). Messaging
+// decides which threads it can update (today Gmail threads from a mailbox
+// this project owns); other providers are skipped there. Returns nil when
+// there is nothing to ask: no Messaging binding, not email, no messages from
+// the bound install, or a Messaging version without the tool.
 func archiveConversationMailbox(ctx *sdk.AppCtx, pid string, convo *Conversation) *mailboxArchiveResult {
 	if convo == nil || convo.Channel != channelEmail || messagingBound(ctx) == nil {
 		return nil
@@ -58,11 +62,11 @@ func archiveConversationMailbox(ctx *sdk.AppCtx, pid string, convo *Conversation
 		return nil
 	}
 	var out mailboxArchiveResult
-	if err := callMessagingTool(ctx, "message_thread_archive", map[string]any{"_project_id": pid, "message_ids": ids}, &out); err != nil {
+	if err := callMessagingTool(ctx, "message_thread_archive", map[string]any{"_project_id": pid, "message_ids": ids, "action": closeMailboxAction}, &out); err != nil {
 		if messagingToolMissing(err) {
 			return nil
 		}
-		ctx.Logger().Warn("crm mailbox archive failed", "project_id", pid, "conversation_id", convo.ID, "err", err)
+		ctx.Logger().Warn("crm mailbox update failed", "project_id", pid, "conversation_id", convo.ID, "err", err)
 		return &mailboxArchiveResult{Error: err.Error()}
 	}
 	if len(out.Archived) == 0 && len(out.Failed) == 0 && out.Remaining == 0 {
