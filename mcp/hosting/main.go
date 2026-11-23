@@ -21,7 +21,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "2.3.0"
+const appVersion = "2.4.0"
 
 type App struct{}
 
@@ -78,6 +78,7 @@ func (a *App) tick(ctx *sdk.AppCtx) error {
 	a.expireReservations(ctx)
 	a.refreshMachines(ctx)
 	a.assignWaitingTenants(ctx)
+	a.alertStuckTenants(ctx)
 	ids, err := dueOperationIDs(ctx.AppDB(), 25)
 	if err != nil {
 		return err
@@ -131,11 +132,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Profiles and products
 		{Name: "hosting_product_list", Description: "List what can run on a tenant: Apteva, Docker images, WordPress, dedicated machines.", InputSchema: schemaObject(nil, nil), Handler: a.toolProductList},
 		{Name: "hosting_profile_list", Description: "List runtime profiles (where a tenant runs and what runs on it).", InputSchema: schemaObject(map[string]any{"include_archived": boolSchema()}, nil), Handler: a.toolProfileList},
-		{Name: "hosting_profile_upsert", Description: "Create or update a runtime profile. backend: container, machine_pool (needs pool_key) or machine_on_demand (needs settings.provider and settings.server_type; optional region, image, platform, setup, provider_connection_id). presale_limit (machine_pool only): how many orders to take ahead of hardware; 0 sells free machines only, null removes the limit (unbounded waiting line). presale_note: free text shown with availability, e.g. ready within 10 days.",
+		{Name: "hosting_profile_upsert", Description: "Create or update a runtime profile. backend: container, machine_pool (needs pool_key) or machine_on_demand (needs settings.provider and settings.server_type; optional region, image, platform, setup, provider_connection_id). presale_limit (machine_pool only): how many orders to take ahead of hardware; 0 sells free machines only, null removes the limit (unbounded waiting line). presale_note: free text shown with availability, e.g. ready within 10 days. presale_ready_days: the promise in days; a tenant that has to wait gets due_at = order time + this, and hosting.tenant.stuck fires when it passes.",
 			InputSchema: schemaObject(map[string]any{
 				"key": strSchema(), "name": strSchema(), "backend": strSchema(), "product_key": strSchema(), "pool_key": strSchema(), "image": strSchema(),
 				"cpu": map[string]any{"type": "number"}, "memory_mb": intSchema(), "storage_mb": intSchema(), "settings": objSchema(), "status": strSchema(), "metadata": objSchema(),
-				"presale_limit": intSchema(), "presale_note": strSchema(),
+				"presale_limit": intSchema(), "presale_note": strSchema(), "presale_ready_days": intSchema(),
 			}, []string{"key", "backend", "product_key"}), Handler: a.toolProfileUpsert},
 
 		// Pools

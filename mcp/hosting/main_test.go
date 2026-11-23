@@ -38,21 +38,22 @@ type fakeInstance struct {
 
 type platformStub struct {
 	tk.BasePlatformClient
-	mu            sync.Mutex
-	calls         []callAppCall
-	commands      []string
-	ingress       []sdk.IngressExposeRequest
-	unexposed     []string
-	instances     map[int64]*fakeInstance
-	nextInstance  int64
-	failStep      string // access/reset step that exits non-zero
-	pendingClean  int    // verify_clean polls that report "not yet"
-	createErr     error
-	destroyCalled []int64
-	osVersion     string            // sw_vers / os-release answer
-	onCall        map[string]func() // hooks run before a tool, outside the lock
-	runErrStarted bool              // containers_run fails after starting the container
-	workloads     []map[string]any  // what containers_list returns
+	mu             sync.Mutex
+	calls          []callAppCall
+	commands       []string
+	ingress        []sdk.IngressExposeRequest
+	unexposed      []string
+	instances      map[int64]*fakeInstance
+	nextInstance   int64
+	failStep       string // access/reset step that exits non-zero
+	pendingClean   int    // verify_clean polls that report "not yet"
+	createErr      error
+	destroyCalled  []int64
+	osVersion      string            // sw_vers / os-release answer
+	activationLock string            // system_profiler Activation Lock Status answer
+	onCall         map[string]func() // hooks run before a tool, outside the lock
+	runErrStarted  bool              // containers_run fails after starting the container
+	workloads      []map[string]any  // what containers_list returns
 }
 
 type callAppCall struct {
@@ -153,6 +154,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		op := opIDRE.FindString(cmd)
 		if strings.Contains(cmd, "sw_vers") || strings.Contains(cmd, "os-release") {
 			return reply(map[string]any{"output": firstNonEmpty(p.osVersion, "15.3") + "\n", "exit_code": 0})
+		}
+		if strings.Contains(cmd, "Activation Lock Status") {
+			return reply(map[string]any{"output": p.activationLock + "\n", "exit_code": 0})
 		}
 		if p.failStep != "" && strings.Contains(cmd, "'"+p.failStep+"'") {
 			return reply(map[string]any{"output": "boom", "exit_code": 1})
@@ -1514,8 +1518,167 @@ func TestMigration007KeepsMachineHolds(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO hosting_reservations (id, profile_key, machine_id, external_ref, status, expires_at) VALUES ('hrs_dup', 'mac-m4', 7, 'acct-4', 'held', '2099-01-01 00:00:00')`); err == nil {
 		t.Fatal("a machine must still carry only one live hold")
 	}
-	p, err := dbProfileGet(db, "mac-m4")
-	if err != nil || p.PresaleLimit != nil {
-		t.Fatalf("profile after 007 = %+v, %v", p, err)
+	var limit sql.NullInt64
+	if err := db.QueryRow(`SELECT presale_limit FROM hosting_profiles WHERE key='mac-m4'`).Scan(&limit); err != nil || limit.Valid {
+		t.Fatalf("presale_limit after 007 = %v, %v", limit, err)
+	}
+}
+
+// ─── Alerts (2.4.0) ──────────────────────────────────────────────────────
+
+type recordedEvent struct {
+	Topic string
+	Data  map[string]any
+}
+
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []recordedEvent
+}
+
+func (r *eventRecorder) EmitWithProject(topic, _ string, data any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, _ := json.Marshal(data)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	r.events = append(r.events, recordedEvent{topic, m})
+}
+
+func (r *eventRecorder) take(topic string) []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []map[string]any
+	var rest []recordedEvent
+	for _, e := range r.events {
+		if e.Topic == topic {
+			out = append(out, e.Data)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	r.events = rest
+	return out
+}
+
+func recordEvents(ctx *sdk.AppCtx) *eventRecorder {
+	r := &eventRecorder{}
+	ctx.SetEmitter(r)
+	return r
+}
+
+func TestMachineOfflineAndOnlineEvents(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 2)
+	ev := recordEvents(ctx)
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.machine.offline"); len(got) != 0 {
+		t.Fatalf("no change, no event: %v", got)
+	}
+	stub.instances[100].Status = "stopped"
+	_ = a.tick(ctx)
+	_ = a.tick(ctx)
+	got := ev.take("hosting.machine.offline")
+	if len(got) != 1 || got[0]["machine_id"] != float64(ids[0]) || got[0]["pool_key"] != "macs" {
+		t.Fatalf("offline events = %v", got)
+	}
+	stub.instances[100].Status = "ready"
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.machine.online"); len(got) != 1 {
+		t.Fatalf("online events = %v", got)
+	}
+	// A Mac being erased is expected to drop off: no alert.
+	if _, err := db.Exec(`UPDATE hosting_machines SET state='cleaning' WHERE id=?`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	stub.instances[101].Status = "stopped"
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.machine.offline"); len(got) != 0 {
+		t.Fatalf("offline while cleaning = %v", got)
+	}
+}
+
+func TestPresaleDueDateAndStuckAlert(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_limit": float64(3), "presale_ready_days": float64(10)})
+	if av := avail(t, a, ctx); av["presale_ready_days"] != float64(10) {
+		t.Fatalf("availability = %v", av)
+	}
+	ev := recordEvents(ctx)
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-d", "profile": "mac-m4", "owner_email": "d@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	tn := tenant(t, db, id)
+	due, ok := parseSQLTime(tn.DueAt)
+	if !ok || due.Sub(now()) < 239*time.Hour || due.Sub(now()) > 241*time.Hour {
+		t.Fatalf("due_at = %q", tn.DueAt)
+	}
+	// A later change to the promise does not move an existing customer's date.
+	call(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_ready_days": float64(30)})
+	if tenant(t, db, id).DueAt != tn.DueAt {
+		t.Fatal("due_at must be fixed at order time")
+	}
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.tenant.stuck"); len(got) != 0 {
+		t.Fatalf("not due yet: %v", got)
+	}
+	advanceClock(t, 11*24*time.Hour)
+	_ = a.tick(ctx)
+	_ = a.tick(ctx)
+	got := ev.take("hosting.tenant.stuck")
+	if len(got) != 1 || got[0]["tenant_id"] != id || got[0]["reason"] != "presale_due" || got[0]["due_at"] == "" {
+		t.Fatalf("stuck events = %v", got)
+	}
+
+	// A tenant left in a transitional status past stuck_after_minutes.
+	other := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-e", "profile": "mac-m4", "owner_email": "e@example.com", "ssh_keys": testKey})["tenant"]), "id")
+	if _, err := db.Exec(`UPDATE hosting_tenants SET status='suspending', updated_at=? WHERE id=?`, sqlTime(now().Add(-4*time.Hour)), other); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.tick(ctx)
+	got = ev.take("hosting.tenant.stuck")
+	if len(got) != 1 || got[0]["tenant_id"] != other || got[0]["reason"] != "status:suspending" {
+		t.Fatalf("status stuck events = %v", got)
+	}
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "web", "backend": "container", "product_key": "ssh-access", "presale_ready_days": float64(5)}, "only for machine_pool")
+	callErr(t, a.toolProfileUpsert, ctx, map[string]any{"key": "mac-m4", "backend": "machine_pool", "product_key": "ssh-access", "presale_ready_days": float64(0)}, "1 or more")
+}
+
+func TestActivationLockBlocksInspect(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupMacPool(t, a, ctx, stub, 0)
+	stub.activationLock = "Enabled"
+	stub.addInstance(400, "macos", "ready")
+	mid := int64Arg(mapFromAny(call(t, a.toolMachineAdd, ctx, map[string]any{"pool_key": "macs", "instance_id": 400, "serial": "S400", "management_user": "admin"})["machine"]), "id")
+	call(t, a.toolMachineUpdate, ctx, map[string]any{"machine_id": mid, "validated": true, "confirm": fmt.Sprint(mid)})
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid})
+	if m := machine(t, db, mid); m.State == MachineAvailable || !strings.Contains(m.StateReason, "Activation Lock") {
+		t.Fatalf("machine with Activation Lock = %s (%s)", m.State, m.StateReason)
+	}
+	stub.activationLock = "Disabled"
+	call(t, a.toolMachineInspect, ctx, map[string]any{"machine_id": mid, "reviewed": true})
+	if m := machine(t, db, mid); m.State != MachineAvailable {
+		t.Fatalf("after Activation Lock off = %s (%s)", m.State, m.StateReason)
+	}
+}
+
+func TestResetExitReasons(t *testing.T) {
+	for _, c := range []struct {
+		step string
+		code int
+		want string
+	}{
+		{"verify_clean", 16, "re-enrollment not verified"},
+		{"verify_clean", 14, "no receipt yet"},
+		{"verify_clean", 13, "serial number"},
+		{"wipe", 15, "RecoveryValidated"},
+		{"reinstall", 1, "secure token"},
+		{"wipe", 99, "unexpected"},
+	} {
+		if got := resetExitReason(c.step, c.code); !strings.Contains(got, c.want) {
+			t.Errorf("%s exit %d = %q, want %q", c.step, c.code, got, c.want)
+		}
 	}
 }

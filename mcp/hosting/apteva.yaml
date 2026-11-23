@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.3.0
+version: 2.4.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
@@ -84,7 +84,7 @@ provides:
     - name: hosting_profile_list
       description: "List runtime profiles (where a tenant runs and what runs on it)."
     - name: hosting_profile_upsert
-      description: "Create or update a runtime profile: backend (container, machine_pool, machine_on_demand), product, pool or provider settings, and presale_limit / presale_note for pool profiles."
+      description: "Create or update a runtime profile: backend (container, machine_pool, machine_on_demand), product, pool or provider settings, and presale_limit / presale_note / presale_ready_days for pool profiles."
     - name: hosting_pool_list
       description: "List machine pools with machine counts per state."
     - name: hosting_pool_upsert
@@ -151,5 +151,10 @@ config_schema:
     default: "30"
     label: Reservation hold (minutes)
     description: How long a pool machine stays held for a checkout before it goes back on sale.
+  - name: stuck_after_minutes
+    type: text
+    default: "180"
+    label: Stuck tenant alert (minutes)
+    description: How long a tenant may stay provisioning, suspending, resuming or releasing before hosting.tenant.stuck is emitted.
 
 upgrade_policy: auto-patch

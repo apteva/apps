@@ -164,6 +164,33 @@ with `hosting_tenant_resolve`: `resume`, `release`, or `force_clean` (erase a
 validated macOS machine without revoking first). It needs `reviewed: true`
 and `confirm` equal to the tenant id.
 
+## Alerts
+
+Hosting emits events that Messaging or a Function can turn into an email or
+chat message. Nothing needs polling.
+
+| Event | When |
+|---|---|
+| `hosting.operation.failed` | a run failed (step and error included); its machine is quarantined |
+| `hosting.machine.offline` / `hosting.machine.online` | the minute refresh sees a machine drop off or come back. Not sent while the machine is being erased (state `cleaning`): that run reports its own failure |
+| `hosting.tenant.stuck` | once per situation: a waiting tenant past its `due_at` (`reason: presale_due`), or a tenant still provisioning, suspending, resuming or releasing after `stuck_after_minutes` (default 180; `reason: status:<status>`) |
+
+`presale_ready_days` on a pool profile is the promise made to customers who
+wait: a tenant that has to wait gets `due_at` = order time + that many days.
+The date is fixed at order time; changing the profile later does not move it.
+
+Erase failures name the missing piece in plain words (for example "device
+management re-enrollment not verified in the receipt", or "Mac unreachable
+… stopped at the setup screens"). Inspect refuses a Mac with Activation
+Lock on.
+
+**Unattended erase needs device management.** After an erase the Mac has
+no user, SSH key or Instances connection. It only comes back on its own
+through Automated Device Enrollment with an MDM that skips the setup screens
+and restores the management account and SSH access, then writes the receipt
+that `verify-clean.sh` checks. Hosting does not ship that part: build and
+test it on the first machine before marking machines `validated`.
+
 ## Operator
 
 The panel has three views: tenants (create, suspend, resume, restart,

@@ -332,6 +332,9 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 				}
 			}
 			t.Status = TenantWaitingForMachine
+			if profile.PresaleReadyDays != nil && *profile.PresaleReadyDays > 0 {
+				t.DueAt = sqlTime(now().Add(time.Duration(*profile.PresaleReadyDays) * 24 * time.Hour))
+			}
 		} else {
 			t.MachineID = machine.ID
 		}
@@ -986,12 +989,13 @@ type Availability struct {
 	Available *int   `json:"available,omitempty"`
 	// Machines and Presale split Available: free machines ready now, and
 	// orders still taken ahead of hardware (machine_pool only).
-	Machines     *int   `json:"machines,omitempty"`
-	Presale      *int   `json:"presale,omitempty"`
-	PresaleLimit *int64 `json:"presale_limit,omitempty"`
-	PresaleNote  string `json:"presale_note,omitempty"`
-	Waiting      int    `json:"waiting,omitempty"`
-	Reason       string `json:"reason,omitempty"`
+	Machines         *int   `json:"machines,omitempty"`
+	Presale          *int   `json:"presale,omitempty"`
+	PresaleLimit     *int64 `json:"presale_limit,omitempty"`
+	PresaleNote      string `json:"presale_note,omitempty"`
+	PresaleReadyDays *int64 `json:"presale_ready_days,omitempty"`
+	Waiting          int    `json:"waiting,omitempty"`
+	Reason           string `json:"reason,omitempty"`
 }
 
 func availability(db *sql.DB, profile *Profile) (*Availability, error) {
@@ -1021,7 +1025,7 @@ func availability(db *sql.DB, profile *Profile) (*Availability, error) {
 		}
 		total := machines + presale
 		out.Available, out.Machines, out.Presale = &total, &machines, &presale
-		out.PresaleLimit, out.PresaleNote = profile.PresaleLimit, profile.PresaleNote
+		out.PresaleLimit, out.PresaleNote, out.PresaleReadyDays = profile.PresaleLimit, profile.PresaleNote, profile.PresaleReadyDays
 		out.ForSale = total > 0
 		if !out.ForSale {
 			out.Reason = "no machine available"
@@ -1138,4 +1142,60 @@ func (a *App) resolveStuckTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant,
 	kickOperation(a, ctx, op.ID)
 	t, err = dbTenantGet(db, t.ID)
 	return t, op, err
+}
+
+// stuckAfter is how long a tenant may sit in a transitional status
+// (provisioning, suspending, resuming, releasing) before operators are told.
+func stuckAfter(ctx *sdk.AppCtx) time.Duration {
+	mins := 180
+	if v := configString(ctx, "stuck_after_minutes", ""); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 10 && n <= 7*24*60 {
+			mins = n
+		}
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// alertStuckTenants emits hosting.tenant.stuck once per stuck situation: a
+// waiting tenant past its due_at (the presale promise), or a tenant left in a
+// transitional status longer than stuck_after_minutes. The alert is sent
+// again only if the tenant gets unstuck and stuck again, or stuck another way.
+func (a *App) alertStuckTenants(ctx *sdk.AppCtx) {
+	db := ctx.AppDB()
+	nowS, cutoff := sqlTime(now()), sqlTime(now().Add(-stuckAfter(ctx)))
+	rows, err := db.Query(`SELECT id, external_ref, profile_key, status, COALESCE(machine_id,0), COALESCE(due_at,''), updated_at, stuck_alert,
+		CASE
+			WHEN status='waiting_for_machine' AND due_at IS NOT NULL AND due_at<=? THEN 'presale_due'
+			WHEN status IN ('provisioning','suspending','resuming','releasing') AND updated_at<=? THEN 'status:'||status
+			ELSE ''
+		END
+		FROM hosting_tenants WHERE stuck_alert!='' OR (status='waiting_for_machine' AND due_at IS NOT NULL) OR status IN ('provisioning','suspending','resuming','releasing')
+		LIMIT 500`, nowS, cutoff)
+	if err != nil {
+		return
+	}
+	type stuck struct {
+		id, ref, profile, status, due, since, last, reason string
+		machine                                            int64
+	}
+	var list []stuck
+	for rows.Next() {
+		var s stuck
+		if rows.Scan(&s.id, &s.ref, &s.profile, &s.status, &s.machine, &s.due, &s.since, &s.last, &s.reason) == nil && s.reason != s.last {
+			list = append(list, s)
+		}
+	}
+	rows.Close()
+	for _, s := range list {
+		// updated_at is left alone: it is the "since" of the next check.
+		if _, err := db.Exec(`UPDATE hosting_tenants SET stuck_alert=? WHERE id=? AND stuck_alert=?`, s.reason, s.id, s.last); err != nil || s.reason == "" {
+			continue
+		}
+		msg := map[bool]string{true: "waiting past the promised date", false: "still " + s.status + " after " + stuckAfter(ctx).String()}[s.reason == "presale_due"]
+		_ = recordEvent(db, s.id, "tenant.stuck", "worker", map[string]any{"reason": s.reason, "due_at": s.due})
+		ctx.Logger().Info("hosting tenant stuck", "tenant_id", s.id, "reason", s.reason)
+		ctx.Emit("hosting.tenant.stuck", map[string]any{"tenant_id": s.id, "external_ref": s.ref, "profile": s.profile, "status": s.status,
+			"machine_id": s.machine, "reason": s.reason, "message": msg, "due_at": s.due, "since": s.since})
+	}
 }
