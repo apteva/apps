@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.6.1
+version: 0.6.2
 description: Generic OpenAI-compatible text, image, audio, and embedding access with streaming, per-minute limits, admission hooks, and provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 icon: /ui/icon.svg
@@ -151,6 +151,8 @@ provides:
       description: A provider route failed and may have triggered failover.
     - name: llm.request.denied
       description: The admission hook denied a request, or could not be reached and the hook fails closed.
+    - name: llm.settlement.stuck
+      description: A settlement has failed repeatedly and is now retried hourly. Carries the admission ref, app, and last error.
 runtime:
   kind: source
   source:
@@ -194,7 +196,7 @@ const (
 	imageTokenEstimate   = 1024
 )
 
-const appVersion = "0.6.1"
+const appVersion = "0.6.2"
 
 type App struct {
 	httpClient *http.Client
@@ -573,7 +575,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"limits":            map[string]any{"type": "object"},
 			"disabled":          map[string]any{"type": "boolean"},
 			"fallback_policy":   map[string]any{"type": "object"},
-			"admission":         map[string]any{"type": "object", "description": "Admission hook: {app, authorize_tool, settle_tool, fail_mode: closed|open, timeout_ms}. Omit or null to clear. A token's own admission overrides the policy's."},
+			"admission":         map[string]any{"type": "object", "description": "Admission hook: {app, authorize_tool, settle_tool, fail_mode: closed|open, timeout_ms, input_estimate_margin (default 1.25), stuck_after_attempts (default 10)}. Omit or null to clear. A token's own admission overrides the policy's."},
 		}, nil), Handler: a.toolPolicySet},
 		{Name: "llm_tokens_create", Description: "Issue an OpenAI-compatible bearer token.", InputSchema: schemaObject(map[string]any{
 			"project_id":   map[string]any{"type": "string"},
@@ -583,7 +585,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"expires_at":   map[string]any{"type": "string"},
 			"label":        map[string]any{"type": "string", "description": "Human-readable name, for example Production server."},
 			"metadata":     map[string]any{"type": "object", "description": "Opaque labels such as {account, project}; passed through, never interpreted."},
-			"admission":    map[string]any{"type": "object", "description": "Admission hook for this token: {app, authorize_tool, settle_tool, fail_mode, timeout_ms}."},
+			"admission":    map[string]any{"type": "object", "description": "Admission hook for this token: {app, authorize_tool, settle_tool, fail_mode, timeout_ms, input_estimate_margin, stuck_after_attempts}."},
 			"prefix":       map[string]any{"type": "string", "description": "Token prefix ending in '_', for example rl_live_. Defaults to llm_."},
 		}, nil), Handler: a.toolTokenCreate},
 		{Name: "llm_tokens_list", Description: "List issued LLM tokens without exposing token secrets.", InputSchema: schemaObject(map[string]any{
@@ -607,7 +609,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"project_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
 		}, []string{"name"}), Handler: a.toolPublicModelDelete},
 		{Name: "llm_settlements_list", Description: "List settlement deliveries to admission hooks, including pending retries.", InputSchema: schemaObject(map[string]any{
-			"project_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string", "description": "pending, delivering, or delivered."}, "limit": map[string]any{"type": "integer"},
+			"project_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string", "description": "pending, delivering, delivered, or stuck (still retrying hourly after repeated failures)."}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolOutboxList},
 		{Name: "llm_tokens_revoke", Description: "Revoke an LLM token by id/token, or revoke all tokens for a subject.", InputSchema: schemaObject(map[string]any{
 			"project_id":   map[string]any{"type": "string"},
@@ -1760,7 +1762,9 @@ func (a *App) toolChatCompleteCtx(reqCtx context.Context, ctx *sdk.AppCtx, args 
 	if err != nil {
 		return nil, err
 	}
-	args["_llm_request_id"] = firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
+	requestID := firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
+	stripToolOnlyArgs(args)
+	args["_llm_request_id"] = requestID
 	res, err := a.executeChatContext(reqCtx, ctx, ident, args)
 	if err != nil {
 		return nil, err
@@ -1773,6 +1777,21 @@ func (a *App) toolChatCompleteCtx(reqCtx context.Context, ctx *sdk.AppCtx, args 
 		object["apteva_usage"] = usageEventPayload(res.UsageEvent, nil)
 	}
 	return out, nil
+}
+
+// stripToolOnlyArgs removes MCP-only arguments before the rest of args is
+// used as the provider request body: platform-injected underscore keys
+// (_project_id, ...) and the identity and idempotency fields the tool reads
+// itself. Call it after identityFromArgs and after reading request_id.
+func stripToolOnlyArgs(args map[string]any) {
+	for k := range args {
+		if strings.HasPrefix(k, "_") {
+			delete(args, k)
+		}
+	}
+	for _, k := range []string{"project_id", "subject_type", "subject_id", "request_id"} {
+		delete(args, k)
+	}
 }
 
 func (a *App) toolChatComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1817,7 +1836,9 @@ func (a *App) toolEmbeddingsCtx(reqCtx context.Context, ctx *sdk.AppCtx, args ma
 	if err != nil {
 		return nil, err
 	}
-	args["_llm_request_id"] = firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
+	requestID := firstNonEmpty(strArg(args, "request_id"), "llm_req_"+randomSuffix(16))
+	stripToolOnlyArgs(args)
+	args["_llm_request_id"] = requestID
 	res, err := a.executeEmbeddingsContext(reqCtx, ctx, ident, args)
 	if err != nil {
 		return nil, err
@@ -4137,20 +4158,40 @@ func matchesAny(patterns []string, value string) bool {
 	return false
 }
 
+// Fixed token overheads providers add around the text itself: role and
+// separator tokens per message, and the reply primer per request. admit
+// multiplies the result by the input estimate margin.
+const (
+	estimateTokensPerMessage = 8
+	estimateTokensPerRequest = 16
+)
+
 func estimateTokens(v any) int64 {
 	b, _ := json.Marshal(v)
-	n := int64(len(b) / 4)
-	if n < 1 {
-		n = 1
+	n := int64(len(b)/4) + estimateTokensPerRequest
+	if items, ok := v.([]any); ok {
+		n += int64(len(items)) * estimateTokensPerMessage
 	}
 	return n
 }
 
 func estimateChatTokens(v any) int64 {
+	if body, ok := v.(map[string]any); ok {
+		// Gateway bookkeeping (_llm_request_id, ...) is never sent upstream.
+		visible := make(map[string]any, len(body))
+		for k, val := range body {
+			if !strings.HasPrefix(k, "_") {
+				visible[k] = val
+			}
+		}
+		v = visible
+	}
 	characters, images := estimateChatInput(v)
-	tokens := characters/4 + images*imageTokenEstimate
-	if tokens < 1 {
-		return 1
+	tokens := characters/4 + images*imageTokenEstimate + estimateTokensPerRequest
+	if body, ok := v.(map[string]any); ok {
+		if messages, ok := body["messages"].([]any); ok {
+			tokens += int64(len(messages)) * estimateTokensPerMessage
+		}
 	}
 	return tokens
 }

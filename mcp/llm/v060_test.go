@@ -28,18 +28,20 @@ func TestMain(m *testing.M) {
 }
 
 type gatewayFixture struct {
-	t     *testing.T
-	ctx   *sdk.AppCtx
-	app   *App
-	token string
-	tokID int64
+	t      *testing.T
+	ctx    *sdk.AppCtx
+	app    *App
+	token  string
+	tokID  int64
+	events *tk.EmitRecorder
 }
 
 func newGatewayFixture(t *testing.T, upstream http.Handler, tokenArgs map[string]any) *gatewayFixture {
 	t.Helper()
 	srv := httptest.NewServer(upstream)
 	t.Cleanup(srv.Close)
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithConfig(map[string]string{
+	events := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(events), tk.WithConfig(map[string]string{
 		"openai_api_key": "sk-test", "anthropic_api_key": "sk-ant",
 	}))
 	app := &App{httpClient: srv.Client()}
@@ -59,7 +61,7 @@ func newGatewayFixture(t *testing.T, upstream http.Handler, tokenArgs map[string
 	if err != nil {
 		t.Fatalf("token: %v", err)
 	}
-	return &gatewayFixture{t: t, ctx: ctx, app: app, token: tok["token"].(string), tokID: tok["id"].(int64)}
+	return &gatewayFixture{t: t, ctx: ctx, app: app, token: tok["token"].(string), tokID: tok["id"].(int64), events: events}
 }
 
 func (f *gatewayFixture) do(method, path, body string, headers ...string) *httptest.ResponseRecorder {

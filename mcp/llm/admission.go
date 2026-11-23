@@ -26,6 +26,11 @@ const (
 	outboxBatchSize         = 50
 	outboxClaimTimeout      = 5 * time.Minute
 	outboxMaxBackoff        = time.Hour
+	// A settlement that has failed this many times is marked stuck, alerted
+	// once with llm.settlement.stuck, and then retried at outboxMaxBackoff.
+	defaultStuckAfterAttempts = 10
+	maxStuckAfterAttempts     = 1000
+	maxInputEstimateMargin    = 5.0
 )
 
 type AdmissionConfig struct {
@@ -34,6 +39,19 @@ type AdmissionConfig struct {
 	SettleTool    string `json:"settle_tool"`
 	FailMode      string `json:"fail_mode,omitempty"`
 	TimeoutMS     int64  `json:"timeout_ms,omitempty"`
+	// InputEstimateMargin multiplies the pre-request input token estimate
+	// (default 1.25, allowed 1 to 5).
+	InputEstimateMargin float64 `json:"input_estimate_margin,omitempty"`
+	// StuckAfterAttempts is how many failed settlement deliveries mark a
+	// settlement stuck (default 10).
+	StuckAfterAttempts int64 `json:"stuck_after_attempts,omitempty"`
+}
+
+func (c *AdmissionConfig) stuckAfter() int64 {
+	if c == nil || c.StuckAfterAttempts <= 0 {
+		return defaultStuckAfterAttempts
+	}
+	return c.StuckAfterAttempts
 }
 
 func (c *AdmissionConfig) enabled() bool {
@@ -85,6 +103,12 @@ func admissionFromAny(v any) (*AdmissionConfig, error) {
 	}
 	if cfg.TimeoutMS < 0 || time.Duration(cfg.TimeoutMS)*time.Millisecond > maxAdmissionTimeout {
 		return nil, fmt.Errorf("admission.timeout_ms must be between 0 and %d", maxAdmissionTimeout.Milliseconds())
+	}
+	if cfg.InputEstimateMargin != 0 && (cfg.InputEstimateMargin < 1 || cfg.InputEstimateMargin > maxInputEstimateMargin) {
+		return nil, fmt.Errorf("admission.input_estimate_margin must be between 1 and %g", maxInputEstimateMargin)
+	}
+	if cfg.StuckAfterAttempts < 0 || cfg.StuckAfterAttempts > maxStuckAfterAttempts {
+		return nil, fmt.Errorf("admission.stuck_after_attempts must be between 1 and %d", maxStuckAfterAttempts)
 	}
 	return &cfg, nil
 }
@@ -296,12 +320,14 @@ func enqueueSettlement(q execer, ev *UsageEvent, partial bool) error {
 }
 
 type outboxRow struct {
-	ID        int64
-	ProjectID string
-	App       string
-	Tool      string
-	Payload   string
-	Attempts  int64
+	ID            int64
+	UsageEventID  int64
+	AdmissionJSON string
+	ProjectID     string
+	App           string
+	Tool          string
+	Payload       string
+	Attempts      int64
 }
 
 var outboxMu sync.Mutex
@@ -330,12 +356,25 @@ func deliverOutbox(ctx *sdk.AppCtx, onlyID int64) (delivered int, err error) {
 			}
 			continue
 		}
-		backoff := outboxBackoff(row.Attempts + 1)
-		_, err = db.Exec(`UPDATE admission_outbox SET status='pending', claimed_at=NULL, attempts=attempts+1, last_error=?,
+		attempts := row.Attempts + 1
+		stuckAfter := parseAdmissionJSON(row.AdmissionJSON).stuckAfter()
+		status, backoff := "pending", outboxBackoff(attempts)
+		if attempts >= stuckAfter {
+			status, backoff = "stuck", outboxMaxBackoff
+		}
+		lastErr := truncate(callErr.Error(), 500)
+		_, err = db.Exec(`UPDATE admission_outbox SET status=?, claimed_at=NULL, attempts=attempts+1, last_error=?,
 			next_attempt_at=datetime('now', ?) WHERE id=?`,
-			truncate(callErr.Error(), 500), fmt.Sprintf("+%d seconds", int(backoff.Seconds())), row.ID)
+			status, lastErr, fmt.Sprintf("+%d seconds", int(backoff.Seconds())), row.ID)
 		if ctx.Logger() != nil {
-			ctx.Logger().Warn("llm settlement delivery failed", "outbox_id", row.ID, "app", row.App, "tool", row.Tool, "attempts", row.Attempts+1, "error", callErr.Error())
+			ctx.Logger().Warn("llm settlement delivery failed", "outbox_id", row.ID, "app", row.App, "tool", row.Tool, "attempts", attempts, "error", callErr.Error())
+		}
+		if err == nil && attempts == stuckAfter {
+			ctx.EmitWithProject("llm.settlement.stuck", row.ProjectID, map[string]any{
+				"outbox_id": row.ID, "usage_event_id": row.UsageEventID, "request_id": strAny(input["request_id"]),
+				"admission_ref": strAny(input["admission_ref"]), "app": row.App, "tool": row.Tool,
+				"attempts": attempts, "last_error": lastErr,
+			})
 		}
 	}
 	return delivered, err
@@ -349,15 +388,17 @@ func claimOutbox(db *sql.DB, onlyID int64) ([]outboxRow, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	query := `SELECT id, project_id, app, tool, payload_json, attempts FROM admission_outbox
-		WHERE (status='pending' AND next_attempt_at <= CURRENT_TIMESTAMP)
-		   OR (status='delivering' AND claimed_at < datetime('now', ?))`
+	const cols = `SELECT o.id, o.usage_event_id, COALESCE(u.admission_json, ''), o.project_id, o.app, o.tool, o.payload_json, o.attempts
+		FROM admission_outbox o LEFT JOIN usage_events u ON u.id = o.usage_event_id`
+	query := cols + `
+		WHERE (o.status IN ('pending','stuck') AND o.next_attempt_at <= CURRENT_TIMESTAMP)
+		   OR (o.status='delivering' AND o.claimed_at < datetime('now', ?))`
 	args := []any{fmt.Sprintf("-%d seconds", int(outboxClaimTimeout.Seconds()))}
 	if onlyID > 0 {
-		query = `SELECT id, project_id, app, tool, payload_json, attempts FROM admission_outbox WHERE id=? AND status='pending'`
+		query = cols + ` WHERE o.id=? AND o.status='pending'`
 		args = []any{onlyID}
 	}
-	query += ` ORDER BY id LIMIT ` + fmt.Sprint(outboxBatchSize)
+	query += ` ORDER BY o.id LIMIT ` + fmt.Sprint(outboxBatchSize)
 	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -365,7 +406,7 @@ func claimOutbox(db *sql.DB, onlyID int64) ([]outboxRow, error) {
 	var out []outboxRow
 	for rows.Next() {
 		var r outboxRow
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.App, &r.Tool, &r.Payload, &r.Attempts); err != nil {
+		if err := rows.Scan(&r.ID, &r.UsageEventID, &r.AdmissionJSON, &r.ProjectID, &r.App, &r.Tool, &r.Payload, &r.Attempts); err != nil {
 			rows.Close()
 			return nil, err
 		}

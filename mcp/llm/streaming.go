@@ -524,6 +524,11 @@ func (a *App) streamChat(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 		if chunkHasContent(chunk) {
 			adm.markFirstToken()
 		}
+		if adm.viaPublic() {
+			if _, ok := chunk["model"]; ok {
+				chunk["model"] = adm.public.Name
+			}
+		}
 		lastChunk = chunk
 		return out.data(chunk)
 	}
@@ -531,12 +536,17 @@ func (a *App) streamChat(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 		return a.streamChatAttempt(r.Context(), ctx, cfg, key, attemptBody, emit)
 	})
 	ev, _ := adm.complete(used, result, callErr)
+	clientErr := adm.clientError(callErr)
 	if callErr != nil && !out.started {
-		writeGatewayError(w, callErr)
+		writeGatewayError(w, clientErr)
 		return
 	}
 	if callErr != nil && !errors.Is(callErr, context.Canceled) {
-		_ = out.data(map[string]any{"error": map[string]any{"message": callErr.Error(), "type": "provider_error"}})
+		_, typ := errorStatus(clientErr)
+		if !adm.viaPublic() {
+			typ = "provider_error"
+		}
+		_ = out.data(map[string]any{"error": map[string]any{"message": clientErr.Error(), "type": typ}})
 	}
 	if includeUsage && ev != nil {
 		final := map[string]any{"object": "chat.completion.chunk", "choices": []any{}, "usage": map[string]any{
@@ -616,8 +626,9 @@ func (a *App) streamResponses(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		return a.streamChatAttempt(r.Context(), ctx, cfg, key, attemptBody, emit)
 	})
 	ev, _ := adm.complete(used, result, callErr)
+	clientErr := adm.clientError(callErr)
 	if callErr != nil && !out.started {
-		writeGatewayError(w, callErr)
+		writeGatewayError(w, clientErr)
 		return
 	}
 	output := []any{}
@@ -636,7 +647,11 @@ func (a *App) streamResponses(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 	if callErr != nil {
 		response["status"] = "incomplete"
 		if !errors.Is(callErr, context.Canceled) {
-			response["error"] = map[string]any{"message": callErr.Error(), "type": "provider_error"}
+			_, typ := errorStatus(clientErr)
+			if !adm.viaPublic() {
+				typ = "provider_error"
+			}
+			response["error"] = map[string]any{"message": clientErr.Error(), "type": typ}
 		}
 		_ = out.event("response.failed", map[string]any{"type": "response.failed", "response": response})
 		return

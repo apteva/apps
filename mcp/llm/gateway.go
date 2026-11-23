@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -145,6 +148,8 @@ func (a *App) admit(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentit
 		return nil, err
 	}
 	adm.policies = policies
+	hook := effectiveAdmission(ident, policies)
+	adm.req.EstimatedInput = applyInputMargin(req.EstimatedInput, hook)
 	public, attempts, err := resolveAttempts(db, ident.ProjectID, req.Model, policies, requestedOutput)
 	if err != nil {
 		if isPolicyError(err) || isUserError(err) {
@@ -161,7 +166,7 @@ func (a *App) admit(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentit
 		}
 	}
 
-	charge, status, err := a.limiter.Charge(rateRulesFor(ident, policies), req.EstimatedInput+requestedOutput)
+	charge, status, err := a.limiter.Charge(rateRulesFor(ident, policies), adm.req.EstimatedInput+requestedOutput)
 	if err != nil {
 		ctx.EmitWithProject("llm.policy.limit_exceeded", ident.ProjectID, map[string]any{
 			"request_id": adm.req.RequestID, "model": req.Model, "subject_type": ident.SubjectType, "subject_id": ident.SubjectID,
@@ -173,7 +178,7 @@ func (a *App) admit(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentit
 	adm.rate, adm.RateStatus = charge, status
 
 	meta := reservationMeta{Endpoint: req.Endpoint, RequestedModel: req.Model, TokenMetadata: ident.Metadata}
-	reservation, grantedMax, err := reserveUsageMeta(db, ident, primary.Provider, primary.Model, req.EstimatedInput, requestedOutput, adm.req.RequestID, policies, req.EnforceOutput, meta)
+	reservation, grantedMax, err := reserveUsageMeta(db, ident, primary.Provider, primary.Model, adm.req.EstimatedInput, requestedOutput, adm.req.RequestID, policies, req.EnforceOutput, meta)
 	if err != nil {
 		adm.rate.Release()
 		if isPolicyError(err) {
@@ -190,7 +195,7 @@ func (a *App) admit(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentit
 		adm.maxOutput = grantedMax
 	}
 
-	if hook := effectiveAdmission(ident, policies); hook.enabled() {
+	if hook.enabled() {
 		adm.hook = hook
 		if err := adm.authorize(reqCtx); err != nil {
 			return nil, err
@@ -322,6 +327,12 @@ func (adm *gatewayAdmission) run(body map[string]any, call attemptFunc) (*chatRe
 				if attemptBody == nil {
 					attemptBody = map[string]any{}
 				}
+				// Underscore keys are gateway bookkeeping, never provider input.
+				for k := range attemptBody {
+					if strings.HasPrefix(k, "_") {
+						delete(attemptBody, k)
+					}
+				}
 				attemptBody["model"] = attempt.Model
 				callResult, err = call(attempt, cfg, key, attemptBody)
 			}
@@ -425,7 +436,7 @@ func (adm *gatewayAdmission) complete(used providerAttempt, result *chatResult, 
 	})
 	if err != nil {
 		if callErr != nil {
-			return nil, fmt.Errorf("provider failed: %v; record usage: %w", callErr, err)
+			return nil, adm.clientError(fmt.Errorf("provider failed: %v; record usage: %w", callErr, err))
 		}
 		return nil, err
 	}
@@ -445,7 +456,7 @@ func (adm *gatewayAdmission) complete(used providerAttempt, result *chatResult, 
 		payload := usageEventPayload(ev, payloadExtra)
 		ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, payload)
 		ctx.EmitWithProject("llm.request.failed", ident.ProjectID, payload)
-		return ev, callErr
+		return ev, adm.clientError(callErr)
 	}
 	_ = dbAudit(db, ident, "request.completed", used.Provider, used.Model, "completed", "", map[string]any{"request_id": adm.req.RequestID, "provider_request_id": ev.ProviderRequestID, "usage_event_id": ev.ID, "endpoint": adm.req.Endpoint, "partial": partial})
 	payload := usageEventPayload(ev, payloadExtra)
@@ -453,8 +464,83 @@ func (adm *gatewayAdmission) complete(used providerAttempt, result *chatResult, 
 	ctx.EmitWithProject("llm.request.completed", ident.ProjectID, payload)
 	if result != nil {
 		result.UsageEvent = ev
+		if adm.viaPublic() {
+			result.Body = withPublicModelName(result.Body, adm.public.Name)
+		}
 	}
-	return ev, callErr
+	return ev, adm.clientError(callErr)
+}
+
+// Public model names hide which provider serves a request. Responses carry
+// the public name back, and provider failures become generic errors. The
+// provider, its model id, and the raw error stay in usage records, audit
+// logs, and events, which callers of the public name never see.
+
+const (
+	defaultInputEstimateMargin = 1.25
+	publicModelUnavailableMsg  = "The model is temporarily unavailable."
+)
+
+// applyInputMargin pads a pre-request input estimate so reservations and
+// admission checks err on the high side. Hooks may set their own margin.
+func applyInputMargin(estimate int64, hook *AdmissionConfig) int64 {
+	if estimate <= 0 {
+		return estimate
+	}
+	margin := defaultInputEstimateMargin
+	if hook != nil && hook.InputEstimateMargin > 0 {
+		margin = hook.InputEstimateMargin
+	}
+	return int64(math.Ceil(float64(estimate) * margin))
+}
+
+// clientError is the error returned to the caller. Requests made under a
+// public model name get a generic OpenAI-style error with no provider
+// detail; provider-prefixed requests see the raw error.
+func (adm *gatewayAdmission) clientError(err error) error {
+	if err == nil || !adm.viaPublic() || errors.Is(err, context.Canceled) {
+		return err
+	}
+	return publicModelError(err)
+}
+
+func publicModelError(err error) error {
+	status, typ := errorStatus(err)
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) ||
+		status == http.StatusGatewayTimeout || status == http.StatusRequestTimeout:
+		return typedErr{status: http.StatusGatewayTimeout, typ: "timeout_error", msg: "The model took too long to respond."}
+	case status == http.StatusTooManyRequests:
+		return typedErr{status: http.StatusTooManyRequests, typ: "rate_limit_error", msg: "The model is receiving too many requests. Please retry shortly."}
+	case typ == "invalid_request_error" || (typ == "provider_error" && status >= 400 && status < 500 &&
+		status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusNotFound):
+		return typedErr{status: http.StatusBadRequest, typ: "invalid_request_error", msg: "The model could not process this request."}
+	default:
+		return typedErr{status: http.StatusBadGateway, typ: "server_error", msg: publicModelUnavailableMsg}
+	}
+}
+
+// withPublicModelName replaces a JSON response's top-level model field.
+// Other fields keep their exact bytes.
+func withPublicModelName(body []byte, name string) []byte {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return body
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &fields) != nil {
+		return body
+	}
+	if _, ok := fields["model"]; !ok {
+		return body
+	}
+	fields["model"], _ = json.Marshal(name)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // asyncSettlement sends a settlement right after the request finishes instead
