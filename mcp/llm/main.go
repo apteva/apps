@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.6.2
+version: 0.6.3
 description: Generic OpenAI-compatible text, image, audio, and embedding access with streaming, per-minute limits, admission hooks, and provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 icon: /ui/icon.svg
@@ -196,7 +196,7 @@ const (
 	imageTokenEstimate   = 1024
 )
 
-const appVersion = "0.6.2"
+const appVersion = "0.6.3"
 
 type App struct {
 	httpClient *http.Client
@@ -342,6 +342,9 @@ func ensureGatewaySchema(db *sql.DB) error {
 		{"usage_events", "token_metadata_json", `TEXT NOT NULL DEFAULT '{}'`},
 		{"usage_events", "admission_ref", `TEXT NOT NULL DEFAULT ''`},
 		{"usage_events", "admission_json", `TEXT NOT NULL DEFAULT '{}'`},
+		// v0.6.3: what the admission hook charged, from its settle reply.
+		{"usage_events", "charged_microunits", `INTEGER`},
+		{"usage_events", "charge_status", `TEXT NOT NULL DEFAULT ''`},
 		// v0.6.0: token labels, opaque metadata, and per-token admission hooks.
 		{"api_tokens", "label", `TEXT NOT NULL DEFAULT ''`},
 		{"api_tokens", "last4", `TEXT NOT NULL DEFAULT ''`},
@@ -585,7 +588,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"expires_at":   map[string]any{"type": "string"},
 			"label":        map[string]any{"type": "string", "description": "Human-readable name, for example Production server."},
 			"metadata":     map[string]any{"type": "object", "description": "Opaque labels such as {account, project}; passed through, never interpreted."},
-			"admission":    map[string]any{"type": "object", "description": "Admission hook for this token: {app, authorize_tool, settle_tool, fail_mode, timeout_ms, input_estimate_margin, stuck_after_attempts}."},
+			"admission":    map[string]any{"type": "object", "description": "Admission hook for this token: {app, authorize_tool, settle_tool, fail_mode, timeout_ms, input_estimate_margin, stuck_after_attempts}. A token with its own hook is a customer key: it can only list and call public model names (others get 404 model_not_found), and its usage reads show the requested model and the settled charge, never the provider."},
 			"prefix":       map[string]any{"type": "string", "description": "Token prefix ending in '_', for example rl_live_. Defaults to llm_."},
 		}, nil), Handler: a.toolTokenCreate},
 		{Name: "llm_tokens_list", Description: "List issued LLM tokens without exposing token secrets.", InputSchema: schemaObject(map[string]any{
@@ -739,6 +742,8 @@ type UsageEvent struct {
 	TokenMetadata          json.RawMessage `json:"token_metadata,omitempty"`
 	AdmissionRef           string          `json:"admission_ref,omitempty"`
 	AdmissionJSON          string          `json:"-"`
+	ChargedMicrounits      *int64          `json:"charged_microunits,omitempty"`
+	ChargeStatus           string          `json:"charge_status,omitempty"`
 	CreatedAt              string          `json:"created_at"`
 	Duplicate              bool            `json:"duplicate,omitempty"`
 }
@@ -905,6 +910,10 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 		seen[pm.Name] = true
 		data = append(data, map[string]any{"id": pm.Name, "object": "model", "owned_by": "gateway", "description": pm.Description})
 	}
+	if isCustomerKey(ident) {
+		writeJSON(w, map[string]any{"object": "list", "data": data})
+		return
+	}
 	cached, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: ident.ProjectID, Status: "active"})
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -963,6 +972,7 @@ func v1UsageFilter(ident *TokenIdentity, r *http.Request) (usageFilter, bool) {
 		Model:       q.Get("model"),
 		TokenID:     int64(intArgQuery(r, "token_id", 0)),
 		Endpoint:    q.Get("endpoint"),
+		PublicView:  isCustomerKey(ident),
 	}, true
 }
 
@@ -979,7 +989,11 @@ func (a *App) handleV1UsageEvents(ctx *sdk.AppCtx, ident *TokenIdentity, w http.
 	}
 	data := make([]map[string]any, 0, len(rows))
 	for i := range rows {
-		data = append(data, usageEventPayload(&rows[i], nil))
+		if isCustomerKey(ident) {
+			data = append(data, customerUsagePayload(&rows[i]))
+		} else {
+			data = append(data, usageEventPayload(&rows[i], nil))
+		}
 	}
 	writeJSON(w, map[string]any{"object": "list", "data": data})
 }
@@ -988,6 +1002,16 @@ func (a *App) handleV1Usage(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respon
 	filter, ok := v1UsageFilter(ident, r)
 	if !ok {
 		writeOpenAIError(w, http.StatusForbidden, "insufficient_scope", "token can only read usage for its own subject")
+		return
+	}
+	if isCustomerKey(ident) {
+		filter.PublicView = true
+		usage, err := dbCustomerUsageGet(ctx.AppDB(), filter)
+		if err != nil {
+			writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
+		writeJSON(w, usage)
 		return
 	}
 	usage, err := dbUsageGet(ctx.AppDB(), filter)
@@ -2832,6 +2856,9 @@ type usageFilter struct {
 	Model       string
 	TokenID     int64
 	Endpoint    string
+	// PublicView filters models by the name the caller requested only
+	// (customer keys never match on provider model ids).
+	PublicView bool
 }
 
 func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
@@ -3128,7 +3155,10 @@ func dbUsageEventsList(db *sql.DB, f usageFilter, limit int) ([]UsageEvent, erro
 		conds = append(conds, "subject_id=?")
 		args = append(args, f.SubjectID)
 	}
-	if f.Model != "" {
+	if f.Model != "" && f.PublicView {
+		conds = append(conds, "requested_model=?")
+		args = append(args, f.Model)
+	} else if f.Model != "" {
 		conds = append(conds, "(model=? OR requested_model=?)")
 		args = append(args, f.Model, f.Model)
 	}
@@ -3162,7 +3192,7 @@ const usageEventColumns = `id, project_id, subject_type, subject_id, provider, m
 	total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
 	provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
 	status, period, request_id, provider_request_id, token_id, endpoint, requested_model,
-	latency_ms, ttft_ms, token_metadata_json, admission_ref, admission_json, COALESCE(created_at,'')`
+	latency_ms, ttft_ms, token_metadata_json, admission_ref, admission_json, charged_microunits, charge_status, COALESCE(created_at,'')`
 
 type usageEventScanner interface {
 	Scan(dest ...any) error
@@ -3171,16 +3201,21 @@ type usageEventScanner interface {
 func scanUsageEvent(row usageEventScanner) (*UsageEvent, error) {
 	var ev UsageEvent
 	var usageDetails, tokenMetadata string
+	var charged sql.NullInt64
 	if err := row.Scan(&ev.ID, &ev.ProjectID, &ev.SubjectType, &ev.SubjectID, &ev.Provider, &ev.Model,
 		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents,
 		&ev.ProviderCostMicrounits, &ev.ProviderCostCurrency, &ev.ProviderCostStatus, &ev.ProviderCostSource,
 		&ev.ProviderRateID, &usageDetails, &ev.Status, &ev.Period,
 		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.Endpoint, &ev.RequestedModel,
-		&ev.LatencyMS, &ev.TTFTMS, &tokenMetadata, &ev.AdmissionRef, &ev.AdmissionJSON, &ev.CreatedAt); err != nil {
+		&ev.LatencyMS, &ev.TTFTMS, &tokenMetadata, &ev.AdmissionRef, &ev.AdmissionJSON, &charged, &ev.ChargeStatus, &ev.CreatedAt); err != nil {
 		return nil, err
 	}
 	ev.UsageDetails = json.RawMessage(firstNonEmpty(usageDetails, "{}"))
 	ev.TokenMetadata = json.RawMessage(firstNonEmpty(tokenMetadata, "{}"))
+	if charged.Valid {
+		v := charged.Int64
+		ev.ChargedMicrounits = &v
+	}
 	return &ev, nil
 }
 
@@ -3741,6 +3776,8 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		"time_to_first_token_ms":   int64(0),
 		"token_metadata":           map[string]any{},
 		"admission_ref":            "",
+		"charged_microunits":       nil,
+		"charge_status":            "",
 	}
 	if ev != nil {
 		out["usage_event_id"] = ev.ID
@@ -3770,6 +3807,10 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		out["time_to_first_token_ms"] = ev.TTFTMS
 		out["token_metadata"] = rawJSON(string(firstNonEmptyRaw(ev.TokenMetadata, `{}`)))
 		out["admission_ref"] = ev.AdmissionRef
+		if ev.ChargedMicrounits != nil {
+			out["charged_microunits"] = *ev.ChargedMicrounits
+		}
+		out["charge_status"] = ev.ChargeStatus
 	}
 	for k, v := range extra {
 		out[k] = v
@@ -3780,6 +3821,7 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 type typedErr struct {
 	status  int
 	typ     string
+	code    string
 	msg     string
 	headers map[string]string
 }
@@ -3794,6 +3836,12 @@ func writeGatewayError(w http.ResponseWriter, err error) {
 		}
 	}
 	status, typ := errorStatus(err)
+	if te.code != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": err.Error(), "type": typ, "code": te.code}})
+		return
+	}
 	writeOpenAIError(w, status, typ, err.Error())
 }
 

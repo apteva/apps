@@ -314,9 +314,15 @@ func enqueueSettlement(q execer, ev *UsageEvent, partial bool) error {
 		return nil
 	}
 	payload, _ := json.Marshal(settlementPayload(ev, partial))
-	_, err := q.Exec(`INSERT OR IGNORE INTO admission_outbox (usage_event_id, project_id, app, tool, payload_json)
-		VALUES (?, ?, ?, ?, ?)`, ev.ID, ev.ProjectID, cfg.App, cfg.SettleTool, string(payload))
-	return err
+	if _, err := q.Exec(`INSERT OR IGNORE INTO admission_outbox (usage_event_id, project_id, app, tool, payload_json)
+		VALUES (?, ?, ?, ?, ?)`, ev.ID, ev.ProjectID, cfg.App, cfg.SettleTool, string(payload)); err != nil {
+		return err
+	}
+	if _, err := q.Exec(`UPDATE usage_events SET charge_status='pending' WHERE id=? AND charge_status=''`, ev.ID); err != nil {
+		return err
+	}
+	ev.ChargeStatus = "pending"
+	return nil
 }
 
 type outboxRow struct {
@@ -353,6 +359,11 @@ func deliverOutbox(ctx *sdk.AppCtx, onlyID int64) (delivered int, err error) {
 			_, err = db.Exec(`UPDATE admission_outbox SET status='delivered', delivered_at=CURRENT_TIMESTAMP, claimed_at=NULL, last_error='', attempts=attempts+1 WHERE id=?`, row.ID)
 			if err == nil {
 				delivered++
+				var charged any
+				if amount, ok := settledCharge(out); ok {
+					charged = amount
+				}
+				_, err = db.Exec(`UPDATE usage_events SET charge_status='settled', charged_microunits=? WHERE id=?`, charged, row.UsageEventID)
 			}
 			continue
 		}

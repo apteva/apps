@@ -462,7 +462,9 @@ func TestTokenAdmissionOverridesPolicyAdmission(t *testing.T) {
 		map[string]any{"admission": map[string]any{"app": "reseller", "authorize_tool": "auth", "settle_tool": "settle"}})
 	hooks := installHooks(t, func(app, tool string, input map[string]any) (any, error) { return map[string]any{"allow": true}, nil })
 	_, _ = dbPolicySet(f.ctx.AppDB(), "proj-test", map[string]any{"admission": billingHook})
-	if rec := f.do(http.MethodPost, "/v1/chat/completions", `{"model":"openai/m","messages":[{"role":"user","content":"hi"}]}`); rec.Code != 200 {
+	// Tokens with their own hook are customer keys: public model names only.
+	_, _ = dbPublicModelUpsert(f.ctx.AppDB(), "proj-test", map[string]any{"name": "text", "routes": []any{map[string]any{"model": "openai/m"}}})
+	if rec := f.do(http.MethodPost, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); rec.Code != 200 {
 		t.Fatalf("status=%d", rec.Code)
 	}
 	if calls := hooks.byTool("auth"); len(calls) != 1 || calls[0].App != "reseller" || len(hooks.byTool("llm_authorize")) != 0 {
