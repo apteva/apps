@@ -50,7 +50,23 @@ func beginAuthTx(db *sql.DB, pid string, oid int64) (*sql.Tx, error) {
 type authPolicy struct {
 	MinLength, Classes, AccessSeconds, RefreshDays, LockThreshold, LockMinutes int
 	Verify                                                                     bool
+	// FromEmail and FromName are the organization's own sender for
+	// verification and password-reset email. Empty means "use the install's
+	// from_email and the organization name".
+	FromEmail, FromName string
 }
+
+const maxFromNameLength = 100
+
+// validateFromName rejects display names that could break or inject mail
+// headers.
+func validateFromName(name string) error {
+	if name == "" || len(name) > maxFromNameLength || strings.ContainsAny(name, "\r\n\x00") || strings.TrimSpace(name) != name {
+		return fmt.Errorf("from_name must be 1-%d characters without line breaks or surrounding spaces", maxFromNameLength)
+	}
+	return nil
+}
+
 type policySpec struct {
 	defaultValue int
 	min, max     int
@@ -82,6 +98,7 @@ func effectivePolicy(ctx *sdk.AppCtx, org *Organization) (authPolicy, error) {
 		}
 		verify = b
 	}
+	var fromEmail, fromName string
 	if org != nil && strings.TrimSpace(org.PolicyOverrides) != "" {
 		var overrides map[string]any
 		d := json.NewDecoder(strings.NewReader(org.PolicyOverrides))
@@ -94,6 +111,25 @@ func effectivePolicy(ctx *sdk.AppCtx, org *Organization) (authPolicy, error) {
 			return authPolicy{}, errors.New("policy_overrides must contain exactly one object")
 		}
 		for k, v := range overrides {
+			switch k {
+			case "from_email":
+				addr, ok := v.(string)
+				if !ok || validateEmail(addr) != nil {
+					return authPolicy{}, errors.New("from_email must be a valid email address")
+				}
+				fromEmail = addr
+				continue
+			case "from_name":
+				name, ok := v.(string)
+				if !ok {
+					return authPolicy{}, errors.New("from_name must be a string")
+				}
+				if err := validateFromName(name); err != nil {
+					return authPolicy{}, err
+				}
+				fromName = name
+				continue
+			}
 			if k == "email_verification_required" {
 				b, ok := v.(bool)
 				if !ok {
@@ -118,7 +154,7 @@ func effectivePolicy(ctx *sdk.AppCtx, org *Organization) (authPolicy, error) {
 			return authPolicy{}, fmt.Errorf("policy %s must be between %d and %d", k, s.min, s.max)
 		}
 	}
-	return authPolicy{values["password_min_length"].(int), values["password_classes_required"].(int), values["jwt_access_ttl_seconds"].(int), values["jwt_refresh_ttl_days"].(int), values["lockout_threshold"].(int), values["lockout_initial_minutes"].(int), verify}, nil
+	return authPolicy{values["password_min_length"].(int), values["password_classes_required"].(int), values["jwt_access_ttl_seconds"].(int), values["jwt_refresh_ttl_days"].(int), values["lockout_threshold"].(int), values["lockout_initial_minutes"].(int), verify, fromEmail, fromName}, nil
 }
 func validatePolicyJSON(raw *string) error {
 	if raw == nil || *raw == "" {

@@ -1,8 +1,8 @@
-# Auth v0.15.0
+# Auth v0.16.0
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.15.0 supports snapshot restore: a runtime restored from a
+permissions. v0.16.0 adds a per-organization email sender. v0.15.0 supports snapshot restore: a runtime restored from a
 snapshot keeps its organizations, users, sessions and signing keys under the new
 project (see below). v0.14.0 hardens client IP handling, audit attribution, email
 verification provenance, access-token lifetime and signing-key storage, and adds
@@ -14,6 +14,23 @@ platform credentials and a renewal
 endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
 migration and preserves existing Auth sessions. Configure explicit role bindings
 and platform policies before enabling delegated access.
+
+## v0.16.0 per-organization email sender
+
+An organization can send verification and password-reset email from its own
+address. Set it with `auth_orgs_update`:
+
+```json
+{"organization_slug": "runlane",
+ "policy_overrides": "{\"from_email\":\"hello@runlane.example\",\"from_name\":\"Runlane\"}"}
+```
+
+`from_email` must be a valid address and a verified sender in Messaging for the
+project. `from_name` is optional (1-100 characters, no line breaks); without it
+the display name is the request's `brand_name` or the organization name. An
+organization without `from_email` uses the install-wide `from_email`, so other
+organizations are unaffected. The `org_updated` audit row records the sender
+change under `email_sender`. No migration.
 
 ## v0.15.0 snapshot restore
 
@@ -175,7 +192,8 @@ and backup access; external key wrapping/HSM integration is a separate change.
 
 ## Recovery and delivery
 
-Configure the messaging app and `from_email`. Missing delivery configuration
+Configure the messaging app and `from_email`, or a per-organization
+`from_email` in `policy_overrides` (see v0.16.0). Missing delivery configuration
 is an error, never a successful "sent" result. Admin provisioning preserves the
 created user and returns `delivery_error` when its requested email fails.
 Verification-required signup also returns a delivery error without losing the

@@ -49,8 +49,9 @@ func issueResetTokenForClient(ctx *sdk.AppCtx, pid string, org *Organization, ui
 	return issueRecoveryToken(ctx, pid, org, uid, email, "reset_password", opts)
 }
 func issueRecoveryToken(ctx *sdk.AppCtx, pid string, org *Organization, uid int64, email, kind string, opts recoveryLinkOptions) error {
-	if ctx == nil || ctx.PlatformAPI() == nil || strings.TrimSpace(ctx.Config().Get("from_email")) == "" {
-		return errors.New("email delivery is not configured")
+	sender, err := recoverySender(ctx, org)
+	if err != nil {
+		return err
 	}
 	if orgBaseURL(ctx, nil, org) == "" {
 		return errors.New("public Auth URL is not configured")
@@ -91,7 +92,7 @@ func issueRecoveryToken(ctx *sdk.AppCtx, pid string, org *Organization, uid int6
 		u.Fragment = f.Encode()
 		link = u.String()
 	}
-	err = sendRecoveryEmail(ctx, pid, email, recoveryBrand(org, opts.BrandName), subject, intro, subject, link, fmt.Sprintf("auth:%s:%d:%s", action, uid, hashToken(raw)[:16]))
+	err = sendRecoveryEmail(ctx, pid, sender.Email, email, recoveryBrand(org, opts.BrandName, sender.Name), subject, intro, subject, link, fmt.Sprintf("auth:%s:%d:%s", action, uid, hashToken(raw)[:16]))
 	status := "sent"
 	if err != nil {
 		status = "failed"
@@ -116,9 +117,46 @@ func recoveryLink(ctx *sdk.AppCtx, org *Organization, continueURL, action, token
 	return u.String()
 }
 
-func recoveryBrand(org *Organization, configured string) string {
+// emailSender is the address and display name verification and reset email
+// is sent from.
+type emailSender struct {
+	Email, Name string
+}
+
+// recoverySender resolves the sender for an organization: its own from_email
+// (and optional from_name) in policy_overrides first, then the install-wide
+// from_email. One organization's sender never applies to another.
+func recoverySender(ctx *sdk.AppCtx, org *Organization) (emailSender, error) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return emailSender{}, errors.New("email delivery is not configured")
+	}
+	if org != nil {
+		policy, err := effectivePolicy(ctx, org)
+		if err != nil {
+			return emailSender{}, err
+		}
+		if policy.FromEmail != "" {
+			return emailSender{Email: policy.FromEmail, Name: policy.FromName}, nil
+		}
+		if from := strings.TrimSpace(ctx.Config().Get("from_email")); from != "" {
+			return emailSender{Email: from, Name: policy.FromName}, nil
+		}
+	} else if from := strings.TrimSpace(ctx.Config().Get("from_email")); from != "" {
+		return emailSender{Email: from}, nil
+	}
+	return emailSender{}, errors.New("email delivery is not configured")
+}
+
+// recoveryBrand picks the display name: the per-request brand, then the
+// organization's from_name, then the organization name.
+func recoveryBrand(org *Organization, configured string, orgFromName ...string) string {
 	if value := strings.TrimSpace(configured); value != "" {
 		return value
+	}
+	for _, value := range orgFromName {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
 	if org != nil && strings.TrimSpace(org.Name) != "" {
 		return strings.TrimSpace(org.Name)
@@ -126,12 +164,11 @@ func recoveryBrand(org *Organization, configured string) string {
 	return "your account"
 }
 
-func sendRecoveryEmail(ctx *sdk.AppCtx, projectID, recipient, brand, subject, intro, action, link, idempotencyKey string) error {
+func sendRecoveryEmail(ctx *sdk.AppCtx, projectID, from, recipient, brand, subject, intro, action, link, idempotencyKey string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("email delivery is not configured")
 	}
-	from := strings.TrimSpace(ctx.Config().Get("from_email"))
-	if from == "" {
+	if from = strings.TrimSpace(from); from == "" {
 		return errors.New("email delivery is not configured")
 	}
 	body := intro + "\n\n" + link + "\n\nIf you did not request this, you can ignore this email."

@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.15.0
+version: 0.16.0
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -17,6 +17,8 @@ description: |
   signing keys at rest, and adds user containment and signup abuse limits.
   v0.15.0 keeps organizations, users, sessions and signing keys when a runtime
   is restored from a snapshot.
+  v0.16.0 lets each organization send verification and password-reset email
+  from its own address (policy_overrides from_email and from_name).
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
 icon: /ui/icon.svg
@@ -171,7 +173,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: auth/v0.15.0
+    ref: auth/v0.16.0
     entry: mcp/auth
   port: 8080
   health_check: /health
@@ -187,7 +189,7 @@ config_schema:
   - name: from_email
     type: text
     label: Outbound from-address
-    description: Sender address for verification and password-reset email. Requires Messaging and a verified sender address. Missing configuration reports a delivery error; recovery secrets are never written to audit logs.
+    description: Default sender address for verification and password-reset email. An organization can use its own address with from_email (and from_name) in its policy_overrides; organizations without one use this address. Requires Messaging and a verified sender address. Missing configuration reports a delivery error; recovery secrets are never written to audit logs.
   - name: jwt_access_ttl_seconds
     type: text
     default: "900"

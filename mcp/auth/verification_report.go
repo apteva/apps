@@ -33,6 +33,12 @@ func orgChangeMeta(ctx *sdk.AppCtx, before, after *Organization) map[string]any 
 		if eb == nil && ea == nil && pb.Verify != pa.Verify {
 			meta["email_verification_required"] = map[string]any{"from": pb.Verify, "to": pa.Verify}
 		}
+		if eb == nil && ea == nil && (pb.FromEmail != pa.FromEmail || pb.FromName != pa.FromName) {
+			meta["email_sender"] = map[string]any{
+				"from": map[string]string{"from_email": pb.FromEmail, "from_name": pb.FromName},
+				"to":   map[string]string{"from_email": pa.FromEmail, "from_name": pa.FromName},
+			}
+		}
 	}
 	return meta
 }
