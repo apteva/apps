@@ -790,7 +790,7 @@ func TestStages_ManifestListsEveryTool(t *testing.T) {
 			t.Errorf("manifest declares %d tools, code registers %d", len(declared), len(tools))
 		}
 	}
-	if disk.Version != "0.5.1" {
-		t.Errorf("apteva.yaml version = %s, want 0.5.1", disk.Version)
+	if disk.Version != "0.5.2" {
+		t.Errorf("apteva.yaml version = %s, want 0.5.2", disk.Version)
 	}
 }

@@ -469,3 +469,45 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// TestRunFunctionStepStage: a function step's stage is templated from
+// the run's stage vars and passed to functions_invoke; an unstaged run
+// renders it empty and omits it; a literal invalid name is refused.
+func TestRunFunctionStepStage(t *testing.T) {
+	stub := &stubPlatform{results: map[string]any{
+		"functions:functions_invoke": map[string]any{"status": "ok"},
+	}}
+	ctx := newRunCtx(t, stub)
+	src := `
+name: fn-stage
+steps:
+  - id: call
+    kind: function
+    name: my-fn
+    stage: "{{ stage.vars.functions_stage }}"
+    input: { x: 1 }
+`
+	wf := mustCreateWorkflow(t, ctx, src)
+	staged := runOptions{triggerKind: "manual", stage: &runStage{Name: "staging", Vars: map[string]any{"functions_stage": "staging"}}}
+	if run, err := RunWorkflow(context.Background(), ctx, testProj, wf, map[string]any{}, staged); err != nil || run.Status != "completed" {
+		t.Fatalf("staged run: %v %+v", err, run)
+	}
+	if got := stub.calls[0].input["stage"]; got != "staging" {
+		t.Fatalf("stage arg = %#v, want staging", got)
+	}
+	if _, err := RunWorkflow(context.Background(), ctx, testProj, wf, map[string]any{}, runOptions{triggerKind: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stub.calls[1].input["stage"]; ok {
+		t.Fatalf("unstaged run passed a stage: %#v", stub.calls[1].input)
+	}
+	bad := staged
+	bad.stage = &runStage{Name: "staging", Vars: map[string]any{"functions_stage": "Not A Stage"}}
+	run, _ := RunWorkflow(context.Background(), ctx, testProj, wf, map[string]any{}, bad)
+	if run == nil || run.Status != "failed" || len(stub.calls) != 2 {
+		t.Fatalf("invalid rendered stage should fail before calling: %+v calls=%d", run, len(stub.calls))
+	}
+	if _, err := ParseDefinition([]byte("name: x\nsteps:\n  - id: a\n    kind: function\n    name: f\n    stage: Bad\n")); err == nil {
+		t.Fatal("literal invalid stage accepted")
+	}
+}

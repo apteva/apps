@@ -60,6 +60,10 @@ type StepDef struct {
 
 	// kind=function
 	FunctionName string `yaml:"name,omitempty" json:"name,omitempty"`
+	// FunctionStage selects a named stage of the function (Functions
+	// 1.22.0+). Templated like input, e.g. "{{ stage.vars.functions_stage }}";
+	// empty after rendering runs the function's active version.
+	FunctionStage string `yaml:"stage,omitempty" json:"stage,omitempty"`
 
 	// kind=app
 	// (App reuses the http App field — same target slug.)
@@ -219,6 +223,9 @@ func validateKind(s *StepDef) error {
 	case "function":
 		if s.FunctionName == "" {
 			return errors.New("function step needs name")
+		}
+		if s.FunctionStage != "" && !strings.Contains(s.FunctionStage, "{{") && !stageNameRE.MatchString(s.FunctionStage) {
+			return fmt.Errorf("function step stage %q is not a valid stage name", s.FunctionStage)
 		}
 	case "app":
 		if s.App == "" || s.Tool == "" {

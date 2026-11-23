@@ -71,6 +71,12 @@ older platforms) are not filtered by it.
 `{{ stage.vars.<key> }}` and `{{ stage.version }}`. They resolve to
 nothing for unstaged runs.
 
+**Function steps on a stage (0.5.2).** A `kind: function` step accepts
+`stage:` (templated like input), passed to `functions_invoke` as its
+`stage`, e.g. `stage: "{{ stage.vars.functions_stage }}"`. Empty after
+rendering runs the function's active version; an invalid name fails the
+step without calling Functions.
+
 **Runs** record `stage` and `workflow_version`; `workflows_runs` and
 `GET /workflows/<id>/runs` accept `stage` to filter. `workflows_run`
 and `/wf/<name>?stage=` run a stage's version with its vars; without a

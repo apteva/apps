@@ -155,6 +155,9 @@ func runFunctionStep(app *sdk.AppCtx, step *StepDef, input any) stepResult {
 		"name":  step.FunctionName,
 		"event": input,
 	}
+	if step.FunctionStage != "" {
+		args["stage"] = step.FunctionStage
+	}
 	var out map[string]any
 	if err := app.PlatformAPI().CallAppResult("functions", "functions_invoke", args, &out); err != nil {
 		return stepResult{Status: "error", Error: err.Error()}
@@ -258,4 +261,22 @@ func runEmitStep(app *sdk.AppCtx, step *StepDef, input any) stepResult {
 	}
 	app.Emit(step.Topic, data)
 	return stepResult{Status: "ok", Output: map[string]any{"topic": step.Topic, "data": data}}
+}
+
+// renderFunctionStage resolves a function step's stage template. An
+// empty result means "no stage" (the function's active version); any
+// other value must be a valid stage name.
+func renderFunctionStage(tmpl string, tctx TemplateContext) (string, error) {
+	v, err := Render(tmpl, tctx)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(stringify(v))
+	if s == "" {
+		return "", nil
+	}
+	if !stageNameRE.MatchString(s) {
+		return "", fmt.Errorf("stage %q is not a valid stage name", s)
+	}
+	return s, nil
 }

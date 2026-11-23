@@ -196,6 +196,20 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 			finalErr = "step " + step.ID + ": render input: " + err.Error()
 			break
 		}
+		// A function step's stage is templated like its input; the
+		// resolved name travels on a per-run copy of the step.
+		if step.Kind == "function" && step.FunctionStage != "" {
+			resolved, err := renderFunctionStage(step.FunctionStage, tctx)
+			if err != nil {
+				recordError(app, runID, step, "render stage: "+err.Error())
+				finalStatus = "failed"
+				finalErr = "step " + step.ID + ": render stage: " + err.Error()
+				break
+			}
+			copied := *step
+			copied.FunctionStage = resolved
+			step = &copied
+		}
 
 		// Retry loop with exponential backoff. backoff_seconds
 		// defaults to 0 (immediate retry) — same as functions /
