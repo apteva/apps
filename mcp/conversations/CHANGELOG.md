@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.27.6 — 2026-11-23
+
+- Show list items' own numbers as written. A bullet such as `- 01. Define the concept` showed "• 1. Define the concept", and `1. 01. Define the goal` showed "1. 1.": Markdown read the number that starts the item's text as a nested numbered list and renumbered it. That number is now kept as text in messages and Inbox cards, outside code blocks. 0.27.5's advice (use bullets for titles that carry numbers) led agents straight into this.
+- Reword the numbered-list advice: `1. 01. ...` shows two numbers.
+
 ## 0.27.5 — 2026-11-23
 
 - Tell agents how to write numbered lists. A reply such as `1. 01. Define the goal` rendered as "1. 1." because the leading `01.` starts a second, nested list. The `conversations_send` text field and the skill now say the list supplies the number, and items whose titles already carry numbers go in a bulleted list. Rendering is unchanged.
