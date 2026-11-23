@@ -8,6 +8,11 @@ package main
 // chat-<id> thread. A unique index allows one such binding per agent; every
 // other conversation keeps its own chat-* thread.
 //
+// The one exception is decided when the conversation is created: a lead agent
+// without a project (the Apteva Helper) has a main thread that is not a chat
+// thread, so the create handler stores main_routing=0 and its chats always get
+// a chat-* thread. Routing reads that column; it never asks the platform.
+//
 // Main stays a global caller: the main binding is a delivery route, never an
 // ownership restriction (see boundConversation).
 
@@ -24,16 +29,18 @@ const mainThreadID = "main"
 
 // mainRoutingEligibleTx reports whether a conversation may be answered by the
 // agent's main thread: a one-agent operator chat started in the web UI, with no
-// transport binding and no external participant.
+// transport binding and no external participant, whose lead was not excluded
+// at creation (main_routing=0).
 func mainRoutingEligibleTx(tx *sql.Tx, conversationID string, agentID int64) (bool, error) {
 	var lead int64
 	var kind, origin, audience string
-	err := tx.QueryRow(`SELECT lead_agent_id, kind, origin, audience FROM conversations WHERE id=?`, conversationID).
-		Scan(&lead, &kind, &origin, &audience)
+	var mainRouting int
+	err := tx.QueryRow(`SELECT lead_agent_id, kind, origin, audience, main_routing FROM conversations WHERE id=?`, conversationID).
+		Scan(&lead, &kind, &origin, &audience, &mainRouting)
 	if err != nil {
 		return false, err
 	}
-	if lead != agentID || kind != "direct" || (origin != "web" && origin != "") || (audience != "operator" && audience != "") {
+	if mainRouting == 0 || lead != agentID || kind != "direct" || (origin != "web" && origin != "") || (audience != "operator" && audience != "") {
 		return false, nil
 	}
 	var bridged int

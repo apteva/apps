@@ -49,6 +49,8 @@ type recordingPlatform struct {
 	killed                 []sdk.ThreadRef
 	killErr                error
 	projects               []sdk.PlatformProject
+	// extraAgents are listed after the default directory (41, 42, 43, 55).
+	extraAgents []sdk.PlatformAgent
 }
 
 type capturedEvent struct {
@@ -1551,12 +1553,12 @@ func TestSendStillRequiresConversation(t *testing.T) {
 // serve — the shape the panel's pickers consume. Agent 41 has this
 // app's MCP bound, 42 does not (the annotation the panel filters on).
 func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, error) {
-	return []sdk.PlatformAgent{
+	return append([]sdk.PlatformAgent{
 		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID, AttachedToCaller: true, Icon: "research", IconColor: "accent"},
 		{ID: 42, Name: "Ops", Status: "stopped", ProjectID: projectID},
 		{ID: 43, Name: "Comms", Status: "running", ProjectID: projectID, AttachedToCaller: true},
 		{ID: 55, Name: "Finance", Status: "running", ProjectID: projectID, AttachedToCaller: true},
-	}, nil
+	}, p.extraAgents...), nil
 }
 
 func (p *recordingPlatform) GetAgent(id int64) (*sdk.PlatformAgent, error) {

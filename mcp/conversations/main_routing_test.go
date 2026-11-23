@@ -106,6 +106,82 @@ func TestMainRoutingSkipsPublicRoomAndBridgedConversations(t *testing.T) {
 	}
 }
 
+// The Apteva Helper is listed in every project it serves but has no project
+// of its own, and its main thread is not a chat thread. Chats it leads are
+// marked at creation and always get their own chat-* thread; agents with a
+// project still take main for their first operator chat.
+func TestProjectlessLeadNeverTakesMainRouting(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	const helper = int64(3)
+	platform.extraAgents = []sdk.PlatformAgent{
+		{ID: helper, Name: "Apteva Helper", Status: "running"},
+		{ID: routedAgent, Name: "Routed", Status: "running", ProjectID: testProject},
+	}
+	create := func(agentID int64) *Conversation {
+		t.Helper()
+		rec := doChats(t, app, "POST", "/chats", fmt.Sprintf(`{"agent_id":%d}`, agentID))
+		if rec.Code != 200 {
+			t.Fatalf("create for agent %d status=%d body=%s", agentID, rec.Code, rec.Body.String())
+		}
+		var got struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.ID == "" {
+			t.Fatalf("decode create: %v body=%s", err, rec.Body.String())
+		}
+		conv, err := app.store.GetConversation(got.ID)
+		if err != nil {
+			t.Fatalf("GetConversation: %v", err)
+		}
+		return conv
+	}
+	mainRoutingColumn := func(conv *Conversation) int {
+		t.Helper()
+		var v int
+		if err := app.store.db.QueryRow(`SELECT main_routing FROM conversations WHERE id=?`, conv.ID).Scan(&v); err != nil {
+			t.Fatalf("read main_routing: %v", err)
+		}
+		return v
+	}
+
+	helperChat := create(helper)
+	if got := mainRoutingColumn(helperChat); got != 0 {
+		t.Fatalf("helper chat main_routing=%d, want 0", got)
+	}
+	postUserMessage(t, app, helperChat, "hello helper")
+	if got := bindingThread(t, app, helperChat, helper); got != conversationThreadID(helperChat.ID) {
+		t.Fatalf("helper chat thread=%q, want its chat thread", got)
+	}
+	if len(platform.ensures) != 1 || platform.ensures[0].ThreadID != conversationThreadID(helperChat.ID) || platform.ensures[0].AgentID != helper {
+		t.Fatalf("helper chat ensures=%+v", platform.ensures)
+	}
+	for _, ev := range platform.trackedEvents {
+		if ev.ThreadID == mainThreadID {
+			t.Fatalf("helper chat reached main: %+v", ev)
+		}
+	}
+	// A second Helper chat behaves the same; nothing ever holds Helper's main.
+	second := create(helper)
+	postUserMessage(t, app, second, "again")
+	if got := bindingThread(t, app, second, helper); got != conversationThreadID(second.ID) {
+		t.Fatalf("second helper chat thread=%q, want its chat thread", got)
+	}
+	var held int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM conversation_agent_threads WHERE agent_id=? AND thread_id=?`, helper, mainThreadID).Scan(&held); err != nil || held != 0 {
+		t.Fatalf("helper main bindings=%d err=%v, want 0", held, err)
+	}
+
+	routed := create(routedAgent)
+	if got := mainRoutingColumn(routed); got != 1 {
+		t.Fatalf("project agent chat main_routing=%d, want 1", got)
+	}
+	postUserMessage(t, app, routed, "hello main")
+	if got := bindingThread(t, app, routed, routedAgent); got != mainThreadID {
+		t.Fatalf("project agent chat thread=%q, want main", got)
+	}
+}
+
 func TestMainStaysGlobalCallerAndRepliesOnlyInItsConversation(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	mountedCtx = ctx

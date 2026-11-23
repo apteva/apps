@@ -462,8 +462,15 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent directory unavailable", http.StatusBadGateway)
 		return
 	}
+	// The platform lists the Apteva Helper in every project it serves, with
+	// no project of its own. Its main thread is not a chat thread, so a chat
+	// it leads never routes to main.
+	leadHasNoProject := false
 	for _, agent := range available {
 		delete(requested, agent.ID)
+		if agent.ID == lead && strings.TrimSpace(agent.ProjectID) == "" {
+			leadHasNoProject = true
+		}
 	}
 	if len(requested) != 0 {
 		http.Error(w, "one or more agents are not available in this project", http.StatusNotFound)
@@ -512,6 +519,7 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		Title: body.Title, OwnerUserID: userID,
 		ConversationKey: body.ConversationKey, Audience: audience, Origin: origin,
 		Directive: body.Directive, AgentIDs: agents,
+		NoMainRouting: leadHasNoProject,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

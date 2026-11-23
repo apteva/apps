@@ -134,6 +134,11 @@ type CreateConversationInput struct {
 	Audience  string
 	Directive string
 	AgentIDs  []int64
+	// NoMainRouting keeps the lead agent's main thread from answering this
+	// conversation; its messages always go to a chat-* thread. Set for lead
+	// agents without a project (the Apteva Helper), whose main thread is not
+	// a chat thread.
+	NoMainRouting bool
 }
 
 func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, error) {
@@ -207,7 +212,7 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 
 func insertConversationTx(tx *sql.Tx, in CreateConversationInput) (string, error) {
 	id := newConversationID()
-	_, err := tx.Exec(`INSERT INTO conversations(id,project_id,lead_agent_id,title,kind,origin,conversation_key,audience,directive,owner_user_id) VALUES(?,?,?,?,'direct',?,?,?,?,?)`, id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.Directive, in.OwnerUserID)
+	_, err := tx.Exec(`INSERT INTO conversations(id,project_id,lead_agent_id,title,kind,origin,conversation_key,audience,directive,owner_user_id,main_routing) VALUES(?,?,?,?,'direct',?,?,?,?,?,?)`, id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.Directive, in.OwnerUserID, boolToInt(!in.NoMainRouting))
 	if err != nil {
 		return "", err
 	}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.27.8 — 2026-11-23
+
+- Never route a chat led by the Apteva Helper to its main thread. Main routing gives an agent's first operator chat to the agent's own main thread. The Helper has no project and serves every project, so its main thread is shared platform-wide, yet its first chat in a project took main. When a chat is created, Conversations now records whether its lead agent has no project, using the agent list that creation already reads. Those chats always get their own chat thread. Sending a message makes no extra platform call.
+- Existing conversations are unchanged. A Helper chat created before this release that has no messages yet can still take main on its first message; start a new chat instead.
+
 ## 0.27.7 — 2026-11-23
 
 - Ask agents for a plain numbered list when item titles carry their own sequence numbers: `1. Define the concept`, not `- 01. Define the concept`. 0.27.5 said to use bullets and keep the numbered titles, which put a bullet and a number on every line. The `conversations_send` text field and the skill both say so. Rendering is unchanged from 0.27.6.
