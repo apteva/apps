@@ -20,9 +20,11 @@ import (
 )
 
 const persistentExecutionScript = `set -eu
-state_dir="$1"; limit="$2"; cmd_umask="$3"; shift 3
+state_dir="$1"; limit="$2"; cmd_umask="$3"; env_file="$4"; shift 4
 umask 077
 mkdir -p "$state_dir"
+# The runner pid lets a remote status check tell a live run from a lost one.
+printf '%s\n' "$$" > "$state_dir/runner"
 : > "$state_dir/output"
 printf 0 > "$state_dir/bytes"
 rm -f "$state_dir/pid" "$state_dir/process_group" "$state_dir/pipe"
@@ -47,11 +49,14 @@ capture=$!
 mark="${state_dir##*/}"
 # Control files stay private; the command itself gets the requested umask.
 [ -z "$cmd_umask" ] || umask "$cmd_umask"
+# Remote runs pass env through a private file in the run folder instead of
+# the host's command line. Only the command's subshell reads it, so its names
+# cannot change this script's variables.
 if command -v setsid >/dev/null 2>&1; then
- APTEVA_PROCESS_TREE="$mark" setsid "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ ( if [ -n "$env_file" ]; then . "$env_file"; rm -f "$env_file"; fi; APTEVA_PROCESS_TREE="$mark" exec setsid "$@" ) </dev/null > "$state_dir/pipe" 2>&1 &
  child=$!; : > "$state_dir/process_group"
 else
- APTEVA_PROCESS_TREE="$mark" "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ ( if [ -n "$env_file" ]; then . "$env_file"; rm -f "$env_file"; fi; APTEVA_PROCESS_TREE="$mark" exec "$@" ) </dev/null > "$state_dir/pipe" 2>&1 &
  child=$!
 fi
 printf '%s\n' "$child" > "$state_dir/pid"
@@ -146,7 +151,7 @@ func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSp
 	if err := prepareControlDirs(ctx, spec); err != nil {
 		return "", err
 	}
-	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID), strconv.Itoa(executionOutputLimit(spec.MaxOutputBytes)), spec.Umask}
+	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID), strconv.Itoa(executionOutputLimit(spec.MaxOutputBytes)), spec.Umask, ""}
 	cmd = append(cmd, spec.Argv...)
 	env := make([]string, 0, len(spec.Env))
 	for _, key := range envKeys(spec.Env) {
@@ -433,6 +438,10 @@ func effectiveExecutionUser(execution *Execution, workload *Workload) string {
 // execution or session still gets its own 0700 folder inside. It runs as the
 // workload user, who owns parents created by earlier commands.
 func prepareControlDirs(ctx context.Context, spec executionRuntimeSpec) error {
+	return prepareControlDirsWith(ctx, docker, spec)
+}
+
+func prepareControlDirsWith(ctx context.Context, run dockerCmdFunc, spec executionRuntimeSpec) error {
 	if spec.User == "" || spec.User == spec.ControlUser {
 		return nil
 	}
@@ -441,7 +450,7 @@ func prepareControlDirs(ctx context.Context, spec executionRuntimeSpec) error {
  [ -k "$p" ] && [ -w "$p" ] && continue
  chmod 1777 "$p" || { echo "cannot share $p for other users" >&2; exit 1; }
 done`
-	if _, err := docker(ctx, execAs(spec.ControlUser, spec.ContainerName, "/bin/sh", "-c", script)...); err != nil {
+	if _, err := run(ctx, execAs(spec.ControlUser, spec.ContainerName, "/bin/sh", "-c", script)...); err != nil {
 		return fmt.Errorf("prepare control folders for user %s: %w", spec.User, err)
 	}
 	return nil

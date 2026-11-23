@@ -1,5 +1,48 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.8.0
+
+Command runs and volume copies on remote hosts (workloads placed on an
+Instances host with `instance_id`/`host_id`). Containers reaches those hosts
+only through the Instances app (`instance_run_command`, `instance_upload_file`,
+`instance_download_file`), so every remote step is an SSH round trip.
+
+- **Remote command runs.** `containers_exec_start`, `_get`, `_logs` and
+  `_cancel` now work on remote workloads. They use the same run script as local
+  runs; a run's state (pid, output, byte count, exit code) lives in its folder
+  inside the container, so runs are picked back up after a Containers restart
+  like local ones.
+  - Env values never appear on the host's command line. They are uploaded as a
+    private file, copied into the run's 0700 folder, and read only by the
+    command's own subshell, which deletes it.
+  - Status is checked from 1 s, backing off to every 5 s while a run keeps
+    going, instead of every 500 ms.
+  - Output is copied to a private host file once and read in pages under the
+    1 MiB command-output cap, base64-encoded so binary output survives.
+  - A run whose runner disappears without an exit code (container restarted
+    or killed from outside) is reported as exit 125 and its processes are
+    killed, as for a vanished local run.
+- **Remote volume copies.** `containers_volume_import` and
+  `containers_volume_export` use the same scripts as local ones, through a
+  private host folder, and pause the workload on its host while copying.
+  Remote archives are limited to 16 MiB (the Instances transfer limit); a
+  `max_archive_bytes` above that is refused up front for remote workloads.
+- **Local only, unchanged.** Persistent shell sessions (`session_key`) are
+  refused on remote workloads with a clear error, since the terminal is held
+  open inside the Containers process. Standalone volumes stay local.
+- **Remote host setup** is cached for 10 minutes instead of 1, so active runs
+  no longer re-run the Docker setup script about once a minute per host.
+- **Remote error messages** now include the command's own output (Docker's
+  message) instead of only "Process exited with status N", so "No such
+  container" and similar cases are recognised remotely too.
+- The run script records its runner pid and takes an optional env file; local
+  runs pass none and behave as before.
+- Tests: a fake Instances app runs every remote command on the test machine
+  against real Docker (`RUN_CONTAINERS_TESTS=1`): env with quotes and
+  newlines, 1.5 MB paged output, exit codes, cancel of setsid children, lost
+  runner, gone container, archive round trip with ownership, pause/resume
+  around a remote import, and the full app path for a remote workload.
+
 ## v0.7.1
 
 Two fixes found in review of 0.7.0.

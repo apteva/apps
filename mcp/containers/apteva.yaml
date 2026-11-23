@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.7.1
+version: 0.8.0
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
@@ -21,8 +21,9 @@ description: |
   non-root user, lower process cap). Commands can run as a chosen user with
   their own umask, archive imports can set file ownership, and standalone
   named volumes can be created once and mounted by several workloads.
-  Execution and archive transfer support local workloads only. Shell state is
-  process-local; routes, scheduled backups, and multi-container blueprints are
+  Command runs and volume archive transfer work on local workloads and on
+  Instances hosts (remote archives up to 16 MiB). Persistent shell sessions and
+  standalone volumes are local only, since shell state is process-local; routes, scheduled backups, and multi-container blueprints are
   not implemented by this app.
 
 author: Apteva
@@ -109,7 +110,7 @@ provides:
       description: "Switch a caller-owned workload's network mode while it runs: default (internet), none (no network), or registry_only (outbound HTTP(S) only to egress_allow hosts through a filtering proxy). Typical use: registry_only to install dependencies, then none to run tests. Args: workload_id, mode, egress_allow?."
       exposure: app_only
     - name: containers_exec_start
-      description: "Start an asynchronous command inside an owned local workload container. Set session_key and shell_command to reuse a stateful /bin/sh shell; explicit argv is always executed literally. Sessions expire after 30 idle minutes; at most 64 sessions and 64 active executions are allowed. Writable-layer files, installed packages, named volumes, and background processes persist for the workload lifetime. Args: workload_id, argv? or shell_command?, working_directory?, env?, timeout_s?, idempotency_key?, session_key?, user?, umask?. user runs this command as another user (name or uid[:gid]; hardened workloads accept only a numeric nonzero uid); a session belongs to one user. umask (for example 022) sets the file mode mask; without it commands use 077, so files are private to their user."
+      description: "Start an asynchronous command inside an owned workload container, local or on an Instances host. Set session_key (local workloads only) and shell_command to reuse a stateful /bin/sh shell; explicit argv is always executed literally. Sessions expire after 30 idle minutes; at most 64 sessions and 64 active executions are allowed. Writable-layer files, installed packages, named volumes, and background processes persist for the workload lifetime. Args: workload_id, argv? or shell_command?, working_directory?, env?, timeout_s?, idempotency_key?, session_key?, user?, umask?. user runs this command as another user (name or uid[:gid]; hardened workloads accept only a numeric nonzero uid); a session belongs to one user. umask (for example 022) sets the file mode mask; without it commands use 077, so files are private to their user."
       exposure: app_only
     - name: containers_exec_get
       description: "Fetch one caller-owned execution. Args: execution_id."
@@ -121,10 +122,10 @@ provides:
       description: "Cancel one caller-owned queued or running execution. Args: execution_id."
       exposure: app_only
     - name: containers_volume_import
-      description: "Import a bounded tar.gz archive into a relative path of an attached named volume on a caller-owned local workload. Args: workload_id, volume, path?, archive_base64, owner?. owner (numeric uid:gid) owns every imported entry and every folder the import creates. Created folders are 0755 and the existing target folder keeps its own mode and owner."
+      description: "Import a bounded tar.gz archive into a relative path of an attached named volume on a caller-owned workload, local or on an Instances host (remote archives up to 16 MiB). Args: workload_id, volume, path?, archive_base64, owner?. owner (numeric uid:gid) owns every imported entry and every folder the import creates. Created folders are 0755 and the existing target folder keeps its own mode and owner."
       exposure: app_only
     - name: containers_volume_export
-      description: "Export a bounded tar.gz archive from a relative path of an attached named volume on a caller-owned local workload. Args: workload_id, volume, path?."
+      description: "Export a bounded tar.gz archive from a relative path of an attached named volume on a caller-owned workload, local or on an Instances host (remote archives up to 16 MiB). Args: workload_id, volume, path?."
       exposure: app_only
     - name: containers_volume_create
       description: "Create a standalone named Docker volume on the local host, owned by the caller and not tied to any workload. Idempotent by name for the same owner. Mount it with containers_run volumes[].volume_id. Args: name, labels?."
@@ -156,7 +157,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: containers/v0.7.1
+    ref: containers/v0.8.0
     entry: mcp/containers
   port: 8080
   health_check: /health

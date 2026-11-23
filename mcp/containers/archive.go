@@ -23,13 +23,9 @@ const (
 	defaultMaxArchiveFiles  = 20000
 )
 
-type volumeArchiveBackend interface {
-	ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error
-	ExportVolumeArchive(context.Context, string, string, int) ([]byte, error)
-}
-
-func (d LocalDocker) ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error {
-	script := `set -eu
+// volumeImportScript reads a tar.gz on stdin and copies it into
+// /volume/<$1>, owned by $2 when set. Shared by local and remote imports.
+const volumeImportScript = `set -eu
 owner="$2"
 # Readable defaults: created folders are 0755; archived entries keep their modes.
 umask 022
@@ -87,14 +83,10 @@ find . -mindepth 1 ! -type d -exec sh -c '
   dest="$1"; shift
   for entry in "$@"; do cp -a --remove-destination "$entry" "$dest/${entry#./}"; done
 ' sh "$dest" {} +`
-	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath, owner)
-	return err
-}
-func (d LocalDocker) ExportVolumeArchive(ctx context.Context, volumeName, relativePath string, maxBytes int) ([]byte, error) {
-	return d.exportVolumeArchiveLimited(ctx, volumeName, relativePath, maxBytes, defaultMaxExpandedBytes, defaultMaxArchiveFiles)
-}
-func (d LocalDocker) exportVolumeArchiveLimited(ctx context.Context, volumeName, relativePath string, maxBytes, maxExpanded, maxFiles int) ([]byte, error) {
-	script := `set -eu
+
+// volumeExportScript writes a tar.gz of /volume/<$1> to stdout, refusing more
+// than $2 expanded bytes or $3 entries.
+const volumeExportScript = `set -eu
 cd /volume
 item="./$1"
 rel="$1"; expanded="$2"; files="$3"; current=.; set -f; oldifs="$IFS"; IFS=/; set -- $rel; IFS="$oldifs"
@@ -102,7 +94,21 @@ for part in "$@"; do current="$current/$part"; [ ! -L "$current" ] || { echo 'so
 [ -e "$item" ] || exit 1
 find "$item" -exec stat -c '%s' '{}' + | awk -v bytes="$expanded" -v files="$files" '{ total+=$1; count++; if(total>bytes || count>files) exit 73; }'
 tar -czf - "$item"`
-	out, err := helperContainer(ctx, nil, maxBytes, "-v", volumeName+":/volume:ro", "alpine:3.20", "sh", "-c", script, "sh", relativePath, strconv.Itoa(maxExpanded), strconv.Itoa(maxFiles))
+
+type volumeArchiveBackend interface {
+	ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error
+	ExportVolumeArchive(context.Context, string, string, int) ([]byte, error)
+}
+
+func (d LocalDocker) ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte, owner string) error {
+	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", volumeImportScript, "sh", relativePath, owner)
+	return err
+}
+func (d LocalDocker) ExportVolumeArchive(ctx context.Context, volumeName, relativePath string, maxBytes int) ([]byte, error) {
+	return d.exportVolumeArchiveLimited(ctx, volumeName, relativePath, maxBytes, defaultMaxExpandedBytes, defaultMaxArchiveFiles)
+}
+func (d LocalDocker) exportVolumeArchiveLimited(ctx context.Context, volumeName, relativePath string, maxBytes, maxExpanded, maxFiles int) ([]byte, error) {
+	out, err := helperContainer(ctx, nil, maxBytes, "-v", volumeName+":/volume:ro", "alpine:3.20", "sh", "-c", volumeExportScript, "sh", relativePath, strconv.Itoa(maxExpanded), strconv.Itoa(maxFiles))
 	if err != nil {
 		return nil, err
 	}
@@ -257,9 +263,6 @@ func findWorkloadVolume(workload *Workload, name string) (*VolumeSpec, error) {
 }
 
 func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath, encoded, owner string) (result map[string]any, resultErr error) {
-	if workload.HostID != 0 || workload.InstanceID != 0 {
-		return nil, errors.New("volume archive transfer currently supports local workloads only")
-	}
 	owner = strings.TrimSpace(owner)
 	if owner != "" && !numericOwnerRE.MatchString(owner) {
 		return nil, typedInputError(errors.New("owner must be numeric uid:gid, for example 1000:1000"))
@@ -278,6 +281,11 @@ func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	maxCompressed := configInt(app, "max_archive_bytes", defaultMaxArchiveBytes)
 	if maxCompressed <= 0 {
 		maxCompressed = defaultMaxArchiveBytes
+	}
+	if workloadTargetID(workload) != 0 {
+		if err := remoteArchiveLimitError(maxCompressed); err != nil {
+			return nil, err
+		}
 	}
 	if len(encoded) > ((maxCompressed+2)/3)*4+4 {
 		return nil, fmt.Errorf("archive exceeds compressed size limit of %d bytes", maxCompressed)
@@ -341,9 +349,6 @@ func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 }
 
 func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath string) (result map[string]any, resultErr error) {
-	if workload.HostID != 0 || workload.InstanceID != 0 {
-		return nil, errors.New("volume archive transfer currently supports local workloads only")
-	}
 	volume, err := findWorkloadVolume(workload, volumeName)
 	if err != nil {
 		return nil, err
@@ -371,6 +376,11 @@ func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	maxFiles := configInt(app, "max_archive_files", defaultMaxArchiveFiles)
 	if maxFiles <= 0 {
 		maxFiles = defaultMaxArchiveFiles
+	}
+	if workloadTargetID(workload) != 0 {
+		if err := remoteArchiveLimitError(maxCompressed); err != nil {
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -400,6 +410,8 @@ func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	var archive []byte
 	if local, ok := backend.(LocalDocker); ok {
 		archive, err = local.exportVolumeArchiveLimited(ctx, volume.DockerVolumeName, relativePath, maxCompressed, maxExpanded, maxFiles)
+	} else if remote, ok := backend.(*RemoteDocker); ok {
+		archive, err = remote.exportVolumeArchiveLimited(ctx, volume.DockerVolumeName, relativePath, maxCompressed, maxExpanded, maxFiles)
 	} else {
 		archive, err = archiveBackend.ExportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, maxCompressed)
 	}
