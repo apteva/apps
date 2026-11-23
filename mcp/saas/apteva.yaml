@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.12.3
+version: 0.13.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -50,6 +50,11 @@ description: |
   overrun the hold.
   v0.12.3 pads the input-token estimate when pricing a hold
   (input_estimate_margin_pct plan metadata, default 20, 0 turns it off).
+  v0.13.0 adds plan metadata auth_org (per_account default, or none for
+  products with a shared Auth org), keeps access until the paid period
+  ends when cancelling on a cancel_at_period_end plan (immediate: true cuts
+  it now), validates saas_checkout_mark_paid methods up front, and emits
+  saas.checkout.paid once per paid checkout for conversion tracking.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -168,6 +173,18 @@ provides:
         from_plan_key: string
         target_plan_key: string
         change_kind: string
+    - name: saas.checkout.paid
+      description: A checkout's first invoice was paid. Emitted once per checkout (not for free, zero-total or trial activations); dedupe on idempotency_key.
+      payload:
+        checkout_id: string
+        account_id: string
+        plan_key: string
+        invoice_id: integer
+        subscription_id: integer
+        amount_cents: integer
+        currency: string
+        paid_at: string
+        idempotency_key: string
   mcp_tools:
     - name: saas_plan_list
       description: List SaaS plans with their Catalog product identity, features, limits, and usage sources.
@@ -212,7 +229,7 @@ provides:
       description: Fetch durable checkout status and any payment or setup URL.
       requires: saas.checkout
     - name: saas_checkout_mark_paid
-      description: Administratively record a manual checkout payment through Billing.
+      description: Administratively record a manual checkout payment through Billing. method is wire (default), cash, check, other or stripe; manual is accepted as other.
       requires: saas.admin
     - name: saas_account_create
       description: Create a SaaS account, Auth organization, Entitlement grants, and plan limits.
@@ -242,7 +259,7 @@ provides:
       description: Resume a suspended, past-due, or cancelled SaaS account.
       requires: saas.admin
     - name: saas_account_cancel
-      description: Cancel a SaaS account and its subscription (at period end when the plan sets cancel_at_period_end). A failed subscription cancel is recorded on the account and retried; the account stays cancelled.
+      description: Cancel a SaaS account and its subscription. On a cancel_at_period_end plan the account keeps access until the paid period ends and is cancelled, with its cancel actions, when Subscriptions reports the subscription ended; immediate true cuts access now. A failed subscription cancel is recorded on the account and retried.
       requires: saas.admin
     - name: saas_subscription_sync
       description: Apply a subscription lifecycle status to a SaaS account.

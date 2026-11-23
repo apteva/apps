@@ -99,7 +99,28 @@ trial policy, provider, billing/auth IDs, lifecycle dates, or payment state.
 When Billing publishes `invoice.paid` during an administrative payment, the
 tool and event handler share the same idempotent operation: the loser waits for
 the winner and returns the completed checkout instead of a false duplicate
-payment error.
+payment error. `method` is checked before anything is recorded: `wire`
+(default), `cash`, `check`, `other` or `stripe`, with `manual` accepted as
+`other`.
+
+### Conversion event
+
+When a checkout's first invoice is paid, SaaS emits `saas.checkout.paid` once
+with `checkout_id`, `account_id`, `plan_key`, `invoice_id`, `subscription_id`,
+`amount_cents`, `currency`, `paid_at` and `idempotency_key`
+(`saas:checkout_paid:<checkout_id>`). A `checkout.paid` row in the account
+history is the durable guard, so a replayed `invoice.paid` or a payment
+recovery never emits twice; consumers should still dedupe on the key. Free,
+zero-total and trial activations do not emit it. Subscribe a Function or
+webhook to it to send one server-side Purchase event per paid checkout.
+
+### Auth org per account
+
+Provisioning creates one Auth org per account by default. Products whose users
+sign in to a shared org of their own set plan metadata `auth_org: "none"`: no
+org is created and `auth_org_id` stays empty (reconcile does not create one).
+On such a plan, `create_owner_user: true` needs the shared org passed as
+`auth_org_id`, and fulfillment action args cannot reference `auth_org`.
 
 ## Plan Changes
 
@@ -136,9 +157,16 @@ fulfillment, account-management, usage-write, and manual-payment tools require
 
 `saas_account_cancel` cancels the account and then asks Subscriptions to cancel
 the linked subscription (`subscriptions_cancel`, with the caller's `actor` and
-an optional `reason`, default `account_cancelled`). When the plan metadata sets
-`cancel_at_period_end: true` the subscription runs to the end of its paid
-period; the account itself is cancelled at once either way.
+an optional `reason`, default `account_cancelled`).
+
+When the plan metadata sets `cancel_at_period_end: true` and the account has a
+subscription, the cancel is scheduled instead (v0.13.0): the subscription is
+cancelled at period end, the account stays `active` with access, and its
+metadata records `cancel_scheduled` (`requested_at`, `reason`, `actor`,
+`cancel_at`). When Subscriptions reports `subscription.ended`, the account
+moves to `cancelled` and the plan's `account_cancelled` actions run (for
+example releasing a hosted machine). Pass `immediate: true` to cut access at
+once, including on an account whose cancel is already scheduled.
 
 The request is recorded in the account metadata under `subscription_cancel`
 (`requested`, `done` or `failed`, with attempts and the last error). A failed

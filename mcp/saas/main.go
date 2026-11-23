@@ -203,7 +203,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"success_url": strSchema(), "cancel_url": strSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "saas_checkout_get", Description: "Fetch durable checkout status and payment/setup URL.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutGet},
-		{Name: "saas_checkout_mark_paid", Description: "Administratively record a manual checkout payment through Billing.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema(), "amount_cents": intSchema(), "method": strSchema(), "notes": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutMarkPaid},
+		{Name: "saas_checkout_mark_paid", Description: "Administratively record a manual checkout payment through Billing. method: wire (default), cash, check, other or stripe; manual is accepted as other.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema(), "amount_cents": intSchema(), "method": map[string]any{"type": "string", "enum": manualPaymentMethods}, "notes": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "saas_fulfillment_run", Description: "Run or retry configured fulfillment actions for a SaaS account lifecycle event.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "event": strSchema()}, []string{"account_id", "event"}), Handler: a.toolFulfillmentRun},
 		{Name: "saas_account_create", Description: "Create a SaaS account and apply plan access.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
@@ -225,7 +225,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_billing_sync", Description: "Refresh linked Billing invoice/payment projections.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "limit": intSchema(), "offset": intSchema()}, nil), Handler: a.toolBillingSync},
 		{Name: "saas_account_suspend", Description: "Suspend a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountSuspend},
 		{Name: "saas_account_resume", Description: "Resume a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountResume},
-		{Name: "saas_account_cancel", Description: "Cancel a SaaS account and its subscription (at period end when the plan sets cancel_at_period_end). A failed subscription cancel is recorded on the account and retried; the account stays cancelled.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "reason": strSchema(), "actor": strSchema()}, []string{"account_id"}), Handler: a.toolAccountCancel},
+		{Name: "saas_account_cancel", Description: "Cancel a SaaS account and its subscription. When the plan sets cancel_at_period_end, the account keeps access until the paid period ends and is cancelled (with its cancel actions) when Subscriptions reports the subscription ended; immediate: true cuts access now. A failed subscription cancel is recorded on the account and retried.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "reason": strSchema(), "actor": strSchema(), "immediate": boolSchema()}, []string{"account_id"}), Handler: a.toolAccountCancel},
 		{Name: "saas_subscription_sync", Description: "Apply subscription status to a SaaS account.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "subscription_id": intSchema(), "subscription_status": strSchema(), "actor": strSchema(), "allow_cancelled_reactivation": boolSchema()}, []string{"subscription_status"}), Handler: a.toolSubscriptionSync},
 		{Name: "saas_usage_sync", Description: "Pull live usage gauges from configured sources.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "status": strSchema()}, nil), Handler: a.toolUsageSync},
 		{Name: "saas_usage_record", Description: "Upsert one live usage gauge.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema(), "quantity": intSchema(), "source_app": strSchema(), "metadata": objSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolUsageRecord},
@@ -819,6 +819,9 @@ func (a *App) toolPlanActionAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	if err := validateActionAuthOrg(ctx.AppDB(), pid, strArg(args, "plan_key"), args["args"]); err != nil {
+		return nil, err
+	}
 	action, err := dbPlanActionInsert(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
@@ -830,6 +833,17 @@ func (a *App) toolPlanActionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	pid, err := requireProject(ctx, args)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := args["args"]; ok {
+		existing, err := dbPlanActionGet(ctx.AppDB(), pid, int64Arg(args, "id"))
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if err := validateActionAuthOrg(ctx.AppDB(), pid, existing.PlanKey, args["args"]); err != nil {
+				return nil, err
+			}
+		}
 	}
 	action, err := dbPlanActionUpdate(ctx.AppDB(), pid, args)
 	if err != nil {
@@ -908,10 +922,14 @@ func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if amount <= 0 {
 		return nil, errors.New("amount_cents must be greater than zero")
 	}
+	method, err := manualPaymentMethod(strArg(args, "method"))
+	if err != nil {
+		return nil, err
+	}
 	var paymentOut map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("billing", "payments_record", map[string]any{
 		"_project_id": pid, "invoice_id": invoiceID, "amount_cents": amount,
-		"method": firstNonEmpty(strArg(args, "method"), "wire"),
+		"method": method,
 		"notes":  firstNonEmpty(strArg(args, "notes"), "SaaS administrative payment"),
 	}, &paymentOut); err != nil {
 		return nil, fmt.Errorf("record checkout payment: %w", err)
@@ -1080,6 +1098,11 @@ func (a *App) toolAccountResume(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolAccountCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !boolArg(args, "immediate") {
+		if out, scheduled, err := a.scheduleAccountCancel(ctx, args); err != nil || scheduled {
+			return out, err
+		}
+	}
 	return a.setAccountStatus(ctx, args, StatusCancelled, "cancelled")
 }
 
@@ -1496,6 +1519,9 @@ func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, boo
 	if plan == nil {
 		return nil, false, fmt.Errorf("plan %q not found", planKey)
 	}
+	if err := validateAccountAuthOrg(plan, args); err != nil {
+		return nil, false, err
+	}
 	slug, err := normalizeSlug(strArg(args, "slug"))
 	if err != nil {
 		return nil, false, err
@@ -1585,6 +1611,9 @@ func (a *App) resumeProvisioning(ctx *sdk.AppCtx, pid string, acct *Account, cus
 	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "auth_org", func() (any, error) {
 		if acct.AuthOrgID != nil {
 			return map[string]any{"auth_org_id": *acct.AuthOrgID}, nil
+		}
+		if planAuthOrgMode(plan) == authOrgNone {
+			return map[string]any{"skipped": true, "reason": "plan auth_org none"}, nil
 		}
 		id, err := createAuthOrg(ctx, pid, acct.Slug, firstNonEmpty(customer.Name, acct.Slug))
 		if err != nil {
@@ -1722,6 +1751,9 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	}
 	if plan == nil {
 		return nil, fmt.Errorf("plan %q not found", planKey)
+	}
+	if err := validateAccountAuthOrg(plan, args); err != nil {
+		return nil, err
 	}
 	discountID, discountCode, err := checkoutDiscountIdentity(plan, strArg(args, "discount_code"))
 	if err != nil {
@@ -3302,6 +3334,7 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 		if err := dbCheckoutComplete(ctx.AppDB(), pid, op.CheckoutID, "active", map[string]any{"invoice_id": invoiceID, "subscription_id": op.SubscriptionID, "cycle_id": op.CycleID}); err != nil {
 			return fail(err)
 		}
+		a.emitCheckoutPaid(ctx, pid, op.CheckoutID, invoice)
 	}
 	_ = recordEvent(ctx.AppDB(), pid, op.AccountID, "invoice.paid", "billing", map[string]any{
 		"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
@@ -3586,6 +3619,9 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 		if err := validatePrepaidPlan(args, metadata); err != nil {
 			return nil, err
 		}
+	}
+	if err := validatePlanAuthOrg(db, pid, key, metadata); err != nil {
+		return nil, err
 	}
 	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
 		var existingMetadata string

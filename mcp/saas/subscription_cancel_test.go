@@ -89,8 +89,10 @@ func TestAccountCancel_UsesPlanCancelAtPeriodEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.(map[string]any)["account"].(*Account).Status != StatusCancelled {
-		t.Fatal("account must be cancelled at once even when the subscription runs to period end")
+	// v0.13.0: the account keeps access until the paid period ends.
+	res := out.(map[string]any)
+	if res["account"].(*Account).Status != StatusActive || res["scheduled"] != true {
+		t.Fatalf("cancel on a cancel_at_period_end plan must be scheduled: %+v", res)
 	}
 	calls := subscriptionCancelCalls(pf.calls)
 	if len(calls) != 1 || calls[0].Input["at_period_end"] != true || calls[0].Input["reason"] != subscriptionCancelReason {
@@ -181,7 +183,7 @@ func TestAccountReconcile_RetriesSubscriptionCancelForCancelledAccount(t *testin
 	defer db.Close()
 	app := &App{}
 	acct := cancelTestAccount(t, app, ctx, db, "reconcile", 614, boolPtr(true))
-	if _, err := app.toolAccountCancel(ctx, map[string]any{"account_id": acct.ID}); err != nil {
+	if _, err := app.toolAccountCancel(ctx, map[string]any{"account_id": acct.ID, "immediate": true}); err != nil {
 		t.Fatal(err)
 	}
 	grantsBefore := countCalls(pf.calls, "entitlements", "entitlement_grants_upsert")
