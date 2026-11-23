@@ -2436,6 +2436,13 @@ func (a *App) toolSetConversationStatus(ctx *sdk.AppCtx, args map[string]any) (a
 	if suppression.Attempted || suppression.Error != "" {
 		out["suppression"] = suppression
 	}
+	// Closing an email conversation archives its mailbox threads (Gmail).
+	// Best effort: the close has already committed.
+	if status == "closed" && convo.Status != "closed" {
+		if archive := archiveConversationMailbox(ctx, pid, updated); archive != nil {
+			out["mailbox_archive"] = archive
+		}
+	}
 	return out, nil
 }
 

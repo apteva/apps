@@ -647,7 +647,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_set_conversation_status",
-			Description: "Set a conversation's workflow status and/or priority. status: open (needs us) | pending (waiting on the contact) | closed (resolved) | spam (mark contact spam and best-effort add Messaging suppression). priority: low | normal | high | urgent. Either may be omitted to leave unchanged. Inbound replies auto-reopen pending/closed threads but never spam threads. Args: conversation_id (req), id? (contact-id safety check), status?, priority?, spam_scope? (sender|domain; default sender), force? (allow common-domain suppression).",
+			Description: "Set a conversation's workflow status and/or priority. status: open (needs us) | pending (waiting on the contact) | closed (resolved) | spam (mark contact spam and best-effort add Messaging suppression). priority: low | normal | high | urgent. Either may be omitted to leave unchanged. Closing an email conversation also archives its Gmail threads through Messaging (removes INBOX, deletes nothing; result in mailbox_archive, never blocks the close). Inbound replies auto-reopen pending/closed threads but never spam threads. Args: conversation_id (req), id? (contact-id safety check), status?, priority?, spam_scope? (sender|domain; default sender), force? (allow common-domain suppression).",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
