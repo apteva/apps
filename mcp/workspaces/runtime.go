@@ -34,6 +34,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if previewPort < 0 || previewPort > 65535 {
 		return nil, errors.New("preview_port must be 1-65535")
 	}
+	instanceID := int64Arg(args, "instance_id")
+	if instanceID < 0 {
+		return nil, errors.New("instance_id must be a positive Instances host id")
+	}
 	name, err := normalizeWorkspaceName(strArg(args, "name"))
 	if err != nil {
 		return nil, err
@@ -108,7 +112,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		ID: newID("wsp"), ProjectID: actor.ProjectID, Name: name,
 		Purpose: strArg(args, "purpose"), Profile: profile, Image: image,
 		LifecycleStatus: statusProvisioning, ActivityStatus: activityIdle,
-		HostLabel: "Local Docker", NetworkPolicy: "isolated-egress",
+		HostLabel: hostLabel(instanceID), InstanceID: instanceID, NetworkPolicy: "isolated-egress",
 		CPU: configFloat(app, "default_cpu", 2), MemoryMB: configInt(app, "default_memory_mb", 4096),
 		ConsumerApp: consumerApp, ConsumerInstallID: consumerInstallID,
 		OwnerAgentID: ownerAgentID, OwnerThreadID: ownerThreadID, OwnerLabel: ownerLabel,
@@ -148,9 +152,14 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		"working_directory": "/workspace",
 		"command":           []string{"/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done"},
 	}
-	if previewPort > 0 {
-		// Preview URLs refer to this host. Never route loopback to a remote default host.
+	if instanceID > 0 {
+		input["instance_id"] = instanceID
+	} else if previewPort > 0 {
+		// Without an explicit instance_id, preview workspaces stay on local
+		// Docker as before; Containers' default_host_id applies to the rest.
 		input["use_local"] = true
+	}
+	if previewPort > 0 {
 		input["ports"] = []map[string]any{{"container_port": previewPort, "host_port": 0, "protocol": "tcp", "bind_addr": "127.0.0.1"}}
 	}
 	var runOut workloadResponse
@@ -161,12 +170,15 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		return nil, a.failCreate(app, w, errors.New("containers_run returned an empty workload id"))
 	}
 	w.WorkloadID = runOut.Workload.ID
+	// Record where Containers actually placed it (explicit or default host).
+	w.InstanceID = workloadTarget(runOut.Workload)
+	w.HostLabel = hostLabel(w.InstanceID)
 	if sourceArchive != "" {
 		var imported map[string]any
 		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
 			"workload_id": w.WorkloadID, "volume": "workspace", "path": ".", "archive_base64": sourceArchive,
 		}, &imported); err != nil {
-			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"workload_id": w.WorkloadID, "updated_at": nowUTC()})
+			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"workload_id": w.WorkloadID, "instance_id": w.InstanceID, "host_label": w.HostLabel, "updated_at": nowUTC()})
 			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.import_failed", Actor{Kind: "runtime", Label: "Containers"}, "Source archive import failed", map[string]any{"error": err.Error()})
 			return nil, a.failCreate(app, w, fmt.Errorf("source import: %w", err))
 		}
@@ -175,6 +187,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	}
 	updates := map[string]any{
 		"workload_id": w.WorkloadID, "lifecycle_status": statusRunning,
+		"instance_id": w.InstanceID, "host_label": w.HostLabel,
 		"runtime_status": firstNonEmpty(runOut.Workload.Status, "running"),
 		"health_status":  runOut.Workload.HealthStatus, "last_error": "", "updated_at": nowUTC(),
 	}
@@ -250,7 +263,10 @@ func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[st
 	if w.Kind == kindTest {
 		execInput["user"] = opts.UID
 		err = a.switchTestNetwork(app, w, opts.Network)
-	} else {
+	} else if w.InstanceID == 0 {
+		// Containers keeps shell sessions open in its own process, so they
+		// exist only on local Docker. Remote commands run one at a time:
+		// working directory and env are per command, shell state is not kept.
 		execInput["session_key"] = "workspace"
 	}
 	var out executionResponse
@@ -352,6 +368,11 @@ func (a *App) refreshWorkspace(app *sdk.AppCtx, w *Workspace) (*ContainerWorkloa
 	fields := map[string]any{
 		"runtime_status": runtime.Status, "health_status": runtime.HealthStatus,
 		"last_error": runtime.LastError, "updated_at": nowUTC(),
+	}
+	// Workspaces created before 0.9.0 never recorded their host.
+	if target := workloadTarget(runtime); target != w.InstanceID {
+		fields["instance_id"] = target
+		fields["host_label"] = hostLabel(target)
 	}
 	if w.LifecycleStatus != statusExpired && w.LifecycleStatus != statusDestroying && w.LifecycleStatus != statusDestroyed {
 		switch runtime.Status {
@@ -503,6 +524,7 @@ func (a *App) destroyWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace) (*Wor
 		return w, nil
 	}
 	_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"lifecycle_status": statusDestroying, "updated_at": nowUTC()})
+	a.closePreviewTunnel(app, w)
 	if w.WorkloadID != "" {
 		var out map[string]any
 		if err := app.PlatformAPI().CallAppResult("containers", "containers_destroy", map[string]any{
@@ -584,4 +606,19 @@ func (a *App) expire(ctx context.Context, app *sdk.AppCtx) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// workloadTarget is the Instances host a workload runs on; 0 means local Docker.
+func workloadTarget(w ContainerWorkload) int64 {
+	if w.InstanceID != 0 {
+		return w.InstanceID
+	}
+	return w.HostID
+}
+
+func hostLabel(instanceID int64) string {
+	if instanceID > 0 {
+		return fmt.Sprintf("Instance #%d", instanceID)
+	}
+	return "Local Docker"
 }

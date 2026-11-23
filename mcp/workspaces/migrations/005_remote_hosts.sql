@@ -1,0 +1,3 @@
+ALTER TABLE workspaces ADD COLUMN instance_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace_previews ADD COLUMN tunnel_port INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace_previews ADD COLUMN instance_id INTEGER NOT NULL DEFAULT 0;

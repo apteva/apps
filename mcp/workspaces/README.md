@@ -1,5 +1,38 @@
 # Workspaces
 
+## v0.9.0
+
+Requires Containers 0.8.0 or later. Remote previews also need the Instances
+app (0.4.18 or later, optional otherwise).
+
+**Workspaces on Instances hosts.**
+
+- `workspaces_create` and `workspace_create_for_resource` take an optional
+  `instance_id`. Without it, preview workspaces stay on local Docker as
+  before and other workspaces go where Containers' `default_host_id` puts
+  them. The host Containers actually chose is stored on the workspace
+  (`instance_id`, `host_label`) and shown in the panel. Workspaces created
+  before 0.9.0 get their host filled in on the next reconcile.
+- **Commands on a remote host run one at a time.** Containers holds shell
+  sessions open in its own process, so they exist only on local Docker.
+  On a remote host each command gets its own shell: `cd` and exported
+  variables do not carry over to the next command; pass `working_directory`.
+  Files and installed tools stay in the volumes as before.
+- **Remote previews** publish the port on the remote host's loopback and
+  open an Instances SSH tunnel to it. The preview URL is the tunnel's local
+  port. Instances keeps tunnels in memory, so every `workspace_preview_get`
+  and reconcile pass reopens or reuses the tunnel; after an Instances
+  restart the URL may change port. Stopping the preview or destroying the
+  workspace closes the tunnel.
+- File and source copies use the same 8 MiB archive limit as local ones
+  (Containers' `max_archive_bytes`); remote hosts accept at most 16 MiB.
+- Dependency caches are volumes on the host the workspace runs on, so a
+  workspace on a new host starts with an empty cache.
+- Test workspaces stay on local Docker: their shared cache is a standalone
+  volume, which Containers keeps local.
+- `workspace_create_for_resource` reuses the caller's existing workspace for
+  the resource even when it is on a different host than `instance_id` asks.
+
 ## v0.8.1
 
 Fixes creates that failed and then blocked every retry with

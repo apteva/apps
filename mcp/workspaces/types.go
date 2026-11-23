@@ -32,6 +32,7 @@ type Workspace struct {
 	RuntimeStatus     string   `json:"runtime_status"`
 	HealthStatus      string   `json:"health_status"`
 	HostLabel         string   `json:"host_label"`
+	InstanceID        int64    `json:"instance_id"`
 	NetworkPolicy     string   `json:"network_policy"`
 	CPU               float64  `json:"cpu"`
 	MemoryMB          int      `json:"memory_mb"`

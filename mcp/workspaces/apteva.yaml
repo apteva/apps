@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.8.1
+version: 0.9.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -26,6 +26,9 @@ description: |
   v0.8.1: a create that fails releases the workspace name, and
   workspace_create_for_resource returns the caller's existing workspace for
   the same resource instead of failing on the name.
+  v0.9.0 runs workspaces on Instances hosts: workspaces_create takes an
+  optional instance_id, commands on remote hosts run one at a time (no shell
+  session), and remote previews are reached through an Instances tunnel.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -46,9 +49,13 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.7.1"
+      version: ">=0.8.0"
       optional: false
-      reason: Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces.
+      reason: Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces. 0.8.0 adds command runs and volume copies on Instances hosts.
+    - name: instances
+      version: ">=0.4.18"
+      optional: true
+      reason: Opens a loopback SSH tunnel to a preview running on an Instances host. Only needed for remote previews.
 
 provides:
   permissions:
@@ -72,7 +79,7 @@ provides:
       description: "Stop a preview. keep_workspace_running defaults to true for agents (preview process only) and false for app callers (container stops, volumes retained). Args: workspace_id, keep_workspace_running?."
       requires: workspaces.write
     - name: workspaces_create
-      description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, preview_port?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
+      description: "Create a development workspace from an approved runtime profile on local Docker or an Instances host, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, preview_port?, instance_id?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
       requires: workspaces.write
     - name: workspaces_list
       description: "List current-project workspaces. Args: status?, include_destroyed?, limit?."
@@ -189,7 +196,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.8.1
+    ref: workspaces/v0.9.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health

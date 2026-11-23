@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.8.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.9.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -76,6 +76,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		"ttl_minutes": intSchema(), "owner_label": strSchema(), "repo_label": strSchema(),
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
 		"preview_port": intSchema(),
+		"instance_id":  map[string]any{"type": "integer", "description": "Instances host to run on. Omit for the default: local Docker for preview workspaces, otherwise Containers' default host."},
 	}
 	appCreateProps := make(map[string]any, len(createProps)+8)
 	for key, value := range createProps {
@@ -89,10 +90,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
 	return append(a.previewTools(), []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile with an optional allowlisted, digest-pinned image override. Set preview_port to publish one container port for workspace_preview_start.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, on local Docker or an Instances host (instance_id). Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
-		{Name: "workspace_command_start", Description: "Run one asynchronous command through the workspace's persistent PTY shell session.", InputSchema: schemaObject(map[string]any{
+		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host each command runs on its own, so cd and exported variables do not carry over (use working_directory).", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema(), "maxItems": 256},
 			"shell_command": strSchema(), "working_directory": strSchema(), "timeout_s": intSchema(), "idempotency_key": strSchema(),
 			"user":    map[string]any{"type": "string", "enum": []string{"builder", "runner"}, "description": "Test workspaces only. Default runner."},

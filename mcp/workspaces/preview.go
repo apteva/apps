@@ -3,6 +3,11 @@ package main
 // Previews use their own Containers execution, independent of the command PTY.
 // The execution and its published loopback port survive Workspaces/Code restarts;
 // the workspace TTL remains the upper bound on the preview's lifetime.
+//
+// On an Instances host the port is published on that host's loopback, so the
+// preview URL is an Instances SSH tunnel to it. Instances keeps tunnels in
+// memory only; every preview refresh reopens (or reuses) it, so a restart of
+// Instances heals on the next preview_get or reconcile pass.
 import (
 	"context"
 	"database/sql"
@@ -20,6 +25,8 @@ type Preview struct {
 	ExecutionID   string `json:"execution_id"`
 	ContainerPort int    `json:"container_port"`
 	HostPort      int    `json:"host_port"`
+	InstanceID    int64  `json:"instance_id,omitempty"`
+	TunnelPort    int    `json:"tunnel_port,omitempty"`
 	Status        string `json:"status"`
 	Error         string `json:"error,omitempty"`
 	StartedAt     string `json:"started_at"`
@@ -28,20 +35,33 @@ type Preview struct {
 
 func getPreview(db *sql.DB, id string) (*Preview, error) {
 	p := &Preview{}
-	err := db.QueryRow(`SELECT workspace_id,execution_id,container_port,host_port,status,error,started_at FROM workspace_previews WHERE workspace_id=?`, id).Scan(&p.WorkspaceID, &p.ExecutionID, &p.ContainerPort, &p.HostPort, &p.Status, &p.Error, &p.StartedAt)
+	err := db.QueryRow(`SELECT workspace_id,execution_id,container_port,host_port,instance_id,tunnel_port,status,error,started_at FROM workspace_previews WHERE workspace_id=?`, id).Scan(&p.WorkspaceID, &p.ExecutionID, &p.ContainerPort, &p.HostPort, &p.InstanceID, &p.TunnelPort, &p.Status, &p.Error, &p.StartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if p.HostPort > 0 {
-		p.URL = "http://127.0.0.1:" + strconv.Itoa(p.HostPort) + "/"
-	}
+	p.setURL()
 	return p, nil
 }
+
+// setURL points at the tunnel for remote previews and the published port
+// for local ones. A remote preview without an open tunnel has no URL.
+func (p *Preview) setURL() {
+	p.URL = ""
+	port := p.HostPort
+	if p.InstanceID > 0 {
+		port = p.TunnelPort
+	}
+	if port > 0 {
+		p.URL = "http://127.0.0.1:" + strconv.Itoa(port) + "/"
+	}
+}
+
 func savePreview(db *sql.DB, p *Preview) error {
-	_, err := db.Exec(`INSERT INTO workspace_previews(workspace_id,execution_id,container_port,host_port,status,error,started_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET execution_id=excluded.execution_id,container_port=excluded.container_port,host_port=excluded.host_port,status=excluded.status,error=excluded.error,started_at=excluded.started_at`, p.WorkspaceID, p.ExecutionID, p.ContainerPort, p.HostPort, p.Status, p.Error, p.StartedAt)
+	_, err := db.Exec(`INSERT INTO workspace_previews(workspace_id,execution_id,container_port,host_port,instance_id,tunnel_port,status,error,started_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET execution_id=excluded.execution_id,container_port=excluded.container_port,host_port=excluded.host_port,instance_id=excluded.instance_id,tunnel_port=excluded.tunnel_port,status=excluded.status,error=excluded.error,started_at=excluded.started_at`, p.WorkspaceID, p.ExecutionID, p.ContainerPort, p.HostPort, p.InstanceID, p.TunnelPort, p.Status, p.Error, p.StartedAt)
+	p.setURL()
 	return err
 }
 func (a *App) previewTools() []sdk.Tool {
@@ -97,10 +117,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 	if err = app.PlatformAPI().CallAppResult("containers", "containers_get", map[string]any{"workload_id": w.WorkloadID}, &runtime); err != nil {
 		return nil, err
 	}
-	if runtime.Workload.HostID != 0 || runtime.Workload.InstanceID != 0 {
-		return nil, errors.New("preview requires a local Docker workspace")
-	}
-	p := &Preview{WorkspaceID: w.ID, Status: "starting", StartedAt: nowUTC()}
+	p := &Preview{WorkspaceID: w.ID, InstanceID: workloadTarget(runtime.Workload), Status: "starting", StartedAt: nowUTC()}
 	for _, port := range runtime.Workload.Ports {
 		if port.Protocol == "tcp" && port.BindAddr == "127.0.0.1" && port.HostPort > 0 {
 			p.ContainerPort = port.ContainerPort
@@ -110,6 +127,11 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 	}
 	if p.HostPort == 0 {
 		return nil, errors.New("workspace has no published preview port; create it with preview_port using Containers >=0.5.0")
+	}
+	if p.InstanceID > 0 {
+		if p.TunnelPort, err = openPreviewTunnel(app, p.InstanceID, p.HostPort); err != nil {
+			return nil, err
+		}
 	}
 	if err = savePreview(app.AppDB(), p); err != nil {
 		return nil, err
@@ -130,7 +152,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 	if err = savePreview(app.AppDB(), p); err != nil {
 		return nil, err
 	}
-	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.started", actor, "Container preview starting", map[string]any{"execution_id": p.ExecutionID, "port": p.HostPort})
+	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.started", actor, "Container preview starting", map[string]any{"execution_id": p.ExecutionID, "port": p.HostPort, "instance_id": p.InstanceID, "tunnel_port": p.TunnelPort})
 	p, _ = getPreview(app.AppDB(), w.ID)
 	return map[string]any{"preview": p}, nil
 }
@@ -159,7 +181,21 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 			p.Status = "crashed"
 			p.Error = firstNonEmpty(out.Execution.Error, fmt.Sprintf("preview exited (%s, exit code %v)", out.Execution.Status, out.Execution.ExitCode))
 		} else {
-			resp, e := previewHTTPClient.Get(p.URL)
+			var e error
+			if p.InstanceID > 0 {
+				// Reuses the open tunnel; reopens it after an Instances restart.
+				var port int
+				if port, e = openPreviewTunnel(app, p.InstanceID, p.HostPort); e == nil {
+					p.TunnelPort = port
+					p.setURL()
+				} else {
+					p.Error = "preview tunnel: " + e.Error()
+				}
+			}
+			var resp *http.Response
+			if e == nil {
+				resp, e = previewHTTPClient.Get(p.URL)
+			}
 			if e == nil {
 				resp.Body.Close()
 				p.Status = "live"
@@ -190,9 +226,45 @@ func (a *App) cancelPreview(app *sdk.AppCtx, w *Workspace) error {
 			return err
 		}
 	}
+	closeTunnel(app, p)
 	p.Status = "stopped"
 	p.Error = ""
 	return savePreview(app.AppDB(), p)
+}
+
+// openPreviewTunnel opens or reuses the Instances tunnel to a port published
+// on the remote host's loopback and returns the local port.
+func openPreviewTunnel(app *sdk.AppCtx, instanceID int64, hostPort int) (int, error) {
+	var out struct {
+		LocalPort int `json:"local_port"`
+	}
+	if err := app.PlatformAPI().CallAppResult("instances", "instance_open_tunnel", map[string]any{"id": instanceID, "target_port": hostPort}, &out); err != nil {
+		return 0, fmt.Errorf("remote preview needs the Instances app: %w", err)
+	}
+	if out.LocalPort <= 0 {
+		return 0, errors.New("Instances returned no tunnel port")
+	}
+	return out.LocalPort, nil
+}
+
+// closeTunnel is best effort: Instances drops all tunnels on restart anyway.
+func closeTunnel(app *sdk.AppCtx, p *Preview) {
+	if p == nil || p.InstanceID <= 0 || p.HostPort <= 0 || p.TunnelPort <= 0 {
+		return
+	}
+	var out map[string]any
+	_ = app.PlatformAPI().CallAppResult("instances", "instance_close_tunnel", map[string]any{"id": p.InstanceID, "target_port": p.HostPort}, &out)
+	p.TunnelPort = 0
+}
+
+// closePreviewTunnel closes a destroyed workspace's tunnel.
+func (a *App) closePreviewTunnel(app *sdk.AppCtx, w *Workspace) {
+	p, err := getPreview(app.AppDB(), w.ID)
+	if err != nil || p == nil || p.TunnelPort <= 0 {
+		return
+	}
+	closeTunnel(app, p)
+	_ = savePreview(app.AppDB(), p)
 }
 func (a *App) toolPreviewGet(c context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	_, w, err := previewContext(c, app, args)
