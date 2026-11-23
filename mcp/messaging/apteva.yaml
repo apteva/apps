@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.16.2
+version: 0.17.0
 description: |
   Multi-provider SMS through Twilio and Telnyx with account-pinned numbers,
   verified durable inbound webhooks, delivery tracking and receive-only mode.
@@ -140,6 +140,7 @@ provides:
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events, and normalized attachment metadata without raw bytes." }
     - { name: message_list,           description: "List messages with normalized attachment metadata. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
+    - { name: message_thread_archive, description: "Archive the Gmail threads holding these messages (removes INBOX, deletes nothing). Other providers are skipped. Args: message_ids." }
     - { name: inbound_redispatch,     description: "Re-attempt routing for an inbound message that previously failed or had no_match, preserving normalized attachment IDs and metadata. Args: id." }
     # routing config
     - { name: inbound_route_set,      description: "Bind a recipient URI pattern to any target app tool. Routed payloads include normalized attachment metadata (storage_id, filename, content_type, size, disposition, status) and never raw bytes or provider credentials. Idempotent. Args: pattern (e.g. mailto:support+*@acme.com), target_app, target_route, priority?." }
@@ -217,7 +218,7 @@ runtime:
   startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
-    ref: messaging/v0.16.2
+    ref: messaging/v0.17.0
     entry: mcp/messaging
   port: 8080
   health_check: /health
