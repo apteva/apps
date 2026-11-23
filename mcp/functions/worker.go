@@ -54,12 +54,15 @@ type worker struct {
 	diskCancel          context.CancelFunc
 	fnID                int64
 	fnName              string
-	versionID           int64
-	cmd                 *exec.Cmd
-	conn                net.Conn
-	stderr              *capBuffer
-	tempDir             string
-	writeMu             sync.Mutex
+	// effective is the stage / pinned-version configuration a keyed worker
+	// was started with (nil for the function's active configuration).
+	effective *Function
+	versionID int64
+	cmd       *exec.Cmd
+	conn      net.Conn
+	stderr    *capBuffer
+	tempDir   string
+	writeMu   sync.Mutex
 
 	mu       sync.Mutex // serialises call(); guards dead + lastUsed + seq
 	dead     bool
@@ -454,10 +457,16 @@ func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadl
 	ans := callResult{Type: "call_result", CallID: msg.CallID}
 	trace := traceFrom(parent)
 	record := -1
-	if err := checkFunctionAccessInPool(p, ctx, w.fnID, msg); err != nil {
+	var accessErr error
+	if w.effective != nil {
+		accessErr = functionAccessAllows(w.effective.Access, msg)
+	} else {
+		accessErr = checkFunctionAccessInPool(p, ctx, w.fnID, msg)
+	}
+	if err := accessErr; err != nil {
 		ans.Error = err.Error()
 	} else {
-		callCtx, cancel := downstreamContext(parent, ctx, w.fnID, msg)
+		callCtx, cancel := downstreamContextFor(parent, ctx, w.fnID, w.effective, msg)
 		defer cancel()
 		record = trace.beginDownstream(msg, callCtx)
 		class := "interactive"
@@ -926,6 +935,9 @@ func workerEnv(fn *Function, entryPath, tempDir string) []string {
 		"APTEVA_FUNCTION_ID="+fmt.Sprintf("%d", fn.ID),
 		"APTEVA_FUNCTION_RUNTIME="+fn.Runtime,
 	)
+	if fn.stage != "" {
+		out = append(out, "APTEVA_FUNCTION_STAGE="+fn.stage)
+	}
 	return out
 }
 

@@ -33,13 +33,18 @@ func checkFunctionAccessInPool(p *pool, ctx *sdk.AppCtx, id int64, msg wireRespo
 	if fn == nil {
 		return errors.New("function deleted")
 	}
-	if fn.Access == nil {
+	return functionAccessAllows(fn.Access, msg)
+}
+
+// functionAccessAllows applies one access policy to a downstream call frame.
+func functionAccessAllows(access *FunctionAccess, msg wireResponse) error {
+	if access == nil {
 		return nil
 	}
-	allowed := fn.Access.Apps
+	allowed := access.Apps
 	target := msg.App + "." + msg.Tool
 	if msg.Type == "integration" {
-		allowed = fn.Access.Integrations
+		allowed = access.Integrations
 		var ref any
 		if err := json.Unmarshal(msg.Conn, &ref); err != nil {
 			return err

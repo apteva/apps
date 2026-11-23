@@ -28,8 +28,13 @@ func callbackClient() *http.Client {
 
 var integrationHTTP = callbackClient()
 
-func downstreamContext(parent context.Context, ctx *sdk.AppCtx, id int64, msg wireResponse) (context.Context, context.CancelFunc) {
-	fn, _ := dbGetFunction(ctx.AppDB(), ctx.CurrentProject(), id, "")
+// downstreamContextFor uses effective (a stage / pinned-version worker's
+// configuration) when set instead of re-reading the active function.
+func downstreamContextFor(parent context.Context, ctx *sdk.AppCtx, id int64, effective *Function, msg wireResponse) (context.Context, context.CancelFunc) {
+	fn := effective
+	if fn == nil {
+		fn, _ = dbGetFunction(ctx.AppDB(), ctx.CurrentProject(), id, "")
+	}
 	r := RuntimePolicy{AppMS: 30000, IntegrationMS: 300000}
 	if fn != nil {
 		r = policy(fn)
@@ -127,6 +132,12 @@ func dispatchNested(parent context.Context, ctx *sdk.AppCtx, input map[string]an
 	fn, err := executionFunction(ctx, ctx.CurrentProject(), int64Arg(input, "id"), strArg(input, "name"))
 	if err != nil || fn == nil {
 		ans.Error = "nested function not found"
+		return ans
+	}
+	// Explicit stage/version wins; otherwise inherit the caller's stage when
+	// the callee defines one of that name (see stages.go).
+	if fn, err = nestedTarget(parent, ctx.AppDB(), fn, input); err != nil {
+		ans.Error = err.Error()
 		return ans
 	}
 	if t := traceFrom(parent); t != nil {

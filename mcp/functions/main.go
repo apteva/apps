@@ -1,4 +1,4 @@
-// Functions v1.18.0 — Lambda-style serverless functions.
+// Functions v1.22.0 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -106,6 +106,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// CRUD on functions.
 		{Pattern: "/functions", Handler: a.handleHTTPFunctionsCollection},
 		{Pattern: "/functions/", Handler: a.handleHTTPFunctionItem},
+		// Stage promotion / rollback across functions (stages.go).
+		{Pattern: "/stages/", Handler: a.handleHTTPStages},
 		// Auto-routed invocation endpoint. /fn/<name> on the sidecar
 		// becomes /api/apps/functions/fn/<name> through the gateway —
 		// that's the URL the Jobs app uses for cron-fired schedules.
@@ -123,7 +125,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append([]sdk.Tool{
 		storageTool(),
 		performanceTool(a, false),
 		performanceTool(a, true),
@@ -215,11 +217,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "functions_invoke",
-			Description: "Synchronously invoke a function's active version. Args: id (or name), event (any JSON; passed to the handler).",
+			Description: "Synchronously invoke a function. Args: id (or name), event (any JSON; passed to the handler), stage? (run that stage's version with its vars/access/limits; unknown or paused stage is an error) or version? (run that ready version with the function's settings). Neither runs the active version.",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"name":  map[string]any{"type": "string"},
-				"event": map[string]any{"description": "JSON payload passed to the handler as its first argument."},
+				"id":      map[string]any{"type": "integer"},
+				"name":    map[string]any{"type": "string"},
+				"event":   map[string]any{"description": "JSON payload passed to the handler as its first argument."},
+				"stage":   map[string]any{"type": "string", "description": "Stage name. Mutually exclusive with version."},
+				"version": map[string]any{"type": "integer", "description": "Version number. Mutually exclusive with stage."},
 			}, nil),
 			HandlerCtx: a.toolInvokeContext,
 		},
@@ -245,8 +249,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "functions_deploy",
-			Description: "Deploy a new immutable version of a function and make it active. Args: id (or name), source OR (repo_id+repo_path), source_kind?, package_json?.",
+			Description: "Deploy a new immutable version of a function. Args: id (or name), source OR (repo_id+repo_path), source_kind?, package_json?, activate? (default true makes it active; false only builds and validates it, for promotion to a stage). Never moves a stage. Identical content returns the existing ready version (reused=true).",
 			InputSchema: schemaObject(map[string]any{
+				"activate":     map[string]any{"type": "boolean", "description": "Make the version active (default true). false keeps the active version and only builds the new one."},
 				"id":           map[string]any{"type": "integer"},
 				"name":         map[string]any{"type": "string"},
 				"source":       map[string]any{"type": "string"},
@@ -278,7 +283,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolVersions,
 		},
-	}
+	}, stageTools(a)...)
 }
 
 func main() {

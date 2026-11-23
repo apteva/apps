@@ -97,7 +97,7 @@ func (p *pool) retainArtifacts() {
 	p.lastArtifactRetention = time.Now()
 	p.mu.Unlock()
 	keep := envInt("APTEVA_FUNCTIONS_KEEP_VERSIONS", 20, 1, 1000)
-	rows, err := p.ctx.AppDB().Query(`SELECT `+fnVerColumns+` FROM function_versions v WHERE build_status IN ('ready','failed') AND created_at < datetime('now','-7 days') AND id NOT IN (SELECT active_version_id FROM functions WHERE active_version_id IS NOT NULL) AND (SELECT count(*) FROM function_versions newer WHERE newer.function_id=v.function_id AND newer.version>v.version)>=?`, keep)
+	rows, err := p.ctx.AppDB().Query(`SELECT `+fnVerColumns+` FROM function_versions v WHERE build_status IN ('ready','failed') AND created_at < datetime('now','-7 days') AND id NOT IN (SELECT active_version_id FROM functions WHERE active_version_id IS NOT NULL) AND id NOT IN (SELECT version_id FROM function_stages) AND id NOT IN (SELECT previous_version_id FROM function_stages WHERE previous_version_id IS NOT NULL) AND (SELECT count(*) FROM function_versions newer WHERE newer.function_id=v.function_id AND newer.version>v.version)>=?`, keep)
 	if err != nil {
 		return
 	}
@@ -116,52 +116,11 @@ func (p *pool) retainArtifacts() {
 		return
 	}
 	for _, v := range candidates {
-		p.mu.Lock()
-		used := false
-		for w := range p.all {
-			if w.versionID == v.ID {
-				used = true
-				break
-			}
-		}
-		p.mu.Unlock()
-		if used {
-			continue
-		}
-		// A concurrent rollback must not race artifact collection.
-		release, err := lockBuild(p.life, fmt.Sprintf("activation-%d", v.FunctionID))
-		if err != nil {
+		// collectVersion re-checks active and stage references under the
+		// activation lock and skips versions with live workers or leases.
+		if _, err := p.collectVersion(v); err != nil {
 			return
 		}
-		var active bool
-		err = p.ctx.AppDB().QueryRow(`SELECT EXISTS(SELECT 1 FROM functions WHERE active_version_id=?)`, v.ID).Scan(&active)
-		if err == nil && !active {
-			dir := versionDir(p.buildBase, v)
-			p.mu.Lock()
-			if p.versionRefs[dir] > 0 {
-				p.mu.Unlock()
-				release()
-				continue
-			}
-			p.collecting[dir] = true
-			p.mu.Unlock()
-			if removeTree(dir) == nil {
-				// Older harness generations and the pre-1.7.1 layout are no longer runnable.
-				variants, _ := filepath.Glob(filepath.Join(p.buildBase, v.ArtifactKey, fmt.Sprintf("v%d-*", v.Version)))
-				for _, old := range variants {
-					_ = removeTree(old)
-				}
-				old := filepath.Clean(v.BuildDir)
-				root := filepath.Clean(p.buildBase) + string(os.PathSeparator)
-				if old != dir && strings.HasPrefix(old, root) {
-					_ = removeTree(old)
-				}
-				_, _ = p.ctx.AppDB().Exec(`DELETE FROM function_versions WHERE id=?`, v.ID)
-				p.versions.Delete(v.ID)
-				p.artifacts.Delete(dir)
-			}
-		}
-		release()
 	}
 }
 

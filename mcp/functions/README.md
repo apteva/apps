@@ -1,4 +1,6 @@
-# Functions 1.20.0
+# Functions 1.22.0
+
+**New in 1.22.0:** named stages. See [Stages (1.22.0)](#stages-1220).
 
 **New in 1.20.0:** snapshot restore. When an Apteva runtime is restored from a
 snapshot, the app SDK moves every `project_id` to the new runtime before
@@ -48,6 +50,73 @@ immutable, built **version** served by a pool of **warm worker
 processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
+
+## Stages (1.22.0)
+
+One stable function keeps immutable versions; a **stage** is a free-text
+name (for example `staging`, `production`) that points the function at one
+version and carries its own settings. A release is: deploy a version
+without going live, promote `staging`, test, then promote `production` to
+the same version. Functions without stages behave exactly as before.
+
+Stage names match `^[a-z0-9][a-z0-9-]{0,39}$` and carry no built-in meaning.
+Each stage stores `version`, `previous_version`, `vars` (string map layered
+over the function `env`; stored and masked the same way as `env`), optional
+`access` and `limits` overrides (`timeout_ms`, `max_memory_mb` and the
+function `limits` fields; omitted fields inherit the function), `status`
+(`active` | `paused`) and `rev` (bumped on every change).
+
+Tools (also on HTTP, shown in brackets):
+
+- `functions_stage_set {function, stage, version?, vars?, access?, limits?, status?, expected_rev?}`
+  creates a stage (`version` required) or updates its settings. It never
+  changes an existing stage's version. Same settings again is a no-op.
+  [`POST /functions/<id>/stages`]
+- `functions_stage_list {function}` [`GET /functions/<id>/stages`]
+- `functions_stage_delete {function, stage, expected_rev?}`; a missing stage is
+  a no-op. [`DELETE /functions/<id>/stages/<stage>`]
+- `functions_stage_promote_many {stage, items: [{function, version, expected_rev?}]}`
+  points one stage of several functions at new versions in one transaction;
+  any bad item (missing function, version or stage, unready version,
+  duplicate, `expected_rev` mismatch) changes nothing. One item is a single
+  promote. The replaced version becomes `previous_version`. Promoting to the
+  current version is a no-op. [`POST /stages/promote`]
+- `functions_stage_rollback {stage, functions: [name | id | {function, expected_rev?}]}`
+  moves each stage back to its previous version, all-or-nothing; it fails if
+  any has no previous version. Current and previous swap, so a second
+  rollback undoes the first. [`POST /stages/rollback`]
+- `functions_versions_prune {function, keep}` deletes old versions, keeping
+  the newest `keep` plus the active version, every version a stage references
+  (current or previous) and versions a worker is using.
+  [`POST /functions/<id>/versions/prune`]
+- `functions_deploy {..., activate?}`: `activate: false` builds and
+  boot-validates the version without making it active. A deploy never moves
+  a stage. Identical content (source hash, `package_json`, source reference)
+  returns the existing ready version with `reused: true`; with
+  `activate: true` that version is activated instead of building a copy.
+
+`function` accepts a name or an integer id. `functions_get` lists a
+function's stages. Invocation history, `functions_logs` and slow-call
+reports record the `stage` and `version_id` of each call.
+
+Invocation rules:
+
+- `functions_invoke {name, stage}` (HTTP: `/fn/<name>?stage=`) runs the
+  stage's version with function `env` + stage `vars`, and stage `access` /
+  `limits` overrides. An unknown stage is an error (no fallback) and a
+  paused stage refuses. `version` instead runs that ready version with the
+  function's own settings. `stage` and `version` are mutually exclusive;
+  neither runs the active version as before. Workers see
+  `APTEVA_FUNCTION_STAGE`.
+- Nested calls (`context.call("functions", "functions_invoke", ...)`) inherit
+  the caller's stage when the callee has a stage of that name (a paused one
+  refuses); otherwise the callee runs its active version. An explicit
+  `stage` or `version` in the nested input wins.
+- Each stage or pinned version runs in its own worker pool keyed by version
+  and effective configuration, so different stage settings never share a
+  worker. Changing or promoting a stage retires its workers. Stages are not
+  warmed proactively; their artifacts are prepared on first call. Public
+  Function URLs serve the active version.
 
 ## Build diagnostics in 1.10.1
 
@@ -330,7 +399,10 @@ python is a planned follow-on.
 `functions_rollback`, `functions_versions`, `functions_update`
 (metadata only — env, limits, status), `functions_delete`,
 `functions_list`, `functions_get`, `functions_invoke`,
-`functions_invocations`, `functions_logs`.
+`functions_invocations`, `functions_logs`, `functions_versions_prune`,
+and the stage tools `functions_stage_set`, `functions_stage_list`,
+`functions_stage_delete`, `functions_stage_promote_many`,
+`functions_stage_rollback` (see [Stages](#stages-1220)).
 
 ## Examples
 

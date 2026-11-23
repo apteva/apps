@@ -42,6 +42,13 @@ type Function struct {
 	ActiveVersionID    *int64             `json:"active_version_id,omitempty"`
 	CreatedAt          string             `json:"created_at,omitempty"`
 	UpdatedAt          string             `json:"updated_at,omitempty"`
+	Stages             []*Stage           `json:"stages,omitempty"`
+
+	// stage / poolKey are set only on an effective invocation target built
+	// by resolveInvocationTarget (a stage or a pinned version). They are
+	// never persisted; an empty poolKey means the active configuration.
+	stage   string
+	poolKey string
 }
 
 type FunctionURLConfig struct {
@@ -73,6 +80,9 @@ type FunctionVersion struct {
 	BuildLog           string `json:"build_log,omitempty"`
 	BuildDir           string `json:"build_dir,omitempty"`
 	CreatedAt          string `json:"created_at,omitempty"`
+	// Reused is set by functions_deploy when identical content already had
+	// a ready version, which was returned instead of creating a new one.
+	Reused bool `json:"reused,omitempty"`
 }
 
 type Invocation struct {
@@ -84,6 +94,7 @@ type Invocation struct {
 	ColdStartMS    int64           `json:"cold_start_ms"`
 	ExecutionMS    int64           `json:"execution_ms"`
 	VersionID      *int64          `json:"version_id,omitempty"`
+	Stage          string          `json:"stage,omitempty"`
 	ConfigHash     string          `json:"config_hash,omitempty"`
 	Truncated      bool            `json:"truncated,omitempty"`
 	ID             int64           `json:"id"`
@@ -429,8 +440,21 @@ func dbListFunctions(db *sql.DB, pid string, f FunctionFilter) ([]*Function, err
 }
 
 func dbDeleteFunction(db *sql.DB, pid string, id int64, identity ...string) error {
-	result, err := db.Exec(`DELETE FROM functions WHERE id=? AND project_id=? AND (?='' OR instance_key=?)`, id, pid, firstString(identity), firstString(identity))
+	tx, err := db.Begin()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Stages cascade with the function; delete them explicitly as well so a
+	// connection without foreign-key enforcement leaves no orphan stage.
+	if _, err = tx.Exec(`DELETE FROM function_stages WHERE function_id=? AND project_id=? AND EXISTS (SELECT 1 FROM functions WHERE id=? AND project_id=? AND (?='' OR instance_key=?))`, id, pid, id, pid, firstString(identity), firstString(identity)); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`DELETE FROM functions WHERE id=? AND project_id=? AND (?='' OR instance_key=?)`, id, pid, firstString(identity), firstString(identity))
+	if err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	n, err := result.RowsAffected()
@@ -649,13 +673,13 @@ func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation, owner ...string
 	res, err := tx.Exec(
 		`INSERT INTO function_invocations (
 			project_id, function_id, started_at, finished_at, duration_ms,
-			status, exit_code, trigger_kind, event_json, response_body, stderr, error, version_id, config_hash, truncated
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			status, exit_code, trigger_kind, event_json, response_body, stderr, error, version_id, config_hash, truncated, stage
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, inv.FunctionID,
 		inv.StartedAt, nullStr(inv.FinishedAt), inv.DurationMS,
 		inv.Status, inv.ExitCode, inv.TriggerKind,
 		nullStr(inv.EventJSON), nullStr(inv.ResponseBody),
-		nullStr(inv.Stderr), nullStr(inv.Error), nullableInt64Ptr(inv.VersionID), inv.ConfigHash, inv.Truncated)
+		nullStr(inv.Stderr), nullStr(inv.Error), nullableInt64Ptr(inv.VersionID), inv.ConfigHash, inv.Truncated, nullStr(inv.Stage))
 	if err != nil {
 		return 0, err
 	}
@@ -680,7 +704,7 @@ func scanInvocation(row scanRow, inv *Invocation) error {
 		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
 		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated,
 		&inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS,
-		&inv.Resources, &inv.Identity, &inv.DetailsExpired)
+		&inv.Resources, &inv.Identity, &inv.DetailsExpired, &inv.Stage)
 }
 
 func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...int64) ([]*Invocation, error) {
@@ -691,7 +715,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired,COALESCE(i.stage,'')
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.function_id = ? AND (?=0 OR i.id<?)
 		 ORDER BY i.id DESC LIMIT ?`,
@@ -717,7 +741,7 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired,COALESCE(i.stage,'')
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.id = ?`,
 		pid, id)
@@ -792,7 +816,7 @@ func invocationHistoryDetailsQuery(pid string, ids []int64) (string, []any) {
 			i.trigger_kind, '', '', '', COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,
 			i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,
 			COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),
-			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
+			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired,COALESCE(i.stage,'')
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`, args
 }
@@ -1012,3 +1036,22 @@ func firstString(v []string) string {
 }
 
 func accessJSON(a *FunctionAccess) string { b, _ := json.Marshal(a); return string(b) }
+
+// dbFindVersionByDigest returns the newest ready version of fn whose
+// content digest (resolved source hash, package.json and source reference)
+// matches, or nil.
+func dbFindVersionByDigest(db *sql.DB, fn *Function, sourceKind, sourceHash, packageJSON string, repoID *int64, repoPath string) (*FunctionVersion, error) {
+	var rid int64
+	if repoID != nil {
+		rid = *repoID
+	}
+	row := db.QueryRow(`SELECT `+fnVerColumns+` FROM function_versions
+		WHERE function_id=? AND project_id=? AND artifact_key=? AND build_status='ready'
+		AND source_kind=? AND source_hash=? AND COALESCE(package_json,'')=? AND COALESCE(repo_id,0)=? AND COALESCE(repo_path,'')=?
+		ORDER BY version DESC LIMIT 1`, fn.ID, fn.ProjectID, fn.InstanceKey, sourceKind, sourceHash, packageJSON, rid, repoPath)
+	v, err := scanVersion(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return v, err
+}

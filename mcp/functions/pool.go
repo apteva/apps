@@ -63,21 +63,26 @@ type pool struct {
 	liveCalls         map[int64]*callTrace
 	rejections        map[string]int64
 
-	initialPreparationScan                                   chan struct{}
-	artifactBuilds                                           atomic.Uint64
-	prepareMu                                                sync.Mutex
-	prepareWG                                                sync.WaitGroup
-	preparations                                             map[string]*preparation
-	prepareHigh, prepareNormal                               chan *preparation
-	versionRefs                                              map[string]int
-	collecting                                               map[string]bool
-	goCacheMu                                                sync.Mutex
-	goCache                                                  string
-	lastArtifactRetention                                    time.Time
-	ctx                                                      *sdk.AppCtx
-	stageDir, buildBase                                      string
-	mu                                                       sync.Mutex
-	byFn                                                     map[int64]*fnPool
+	initialPreparationScan     chan struct{}
+	artifactBuilds             atomic.Uint64
+	prepareMu                  sync.Mutex
+	prepareWG                  sync.WaitGroup
+	preparations               map[string]*preparation
+	prepareHigh, prepareNormal chan *preparation
+	versionRefs                map[string]int
+	collecting                 map[string]bool
+	goCacheMu                  sync.Mutex
+	goCache                    string
+	lastArtifactRetention      time.Time
+	ctx                        *sdk.AppCtx
+	stageDir, buildBase        string
+	mu                         sync.Mutex
+	byFn                       map[int64]*fnPool
+	// keyed holds pools for invocations that do not run the function's
+	// active configuration: a stage or an explicitly pinned version. The key
+	// names the function, the target and the effective configuration hash,
+	// so different stage settings never share a worker (see stages.go).
+	keyed                                                    map[string]*fnPool
 	all                                                      map[*worker]*fnPool
 	globalSem, globalQueue, buildSem, buildQueue, downstream chan struct{}
 	liveMB                                                   int
@@ -151,7 +156,7 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		return nil, err
 	}
 	life, cancel := context.WithCancel(context.Background())
-	p := &pool{auto: admission.NewObserver(), autoDownstream: admission.NewObserver(), ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
+	p := &pool{auto: admission.NewObserver(), autoDownstream: admission.NewObserver(), ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, keyed: map[string]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
 	steps := []struct {
 		name string
 		run  func() error
@@ -199,6 +204,71 @@ func (p *pool) poolForLocked(id int64) *fnPool {
 	}
 	return fp
 }
+
+// poolForFunction returns the active pool for an unstaged function and a
+// dedicated keyed pool for a stage or pinned-version target.
+func (p *pool) poolForFunction(fn *Function) *fnPool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.poolForFunctionLocked(fn)
+}
+func (p *pool) poolForFunctionLocked(fn *Function) *fnPool {
+	if fn.poolKey == "" {
+		return p.poolForLocked(fn.ID)
+	}
+	key := keyedPoolKey(fn.ID, fn.poolKey)
+	fp := p.keyed[key]
+	if fp == nil {
+		if p.keyed == nil {
+			p.keyed = map[string]*fnPool{}
+		}
+		fp = &fnPool{sem: make(chan struct{}, 1024), idle: make(chan *worker, 1024), queue: make(chan struct{}, 10000)}
+		p.keyed[key] = fp
+	}
+	return fp
+}
+func keyedPoolKey(fnID int64, key string) string { return fmt.Sprintf("%d/%s", fnID, key) }
+
+// allPoolsLocked lists active and keyed pools. Callers hold p.mu.
+func (p *pool) allPoolsLocked() []*fnPool {
+	out := make([]*fnPool, 0, len(p.byFn)+len(p.keyed))
+	for _, fp := range p.byFn {
+		out = append(out, fp)
+	}
+	for _, fp := range p.keyed {
+		out = append(out, fp)
+	}
+	return out
+}
+
+// retireKeyedPools closes the keyed pools of one function whose key starts
+// with prefix ("" retires all of them). Idle workers are discarded now;
+// busy workers are discarded when they return because their pool is closed.
+func (p *pool) retireKeyedPools(fnID int64, prefix string) {
+	p.mu.Lock()
+	var idle []*worker
+	start := keyedPoolKey(fnID, prefix)
+	for key, fp := range p.keyed {
+		if !strings.HasPrefix(key, start) {
+			continue
+		}
+		fp.closed = true
+		delete(p.keyed, key)
+		for n := len(fp.idle); n > 0; n-- {
+			select {
+			case w := <-fp.idle:
+				idle = append(idle, w)
+			default:
+			}
+		}
+	}
+	p.mu.Unlock()
+	for _, w := range idle {
+		p.discard(w)
+	}
+	p.signal()
+}
+
 func (p *pool) signal() {
 	select {
 	case p.wake <- struct{}{}:
@@ -226,7 +296,7 @@ func (p *pool) discard(w *worker) {
 func (p *pool) evictIdle() bool {
 	p.mu.Lock()
 	var victim *worker
-	for _, fp := range p.byFn {
+	for _, fp := range p.allPoolsLocked() {
 		select {
 		case victim = <-fp.idle:
 		default:
@@ -268,8 +338,14 @@ func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, s
 	w.capacityClass = class
 	w.projectID = fn.ProjectID
 	w.capacityState.Store("starting")
+	if fn.poolKey != "" {
+		// Keyed workers carry their effective stage/version configuration;
+		// access checks and downstream deadlines must not read the active one.
+		effective := *fn
+		w.effective = &effective
+	}
 	p.mu.Lock()
-	fp := p.poolForLocked(fn.ID)
+	fp := p.poolForFunctionLocked(fn)
 	p.all[w] = fp
 	p.hostSample.at = time.Time{}
 	closed := p.closed || fp.closed || p.deleted[fn.InstanceKey]
@@ -290,7 +366,12 @@ func (p *pool) put(fn *Function, fp *fnPool, w *worker, idleTarget int) {
 		keep = false
 	}
 	if current := p.cachedFunction(fn.ProjectID, fn.ID, ""); current != nil {
-		keep = keep && current.ActiveVersionID != nil && *current.ActiveVersionID == w.versionID && current.Status == "active"
+		if fn.poolKey == "" {
+			keep = keep && current.ActiveVersionID != nil && *current.ActiveVersionID == w.versionID && current.Status == "active"
+		} else {
+			// A keyed pool is retired when its stage changes; its version is fixed.
+			keep = keep && current.Status == "active" && fn.ActiveVersionID != nil && *fn.ActiveVersionID == w.versionID
+		}
 	}
 	if keep {
 		select {
@@ -311,7 +392,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	t := timingsFrom(parent)
 	queueStart := time.Now()
 	parent = context.WithValue(parent, queueDeadlineKey{}, queueStart.Add(time.Duration(policy(fn).QueueMS)*time.Millisecond))
-	fp := p.poolFor(fn.ID)
+	fp := p.poolForFunction(fn)
 	autoPermit, autoErr := p.acquireAutomatic(parent, fn)
 	t.queue = time.Since(queueStart)
 	if autoErr != nil {
@@ -433,7 +514,9 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	reusable := fn.WorkerIsolation == isolateFunctionVersion ||
 		(fn.WorkerIsolation != isolateInvocation && !authenticated)
 	if err == nil && parent.Err() == nil && oom == 0 && w.alive() {
-		p.markBootValidated(fn, t.cold)
+		if fn.poolKey == "" {
+			p.markBootValidated(fn, t.cold)
+		}
 		if reusable {
 			p.put(fn, fp, w, 0)
 		} else {
@@ -442,7 +525,9 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	} else {
 		p.discard(w)
 	}
-	p.scheduleWarmWorkers(fn)
+	if fn.poolKey == "" {
+		p.scheduleWarmWorkers(fn)
+	}
 	return res, err
 }
 func (p *pool) acquireBuild(ctx context.Context) error {
@@ -589,9 +674,21 @@ func (p *pool) removeFunction(fn *Function) {
 		fp.closed = true
 		delete(p.byFn, fn.ID)
 	}
+	retired := map[*fnPool]bool{}
+	if fp != nil {
+		retired[fp] = true
+	}
+	prefix := keyedPoolKey(fn.ID, "")
+	for key, keyed := range p.keyed {
+		if strings.HasPrefix(key, prefix) {
+			keyed.closed = true
+			delete(p.keyed, key)
+			retired[keyed] = true
+		}
+	}
 	var workers []*worker
 	for w, owner := range p.all {
-		if owner == fp {
+		if retired[owner] {
 			workers = append(workers, w)
 		}
 	}
@@ -626,7 +723,7 @@ func (p *pool) reapLoop() {
 func (p *pool) reapIdle() {
 	p.mu.Lock()
 	var victims []*worker
-	for _, fp := range p.byFn {
+	for _, fp := range p.allPoolsLocked() {
 		n := len(fp.idle)
 		for i := 0; i < n; i++ {
 			select {
@@ -638,6 +735,21 @@ func (p *pool) reapIdle() {
 				}
 			default:
 			}
+		}
+	}
+	// Drop keyed pools that keep no worker after this pass; the next staged
+	// call recreates its pool on demand.
+	owners := map[*fnPool]int{}
+	for _, owner := range p.all {
+		owners[owner]++
+	}
+	for _, w := range victims {
+		owners[p.all[w]]--
+	}
+	for key, fp := range p.keyed {
+		if len(fp.idle) == 0 && owners[fp] <= 0 {
+			fp.closed = true
+			delete(p.keyed, key)
 		}
 	}
 	p.mu.Unlock()
@@ -664,7 +776,7 @@ func (p *pool) shutdown() {
 	for w := range p.all {
 		workers = append(workers, w)
 	}
-	for _, fp := range p.byFn {
+	for _, fp := range p.allPoolsLocked() {
 		fp.closed = true
 	}
 	p.mu.Unlock()
@@ -700,6 +812,9 @@ func (p *pool) leaseVersion(dir string) (func(), error) {
 }
 
 func (p *pool) workerIdleTTL(w *worker) time.Duration {
+	if w.effective != nil {
+		return time.Duration(policy(w.effective).IdleMS) * time.Millisecond
+	}
 	if fn := p.cachedFunction(w.projectID, w.fnID, ""); fn != nil {
 		return time.Duration(policy(fn).IdleMS) * time.Millisecond
 	}

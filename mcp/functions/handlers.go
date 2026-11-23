@@ -140,7 +140,14 @@ func (a *App) handleHTTPFunctionItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(parts) == 2 {
+		if parts[1] == "stages" || strings.HasPrefix(parts[1], "stages/") {
+			a.handleHTTPFunctionStages(w, r, id, strings.TrimPrefix(strings.TrimPrefix(parts[1], "stages"), "/"))
+			return
+		}
 		switch parts[1] {
+		case "versions/prune":
+			a.handleHTTPPruneVersions(w, r, id)
+			return
 		case "prepare":
 			a.handleHTTPPrepare(w, r, id)
 			return
@@ -250,8 +257,13 @@ func (a *App) handleHTTPGetFunction(w http.ResponseWriter, r *http.Request, id i
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	if r.URL.Query().Get("include_secrets") != "1" {
+	reveal := r.URL.Query().Get("include_secrets") == "1"
+	if !reveal {
 		fn = maskFunction(fn)
+	}
+	if err := attachStages(globalCtx.AppDB(), fn, reveal); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	httpJSON(w, map[string]any{"function": withReadiness(fn)})
 }
@@ -423,6 +435,10 @@ func (a *App) handleHTTPInvokeByName(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "function not found")
 		return
 	}
+	fn, ok := httpTarget(w, r, fn)
+	if !ok {
+		return
+	}
 	event, readErr := readEventBody(w, r)
 	if readErr != nil {
 		httpErr(w, requestErrorStatus(readErr), readErr.Error())
@@ -444,6 +460,10 @@ func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id in
 	}
 	if fn == nil {
 		httpErr(w, http.StatusNotFound, "function not found")
+		return
+	}
+	fn, ok := httpTarget(w, r, fn)
+	if !ok {
 		return
 	}
 	event, readErr := readEventBody(w, r)
@@ -1089,8 +1109,12 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if fn == nil {
 		return map[string]any{"function": nil, "found": false}, nil
 	}
-	if args["include_secrets"] != true {
+	reveal := args["include_secrets"] == true
+	if !reveal {
 		fn = maskFunction(fn)
+	}
+	if err := attachStages(ctx.AppDB(), fn, reveal); err != nil {
+		return nil, err
 	}
 	return map[string]any{"function": withReadiness(fn), "found": true}, nil
 }
@@ -1110,12 +1134,21 @@ func (a *App) toolInvokeContext(parent context.Context, ctx *sdk.AppCtx, args ma
 	if fn == nil {
 		return nil, errors.New("function not found")
 	}
+	stage, version, err := targetArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fn, err = resolveInvocationTarget(ctx.AppDB(), fn, stage, version)
+	if err != nil {
+		return nil, err
+	}
 	event := args["event"]
 	res, err := invokeFunction(ctx, parent, fn, event, "manual")
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]any{
+		"version_id":    fn.ActiveVersionID,
 		"invocation_id": res.InvocationID,
 		"resources":     res.Resources, "error_code": res.ErrorCode,
 		"status":      res.Status,
@@ -1129,6 +1162,9 @@ func (a *App) toolInvokeContext(parent context.Context, ctx *sdk.AppCtx, args ma
 	}
 	if res.Error != "" {
 		out["error"] = res.Error
+	}
+	if fn.stage != "" {
+		out["stage"] = fn.stage
 	}
 	return out, nil
 }
@@ -1184,6 +1220,7 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"execution_ms":    inv.ExecutionMS,
 		"resources":       inv.Resources,
 		"version_id":      inv.VersionID,
+		"stage":           inv.Stage,
 	}, nil
 }
 

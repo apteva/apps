@@ -105,7 +105,10 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		eventLog = strings.ReplaceAll(eventLog, fn.FunctionURL.Token, "[redacted]")
 	}
 	eventLog = redactSecrets(eventLog, fn.Env)
-	inv := &Invocation{FunctionID: fn.ID, VersionID: fn.ActiveVersionID, ConfigHash: configHash(fn), StartedAt: started.Format(time.RFC3339Nano), Status: "running", TriggerKind: triggerKind, EventJSON: truncate(eventLog, eventJSONCap), Truncated: len(eventLog) > eventJSONCap}
+	// Nested calls brokered by this invocation inherit its stage name.
+	parent = context.WithValue(parent, stageContextKey{}, fn.stage)
+	invokeCtx = context.WithValue(invokeCtx, stageContextKey{}, fn.stage)
+	inv := &Invocation{FunctionID: fn.ID, VersionID: fn.ActiveVersionID, Stage: fn.stage, ConfigHash: configHash(fn), StartedAt: started.Format(time.RFC3339Nano), Status: "running", TriggerKind: triggerKind, EventJSON: truncate(eventLog, eventJSONCap), Truncated: len(eventLog) > eventJSONCap}
 	identityJSON, err := json.Marshal(security.Identity)
 	if err != nil {
 		return nil, err
@@ -210,6 +213,9 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		p.cacheVersion(v)
 	}
 	if v == nil || v.ArtifactKey != fn.InstanceKey || v.BuildStatus != "ready" {
+		if fn.poolKey != "" {
+			return nil, errors.New("stage version unavailable")
+		}
 		return nil, errors.New("active version unavailable")
 	}
 	dir := versionDir(p.buildBase, v)
@@ -221,7 +227,13 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	// Preparation is owned by the runtime, not the customer request. Concurrent
 	// callers share one bounded job; cancellation only stops this caller's wait.
 	prepStart := time.Now()
-	if err := p.awaitPreparation(invokeCtx, fn); err != nil {
+	if fn.poolKey != "" {
+		// Stage / pinned-version targets bypass the active-version
+		// preparation queue: build the artifact on demand if it is missing.
+		if err := p.ensureVersionArtifact(invokeCtx, ctx, fn, v, spec); err != nil {
+			return nil, err
+		}
+	} else if err := p.awaitPreparation(invokeCtx, fn); err != nil {
 		return nil, err
 	}
 	timings.build = time.Since(prepStart)

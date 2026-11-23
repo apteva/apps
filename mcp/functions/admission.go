@@ -126,7 +126,7 @@ func (p *pool) evictIdleClass(class string) bool {
 	p.mu.Lock()
 	var victim *worker
 	var owner *fnPool
-	for _, fp := range p.byFn {
+	for _, fp := range p.allPoolsLocked() {
 		n := len(fp.idle)
 		for i := 0; i < n; i++ {
 			w := <-fp.idle

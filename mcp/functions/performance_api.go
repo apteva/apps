@@ -309,6 +309,7 @@ type slowInvocation struct {
 	FunctionID   int64  `json:"function_id"`
 	FunctionName string `json:"function_name"`
 	VersionID    *int64 `json:"version_id,omitempty"`
+	Stage        string `json:"stage,omitempty"`
 	StartedAt    string `json:"started_at"`
 	FinishedAt   string `json:"finished_at"`
 	Status       string `json:"status"`
@@ -386,7 +387,7 @@ func dbSlowInvocations(parent context.Context, db *sql.DB, pid string, f perform
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	args := f.queryArgs(pid)
-	query := `SELECT i.id,i.function_id,f.name,i.version_id,i.started_at,i.finished_at,i.status,i.trigger_kind,
+	query := `SELECT i.id,i.function_id,f.name,i.version_id,COALESCE(i.stage,''),i.started_at,i.finished_at,i.status,i.trigger_kind,
 		COALESCE(i.duration_ms,0),i.execution_ms,i.queue_ms,i.build_ms,i.cold_start_ms
 		FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		WHERE ` + performanceWhere + ` AND i.status!='running' AND COALESCE(i.finished_at,'')!=''
@@ -406,7 +407,7 @@ func dbSlowInvocations(parent context.Context, db *sql.DB, pid string, f perform
 	page := &slowInvocationsPage{Since: f.Since.Format(time.RFC3339Nano), Until: f.Until.Format(time.RFC3339Nano), Sort: f.Sort, Invocations: []*slowInvocation{}}
 	for rows.Next() {
 		i := &slowInvocation{}
-		if err := rows.Scan(&i.ID, &i.FunctionID, &i.FunctionName, &i.VersionID, &i.StartedAt, &i.FinishedAt, &i.Status, &i.TriggerKind, &i.DurationMS, &i.ExecutionMS, &i.QueueMS, &i.BuildMS, &i.ColdStartMS); err != nil {
+		if err := rows.Scan(&i.ID, &i.FunctionID, &i.FunctionName, &i.VersionID, &i.Stage, &i.StartedAt, &i.FinishedAt, &i.Status, &i.TriggerKind, &i.DurationMS, &i.ExecutionMS, &i.QueueMS, &i.BuildMS, &i.ColdStartMS); err != nil {
 			return nil, err
 		}
 		page.Invocations = append(page.Invocations, i)

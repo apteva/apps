@@ -112,6 +112,24 @@ interface FunctionRow {
   access?: {apps: string[]; integrations: string[]};
   function_url?: FunctionURLConfig;
   active_version_id?: number;
+  stages?: Stage[];
+}
+
+// A named stage (staging, production, ...) pointing at one version with
+// its own vars / access / limits overrides. Read-only in the panel; stages
+// are managed through the functions_stage_* tools.
+interface Stage {
+  id: number;
+  name: string;
+  version_id: number;
+  version: number;
+  previous_version?: number;
+  vars?: Record<string, string>;
+  access?: { apps: string[]; integrations: string[] };
+  limits?: Record<string, unknown>;
+  status: "active" | "paused";
+  rev: number;
+  updated_at?: string;
 }
 
 interface FunctionURLConfig {
@@ -635,6 +653,8 @@ function DetailDialog({
         <RuntimePreparation fn={fn} api={api} onChanged={onChanged}/>
         <InvokeConsole fn={fn} withParams={withParams} onInvoked={onChanged} />
 
+        <StagesSection stages={fn.stages || []} />
+
         {/* Versions */}
         <section>
           <div className="flex items-center gap-2 mb-2">
@@ -796,6 +816,77 @@ function DetailDialog({
         )}
       </div>
     </div>
+  );
+}
+
+function StagesIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3 2 8l10 5 10-5-10-5z" />
+      <path d="m2 16 10 5 10-5" />
+      <path d="m2 12 10 5 10-5" />
+    </svg>
+  );
+}
+
+function StagesSection({ stages }: { stages: Stage[] }) {
+  const small = { fontSize: 11 };
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-2 text-text-dim">
+        <StagesIcon />
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">Stages ({stages.length})</h3>
+      </div>
+      {stages.length === 0 ? (
+        <p className="text-text-muted text-sm">
+          No stages. Calls run the active version. Create stages with functions_stage_set.
+        </p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-text-dim text-xs uppercase tracking-wide">
+            <tr>
+              <th className="text-left px-3 py-2 font-normal">Stage</th>
+              <th className="text-left px-3 py-2 font-normal">Version</th>
+              <th className="text-left px-3 py-2 font-normal">Previous</th>
+              <th className="text-left px-3 py-2 font-normal">Status</th>
+              <th className="text-left px-3 py-2 font-normal">Settings</th>
+              <th className="text-left px-3 py-2 font-normal">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stages.map((st) => {
+              const varCount = Object.keys(st.vars || {}).length;
+              const overrides = [
+                varCount > 0 ? `${varCount} var${varCount === 1 ? "" : "s"}` : "",
+                st.access ? "access" : "",
+                st.limits ? "limits" : "",
+              ].filter(Boolean);
+              return (
+                <tr key={st.id} className="border-t border-border">
+                  <td className="px-3 py-2 text-text font-mono">{st.name}</td>
+                  <td className="px-3 py-2 text-text font-mono">v{st.version}</td>
+                  <td className="px-3 py-2 text-text-muted font-mono">
+                    {st.previous_version ? `v${st.previous_version}` : "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span
+                      className={`px-1.5 py-0.5 rounded border border-border ${st.status === "active" ? "text-text" : "text-text-muted"}`}
+                      style={small}
+                    >{st.status}</span>
+                  </td>
+                  <td className="px-3 py-2 text-text-muted" style={small}>
+                    {overrides.length ? overrides.join(", ") : "inherits function"}
+                  </td>
+                  <td className="px-3 py-2 text-text-muted">
+                    {relTime(st.updated_at)} <span style={small}>rev {st.rev}</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

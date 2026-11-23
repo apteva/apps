@@ -34,7 +34,7 @@ func (a *App) OnRestore(ctx context.Context, _ *sdk.AppCtx, tx *sql.Tx, rc sdk.R
 	if err := remapInvocationPolicies(ctx, tx, rc); err != nil {
 		return err
 	}
-	if _, err := sdk.RewriteOriginColumns(ctx, tx, rc, "functions.env_json", "function_invocation_policies.policy_json"); err != nil {
+	if _, err := sdk.RewriteOriginColumns(ctx, tx, rc, "functions.env_json", "function_stages.vars_json", "function_invocation_policies.policy_json"); err != nil {
 		return err
 	}
 	if err := remapInvocationIdentities(ctx, tx, rc); err != nil {

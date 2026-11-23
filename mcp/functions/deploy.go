@@ -17,6 +17,26 @@ func deployVersion(ctx *sdk.AppCtx, fn *Function, sourceKind, source string, rep
 	return deployVersionContext(context.Background(), ctx, fn, sourceKind, source, repoID, repoPath, packageJSON)
 }
 func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function, sourceKind, source string, repoID *int64, repoPath, packageJSON string) (*FunctionVersion, error) {
+	return deployVersionOptions(parent, ctx, fn, sourceKind, source, repoID, repoPath, packageJSON, deployOptions{activate: true})
+}
+
+// deployOptions controls functions_deploy. activate=false builds and
+// validates the version without moving the active pointer (stages are never
+// moved by a deploy). dedupe returns an existing ready version with the same
+// content digest instead of creating a new one.
+type deployOptions struct {
+	activate, dedupe bool
+}
+
+// errActivateExisting asks the caller to activate an existing, identical
+// version through the rollback path (outside this deployment's work slot).
+type errActivateExisting struct{ version *FunctionVersion }
+
+func (e *errActivateExisting) Error() string {
+	return fmt.Sprintf("identical content already deployed as version %d", e.version.Version)
+}
+
+func deployVersionOptions(parent context.Context, ctx *sdk.AppCtx, fn *Function, sourceKind, source string, repoID *int64, repoPath, packageJSON string, opts deployOptions) (*FunctionVersion, error) {
 	p := currentPool()
 	if p == nil {
 		return nil, errors.New("pool unavailable")
@@ -48,6 +68,19 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 	src, err := resolveVersionSourceContext(parent, ctx, probe)
 	if err != nil {
 		return nil, fmt.Errorf("resolve source: %w", err)
+	}
+	if opts.dedupe {
+		existing, err := dbFindVersionByDigest(db, fn, sourceKind, hashSource(src), packageJSON, repoID, repoPath)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			existing.Reused = true
+			if !opts.activate || (fn.ActiveVersionID != nil && *fn.ActiveVersionID == existing.ID) {
+				return existing, nil
+			}
+			return nil, &errActivateExisting{version: existing}
+		}
 	}
 
 	ver, err := dbCreateVersion(db, fn.ProjectID, &FunctionVersion{
@@ -94,6 +127,17 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 	if err != nil {
 		_ = dbUpdateVersionBuild(db, fn.ProjectID, ver.ID, "failed", err.Error(), dir, fn.InstanceKey)
 		return ver, fmt.Errorf("worker validation: %w", err)
+	}
+	if !opts.activate {
+		// Built and boot-validated; the active pointer and every stage stay put.
+		p.discard(candidate)
+		if err := dbUpdateVersionBuild(db, fn.ProjectID, ver.ID, "ready", "", dir, fn.InstanceKey); err != nil {
+			return nil, err
+		}
+		ver.BuildStatus = "ready"
+		p.cacheVersion(ver)
+		ctx.WithProject(fn.ProjectID).Emit("function.version_built", map[string]any{"id": fn.ID, "version": ver.Version})
+		return ver, nil
 	}
 
 	release, err := lockBuild(parent, fmt.Sprintf("activation-%d", fn.ID))
@@ -267,7 +311,24 @@ func deployFromArgsContext(parent context.Context, ctx *sdk.AppCtx, pid string, 
 			pkg = prior.PackageJSON
 		}
 	}
-	ver, err := deployVersionContext(parent, ctx, fn, sourceKind, source, repoID, repoPath, pkg)
+	activate := true
+	if raw, has := args["activate"]; has && raw != nil {
+		b, ok := raw.(bool)
+		if !ok {
+			return nil, nil, errors.New("activate must be a boolean")
+		}
+		activate = b
+	}
+	ver, err := deployVersionOptions(parent, ctx, fn, sourceKind, source, repoID, repoPath, pkg, deployOptions{activate: activate, dedupe: true})
+	var reuse *errActivateExisting
+	if errors.As(err, &reuse) {
+		// Identical content exists: activate that version instead of
+		// building a duplicate (same path as functions_rollback).
+		ver, err = rollbackFunctionContext(parent, ctx.WithProject(pid), pid, fnID, reuse.version.Version)
+		if ver != nil {
+			ver.Reused = true
+		}
+	}
 	if err != nil {
 		return nil, ver, err
 	}
