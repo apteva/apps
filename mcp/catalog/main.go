@@ -1,4 +1,4 @@
-// Catalog v0.3.0 — the source-of-truth app for "what your business sells".
+// Catalog v0.3.1 — the source-of-truth app for "what your business sells".
 //
 // Two entities (Stripe-shaped):
 //   - Product: the thing (SaaS plan, ecommerce SKU, consulting service).
@@ -32,16 +32,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: catalog
 display_name: Catalog
-version: 0.3.0
+version: 0.3.1
 description: |
   Products, prices, and basket-aware promotions — source of truth for what the business sells.
   Modelled after Stripe's Product + Price split. Self-contained: calls
   no other app; downstream apps (billing, subscriptions, checkout)
-  call catalog.
+  call catalog. Global install only; data is partitioned by project.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
-scopes: [project, global]
+scopes: [global]
 requires:
   permissions:
     - db.write.app
@@ -52,7 +52,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: catalog/v0.3.0
+    ref: catalog/v0.3.1
     entry: mcp/catalog
   port: 8080
   health_check: /health
@@ -81,7 +81,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("catalog mounted",
-		"version", "0.3.0",
+		"version", "0.3.1",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }

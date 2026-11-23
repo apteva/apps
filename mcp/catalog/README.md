@@ -23,7 +23,7 @@ Lower-layer commerce app. Modelled after Stripe's `Product` + `Price` API split:
 
 - **Prices are effectively immutable** for financial fields after create. `unit_amount_cents`, `currency`, `interval` cannot change — to change a price, create a new one and archive the old. Same rule Stripe enforces. Keeps historical invoice snapshots sound.
 - **Soft-delete only** — never hard-delete a product or price. Existing invoice/subscription references must keep resolving forever.
-- **Per-project partition** — same as billing; works for both project and global install scopes.
+- **Global install only (since v0.3.1)** — every row is partitioned by `project_id` (from `_project_id` on tool calls, `?project_id=` on REST), so one global install already gives each project its own catalog. Billing and Commerce bind to that one install; a project-scoped Catalog is not bound to them, so its prices cannot be found at checkout. New project installs are refused, and project-scoped dependency installs land on the global Catalog. Existing project installs keep running; move their data into the global install and remove them.
 - **Immutable discount applications** — quote/reserve returns a complete application snapshot. Changing a campaign later does not alter an existing purchase or subscription.
 - **Opaque consumers** — `customer_ref` and `context_ref` are caller-owned strings. Catalog does not depend on SaaS, Commerce, Checkout, Subscriptions, or Billing.
 

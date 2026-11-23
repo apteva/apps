@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: catalog
 display_name: Catalog
-version: 0.3.0
+version: 0.3.1
 description: |
   Products, prices, and basket-aware promotions — the source of truth for
   what your business sells. Modelled after Stripe's Product + Price
@@ -11,9 +11,10 @@ description: |
   through immutable application snapshots. Lower-layer app: catalog
   calls nothing; downstream apps call catalog.
 
-  Per-project partitioning matches billing — a project running
-  multiple businesses keeps separate catalogs even in a global-scope
-  install.
+  Global install only. Catalog partitions all data by project, so one
+  global install gives every project its own separate catalog. Billing
+  and Commerce bind to that single install; a project-scoped Catalog
+  would not be bound and its prices would fail at checkout.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/catalog
@@ -21,7 +22,7 @@ icon: /ui/icon.svg
 icon_style: monochrome
 tags: [catalog, products, pricing, discounts, commerce, ecommerce, saas]
 
-scopes: [project, global]
+scopes: [global]
 min_apteva_version: "0.11.0"
 
 requires:
@@ -141,7 +142,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: catalog/v0.3.0
+    ref: catalog/v0.3.1
     entry: mcp/catalog
   port: 8080
   health_check: /health

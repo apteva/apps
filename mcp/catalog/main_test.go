@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
@@ -351,13 +352,37 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version empty")
 	}
-	scopes := map[string]bool{}
-	for _, s := range m.Scopes {
-		scopes[string(s)] = true
+	assertGlobalOnly(t, "embedded", m.Scopes)
+}
+
+// Catalog must be global-only: Billing and Commerce bind to one Catalog,
+// and a project-scoped install is never bound, so checkouts break.
+func TestSourceManifest_GlobalOnlyAndMatchesEmbedded(t *testing.T) {
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{"project", "global"} {
-		if !scopes[want] {
-			t.Errorf("manifest missing scope %q", want)
-		}
+	src, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGlobalOnly(t, "apteva.yaml", src.Scopes)
+	emb := (&App{}).Manifest()
+	if src.Version != emb.Version {
+		t.Errorf("version mismatch: apteva.yaml=%q embedded=%q", src.Version, emb.Version)
+	}
+	wantRef := "catalog/v" + src.Version
+	if src.Runtime.Source == nil || src.Runtime.Source.Ref != wantRef {
+		t.Errorf("apteva.yaml runtime.source.ref should be %q", wantRef)
+	}
+	if emb.Runtime.Source == nil || emb.Runtime.Source.Ref != wantRef {
+		t.Errorf("embedded runtime.source.ref should be %q", wantRef)
+	}
+}
+
+func assertGlobalOnly(t *testing.T, label string, scopes []sdk.Scope) {
+	t.Helper()
+	if len(scopes) != 1 || scopes[0] != sdk.ScopeGlobal {
+		t.Errorf("%s scopes=%v, want [global]", label, scopes)
 	}
 }
