@@ -23,16 +23,21 @@ type gmailArchiveThread struct {
 }
 
 type gmailArchiveResult struct {
+	Action    string               `json:"action"`
 	Archived  []gmailArchiveThread `json:"archived"`
 	Failed    []gmailArchiveThread `json:"failed,omitempty"`
 	Skipped   int                  `json:"skipped"`
 	Remaining int                  `json:"remaining,omitempty"`
 }
 
-// toolMessageThreadArchive archives the provider mailbox threads holding the
-// given messages. Only Gmail supports it: the thread loses its INBOX label
-// (Gmail's "Archive"), nothing is deleted, and a new reply puts it back in
-// the inbox. Messages from other providers, or from a Gmail connection this
+// Mailbox actions and the Gmail label each one removes from the thread.
+// archive is Gmail's "Archive" (INBOX); mark_read is "Mark as read" (UNREAD).
+var gmailThreadActions = map[string]string{"archive": "INBOX", "mark_read": "UNREAD"}
+
+// toolMessageThreadArchive updates the provider mailbox threads holding the
+// given messages: archive (default) or mark_read. Only Gmail supports it.
+// Nothing is deleted, and a new reply returns an archived thread to the
+// inbox. Messages from other providers, or from a Gmail connection this
 // project no longer owns, are skipped.
 func (a *App) toolMessageThreadArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
@@ -43,7 +48,14 @@ func (a *App) toolMessageThreadArchive(ctx *sdk.AppCtx, args map[string]any) (an
 	if err != nil {
 		return nil, err
 	}
-	return archiveGmailThreads(ctx, pid, ids)
+	action := strings.ToLower(strings.TrimSpace(strArg(args, "action")))
+	if action == "" {
+		action = "archive"
+	}
+	if _, ok := gmailThreadActions[action]; !ok {
+		return nil, fmt.Errorf("invalid action %q (archive|mark_read)", action)
+	}
+	return archiveGmailThreads(ctx, pid, ids, action)
 }
 
 func archiveMessageIDs(raw any) ([]int64, error) {
@@ -78,8 +90,8 @@ func archiveMessageIDs(raw any) ([]int64, error) {
 	return out, nil
 }
 
-func archiveGmailThreads(ctx *sdk.AppCtx, pid string, ids []int64) (*gmailArchiveResult, error) {
-	out := &gmailArchiveResult{Archived: []gmailArchiveThread{}}
+func archiveGmailThreads(ctx *sdk.AppCtx, pid string, ids []int64, action string) (*gmailArchiveResult, error) {
+	out := &gmailArchiveResult{Action: action, Archived: []gmailArchiveThread{}}
 	bound := map[int64]bool{}
 	for _, b := range ctx.IntegrationsFor("email_provider") {
 		if b.AppSlug == "gmail" {
@@ -163,7 +175,7 @@ func archiveGmailThreads(ctx *sdk.AppCtx, pid string, ids []int64) (*gmailArchiv
 		item := gmailArchiveThread{ConnectionID: k.conn, ThreadID: k.thread}
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(k.conn, "modify_thread", map[string]any{
 			"threadId":       k.thread,
-			"removeLabelIds": []string{"INBOX"},
+			"removeLabelIds": []string{gmailThreadActions[action]},
 		})
 		switch {
 		case err != nil:

@@ -145,3 +145,32 @@ func TestMessageThreadArchive_ValidatesInput(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageThreadArchive_MarkReadRemovesUnreadOnly(t *testing.T) {
+	platform, ctx := archiveTestCtx(t)
+	id := insertArchiveMessage(t, ctx, "test-proj", "gmail", 3, "thread-a", "2026-11-22T10:00:00Z")
+	out, err := (&App{}).toolMessageThreadArchive(ctx, map[string]any{"message_ids": []any{float64(id)}, "action": "mark_read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(*gmailArchiveResult)
+	if got.Action != "mark_read" || len(got.Archived) != 1 {
+		t.Fatalf("result=%+v", got)
+	}
+	calls := modifyThreadCalls(platform)
+	labels, _ := json.Marshal(calls[0].Input["removeLabelIds"])
+	if len(calls) != 1 || string(labels) != `["UNREAD"]` {
+		t.Fatalf("mark_read must remove UNREAD only, got %s", labels)
+	}
+}
+
+func TestMessageThreadArchive_DefaultActionIsArchive(t *testing.T) {
+	_, ctx := archiveTestCtx(t)
+	id := insertArchiveMessage(t, ctx, "test-proj", "gmail", 3, "thread-a", "2026-11-22T10:00:00Z")
+	if got := runArchive(t, ctx, id); got.Action != "archive" {
+		t.Fatalf("action=%q", got.Action)
+	}
+	if _, err := (&App{}).toolMessageThreadArchive(ctx, map[string]any{"message_ids": []any{float64(id)}, "action": "delete"}); err == nil {
+		t.Fatal("unknown action must be rejected")
+	}
+}
