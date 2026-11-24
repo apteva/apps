@@ -13,7 +13,7 @@ import (
 const (
 	pcbMechanicalEnvelopeSchema  = "apteva-mechanical-envelope/v1"
 	pcbEnclosureGenerator        = "pcb-enclosure"
-	pcbEnclosureGeneratorVersion = "1"
+	pcbEnclosureGeneratorVersion = "2"
 )
 
 type PCBMechanicalResponse struct {
@@ -149,6 +149,42 @@ type EnclosureOptions struct {
 	LipDepthMM         float64 `json:"lip_depth_mm"`
 	LipThicknessMM     float64 `json:"lip_thickness_mm"`
 	OpeningClearanceMM float64 `json:"opening_clearance_mm"`
+
+	// Shape: "box" (bounding box, the v1 behaviour), "rounded" (rounded
+	// rectangle; corners follow corner_radius_mm at the PCB outline, default
+	// the board's corner radius) or "outline" (walls follow the PCB outline).
+	Shape          string  `json:"shape,omitempty"`
+	CornerRadiusMM float64 `json:"corner_radius_mm,omitempty"`
+	// Lid: "lip" (locating lip, default) or "snap" (lip with snap bumps that
+	// click into grooves in the base walls; box and rounded shapes).
+	Lid    string  `json:"lid,omitempty"`
+	SnapMM float64 `json:"snap_mm,omitempty"`
+	// Positions are in PCB board coordinates (mm), the frame of the outline.
+	Magnets     []EnclosureMagnet `json:"magnets,omitempty"`
+	PogoWindows []EnclosureWindow `json:"pogo_windows,omitempty"`
+}
+
+// EnclosureMagnet is a blind pocket opened on the inside face of the base
+// floor or the lid, leaving a skin on the outside.
+type EnclosureMagnet struct {
+	XMM        float64 `json:"x_mm"`
+	YMM        float64 `json:"y_mm"`
+	DiameterMM float64 `json:"diameter_mm"`
+	DepthMM    float64 `json:"depth_mm"`
+	Part       string  `json:"part,omitempty"` // base (default) | lid
+	FitMM      float64 `json:"fit_mm,omitempty"`
+}
+
+// EnclosureWindow is a through opening in the floor (bottom) or lid (top),
+// for pogo-pin access, test pads or programming headers.
+type EnclosureWindow struct {
+	ID             string  `json:"id,omitempty"`
+	XMM            float64 `json:"x_mm"`
+	YMM            float64 `json:"y_mm"`
+	WidthMM        float64 `json:"width_mm"`
+	HeightMM       float64 `json:"height_mm"`
+	CornerRadiusMM float64 `json:"corner_radius_mm,omitempty"`
+	Face           string  `json:"face,omitempty"` // bottom (default) | top
 }
 
 type EnclosureGenerationReport struct {
@@ -160,6 +196,11 @@ type EnclosureGenerationReport struct {
 	GeneratedServiceOpenings int        `json:"generated_service_openings"`
 	ClearanceZones           int        `json:"clearance_zones"`
 	SourceWarnings           int        `json:"source_warnings"`
+	Shape                    string     `json:"shape"`
+	Lid                      string     `json:"lid"`
+	MagnetPockets            int        `json:"magnet_pockets,omitempty"`
+	PogoWindows              int        `json:"pogo_windows,omitempty"`
+	SnapFeatures             int        `json:"snap_features,omitempty"`
 }
 
 func defaultEnclosureOptions() EnclosureOptions {
@@ -207,6 +248,65 @@ func normalizeEnclosureOptions(input EnclosureOptions, envelope PCBMechanicalEnv
 	minimumStandoff := -minZ + nm(envelope.Tolerances.ZNM) + 0.2
 	if input.StandoffHeightMM < minimumStandoff {
 		input.StandoffHeightMM = minimumStandoff
+	}
+	switch input.Shape {
+	case "", "box", "rounded", "outline":
+	default:
+		return input, errors.New("shape must be box, rounded or outline")
+	}
+	if input.Shape == "" {
+		input.Shape = "box"
+	}
+	if input.Lid == "" {
+		input.Lid = "lip"
+	}
+	switch input.Lid {
+	case "lip":
+	case "snap":
+		if input.Shape == "outline" {
+			return input, errors.New("snap lids need a box or rounded shape; use lid=lip with an outline shape")
+		}
+		if input.SnapMM == 0 {
+			input.SnapMM = 0.5
+		}
+		if input.SnapMM <= input.LidFitMM || input.SnapMM > input.WallThicknessMM-0.8 {
+			return input, errors.New("snap_mm must exceed lid_fit_mm and leave at least 0.8 mm of wall")
+		}
+		if input.LipDepthMM < 2 {
+			input.LipDepthMM = 2
+		}
+	default:
+		return input, errors.New("lid must be lip or snap")
+	}
+	if input.CornerRadiusMM < 0 || input.CornerRadiusMM > 50 {
+		return input, errors.New("corner_radius_mm must be between 0 and 50")
+	}
+	if len(input.Magnets) > 32 || len(input.PogoWindows) > 32 {
+		return input, errors.New("at most 32 magnets and 32 pogo windows")
+	}
+	for index, magnet := range input.Magnets {
+		thickness := input.FloorThicknessMM
+		switch magnet.Part {
+		case "", "base":
+		case "lid":
+			thickness = input.LidThicknessMM
+		default:
+			return input, fmt.Errorf("magnets[%d].part must be base or lid", index)
+		}
+		if magnet.DiameterMM <= 0 || magnet.DepthMM <= 0 || magnet.FitMM < 0 || magnet.FitMM > 1 {
+			return input, fmt.Errorf("magnets[%d] needs a positive diameter_mm and depth_mm (fit_mm 0-1)", index)
+		}
+		if magnet.DepthMM > thickness-0.4 {
+			return input, fmt.Errorf("magnets[%d] depth %.2f mm leaves less than 0.4 mm of the %.2f mm %s; thicken it or use a thinner magnet", index, magnet.DepthMM, thickness, map[bool]string{true: "lid", false: "floor"}[magnet.Part == "lid"])
+		}
+	}
+	for index, window := range input.PogoWindows {
+		if window.WidthMM <= 0 || window.HeightMM <= 0 || window.CornerRadiusMM < 0 || window.CornerRadiusMM*2 > math.Min(window.WidthMM, window.HeightMM) {
+			return input, fmt.Errorf("pogo_windows[%d] needs positive width_mm/height_mm and corner_radius_mm up to half the shorter side", index)
+		}
+		if window.Face != "" && window.Face != "bottom" && window.Face != "top" {
+			return input, fmt.Errorf("pogo_windows[%d].face must be bottom or top", index)
+		}
 	}
 	if input.LipThicknessMM*2+input.LidFitMM*2 >= nm(envelope.Board.WidthNM) || input.LipThicknessMM*2+input.LidFitMM*2 >= nm(envelope.Board.HeightNM) {
 		return input, errors.New("lid lip is too thick for the PCB envelope")
@@ -304,16 +404,50 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 		"lip_depth":     parameter(options.LipDepthMM, .5, 6, "Depth of the locating lip"),
 		"lip_thickness": parameter(options.LipThicknessMM, .6, 4, "Thickness of the locating lip"),
 	}
+	if options.Lid == "snap" {
+		parameters["snap"] = parameter(options.SnapMM, .2, 2, "Snap bump protrusion beyond the lip")
+	}
 	baseHeightExpr := fmt.Sprintf("floor+standoff+%s+top_clearance", number(maxZ))
 	outerWidthExpr := fmt.Sprintf("%s+2*(wall+xy_clearance)", number(boardW))
 	outerDepthExpr := fmt.Sprintf("%s+2*(wall+xy_clearance)", number(boardD))
 	innerWidthExpr := fmt.Sprintf("%s+2*xy_clearance", number(boardW))
 	innerDepthExpr := fmt.Sprintf("%s+2*xy_clearance", number(boardD))
-	operations := []map[string]any{
-		{"id": "base_outer", "type": "box", "size": []any{outerWidthExpr, outerDepthExpr, baseHeightExpr}},
-		{"id": "base_cavity", "type": "box", "size": []any{innerWidthExpr, innerDepthExpr, fmt.Sprintf("standoff+%s+top_clearance+1", number(maxZ))}, "origin": []any{"wall", "wall", "floor"}},
-		{"id": "base_shell", "type": "cut", "inputs": []string{"base_outer", "base_cavity"}},
+	cavityHeightExpr := fmt.Sprintf("standoff+%s+top_clearance+1", number(maxZ))
+	boardX := func(x float64) string { return fmt.Sprintf("wall+xy_clearance+%s", number(x-minX)) }
+	boardY := func(y float64) string { return fmt.Sprintf("wall+xy_clearance+%s", number(y-minY)) }
+	cornerRadius := options.CornerRadiusMM
+	if cornerRadius == 0 {
+		cornerRadius = nm(envelope.Board.CornerRadiusNM)
 	}
+	// profile returns the enclosure footprint grown by `grow` (an expression)
+	// beyond the PCB outline.
+	profile := func(grow string) map[string]any {
+		width := fmt.Sprintf("%s+2*(%s)", number(boardW), grow)
+		depth := fmt.Sprintf("%s+2*(%s)", number(boardD), grow)
+		center := []any{fmt.Sprintf("wall+xy_clearance+%s", number(boardW/2)), fmt.Sprintf("wall+xy_clearance+%s", number(boardD/2))}
+		if options.Shape == "outline" {
+			points := make([]any, 0, len(envelope.Board.Outline))
+			for _, point := range envelope.Board.Outline {
+				points = append(points, []any{boardX(nm(point.XNM)), boardY(nm(point.YNM))})
+			}
+			return map[string]any{"kind": "polygon", "points": points, "offset": grow}
+		}
+		return map[string]any{"kind": "rounded_rectangle", "width": width, "height": depth, "center": center,
+			"radius": fmt.Sprintf("clamp(%s+(%s), 0, min(%s, %s)/2-0.01)", number(cornerRadius), grow, width, depth)}
+	}
+	operations := []map[string]any{}
+	if options.Shape == "box" {
+		operations = append(operations,
+			map[string]any{"id": "base_outer", "type": "box", "size": []any{outerWidthExpr, outerDepthExpr, baseHeightExpr}},
+			map[string]any{"id": "base_cavity", "type": "box", "size": []any{innerWidthExpr, innerDepthExpr, cavityHeightExpr}, "origin": []any{"wall", "wall", "floor"}},
+		)
+	} else {
+		operations = append(operations,
+			map[string]any{"id": "base_outer", "type": "extrude_profile", "profile": profile("wall+xy_clearance"), "height": baseHeightExpr},
+			map[string]any{"id": "base_cavity", "type": "extrude_profile", "profile": profile("xy_clearance"), "origin": []any{0, 0, "floor"}, "height": cavityHeightExpr},
+		)
+	}
+	operations = append(operations, map[string]any{"id": "base_shell", "type": "cut", "inputs": []string{"base_outer", "base_cavity"}})
 	baseInputs := []string{"base_shell"}
 	for index, hole := range envelope.MountingHoles {
 		bossID := fmt.Sprintf("boss_%d", index+1)
@@ -397,20 +531,80 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 		}
 		topCutters = append(topCutters, cutterID)
 	}
+	for index, window := range options.PogoWindows {
+		id := fmt.Sprintf("pogo_window_%d", index+1)
+		cut := map[string]any{"id": id, "type": "extrude_profile", "profile": map[string]any{
+			"kind": "rounded_rectangle", "width": window.WidthMM, "height": window.HeightMM, "radius": window.CornerRadiusMM,
+			"center": []any{boardX(window.XMM), boardY(window.YMM)},
+		}}
+		if window.Face == "top" {
+			cut["origin"], cut["height"] = []any{0, 0, fmt.Sprintf("%s-lip_depth-1", baseHeightExpr)}, "lid+lip_depth+2"
+			topCutters = append(topCutters, id)
+		} else {
+			cut["origin"], cut["height"] = []any{0, 0, -1}, "floor+2"
+			bottomCutters = append(bottomCutters, id)
+		}
+		operations = append(operations, cut)
+	}
+	lidMagnets := []EnclosureMagnet{}
+	baseMagnets := 0
+	for index, magnet := range options.Magnets {
+		if magnet.Part == "lid" {
+			lidMagnets = append(lidMagnets, magnet)
+			continue
+		}
+		baseMagnets++
+		fit := magnet.FitMM
+		if fit == 0 {
+			fit = 0.2
+		}
+		id := fmt.Sprintf("magnet_%d", index+1)
+		operations = append(operations, map[string]any{"id": id, "type": "hole", "input": baseSolid,
+			"position": []any{boardX(magnet.XMM), boardY(magnet.YMM), "floor"}, "direction": []any{0, 0, -1},
+			"diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM})
+		baseSolid = id
+	}
+	snapGrooves, snapBumps := []string{}, []string{}
+	if options.Lid == "snap" {
+		snapGrooves, snapBumps, operations = snapFeatures(operations, innerWidthExpr, innerDepthExpr, baseHeightExpr)
+		cutters = append(cutters, snapGrooves...)
+	}
 	allBaseCuts := append(append([]string{}, cutters...), bottomCutters...)
 	if len(allBaseCuts) > 0 {
 		inputs := append([]string{baseSolid}, allBaseCuts...)
 		operations = append(operations, map[string]any{"id": "base_finished", "type": "cut", "inputs": inputs})
 		baseSolid = "base_finished"
 	}
+	if options.Shape == "box" {
+		operations = append(operations,
+			map[string]any{"id": "lid_panel", "type": "box", "size": []any{outerWidthExpr, outerDepthExpr, "lid"}, "origin": []any{0, 0, baseHeightExpr}},
+			map[string]any{"id": "lip_outer", "type": "box", "size": []any{fmt.Sprintf("%s-2*lid_fit", innerWidthExpr), fmt.Sprintf("%s-2*lid_fit", innerDepthExpr), "lip_depth"}, "origin": []any{"wall+lid_fit", "wall+lid_fit", fmt.Sprintf("%s-lip_depth", baseHeightExpr)}},
+			map[string]any{"id": "lip_inner", "type": "box", "size": []any{fmt.Sprintf("%s-2*(lid_fit+lip_thickness)", innerWidthExpr), fmt.Sprintf("%s-2*(lid_fit+lip_thickness)", innerDepthExpr), "lip_depth+2"}, "origin": []any{"wall+lid_fit+lip_thickness", "wall+lid_fit+lip_thickness", fmt.Sprintf("%s-lip_depth-1", baseHeightExpr)}},
+		)
+	} else {
+		operations = append(operations,
+			map[string]any{"id": "lid_panel", "type": "extrude_profile", "profile": profile("wall+xy_clearance"), "origin": []any{0, 0, baseHeightExpr}, "height": "lid"},
+			map[string]any{"id": "lip_outer", "type": "extrude_profile", "profile": profile("xy_clearance-lid_fit"), "origin": []any{0, 0, fmt.Sprintf("%s-lip_depth", baseHeightExpr)}, "height": "lip_depth"},
+			map[string]any{"id": "lip_inner", "type": "extrude_profile", "profile": profile("xy_clearance-lid_fit-lip_thickness"), "origin": []any{0, 0, fmt.Sprintf("%s-lip_depth-1", baseHeightExpr)}, "height": "lip_depth+2"},
+		)
+	}
+	lidParts := append([]string{"lid_panel", "lid_lip"}, snapBumps...)
 	operations = append(operations,
-		map[string]any{"id": "lid_panel", "type": "box", "size": []any{outerWidthExpr, outerDepthExpr, "lid"}, "origin": []any{0, 0, baseHeightExpr}},
-		map[string]any{"id": "lip_outer", "type": "box", "size": []any{fmt.Sprintf("%s-2*lid_fit", innerWidthExpr), fmt.Sprintf("%s-2*lid_fit", innerDepthExpr), "lip_depth"}, "origin": []any{"wall+lid_fit", "wall+lid_fit", fmt.Sprintf("%s-lip_depth", baseHeightExpr)}},
-		map[string]any{"id": "lip_inner", "type": "box", "size": []any{fmt.Sprintf("%s-2*(lid_fit+lip_thickness)", innerWidthExpr), fmt.Sprintf("%s-2*(lid_fit+lip_thickness)", innerDepthExpr), "lip_depth+2"}, "origin": []any{"wall+lid_fit+lip_thickness", "wall+lid_fit+lip_thickness", fmt.Sprintf("%s-lip_depth-1", baseHeightExpr)}},
 		map[string]any{"id": "lid_lip", "type": "cut", "inputs": []string{"lip_outer", "lip_inner"}},
-		map[string]any{"id": "lid_joined", "type": "fuse", "inputs": []string{"lid_panel", "lid_lip"}},
+		map[string]any{"id": "lid_joined", "type": "fuse", "inputs": lidParts},
 	)
 	lidSolid := "lid_joined"
+	for index, magnet := range lidMagnets {
+		fit := magnet.FitMM
+		if fit == 0 {
+			fit = 0.2
+		}
+		id := fmt.Sprintf("lid_magnet_%d", index+1)
+		operations = append(operations, map[string]any{"id": id, "type": "hole", "input": lidSolid,
+			"position": []any{boardX(magnet.XMM), boardY(magnet.YMM), baseHeightExpr}, "direction": []any{0, 0, 1},
+			"diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM})
+		lidSolid = id
+	}
 	if len(topCutters) > 0 {
 		inputs := append([]string{lidSolid}, topCutters...)
 		operations = append(operations, map[string]any{"id": "lid_finished", "type": "cut", "inputs": inputs})
@@ -432,7 +626,8 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 		Status: "ready", OuterSizeMM: [3]float64{outerW, outerD, totalH},
 		BoardSizeMM:   [3]float64{boardW, boardD, nm(envelope.Board.ThicknessNM)},
 		MountingHoles: len(envelope.MountingHoles), PanelOpenings: len(envelope.PanelOpenings),
-		GeneratedServiceOpenings: serviceOpenings, ClearanceZones: len(envelope.ClearanceZones), SourceWarnings: response.Validation.Warnings,
+		GeneratedServiceOpenings: serviceOpenings, Shape: options.Shape, Lid: options.Lid,
+		MagnetPockets: len(options.Magnets), PogoWindows: len(options.PogoWindows), SnapFeatures: len(snapBumps), ClearanceZones: len(envelope.ClearanceZones), SourceWarnings: response.Validation.Warnings,
 	}
 	return definition, report, nil
 }
@@ -492,4 +687,42 @@ func fetchPCBMechanicalEnvelope(app *sdk.AppCtx, designID, revisionID int64) (PC
 		return response, err
 	}
 	return response, nil
+}
+
+// snapFeatures adds a snap bump at the middle of each lip side (fused to the
+// lid) and a matching groove in the base wall (cut from the base). The bump
+// sits 0.6 mm above the lip's lower edge so the lip flexes past the rim.
+func snapFeatures(operations []map[string]any, innerWidth, innerDepth, baseHeight string) ([]string, []string, []map[string]any) {
+	grooves, bumps := []string{}, []string{}
+	bumpZ := fmt.Sprintf("%s-lip_depth+0.6", baseHeight)
+	grooveZ := fmt.Sprintf("%s-lip_depth+0.45", baseHeight)
+	alongX := fmt.Sprintf("min(15, (%s)/3)", innerWidth)
+	alongY := fmt.Sprintf("min(15, (%s)/3)", innerDepth)
+	type side struct {
+		name             string
+		bumpSize, bumpAt []any
+		groveSize, grAt  []any
+	}
+	midX := fmt.Sprintf("wall+(%s)/2-(%s)/2", innerWidth, alongX)
+	midY := fmt.Sprintf("wall+(%s)/2-(%s)/2", innerDepth, alongY)
+	far := func(inner string) string { return fmt.Sprintf("wall+%s", inner) }
+	sides := []side{
+		{"west", []any{"snap+0.3", alongY, 0.8}, []any{"wall+lid_fit-snap", midY, bumpZ},
+			[]any{"snap-lid_fit+0.15+0.01", alongY, 1.1}, []any{"wall-(snap-lid_fit+0.15)", midY, grooveZ}},
+		{"east", []any{"snap+0.3", alongY, 0.8}, []any{fmt.Sprintf("%s-lid_fit-0.3", far(innerWidth)), midY, bumpZ},
+			[]any{"snap-lid_fit+0.15+0.01", alongY, 1.1}, []any{fmt.Sprintf("%s-0.01", far(innerWidth)), midY, grooveZ}},
+		{"south", []any{alongX, "snap+0.3", 0.8}, []any{midX, "wall+lid_fit-snap", bumpZ},
+			[]any{alongX, "snap-lid_fit+0.15+0.01", 1.1}, []any{midX, "wall-(snap-lid_fit+0.15)", grooveZ}},
+		{"north", []any{alongX, "snap+0.3", 0.8}, []any{midX, fmt.Sprintf("%s-lid_fit-0.3", far(innerDepth)), bumpZ},
+			[]any{alongX, "snap-lid_fit+0.15+0.01", 1.1}, []any{midX, fmt.Sprintf("%s-0.01", far(innerDepth)), grooveZ}},
+	}
+	for _, item := range sides {
+		bump, groove := "snap_bump_"+item.name, "snap_groove_"+item.name
+		operations = append(operations,
+			map[string]any{"id": bump, "type": "box", "size": item.bumpSize, "origin": item.bumpAt},
+			map[string]any{"id": groove, "type": "box", "size": item.groveSize, "origin": item.grAt},
+		)
+		bumps, grooves = append(bumps, bump), append(grooves, groove)
+	}
+	return grooves, bumps, operations
 }

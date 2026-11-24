@@ -6,6 +6,8 @@ Use Design Studio when the result must be a measurable 2D profile, exact 3D soli
 
 When PCB Studio is bound as the optional `pcb_source`, use `design_enclosure_from_pcb` rather than manually copying board dimensions. It accepts a PCB design ID and optional revision ID, rejects failed mechanical validation, and creates a parametric base/lid enclosure with mounting bosses, fastener holes, panel cutouts, and immutable PCB provenance. Use `design_enclosure_refresh_from_pcb` to create a new Design revision from the current or specified PCB revision; never overwrite the existing enclosure or discard its source hash.
 
+Enclosure options: `shape` is `rounded` for new enclosures (corners follow `corner_radius_mm` or the board's corner radius), `outline` to follow the PCB outline exactly, or `box`. `lid: "snap"` adds snap bumps on the lip and grooves in the base walls (`snap_mm`, box/rounded only). `magnets` adds blind pockets opened on the inside of the floor or lid (`part: base|lid`, at least 0.4 mm skin is kept), and `pogo_windows` adds rounded through-windows in the floor or lid. Positions are in PCB board coordinates. Connector openings come from PCB Studio's `panel_openings`; side openings assume the connector sits on the outline's bounding edge.
+
 The generated parameters expose wall thickness, PCB clearance, floor/lid thickness, standoff height, top clearance, and lid-lip fit. Build a preview after generation, inspect connector access and clearances, then export STEP/STL/3MF. PCB Studio remains the authority for the board envelope; Design Studio remains the authority for enclosure geometry.
 
 For a multi-part product, keep reusable geometry in `operations`, identify manufacturing outputs in `parts`, and place them with `assembly.instances`. Add materials, print profiles, interfaces, joints, purchased BOM rows, and `open_hardware` metadata. This produces colored assembly previews, mass properties, manufacturing checks, per-part exports, and a release-ready ZIP. Use `design_examples` and select `featured.open_rover` for a complete reference.
@@ -49,6 +51,12 @@ Numeric fields accept parameter expressions such as `width/2`, `(diameter+cleara
 Parameter types are `length` (default), `number`, `angle`, `integer` (whole numbers, for counts) and `boolean` (`true`/`false`). Any numeric type may list `options` (allowed values) alongside `min`/`max`.
 
 Make features optional with `when` on any operation (a boolean, number, or expression such as `"has_vent"` or `"width > 60"`). A skipped operation drops out of `fuse`, `cut` tools, `intersect` and `compound` inputs; using it any other way (as a cut base, a transform input, or an output) is an error, so the mistake is visible.
+
+## Mates and joints
+
+Give parts named mechanical interfaces in `assembly.interfaces`: `{id, kind, part_id, position, direction, up}` in the part's own coordinates. `direction` is the outward normal of the mating face; `up` fixes the turn about it (default: world +Z projected onto the face, or +Y for horizontal faces). Place an instance with `mate: {interface, to_instance, to_interface, gap, angle, flip}` instead of a transform: the faces oppose, the up vectors align, then `gap` (mm along the target normal) and `angle` (degrees about it) apply. Mates chain: a part mated to a mated part follows it. An instance uses one of transform, alignment or mate; an interface takes one mate; cycles are rejected.
+
+Joints (`revolute`, `prismatic`, `fixed`) take `origin` and `axis` in the parent instance's part coordinates and a `state` (degrees or mm, number or expression, within `limits`). The child, and everything placed relative to it, moves with the state, so a parameter can open a lid. Add a `joint_sweep` check (`joint`, optional `from`/`to` defaulting to the limits, `steps`, `min` clearance, `ignore_pairs`) to test collisions through the range; parent-child contact at the hinge is allowed.
 
 ## Edges, shells, profiles, holes and lofts
 

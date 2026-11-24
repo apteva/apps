@@ -49,6 +49,12 @@ func designExamples() map[string]any {
 			"options": "diameter or thread {size M2-M8, mode clearance|tap|insert}; depth (omit = through); counterbore {diameter, depth} or countersink {diameter, angle=90}. position is on the surface; direction points into the material.",
 		},
 		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "manufacturing-package.zip"},
+		"mates": map[string]any{
+			"interface": map[string]any{"id": "dovetail_out", "kind": "dovetail", "part_id": "base", "position": []any{20, 20, 10}, "direction": []any{0, 0, 1}, "up": []any{1, 0, 0}},
+			"instance":  map[string]any{"id": "cap", "part_id": "cap", "mate": map[string]any{"interface": "dovetail_in", "to_instance": "base_1", "to_interface": "dovetail_out", "gap": 0.2, "angle": 0}},
+			"joint":     map[string]any{"id": "lid_hinge", "type": "revolute", "parent_instance": "base_1", "child_instance": "lid_1", "origin": []any{0, 40, 10}, "axis": []any{-1, 0, 0}, "limits": []any{0, 110}, "state": "lid_open"},
+			"check":     map[string]any{"id": "lid_swing", "type": "joint_sweep", "joint": "lid_hinge", "steps": 12, "min": 0.5},
+		},
 		"linked_components": map[string]any{
 			"source_contract": map[string]any{"design_id": 12, "revision_id": 34, "source_sha256": "64 lowercase hex characters", "part_id": "optional_named_part"},
 			"create_tool":     "assembly_create", "refresh_tool": "assembly_sources_refresh",

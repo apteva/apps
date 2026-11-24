@@ -9,7 +9,7 @@ import (
 const (
 	designSchema  = "apteva-design/v1"
 	engineName    = "replicad-opencascade"
-	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.8"
+	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.9"
 )
 
 type ParameterSpec struct {
@@ -169,7 +169,21 @@ type AssemblyInstance struct {
 	Quantity  int               `json:"quantity,omitempty"`
 	Transform AssemblyTransform `json:"transform,omitempty"`
 	Alignment *DatumAlignment   `json:"alignment,omitempty"`
+	Mate      *InstanceMate     `json:"mate,omitempty"`
 	Visible   *bool             `json:"visible,omitempty"`
+}
+
+// InstanceMate places an instance by bringing one of its part's mechanical
+// interfaces onto an interface of an already-placed instance: the faces
+// oppose (flip, default true), the up vectors align, then gap (mm along the
+// target normal) and angle (degrees about it) apply.
+type InstanceMate struct {
+	Interface   string `json:"interface"`
+	ToInstance  string `json:"to_instance"`
+	ToInterface string `json:"to_interface"`
+	Gap         any    `json:"gap,omitempty"`
+	Angle       any    `json:"angle,omitempty"`
+	Flip        *bool  `json:"flip,omitempty"`
 }
 
 type MechanicalInterface struct {
@@ -178,6 +192,7 @@ type MechanicalInterface struct {
 	PartID     string         `json:"part_id"`
 	Position   []any          `json:"position"`
 	Direction  []any          `json:"direction,omitempty"`
+	Up         []any          `json:"up,omitempty"`
 	Parameters map[string]any `json:"parameters,omitempty"`
 	Notes      string         `json:"notes,omitempty"`
 }
@@ -190,6 +205,10 @@ type JointSpec struct {
 	Origin         []any     `json:"origin"`
 	Axis           []any     `json:"axis,omitempty"`
 	Limits         []float64 `json:"limits,omitempty"`
+	// State is the joint's current angle (degrees, revolute) or travel (mm,
+	// prismatic): a number or an expression over parameters. Origin and axis
+	// are in the parent instance's part coordinates.
+	State any `json:"state,omitempty"`
 }
 
 type AssemblySpec struct {

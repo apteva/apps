@@ -1,5 +1,14 @@
 # Design Studio changes
 
+## 0.9.0
+
+- Place parts by mating interfaces. Mechanical interfaces gain an `up` vector; an instance can use `mate: {interface, to_instance, to_interface, gap, angle, flip}` instead of a transform. Mates chain, and conflicts are rejected when saving: unknown or wrong-part interfaces, two mates on one interface, transform plus mate, alignment plus mate, two joints on one child, and placement cycles.
+- Joint states. Revolute and prismatic joints take a `state` (number or expression, within `limits`); origin and axis are in the parent part's coordinates, and the child plus everything placed relative to it moves.
+- New `joint_sweep` exact collision check samples a joint through its range and reports the states where moving parts hit fixed ones.
+- PCB enclosures: `shape` rounded (default for new enclosures), outline (follows the PCB outline) or box (v1; kept by refreshes of existing enclosures); `lid: "snap"` with snap bumps and wall grooves; `magnets` (blind pockets in floor or lid with a minimum skin); `pogo_windows` (rounded through-windows). Generator version 2.
+- Profiles accept `offset` to grow or shrink an outline.
+- Engine version `ds0.9`.
+
 ## 0.8.0
 
 - Fillet and chamfer on selected edges. `edges` takes a selector by description (side of the shape, direction, curve type, plane, box, nearby point, length, `not`, lists for "any of"), instead of always rounding every edge. Selecting nothing, or an unknown selector key, is a clear error.

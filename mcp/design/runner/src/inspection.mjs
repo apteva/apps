@@ -80,7 +80,7 @@ export function topology(shape, instance_id) {
   } catch {}
   return { instance_id, valid, solid_count, shell_count, status };
 }
-function exactPair(
+export function exactPair(
   a,
   b,
   tolerance = 0.001,
@@ -147,7 +147,7 @@ function exactPair(
   }
 }
 const bounds = (shape) => shape.boundingBox.bounds;
-function boxDistance(a, b) {
+export function boxDistance(a, b) {
   const [amin, amax] = bounds(a),
     [bmin, bmax] = bounds(b);
   return Math.hypot(

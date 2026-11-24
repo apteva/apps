@@ -26,6 +26,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		"standoff_height_mm": numberSchema(.05, 50), "top_clearance_mm": numberSchema(.05, 50),
 		"lid_fit_mm": numberSchema(.05, 3), "lip_depth_mm": numberSchema(.05, 12),
 		"lip_thickness_mm": numberSchema(.05, 8), "opening_clearance_mm": numberSchema(.05, 5),
+		"shape":            map[string]any{"type": "string", "enum": []string{"box", "rounded", "outline"}, "description": "box (bounding box), rounded (default for new enclosures; corners follow corner_radius_mm or the board's), outline (walls follow the PCB outline)"},
+		"corner_radius_mm": numberSchema(0, 50),
+		"lid":              map[string]any{"type": "string", "enum": []string{"lip", "snap"}, "description": "lip (locating lip) or snap (lip with snap bumps clicking into wall grooves; box/rounded only)"},
+		"snap_mm":          numberSchema(.2, 2),
+		"magnets": map[string]any{"type": "array", "description": "Blind magnet pockets opened on the inside of the floor (part base) or lid (part lid), in PCB board coordinates", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"x_mm": map[string]any{"type": "number"}, "y_mm": map[string]any{"type": "number"}, "diameter_mm": numberSchema(.5, 50), "depth_mm": numberSchema(.2, 20),
+			"part": map[string]any{"type": "string", "enum": []string{"base", "lid"}}, "fit_mm": numberSchema(0, 1),
+		}, "required": []string{"x_mm", "y_mm", "diameter_mm", "depth_mm"}}},
+		"pogo_windows": map[string]any{"type": "array", "description": "Through windows in the floor (bottom) or lid (top) for pogo pins or test pads, in PCB board coordinates", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"id": map[string]any{"type": "string"}, "x_mm": map[string]any{"type": "number"}, "y_mm": map[string]any{"type": "number"},
+			"width_mm": numberSchema(.5, 200), "height_mm": numberSchema(.5, 200), "corner_radius_mm": numberSchema(0, 50),
+			"face": map[string]any{"type": "string", "enum": []string{"bottom", "top"}},
+		}, "required": []string{"x_mm", "y_mm", "width_mm", "height_mm"}}},
 	}}
 	tools := []sdk.Tool{
 		{Name: "design_verification_record", Description: "Attach a physical fit or enclosed thermal test result to the exact tested revision and source hash, without mutating CAD source. Requires evidence URL and notes describing actual results.", InputSchema: schemaObject(map[string]any{"revision_id": id, "source_sha256": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"physical_fit", "enclosed_thermal"}}, "status": map[string]any{"type": "string", "enum": []string{"pass", "fail"}}, "evidence_url": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}}, []string{"revision_id", "source_sha256", "kind", "status", "evidence_url"}), HandlerCtx: a.toolVerificationRecord},
@@ -127,6 +140,11 @@ func (a *App) toolEnclosureFromPCB(ctx context.Context, app *sdk.AppCtx, args ma
 	options, err := enclosureOptionsFromArgs(args)
 	if err != nil {
 		return nil, err
+	}
+	if options.Shape == "" {
+		// New enclosures follow the board's corners; refreshes keep the
+		// shape stored with the original options (v1 enclosures stay boxes).
+		options.Shape = "rounded"
 	}
 	definition, report, err := generatePCBEnclosure(response, options)
 	if err != nil {

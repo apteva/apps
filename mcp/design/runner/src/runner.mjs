@@ -1,7 +1,8 @@
 import {geometryFor,rememberGeometry,inheritCache,meshFor} from "./geometry-cache.mjs";
 import { ExpressionParser } from "./expressions.mjs";
+import { IDENTITY, applyPose, applyR, compose, interfaceFrame, matePose, poseFromTransform, rotationAbout, transformFromPose, unit } from "./kinematics.mjs";
 import { edgeFeature, shellFeature, extrudeProfile, loftFeature, holeFeature } from "./features.mjs";
-import { loadAsset, inspect, topology, count } from "./inspection.mjs";
+import { exactPair, boxDistance, loadAsset, inspect, topology, count } from "./inspection.mjs";
 import initOpenCascade from "replicad-opencascadejs/src/replicad_single.js";
 import {
   Transformation,
@@ -26,7 +27,7 @@ import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
 const importedGeometry=new WeakSet();
-const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.8";
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.9";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -421,7 +422,7 @@ function hexColor(value, fallback = "#64748b") {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
 }
 
-function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params, importedVisuals) {
+function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params, importedVisuals, options = {}) {
   const parts = new Map((definition.parts || []).map((part) => [part.id, part]));
   const materials = new Map((definition.materials || []).map((material) => [material.id, material]));
   if (!definition.assembly?.instances?.length) {
@@ -432,11 +433,24 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
   }
   const instances = [];
   const pending=[...definition.assembly.instances];
+  const interfaces = new Map((definition.assembly.interfaces || []).map((item) => [item.id, item]));
+  const jointByChild = new Map((definition.assembly.joints || []).map((joint) => [joint.child_instance, joint]));
+  const placed = (id) => instances.find((item) => item.id === id);
+  const frameOf = (id, partID, label) => {
+    const item = interfaces.get(id);
+    if (!item) fail(`${label} references unknown interface ${id}`);
+    if (item.part_id !== partID) fail(`${label}: interface ${id} belongs to part ${item.part_id}, not ${partID}`);
+    return interfaceFrame(vector(item.position, params, `interface ${id}.position`), item.direction ? vector(item.direction, params, `interface ${id}.direction`) : undefined, item.up ? vector(item.up, params, `interface ${id}.up`) : undefined, `interface ${id}`);
+  };
+  const usedTargets = new Map();
   let attempts=0;
   while(pending.length) {
-    if(++attempts>definition.assembly.instances.length**2+1)fail("Datum alignment dependency cycle");
+    if(++attempts>definition.assembly.instances.length**2+1)fail("Assembly placement cycle: alignment, mate and joint references must form a tree");
     const instance=pending.shift();
-    if(instance.alignment && !instances.some(i=>i.id===instance.alignment.target_instance)){pending.push(instance);continue;}
+    const joint = jointByChild.get(instance.id);
+    const dependsOn = [instance.alignment?.target_instance, instance.mate?.to_instance, joint?.parent_instance].filter(Boolean);
+    for (const id of dependsOn) if (id === instance.id) fail(`assembly instance ${instance.id} cannot be placed relative to itself`);
+    if(dependsOn.some((id) => !placed(id))){pending.push(instance);continue;}
 
     const part = parts.get(instance.part_id);
     if (!part) fail(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
@@ -449,6 +463,40 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
       const local=point(a.local_point,resolvedTransform),world=point(a.target_point,target.resolvedTransform),offset=vector(a.offset,params,"datum offset");
       const delta=world.map((v,k)=>v+offset[k]-local[k]);
       const old=vector(resolvedTransform.translate,params,"translation");resolvedTransform={...resolvedTransform,translate:old.map((v,k)=>v+delta[k])};
+    }
+    let drivenBy = new Set();
+    for (const id of dependsOn) for (const j of placed(id).drivenBy) drivenBy.add(j);
+    if (instance.mate || joint) {
+      const label = `assembly instance ${instance.id}`;
+      if (resolvedTransform.scale !== undefined && resolve(resolvedTransform.scale, params) !== 1) fail(`${label}: mated or jointed instances cannot be scaled`);
+      let pose = poseFromTransform(resolvedTransform, (v, l) => resolve(v, params, l), (v, l, f) => vector(v, params, l, f));
+      if (instance.mate) {
+        const mate = instance.mate;
+        if (instance.alignment) fail(`${label} has both alignment and mate; use one`);
+        if (resolvedTransform.rotate?.length || resolvedTransform.translate) fail(`${label} has both a transform and a mate; the mate decides placement (use mate.gap and mate.angle)`);
+        const target = placed(mate.to_instance);
+        if (!target.pose) fail(`${label} mates to scaled instance ${target.id}`);
+        const key = `${mate.to_instance}/${mate.to_interface}`;
+        if (usedTargets.has(key)) fail(`${label} and ${usedTargets.get(key)} both mate to ${key}`);
+        usedTargets.set(key, instance.id);
+        pose = matePose(target.pose, frameOf(mate.to_interface, target.part.id, `${label}.mate.to_interface`), frameOf(mate.interface, part.id, `${label}.mate.interface`),
+          resolve(mate.gap ?? 0, params, `${label}.mate.gap`), resolve(mate.angle ?? 0, params, `${label}.mate.angle`), mate.flip !== false);
+      }
+      if (joint && joint.type !== "fixed") {
+        const parent = placed(joint.parent_instance);
+        if (!parent.pose) fail(`joint ${joint.id} parent ${parent.id} is scaled`);
+        const override = options.jointStates && Object.hasOwn(options.jointStates, joint.id) ? options.jointStates[joint.id] : undefined;
+        const state = override !== undefined ? override : resolve(joint.state ?? 0, params, `joint ${joint.id}.state`);
+        if (Array.isArray(joint.limits) && joint.limits.length === 2 && (state < joint.limits[0] - 1e-9 || state > joint.limits[1] + 1e-9)) {
+          fail(`joint ${joint.id} state ${state} is outside its limits [${joint.limits.join(", ")}]`);
+        }
+        const origin = applyPose(parent.pose, vector(joint.origin, params, `joint ${joint.id}.origin`));
+        const axis = unit(applyR(parent.pose.R, vector(joint.axis, params, `joint ${joint.id}.axis`, [0, 0, 1])), `joint ${joint.id}.axis`);
+        const motion = joint.type === "revolute" ? rotationAbout(origin, axis, state) : { R: IDENTITY().R, t: axis.map((v) => v * state) };
+        pose = compose(motion, pose);
+        drivenBy.add(joint.id);
+      }
+      resolvedTransform = transformFromPose(pose);
     }
     if(part.manufacturing?.classification==='purchased' && resolvedTransform.scale!==undefined && resolve(resolvedTransform.scale,params)!==1)fail('Purchased components require rigid placement; normalize import units separately');
     const shape = applyAssemblyTransform(sourceShape, resolvedTransform, params);
@@ -468,6 +516,8 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
       color: hexColor(part.color || material?.color),
       physical: transformPhysical(partPhysical.get(part.id), resolvedTransform, params),
       visuals,
+      drivenBy,
+      pose: resolvedTransform.scale !== undefined ? null : poseFromTransform(resolvedTransform, (v, l) => resolve(v, params, l), (v, l, f) => vector(v, params, l, f)),
     });
   }
   if (!instances.length) fail("assembly has no visible instances");
@@ -544,7 +594,66 @@ function buildDefinitionGeometry(definition, supplied) {
     const matching = (definition.parts || []).find((part) => part.output === definition.output);
     physical = matching ? partPhysical.get(matching.id) : { mass: 0, center: exactCenterOfMass(assembly.shape) };
   }
-  return { params, shapes, partShapes, partPhysical, partVisuals, assembly, physical };
+  return { params, shapes, partShapes, partPhysical, partVisuals, assembly, physical, importedVisuals, definition };
+}
+
+// joint_sweep: move one joint through its range and check every instance it
+// moves against every instance it does not, at each sampled state.
+function jointSweeps(definition, built) {
+  const results = [];
+  for (const [index, c] of (definition.checks || []).entries()) {
+    if (c.type !== "joint_sweep") continue;
+    const result = { id: c.id || `check_${index}`, type: "joint_sweep", status: "indeterminate", message: "Joint sweep could not be completed", instances: [], details: {} };
+    results.push(result);
+    try {
+      const joint = (definition.assembly?.joints || []).find((item) => item.id === c.joint);
+      if (!joint) throw new Error(`unknown joint ${c.joint}`);
+      if (!["revolute", "prismatic"].includes(joint.type)) throw new Error(`joint ${joint.id} is ${joint.type}; only revolute and prismatic joints move`);
+      const from = c.from !== undefined ? resolve(c.from, built.params, `${result.id}.from`) : joint.limits?.[0];
+      const to = c.to !== undefined ? resolve(c.to, built.params, `${result.id}.to`) : joint.limits?.[1];
+      if (!Number.isFinite(from) || !Number.isFinite(to)) throw new Error("set from/to or give the joint limits");
+      const steps = Math.trunc(Number(c.steps ?? 8));
+      if (!(steps >= 1 && steps <= 64)) throw new Error("steps must be between 1 and 64");
+      const min = Number(c.min ?? 0), tolerance = Number(c.tolerance_mm ?? 0.001);
+      const match = (pairs, a, b) => (pairs || []).some((p) => p.length === 2 && ((p[0] === a && p[1] === b) || (p[1] === a && p[0] === b)));
+      const allowedContact = [...(c.allowed_contact_pairs || []), [joint.parent_instance, joint.child_instance]];
+      const samples = [];
+      let worst = Infinity, failures = 0;
+      for (let step = 0; step <= steps; step += 1) {
+        const value = from + ((to - from) * step) / steps;
+        const assembly = assemblyGeometry(definition, built.shapes, built.partShapes, built.partPhysical, built.partVisuals, built.params, built.importedVisuals, { jointStates: { [joint.id]: value } });
+        const moving = assembly.instances.filter((item) => item.drivenBy.has(joint.id));
+        const fixed = assembly.instances.filter((item) => !item.drivenBy.has(joint.id));
+        const sample = { state: value, pairs: [] };
+        for (const a of moving) for (const b of fixed) {
+          if (match(c.ignore_pairs, a.id, b.id)) continue;
+          if (boxDistance(a.shape, b.shape) > min + tolerance) continue;
+          const left = exactAssemblyTransform(a.sourceShape, a.resolvedTransform, built.params);
+          const right = exactAssemblyTransform(b.sourceShape, b.resolvedTransform, built.params);
+          try {
+            const p = exactPair(left, right, tolerance, Number(c.volume_tolerance_mm3 ?? 1e-6));
+            const allowed = match(allowedContact, a.id, b.id);
+            const pass = !p.intersects && (!p.contact || allowed) && (allowed || p.distance_mm + tolerance >= min);
+            worst = Math.min(worst, p.distance_mm - (p.intersects ? p.intersection_volume_mm3 : 0));
+            if (!pass) { failures += 1; sample.pairs.push({ a: a.id, b: b.id, distance_mm: p.distance_mm, intersection_volume_mm3: p.intersection_volume_mm3 }); }
+          } finally { left.delete(); right.delete(); }
+        }
+        samples.push(sample);
+      }
+      const failing = samples.filter((sample) => sample.pairs.length);
+      result.status = failing.length ? "fail" : "pass";
+      result.instances = [joint.child_instance];
+      result.expected = min;
+      result.actual = Number.isFinite(worst) ? worst : null;
+      result.message = failing.length
+        ? `Joint ${joint.id} collides at ${failing.map((sample) => +sample.state.toFixed(3)).join(", ")} (${failures} pair contact(s))`
+        : `Joint ${joint.id} moves from ${from} to ${to} without collisions (${steps + 1} states)`;
+      result.details = { joint: joint.id, from, to, steps, failing_states: failing, method: "exact_brep_sampled" };
+    } catch (error) {
+      result.message = String(error?.message || error);
+    }
+  }
+  return results;
 }
 
 async function writeBlob(path, blob) {
@@ -635,7 +744,7 @@ async function run(request) {
 
   let report;try{report=geometryReport(shape, mesh, assembly.instances);}catch(e){fail(`Geometry measurements failed: ${String(e)}`);}
   const inspection=inspect(request.definition,built,applyAssemblyTransform,exactAssemblyTransform);
-  report.topology=inspection.topology; report.exact_checks=inspection.exact_checks;
+  report.topology=inspection.topology; report.exact_checks=[...inspection.exact_checks, ...jointSweeps(request.definition, built)];
   report.body_count=inspection.topology.reduce((s,t)=>s+t.solid_count,0);
 
   if (!report.valid) fail("output geometry is empty or invalid", report);

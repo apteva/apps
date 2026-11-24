@@ -168,3 +168,79 @@ func TestPCBEnclosureToolCallsBoundSourceAndRefreshesImmutably(t *testing.T) {
 		t.Fatalf("refreshed provenance=%#v err=%v", definition.Provenance, err)
 	}
 }
+
+func TestPCBEnclosureShapesMagnetsPogoAndSnap(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun unavailable")
+	}
+	engine, err := NewEngine(t.TempDir(), bun, 90*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(name string, response PCBMechanicalResponse, options EnclosureOptions) (*EngineResult, EnclosureGenerationReport) {
+		t.Helper()
+		definition, report, err := generatePCBEnclosure(response, options)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		body, _ := json.Marshal(definition)
+		canonical, normalized, err := normalizeDefinition(body, 256)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		parameters, _ := normalizeParameters([]byte(`{}`), normalized)
+		result, err := engine.Build(context.Background(), name, canonical, parameters, []string{"mesh-json"})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !result.Report.Valid || result.Report.BodyCount != 2 {
+			t.Fatalf("%s: want base + lid as two valid solids, got valid=%v bodies=%d", name, result.Report.Valid, result.Report.BodyCount)
+		}
+		return result, report
+	}
+	fixture := pcbEnvelopeFixture()
+	fixture.Envelope.Board.CornerRadiusNM = 3_000_000
+	box, _ := build("box", fixture, EnclosureOptions{Shape: "box", FloorThicknessMM: 3, LidThicknessMM: 3})
+	rounded, report := build("rounded", fixture, EnclosureOptions{
+		Shape: "rounded", Lid: "snap", FloorThicknessMM: 3, LidThicknessMM: 3,
+		Magnets:     []EnclosureMagnet{{XMM: 20, YMM: 20, DiameterMM: 6, DepthMM: 2}, {XMM: 60, YMM: 20, DiameterMM: 6, DepthMM: 2, Part: "lid"}},
+		PogoWindows: []EnclosureWindow{{XMM: 40, YMM: 40, WidthMM: 10, HeightMM: 4, CornerRadiusMM: 1}},
+	})
+	if report.Shape != "rounded" || report.Lid != "snap" || report.SnapFeatures != 4 || report.MagnetPockets != 2 || report.PogoWindows != 1 {
+		t.Fatalf("report does not describe the features: %#v", report)
+	}
+	for k := 0; k < 3; k++ {
+		if diff := box.Report.Bounds.Size[k] - rounded.Report.Bounds.Size[k]; diff < -1e-3 || diff > 1e-3 {
+			t.Fatalf("rounded corners must keep the outer size: %v vs %v", box.Report.Bounds.Size, rounded.Report.Bounds.Size)
+		}
+	}
+	if rounded.Report.VolumeMM3 >= box.Report.VolumeMM3+3000 {
+		t.Fatalf("rounded enclosure should not be much larger than the box: %v vs %v", rounded.Report.VolumeMM3, box.Report.VolumeMM3)
+	}
+	// An L-shaped board: the outline enclosure is smaller than its bounding box.
+	lShape := pcbEnvelopeFixture()
+	lShape.Envelope.Board.Outline = []PCBPoint{{0, 0}, {85_000_000, 0}, {85_000_000, 25_000_000}, {40_000_000, 25_000_000}, {40_000_000, 56_000_000}, {0, 56_000_000}}
+	lShape.Envelope.MountingHoles = lShape.Envelope.MountingHoles[:1]
+	lShape.Envelope.ClearanceZones = lShape.Envelope.ClearanceZones[:1]
+	lShape.Envelope.Components = lShape.Envelope.Components[:1]
+	lShape.Envelope.PanelOpenings = lShape.Envelope.PanelOpenings[:1]
+	outline, _ := build("outline", lShape, EnclosureOptions{Shape: "outline"})
+	lBox, _ := build("outline-box", lShape, EnclosureOptions{Shape: "box"})
+	if dx := outline.Report.Bounds.Size[0] - lBox.Report.Bounds.Size[0]; dx < -1e-3 || dx > 1e-3 {
+		t.Fatalf("outline enclosure keeps the outline's extent: %v vs %v", outline.Report.Bounds.Size, lBox.Report.Bounds.Size)
+	}
+	if outline.Report.VolumeMM3 > 0.9*lBox.Report.VolumeMM3 {
+		t.Fatalf("outline enclosure should follow the L: %v vs box %v", outline.Report.VolumeMM3, lBox.Report.VolumeMM3)
+	}
+	for options, want := range map[*EnclosureOptions]string{
+		{Shape: "outline", Lid: "snap"}:                                             "snap lids need",
+		{Magnets: []EnclosureMagnet{{XMM: 1, YMM: 1, DiameterMM: 6, DepthMM: 1.8}}}: "leaves less than 0.4 mm",
+		{Shape: "hex"}: "shape must be",
+		{PogoWindows: []EnclosureWindow{{XMM: 1, YMM: 1, WidthMM: 4, HeightMM: 2, CornerRadiusMM: 2}}}: "corner_radius_mm up to half",
+	} {
+		if _, _, err := generatePCBEnclosure(fixture, *options); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%+v: want %q, got %v", *options, want, err)
+		}
+	}
+}
