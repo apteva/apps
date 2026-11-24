@@ -4,6 +4,7 @@ import { useToolTranslation as useTranslation } from "./toolActivityAdapter";
 import { AppIcon } from "./toolAppIcon";
 import { toolDurationMs, toolGroupDurationMs, type ToolActivity } from "./toolActivityModel";
 import {
+  COMPACTION_ACTIVITY,
   resolveToolVisual,
   type ToolGlyph,
   type ToolVisual,
@@ -43,7 +44,24 @@ function stateLabel(tool: ToolActivity, t: (key: string, options?: Record<string
   return t("chat.panel.toolDone");
 }
 
+// Core's context compaction is shown with its own localized wording; the row's
+// reason holds only the language-neutral sizes ("77k → 24k").
+function compactionLabel(tool: ToolActivity, t: (key: string, options?: Record<string, unknown>) => string): string {
+  const state = visualState(tool);
+  if (state === "running" || state === "preparing") return t("compaction.running");
+  if (state === "failed") return t("compaction.failed");
+  if (state === "interrupted") return t("compaction.interrupted");
+  return t("compaction.done");
+}
+
+function reasonTitle(tool: ToolActivity, t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (tool.name !== COMPACTION_ACTIVITY) return reasonLabel(tool, t);
+  const sizes = tool.reason.trim();
+  return [t("compaction.about"), sizes ? t("compaction.sizes", { sizes }) : ""].filter(Boolean).join("\n");
+}
+
 function reasonLabel(tool: ToolActivity, t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (tool.name === COMPACTION_ACTIVITY) return compactionLabel(tool, t);
   if (tool.reason.trim()) return tool.reason.trim();
   const state = visualState(tool);
   if (state === "interrupted") return t("tool.interrupted");
@@ -102,7 +120,9 @@ export function ChatToolActivity({
   waitingForModel = false,
 }: ToolActivityProps) {
   const { t } = useTranslation();
-  const running = showDuration && tools.some(tool => tool.state === "running");
+  // Compaction always shows how long it took: that wait is why the row exists.
+  const compactionFocus = tools.length > 0 && summaryFocusTool(tools).name === COMPACTION_ACTIVITY;
+  const running = (showDuration || compactionFocus) && tools.some(tool => tool.state === "running");
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!running) return;
@@ -111,7 +131,9 @@ export function ChatToolActivity({
     return () => window.clearInterval(timer);
   }, [running]);
   if (tools.length === 0) return null;
-  const duration = showDuration ? durationLabel(toolGroupDurationMs(tools, now)) : "";
+  const duration = showDuration
+    ? durationLabel(toolGroupDurationMs(tools, now))
+    : compactionFocus ? durationLabel(toolDurationMs(summaryFocusTool(tools), now)) : "";
 
   const grouped = tools.length > 1;
   const status = grouped
@@ -124,6 +146,7 @@ export function ChatToolActivity({
     : reasonLabel(tools[0]!, t);
   const focusTool = summaryFocusTool(tools);
   const focusReason = reasonLabel(focusTool, t);
+  const focusTitle = reasonTitle(focusTool, t);
   const copyIsActive = status.state === "preparing" || status.state === "running";
   const failedCount = tools.filter((tool) => visualState(tool) === "failed").length;
   const visibleFailure = failedCount > 0
@@ -155,7 +178,7 @@ export function ChatToolActivity({
         aria-busy={copyIsActive || undefined}
         tabIndex={grouped ? 0 : -1}
         onClick={grouped ? onToggle : undefined}
-        title={grouped ? `${title} · ${expanded ? t("chat.panel.hideToolCalls") : t("chat.panel.showToolCalls")}` : focusReason}
+        title={grouped ? `${title} · ${expanded ? t("chat.panel.hideToolCalls") : t("chat.panel.showToolCalls")}` : focusTitle}
       >
         <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
@@ -165,7 +188,7 @@ export function ChatToolActivity({
               {t("chat.thinking")}
             </span> : <span
               className={`chat-tool-copy truncate text-[13px] font-medium leading-5 ${copyIsActive ? "chat-tool-copy-running" : ""}`}
-              title={focusReason}
+              title={focusTitle}
             >
               {focusReason}
             </span>}
@@ -252,11 +275,12 @@ function ToolCallRow({
   const { t } = useTranslation();
   const visual = useMemo(() => resolveToolVisual(tool.name, registry), [tool.name, registry]);
   const state = visualState(tool);
-  const duration = showDuration ? durationLabel(toolDurationMs(tool, now)) : "";
+  const duration = showDuration || tool.name === COMPACTION_ACTIVITY ? durationLabel(toolDurationMs(tool, now)) : "";
   const stateText = stateLabel(tool, t);
   const reason = reasonLabel(tool, t);
   return (
     <div
+      title={tool.name === COMPACTION_ACTIVITY ? reasonTitle(tool, t) : undefined}
       className={`grid min-h-10 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 py-0.5 ${
         standalone ? "chat-tool-activity px-1" : "border-t border-border/60 first:border-t-0"
       }`}
@@ -338,6 +362,7 @@ function ToolGlyphIcon({ glyph }: { glyph: ToolGlyph }) {
   if (glyph === "memory") return <svg {...common}><path d="M9 5a3 3 0 0 0-5 2.2A3.5 3.5 0 0 0 5 14v2a3 3 0 0 0 4 2.8M15 5a3 3 0 0 1 5 2.2A3.5 3.5 0 0 1 19 14v2a3 3 0 0 1-4 2.8M9 4v16m6-16v16M9 9h6m-6 6h6"/></svg>;
   if (glyph === "message") return <svg {...common}><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8m-8 3h5"/></svg>;
   if (glyph === "search") return <svg {...common}><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>;
+  if (glyph === "compress") return <svg {...common}><path d="M4 9h16M4 15h16"/><path d="m9 3 3 3 3-3M9 21l3-3 3 3"/></svg>;
   if (glyph === "table") return <svg {...common}><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>;
   return <svg {...common}><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg>;
 }

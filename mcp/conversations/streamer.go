@@ -633,7 +633,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	responseEvents := []string{"event.received", "event.settled", "llm.start", "llm.done", "llm.provider_error", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
+	responseEvents := append([]string{"event.received", "event.settled", "llm.start", "llm.done", "llm.provider_error", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}, compactionEvents...)
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events: responseEvents, ThreadPrefix: "chat-",
 	}, chatFeed)
@@ -748,6 +748,11 @@ func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStrea
 		}
 		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
 			ctx.Logger().Error("tool activity persistence failed", "err", err)
+		}
+		// Before the streamer: a retried model call (llm.start) closes the
+		// compaction row before the response moves back to Thinking.
+		if err := a.ingestCompaction(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+			ctx.Logger().Error("compaction activity persistence failed", "err", err)
 		}
 		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 	}

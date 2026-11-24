@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.32.0 — 2026-11-24
+
+- Show when an agent is compacting its conversation memory. When a thread's context gets too long, Core summarizes older parts before the next model call. Emergency recovery after an over-budget request can take a minute or more with no tool calls and nothing to stream, so the chat showed a bare "Thinking…" and looked stuck (79 s on prod). The chat now shows "Compacting conversation memory…" with a running timer while it happens, and keeps a quiet "Conversation memory compacted · 79.0s" line afterwards. Hovering it explains what happened and shows the context size before and after ("77k → 24k tokens"). If compaction fails with the turn, the line says "Couldn't compact conversation memory".
+- It is an activity row, not a message: no unread count, no notification, nothing the agent reads. It follows the same ownership as tool activity, so compaction during an agent's background work on main never appears in the chat main answers. Labels are translated (English, French, Spanish). It uses events Core already emits (`llm.provider_error` class `context_length_exceeded`, `llm.context_recovery`, `llm.compaction_started`, `llm.compaction_done`); no Core or server change is needed.
+
 ## 0.31.0 — 2026-11-24
 
 - Agents now do the work requested in a conversation themselves instead of spawning helper threads for it. Core tells an agent's main thread to hand independent units of work to separate threads. When main answered its operator chat, a quick request such as "read these threads, mark three as spam and close three" turned into four helper threads for about ten CRM calls, which added delay and hid the work behind "Assigning…" rows. The reply rule main receives with each chat message, and the Conversations skill for main and conversation threads, now treat a request made in the conversation as small work done in the same turn (in parallel when the calls are independent). Spawning stays for work that has to continue after the reply (waiting, polling, retries, a schedule) or is too large for one turn.

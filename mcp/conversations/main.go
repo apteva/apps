@@ -45,6 +45,9 @@ type App struct {
 	adapters         *adapterRegistry
 	streamer         *streamer
 	telegramFeedback *telegramFeedbackManager
+	// compactions holds the open context_compaction row per agent thread.
+	compactionMu sync.Mutex
+	compactions  map[string]*openCompaction
 	// telemetryStop cancels the bridge subscription on unmount.
 	telemetryStop func()
 }

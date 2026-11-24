@@ -12,7 +12,11 @@ export type ToolGlyph =
   | "message"
   | "search"
   | "table"
+  | "compress"
   | "tool";
+
+/** Conversations' own row for Core's context compaction (not a tool call). */
+export const COMPACTION_ACTIVITY = "context_compaction";
 
 export interface ToolVisual {
   key: string;
@@ -144,6 +148,7 @@ export function buildToolVisualRegistry(
 }
 
 export function resolveToolVisual(name: string, registry: ToolVisualRegistry): ToolVisual {
+  if (name === COMPACTION_ACTIVITY) return { key: "native:context_compaction", label: "Apteva", glyph: "compress" };
   const normalized = normalizeToolToken(name);
   const exact = registry.exact.get(normalized);
   if (exact) return exact;
