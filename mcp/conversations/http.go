@@ -621,7 +621,12 @@ func (a *App) handleParticipants(w http.ResponseWriter, r *http.Request) {
 		if ids == nil {
 			ids = []int64{}
 		}
-		writeJSON(w, map[string]any{"agent_ids": ids, "lead_agent_id": conv.LeadAgentID})
+		models, err := a.store.AgentModels(id, ids)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"agent_ids": ids, "lead_agent_id": conv.LeadAgentID, "agents": models})
 	}
 	switch r.Method {
 	case http.MethodGet:

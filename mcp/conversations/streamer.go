@@ -84,6 +84,8 @@ type streamer struct {
 	// project (such as the Apteva Helper). Such an agent's responses must not
 	// wait for a receipt that cannot arrive.
 	telemetrySeen map[int64]bool
+	// models holds the provider/model each agent thread used last.
+	models map[string]ModelUse
 	hub           *hub
 	resolve       func(int64, string) string
 	throttle      time.Duration
@@ -131,7 +133,7 @@ func newStreamer(h *hub) *streamer {
 		buffers:        map[string]*streamState{},
 		lastEmit:       map[string]string{},
 		touched:        map[string]time.Time{}, ackTimes: map[string]time.Time{},
-		pendingAcks: map[string]string{}, telemetrySeen: map[int64]bool{},
+		pendingAcks: map[string]string{}, telemetrySeen: map[int64]bool{}, models: map[string]ModelUse{},
 	}
 }
 
@@ -225,6 +227,12 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	s.mu.Lock()
 	s.telemetrySeen[agentID] = true
 	s.mu.Unlock()
+	s.observeModel(eventType, agentID, threadID, dataJSON)
+	if eventType == "llm.done" || eventType == "llm.provider_error" {
+		// Subscribed only for the model record; responses advance on the
+		// events below.
+		return
+	}
 	if eventType == "event.settled" {
 		s.settleTrackedEvent(agentID, threadID, dataJSON)
 		return
@@ -625,7 +633,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	responseEvents := []string{"event.received", "event.settled", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
+	responseEvents := []string{"event.received", "event.settled", "llm.start", "llm.done", "llm.provider_error", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events: responseEvents, ThreadPrefix: "chat-",
 	}, chatFeed)

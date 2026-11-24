@@ -331,6 +331,9 @@ func (a *App) deliver(app *sdk.AppCtx, conv *Conversation, msg *Message) {
 // appendAndDeliver is the only production append path. Message and initial
 // outbox rows commit atomically; immediate dispatch happens after commit.
 func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message) (*Message, bool, error) {
+	if msg.Role == "agent" && msg.generatedBy == nil {
+		msg.generatedBy = a.streamer.modelFor(msg.AgentID, msg.ThreadID)
+	}
 	targets, err := a.deliveryTargets(conv, msg)
 	if err != nil {
 		return nil, false, err

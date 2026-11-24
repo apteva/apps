@@ -66,6 +66,11 @@ type Message struct {
 	// Only trusted tool handlers set this. Provider call IDs can be reused;
 	// the store scopes automatic retry identity to the input and payload.
 	toolCallID     string
+	// generatedBy is the model that produced an agent message. It is stored
+	// in its own column, outside the retry fingerprint: a retried send must
+	// not become "a different request" because a later call used another
+	// model.
+	generatedBy *ModelUse
 	Revision       int64          `json:"revision,omitempty"`
 	ID             int64          `json:"id"`
 	ConversationID string         `json:"conversation_id"`
@@ -759,6 +764,11 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	if err != nil {
 		return nil, false, err
 	}
+	generatedBy := ""
+	if m.generatedBy != nil && m.Role == "agent" {
+		raw, _ := json.Marshal(m.generatedBy)
+		generatedBy = string(raw)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, false, err
@@ -823,7 +833,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 		return nil, false, err
 	}
 	id, _ := res.LastInsertId()
-	if _, err := tx.Exec(`UPDATE messages SET request_hash=? WHERE id=?`, requestHash, id); err != nil {
+	if _, err := tx.Exec(`UPDATE messages SET request_hash=?,generated_by=? WHERE id=?`, requestHash, generatedBy, id); err != nil {
 		return nil, false, err
 	}
 	if _, err := tx.Exec(`UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ConversationID); err != nil {

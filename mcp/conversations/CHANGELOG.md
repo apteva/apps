@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.29.0 — 2026-11-24
+
+- Show which model answers in a conversation. Details now lists, under each agent, the model behind the agent's latest reply here, its provider, and whether the agent answers from its main thread or the conversation's own thread. The full model name, thread id and reply time show on hover. A conversation with no reply since 0.29.0 shows "Model not recorded yet".
+- Each agent reply records the provider and model Core reported for the call that produced it (`llm.start`, corrected by `llm.done` when a fallback provider answered). If the primary provider fails and the reply arrives before the fallback reports, that reply records no model rather than the wrong one. The record is kept outside message payloads, so public visitors never see it, and outside retry identity, so a retried send stays a duplicate.
+
 ## 0.28.0 — 2026-11-23
 
 - Redesign the message composer after Intercom's: a rounded box with the draft on top at full width and a slim tools row beneath it, `+` and the microphone on the left and send/pause on the right. On phones, in the Helper dock and in other chats 480px wide or narrower (the automatic layout), and wherever `composer_layout: compact` is set, `+`, the text and send used to share one row, so a long draft wrapped in a narrow, indented column between the buttons. The text now always gets the full width. Compact keeps the same shape with tighter spacing: one text line that grows as you type.

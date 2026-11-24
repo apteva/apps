@@ -114,9 +114,21 @@ function selectableAgents(agents: AgentInfo[] | null): {
     : { list: all, bindingKnown: false };
 }
 
+interface AgentModelInfo {
+  agent_id: number;
+  // The thread this conversation is bound to for the agent: "main" or its
+  // own chat-<id> thread. Empty before the first message reaches it.
+  thread_id?: string;
+  // The provider/model behind the agent's latest reply here that recorded one.
+  last_reply?: { provider?: string; model: string };
+  reply_thread_id?: string;
+  replied_at?: string;
+}
+
 interface ParticipantsInfo {
   agent_ids: number[];
   lead_agent_id: number;
+  agents?: AgentModelInfo[];
 }
 
 interface TelegramConnectionView {
@@ -899,15 +911,41 @@ function ContextColumn({
             <p className="text-xs text-text-dim">{t("common.loading")}</p>
           ) : (
             <div className="space-y-1.5">
-              {participants.agent_ids.map((id) => (
-                <div key={id} className="flex items-center gap-2 text-xs">
-                  {showAvatars && <ConversationIdentity conversation={{kind:"direct",lead_agent_id:id}} agents={agents || []}/>}
-                  <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
-                  {id === participants.lead_agent_id && (
-                    <span className="uppercase text-accent">{t("chat.lead")}</span>
-                  )}
-                </div>
-              ))}
+              {participants.agent_ids.map((id) => {
+                const info = participants.agents?.find((a) => a.agent_id === id);
+                const thread = info?.reply_thread_id || info?.thread_id || "";
+                const model = info?.last_reply;
+                return (
+                  <div key={id} className="space-y-0.5" data-agent-model={id}>
+                    <div className="flex items-center gap-2 text-xs">
+                      {showAvatars && <ConversationIdentity conversation={{kind:"direct",lead_agent_id:id}} agents={agents || []}/>}
+                      <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
+                      {id === participants.lead_agent_id && (
+                        <span className="uppercase text-accent">{t("chat.lead")}</span>
+                      )}
+                    </div>
+                    {info && (
+                      <div
+                        className="chat-agent-model min-w-0 text-xs"
+                        title={[
+                          model?.model,
+                          thread,
+                          model && info.replied_at ? t("chat.modelLastReply", { time: relativeTime(info.replied_at) || info.replied_at }) : "",
+                        ].filter(Boolean).join("\n")}
+                      >
+                        <div className="chat-agent-model-name truncate text-text-muted">
+                          {model ? model.model : t("chat.modelUnknown")}
+                        </div>
+                        {(thread || model?.provider) && (
+                          <div className="chat-agent-model-source truncate text-text-dim">
+                            {[thread ? (thread === "main" ? t("chat.mainThread") : t("chat.chatThread")) : "", model?.provider || ""].filter(Boolean).join(" · ")}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           <button
