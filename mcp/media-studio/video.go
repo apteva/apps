@@ -436,7 +436,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusFilter := r.URL.Query().Get("status")
-	q := `SELECT id, queue_id, provider, model, prompt, status, error,
+	q := `SELECT id, kind, queue_id, provider, model, prompt, status, error,
 	             result_storage_id, generation_id, attempts, cost_usd,
 	             estimated_duration_seconds, actual_duration_seconds, created_at, updated_at
 	      FROM video_jobs
@@ -460,18 +460,19 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, storageID, generationID, attempts            int64
-			queueID, provider, model, prompt, status, errMsg string
-			createdAt, updatedAt                             string
-			costUSD, estimatedDuration, actualDuration       float64
+			id, storageID, generationID, attempts                  int64
+			kind, queueID, provider, model, prompt, status, errMsg string
+			createdAt, updatedAt                                   string
+			costUSD, estimatedDuration, actualDuration             float64
 		)
-		if err := rows.Scan(&id, &queueID, &provider, &model, &prompt,
+		if err := rows.Scan(&id, &kind, &queueID, &provider, &model, &prompt,
 			&status, &errMsg, &storageID, &generationID, &attempts,
 			&costUSD, &estimatedDuration, &actualDuration, &createdAt, &updatedAt); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
 			"id":                         id,
+			"kind":                       kind,
 			"queue_id":                   queueID,
 			"provider":                   provider,
 			"model":                      model,

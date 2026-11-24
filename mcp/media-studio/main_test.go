@@ -3447,3 +3447,31 @@ func TestPollWorker_AvatarTavus_StillGenerating(t *testing.T) {
 		t.Errorf("attempts = %d, want 1", attempts)
 	}
 }
+
+func TestListVideoJobs_IncludesKind(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	for _, row := range []struct{ queueID, kind string }{{"q-video", "video"}, {"q-avatar", "avatar"}} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO video_jobs (project_id, kind, queue_id, provider, model, prompt, status)
+			 VALUES (?, ?, ?, 'heygen', 'm', 'p', 'polling')`,
+			"test-proj", row.kind, row.queueID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response := httptest.NewRecorder()
+	(&App{}).handleListVideoJobs(response, httptest.NewRequest(http.MethodGet, "/video-jobs?project_id=test-proj", nil))
+	var body struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, j := range body.Jobs {
+		got[j["queue_id"].(string)] = j["kind"]
+	}
+	if got["q-video"] != "video" || got["q-avatar"] != "avatar" {
+		t.Fatalf("job kinds = %+v, want video/avatar", got)
+	}
+}

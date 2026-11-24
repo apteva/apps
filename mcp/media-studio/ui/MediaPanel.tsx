@@ -163,6 +163,7 @@ interface GenerationEstimate {
 
 interface VideoJob {
   id: number;
+  kind?: string;
   queue_id: string;
   generation_id?: number;
   provider?: string;
@@ -451,7 +452,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [generatingDraftId, setGeneratingDraftId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Generation | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const [selected, setSelected] = useState<Generation | null>(null);
+  // Details belong to the tab they were opened from: switching media
+  // type closes them instead of showing an image's details over videos.
+  useEffect(() => {
+    setSelected((cur) => (cur && cur.kind !== activeKind ? null : cur));
+  }, [activeKind]);
   const [lightbox, setLightbox] = useState<Generation | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -1014,7 +1022,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               : selectedAvatar;
   const pendingVideoJobs =
     activeKind === "video" || activeKind === "avatar"
-      ? videoJobs.filter((j) => j.status === "queued" || j.status === "polling" || j.status === "finalizing")
+      ? videoJobs.filter(
+          (j) =>
+            (j.kind || "video") === activeKind &&
+            (j.status === "queued" || j.status === "polling" || j.status === "finalizing"),
+        )
       : [];
   // Video reference-image is allowed for both standard (text-to-video)
   // and image-to-video models — required for the latter, optional
@@ -1682,19 +1694,22 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const requestDelete = (g: Generation) => {
+    if (deletingId) return;
+    setDeleteError("");
+    setConfirmDelete(g);
+  };
+
+  // deleteGeneration runs after the user confirms in ConfirmDeleteDialog.
+  // Failures stay in the dialog so the user can retry or cancel.
   const deleteGeneration = async (g: Generation) => {
     if (deletingId) return;
-    const storageCount = g.storage_ids?.length || 0;
-    const label = storageCount > 0
-      ? `Delete this generation and ${storageCount} linked Storage file${storageCount === 1 ? "" : "s"}?`
-      : "Delete this generation?";
-    if (!window.confirm(label)) return;
     const requestedKind = g.kind;
     const commitStatus = (message: string) => {
       if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) setStatus(message);
     };
     setDeletingId(g.id);
-    setStatus("Deleting…");
+    setDeleteError("");
     try {
       const res = await fetch(`${API}/delete?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
@@ -1704,16 +1719,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
-        commitStatus(`Delete failed: ${data.error || res.status}`);
+        setDeleteError(String(data.error || `The server returned ${res.status}.`));
         return;
       }
+      setConfirmDelete(null);
       setItems((cur) => cur.filter((x) => x.id !== g.id));
       setSelected((cur) => (cur?.id === g.id ? null : cur));
       setLightbox((cur) => (cur?.id === g.id ? null : cur));
       setVideoJobs((cur) => cur.filter((x) => x.generation_id !== g.id));
       commitStatus("Deleted.");
     } catch (e) {
-      commitStatus("Delete failed: " + (e as Error).message);
+      setDeleteError((e as Error).message || "Network error.");
     } finally {
       setDeletingId(null);
     }
@@ -1726,6 +1742,147 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .ms-media-main { flex-direction: row; overflow: hidden; }
         .ms-media-content { padding: 12px; }
         .ms-media-detail { width: 384px; border-left-width: 1px; border-left-style: solid; }
+        .ms-kind-tabs { scrollbar-width: none; }
+        .ms-kind-tabs::-webkit-scrollbar { display: none; }
+        .ms-detail-header { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 12px; }
+        .ms-detail-title {
+          flex: 1;
+          min-width: 0;
+          margin: 0;
+          font-size: 14px;
+          line-height: 1.4;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          overflow-wrap: anywhere;
+        }
+        .ms-detail-close {
+          flex-shrink: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          margin: -4px -6px 0 0;
+          border-radius: 6px;
+        }
+        .ms-detail-close:hover { background: var(--bg-input); }
+        .ms-detail-request summary { cursor: pointer; padding: 8px 10px; user-select: none; }
+        .ms-detail-request[open] summary { border-bottom: 1px solid var(--border); }
+        .ms-detail-request pre {
+          margin: 0;
+          padding: 10px;
+          max-height: 260px;
+          overflow: auto;
+          font-size: 11px;
+          line-height: 1.5;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+        .ms-btn-icon { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+        .ms-btn-danger {
+          color: var(--error);
+          background: transparent;
+          border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+          transition: background-color 120ms ease, border-color 120ms ease;
+        }
+        .ms-btn-danger:hover:not(:disabled) {
+          background: color-mix(in srgb, var(--error) 12%, transparent);
+          border-color: var(--error);
+        }
+        .ms-btn-danger:disabled { opacity: .5; }
+        .ms-btn-danger-solid {
+          color: #fff;
+          background: var(--error);
+          border: 1px solid var(--error);
+          transition: filter 120ms ease;
+        }
+        .ms-btn-danger-solid:hover:not(:disabled) { filter: brightness(1.1); }
+        .ms-btn-danger-solid:disabled { opacity: .7; cursor: progress; }
+        .ms-btn-danger:focus-visible, .ms-btn-danger-solid:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--error) 60%, transparent);
+          outline-offset: 2px;
+        }
+        .ms-confirm-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 10000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(0, 0, 0, 0.72);
+        }
+        .ms-confirm-dialog {
+          width: min(460px, 100%);
+          border: 1px solid var(--border);
+          background: var(--bg-card);
+          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+          overflow: hidden;
+        }
+        .ms-confirm-body { display: flex; gap: 14px; padding: 20px 20px 18px; }
+        .ms-confirm-body h2 { margin: 2px 0 12px; }
+        .ms-confirm-icon {
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 36px;
+          height: 36px;
+          border-radius: 999px;
+          color: var(--error);
+          background: color-mix(in srgb, var(--error) 14%, transparent);
+        }
+        .ms-confirm-item { display: flex; align-items: center; gap: 10px; padding: 8px; margin-bottom: 12px; }
+        .ms-confirm-thumb {
+          flex-shrink: 0;
+          width: 48px;
+          height: 48px;
+          border-radius: 4px;
+          object-fit: cover;
+          background: var(--bg);
+        }
+        .ms-confirm-thumb-icon { display: flex; align-items: center; justify-content: center; }
+        .ms-confirm-prompt {
+          margin: 0 0 2px;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          overflow-wrap: anywhere;
+          line-height: 1.35;
+        }
+        .ms-confirm-error {
+          margin-top: 12px;
+          padding: 8px 10px;
+          color: var(--error);
+          background: color-mix(in srgb, var(--error) 10%, transparent);
+          border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+        }
+        .ms-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; background: var(--bg); }
+        .ms-confirm-spinner {
+          width: 13px;
+          height: 13px;
+          border-radius: 999px;
+          border: 2px solid rgba(255, 255, 255, 0.4);
+          border-top-color: #fff;
+          animation: ms-confirm-spin 0.8s linear infinite;
+        }
+        @keyframes ms-confirm-spin { to { transform: rotate(360deg); } }
+        .ms-tile-media {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 100%;
+          aspect-ratio: 1 / 1;
+          overflow: hidden;
+        }
+        .ms-tile-media img { width: 100%; height: 100%; object-fit: contain; display: block; }
+        .ms-tile-empty { flex-direction: column; gap: 8px; font-size: 12px; }
+        .ms-tile-failed { color: var(--error); }
+        .ms-card-selected { box-shadow: 0 0 0 1px var(--accent); }
+        .ms-media-card.ms-card-selected { border-color: var(--accent); }
         .ms-create-backdrop {
           position: fixed;
           inset: 0;
@@ -2041,6 +2198,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           }
         }
         @media (max-width: 640px) {
+          .ms-media-detail {
+            position: fixed;
+            inset: 0;
+            z-index: 9990;
+            max-height: none;
+            border-top-width: 0;
+          }
+          .ms-confirm-backdrop { align-items: flex-end; padding: 0; }
+          .ms-confirm-dialog { width: 100%; border-radius: 12px 12px 0 0 !important; }
+          .ms-confirm-actions { flex-direction: column-reverse; }
+          .ms-confirm-actions button { width: 100%; min-height: 44px; }
           .ms-gallery-grid { gap: 8px; padding: 8px; }
           .ms-gallery-video, .ms-gallery-audio { grid-template-columns: minmax(0, 1fr); }
           .ms-create-backdrop { padding: 0; align-items: stretch; }
@@ -2083,7 +2251,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       `}</style>
       {/* Kind tabs */}
       <nav
-        className="flex items-center flex-shrink-0 overflow-x-auto border-b border-border px-2 sm:px-4"
+        className="ms-kind-tabs flex items-center flex-shrink-0 overflow-x-auto border-b border-border px-2 sm:px-4"
         role="tablist"
         aria-label="Media type"
       >
@@ -2356,6 +2524,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 <Gallery
                   kind={activeKind}
                   items={items}
+                  selectedId={selected?.id ?? null}
                   onSelect={setSelected}
                   onOpenLightbox={setLightbox}
                   onGenerateDraft={generateDraft}
@@ -2387,7 +2556,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             selected={selected}
             onClose={() => setSelected(null)}
             deleting={deletingId === selected.id}
-            onDelete={() => deleteGeneration(selected)}
+            onDelete={() => requestDelete(selected)}
             onUseAsReference={
               selected.kind === "image" && selected.storage_ids.length > 0
                 ? () => {
@@ -2402,6 +2571,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           />
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmDeleteDialog
+          generation={confirmDelete}
+          busy={deletingId === confirmDelete.id}
+          error={deleteError}
+          onCancel={() => {
+            if (deletingId) return;
+            setConfirmDelete(null);
+            setDeleteError("");
+          }}
+          onConfirm={() => deleteGeneration(confirmDelete)}
+        />
+      )}
 
       {lightbox && (
         <Lightbox
@@ -4978,9 +5161,11 @@ function Gallery({
   generatingCostUSD,
   pendingJobs,
   generatingDraftId,
+  selectedId,
 }: {
   kind: Kind;
   items: Generation[];
+  selectedId: number | null;
   onSelect: (g: Generation) => void;
   onOpenLightbox: (g: Generation) => void;
   onGenerateDraft: (g: Generation) => void;
@@ -5012,25 +5197,33 @@ function Gallery({
           return (
             <div
               key={g.id}
-              className="border border-border rounded overflow-hidden hover:border-accent transition-colors"
+              className={
+                "ms-image-card border rounded overflow-hidden hover:border-accent transition-colors " +
+                (selectedId === g.id ? "border-accent ms-card-selected" : "border-border")
+              }
             >
               {draft ? (
                 <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
               ) : src ? (
                 <button
                   onClick={() => onOpenLightbox(g)}
-                  className="block w-full"
-                  title="Click to open"
+                  className="ms-tile-media bg-bg-input"
+                  title="Open full size"
+                  aria-label={`Open ${g.prompt || "image"} full size`}
                 >
-                  <img src={src} alt="" className="w-full" loading="lazy" style={{ display: "block" }} />
+                  <img src={src} alt="" loading="lazy" />
                 </button>
               ) : (
-                <div className="bg-bg-input py-12 text-center text-text-muted text-xs">no preview</div>
+                <div className={`ms-tile-media ms-tile-empty bg-bg-input ${g.status === "failed" ? "ms-tile-failed" : "text-text-muted"}`}>
+                  <TileEmptyIcon failed={g.status === "failed"} />
+                  <span>{g.status === "failed" ? "Generation failed" : "No preview"}</span>
+                </div>
               )}
               <button
                 onClick={() => onSelect(g)}
                 className="block w-full text-left"
                 title="Show details"
+                aria-pressed={selectedId === g.id}
               >
                 <CardMeta g={g} />
               </button>
@@ -5084,7 +5277,7 @@ function Gallery({
           return (
             <div
               key={g.id}
-              className="ms-media-card"
+              className={selectedId === g.id ? "ms-media-card ms-card-selected" : "ms-media-card"}
             >
               {draft ? (
                 <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
@@ -5103,6 +5296,7 @@ function Gallery({
                 onClick={() => onSelect(g)}
                 className="block w-full text-left"
                 title="Show details"
+                aria-pressed={selectedId === g.id}
               >
                 <CardMeta g={g} />
               </button>
@@ -5227,33 +5421,40 @@ function DetailAside({
     <aside
       className="ms-media-detail flex-shrink-0 border-border bg-bg-card flex flex-col"
     >
-      <header className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border">
-        <span className="w-full sm:w-auto text-text font-medium truncate flex-1" title={selected.prompt}>{selected.prompt}</span>
-        {onUseAsReference && (
+      <header className="ms-detail-header border-b border-border">
+        <div className="flex items-start gap-3">
+          <h3 className="ms-detail-title text-text font-medium" title={selected.prompt}>
+            {selected.prompt || "Untitled generation"}
+          </h3>
           <button
-            onClick={onUseAsReference}
-            className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent"
-            title="Use this image as the reference for an edit"
+            onClick={onClose}
+            aria-label="Close details"
+            title="Close details"
+            className="ms-detail-close text-text-muted hover:text-text"
           >
-            Use as reference
+            <CloseIcon />
           </button>
-        )}
-        <button
-          onClick={onDelete}
-          disabled={deleting}
-          className="text-xs px-2 py-1 border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
-          title="Delete this generation and linked Storage files"
-        >
-          {deleting ? "Deleting…" : "Delete"}
-        </button>
-        <button
-          onClick={onClose}
-          aria-label="Close details"
-          className="text-text-muted hover:text-text leading-none px-1"
-          style={{ fontSize: 18 }}
-        >
-          ×
-        </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {onUseAsReference && (
+            <button
+              onClick={onUseAsReference}
+              className="text-xs px-2.5 py-1.5 border border-border rounded text-accent hover:border-accent"
+              title="Use this image as the reference for an edit"
+            >
+              Use as reference
+            </button>
+          )}
+          <button
+            onClick={onDelete}
+            disabled={deleting}
+            className="ms-btn-danger ms-btn-icon text-xs px-2.5 py-1.5 rounded"
+            title="Delete this generation and its linked Storage files"
+          >
+            <TrashIcon size={13} />
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
+        </div>
       </header>
       <div className="flex-1 overflow-auto">
         {url && selected.kind === "image" && <img src={url} alt="" className="w-full" />}
@@ -5277,6 +5478,7 @@ function DetailAside({
           />
         )}
         <dl className="px-4 py-3 text-xs flex flex-col gap-2">
+          {selected.prompt && <Row label="Prompt" value={selected.prompt} wrap />}
           <Row label="Kind" value={selected.kind} />
           {selected.status && <Row label="Status" value={selected.status} />}
           <Row label="Provider" value={selected.provider} />
@@ -5290,8 +5492,7 @@ function DetailAside({
             <Row label="Cost" value={formatCost(selected.cost_usd)} />
           )}
           <Row label="Created" value={new Date(selected.created_at).toLocaleString()} />
-          {selected.revised_prompt && <Row label="Revised" value={selected.revised_prompt} />}
-          {selected.request_json && <Row label="Request" value={selected.request_json} />}
+          {selected.revised_prompt && <Row label="Revised" value={selected.revised_prompt} wrap />}
           {selected.storage_ids.length > 0 && (
             <Row
               label="Storage IDs"
@@ -5299,6 +5500,12 @@ function DetailAside({
             />
           )}
         </dl>
+        {selected.request_json && (
+          <details className="ms-detail-request mx-4 mb-3 border border-border rounded">
+            <summary className="text-xs text-text-muted">Request details</summary>
+            <pre className="text-text">{prettyJSON(selected.request_json)}</pre>
+          </details>
+        )}
         {selected.storage_urls && selected.storage_urls.length > 0 && (
           <div className="px-4 pb-3 flex flex-col gap-1">
             {selected.storage_urls.map((u, i) => (
@@ -5465,15 +5672,201 @@ function Lightbox({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, wrap }: { label: string; value: string; wrap?: boolean }) {
   return (
     <div className="flex gap-2">
       <span className="text-text-dim flex-shrink-0" style={{ width: 80 }}>
         {label}
       </span>
-      <span className="flex-1 min-w-0 text-text break-all" title={value}>
+      <span
+        className={"flex-1 min-w-0 text-text " + (wrap ? "break-words" : "break-all")}
+        style={wrap ? { whiteSpace: "pre-wrap", lineHeight: 1.5 } : undefined}
+        title={wrap ? undefined : value}
+      >
         {value}
       </span>
+    </div>
+  );
+}
+
+function prettyJSON(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function TrashIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+function TileEmptyIcon({ failed }: { failed: boolean }) {
+  return failed ? (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7.5v5.5M12 16.5h.01" />
+    </svg>
+  ) : (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+    </svg>
+  );
+}
+
+const DELETE_KIND_NOUN: Record<string, string> = {
+  image: "image",
+  video: "video",
+  audio_tts: "voiceover",
+  audio_sfx: "sound effect",
+  music: "track",
+  avatar: "avatar video",
+};
+
+// ConfirmDeleteDialog replaces window.confirm for deletions: it shows
+// what is being removed (preview, prompt, linked Storage files), keeps
+// focus inside, starts on Cancel, and stays open with a busy state and
+// any error until the delete finishes.
+function ConfirmDeleteDialog({
+  generation,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  generation: Generation;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>("button:not([disabled])"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  const noun = DELETE_KIND_NOUN[generation.kind] || "generation";
+  const storageIds = generation.storage_ids || [];
+  const preview = generation.kind === "image" ? imageSrc(generation) : generationPoster(generation) || "";
+  const when = generation.created_at ? new Date(generation.created_at).toLocaleString() : "";
+  return (
+    <div className="ms-confirm-backdrop" onMouseDown={() => onCancelRef.current()}>
+      <div
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="ms-confirm-title"
+        aria-describedby="ms-confirm-desc"
+        className="ms-confirm-dialog rounded"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="ms-confirm-body">
+          <div className="ms-confirm-icon" aria-hidden="true">
+            <TrashIcon size={18} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 id="ms-confirm-title" className="text-base font-semibold text-text">
+              Delete this {noun}?
+            </h2>
+            <div className="ms-confirm-item border border-border rounded bg-bg-input">
+              {preview ? (
+                <img src={preview} alt="" className="ms-confirm-thumb" />
+              ) : (
+                <span className="ms-confirm-thumb ms-confirm-thumb-icon text-text-muted">
+                  <KindIcon kind={generation.kind} />
+                </span>
+              )}
+              <div className="min-w-0">
+                <p className="ms-confirm-prompt text-sm text-text">{generation.prompt || "Untitled generation"}</p>
+                <p className="text-xs text-text-dim truncate">
+                  {[generation.model, when].filter(Boolean).join(" · ")}
+                </p>
+              </div>
+            </div>
+            <p id="ms-confirm-desc" className="text-sm text-text-muted" style={{ lineHeight: 1.5 }}>
+              {storageIds.length > 0 ? (
+                <>
+                  The generation and its {storageIds.length === 1 ? "Storage file" : `${storageIds.length} Storage files`}{" "}
+                  <span className="text-text">{storageIds.map((id) => `#${id}`).join(", ")}</span> will be
+                  permanently deleted.
+                </>
+              ) : (
+                <>The generation record will be permanently deleted.</>
+              )}{" "}
+              This can't be undone.
+            </p>
+            {error && (
+              <p className="ms-confirm-error text-sm rounded" role="alert">
+                Couldn't delete: {error}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="ms-confirm-actions border-t border-border">
+          <button
+            ref={cancelRef}
+            onClick={onCancel}
+            disabled={busy}
+            className="px-4 py-2 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="ms-btn-danger-solid ms-btn-icon px-4 py-2 text-sm rounded font-semibold"
+          >
+            {busy ? <span className="ms-confirm-spinner" aria-hidden="true" /> : <TrashIcon size={14} />}
+            {busy ? "Deleting…" : error ? "Try again" : "Delete"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
