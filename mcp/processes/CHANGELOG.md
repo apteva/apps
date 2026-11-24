@@ -2,6 +2,12 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## One-line live row with app icons (0.23.1)
+
+Running rows show just the latest tool call with its app icon and a live
+thinking marker; the details modal shows icons on every action. See
+`docs-release-0.23.1.md`.
+
 ## Followable live activity in the widget (0.23.0)
 
 Running rows show the last finished thought, the last three actions in plain

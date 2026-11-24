@@ -2,7 +2,7 @@ import { timingLabel, useTimingNow } from "./Timing";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { eventsForStep, useWorkerActivity } from "./execution-activity";
-import { callsForExecution } from "./ExecutionTools";
+import { callsForExecution, resolveToolSource, type ToolSource } from "./ExecutionTools";
 
 type Props = {
   appName?: string;
@@ -433,52 +433,101 @@ function ThoughtIcon() {
     </svg>
   );
 }
-/** The running row's two fixed lines: the last finished thought, and the
- * last completed actions with a live marker. Only finished work is shown as
- * text, so nothing flickers; the marker shows the worker is busy now. */
-function LiveLines({ item }: { item: Item }) {
+const sourceCache = new Map<string, Promise<ToolSource[]>>();
+/** Installed apps and connected integrations of a project, for tool icons.
+ * Same sources as the Processes panel; fetched once per project. */
+function loadToolSources(projectID: string) {
+  let pending = sourceCache.get(projectID);
+  if (!pending) {
+    const query = new URLSearchParams({ project_id: projectID });
+    const json = (url: string) => fetch(url, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+    pending = Promise.all([json(`/api/apps?${query}`), json(`/api/connections?${query}&include_app_owned=1`)]).then(([apps, connections]) => [
+      ...(Array.isArray(apps) ? apps : []).map((app: any): ToolSource => ({
+        key: `app:${app.install_id || app.name}`,
+        label: app.display_name || app.name,
+        icon: app.icon,
+        iconStyle: app.icon_style,
+        aliases: [app.name, app.display_name].filter(Boolean),
+        tools: app.surfaces?.mcp_tool_names || [],
+      })),
+      ...(Array.isArray(connections) ? connections : []).map((c: any): ToolSource => ({
+        key: `integration:${c.id}`,
+        label: c.app_name || c.name || c.app_slug,
+        icon: c.logo,
+        iconStyle: "image",
+        aliases: [c.app_slug, c.app_name, c.name].filter(Boolean),
+      })),
+    ]);
+    sourceCache.set(projectID, pending);
+  }
+  return pending;
+}
+function useToolSources(projectID?: string) {
+  const [sources, setSources] = useState<ToolSource[]>([]);
+  useEffect(() => {
+    if (!projectID) return;
+    let live = true;
+    loadToolSources(projectID).then((list) => live && setSources(list));
+    return () => {
+      live = false;
+    };
+  }, [projectID]);
+  return sources;
+}
+/** The app or integration icon for a tool, else a small wrench. */
+function ToolIcon({ tool, sources }: { tool: string; sources: ToolSource[] }) {
+  const source = resolveToolSource(tool, sources);
+  const [failed, setFailed] = useState("");
+  const title = source?.label;
+  if (source?.icon && failed !== source.icon) {
+    if (source.iconStyle === "monochrome")
+      return (
+        <span className="po-tool-icon mono" title={title} aria-hidden="true">
+          <span style={{ maskImage: `url("${source.icon}")`, WebkitMaskImage: `url("${source.icon}")` }} />
+          <img src={source.icon} alt="" onError={() => setFailed(source.icon!)} />
+        </span>
+      );
+    return <img className="po-tool-icon" src={source.icon} alt="" title={title} onError={() => setFailed(source.icon!)} />;
+  }
+  return (
+    <svg className="po-tool-icon fallback" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4l-6 6 2 2 6-6a4 4 0 0 0 5.4-5.4l-2.4 2.4-2-2z" />
+    </svg>
+  );
+}
+/** The running row's single activity line: the latest tool call with its
+ * app's icon (the step name until there is one), and a live marker. The last finished
+ * thought is the line's tooltip; the full timeline is in the details. */
+function LiveLine({ item, projectID }: { item: Item; projectID?: string }) {
   const target = useMemo(() => liveTarget(item), [item]);
   const { activity } = useActivity(target, true);
-  const running = activity.actions.filter((a) => a.status === "running");
-  const settled = activity.actions.filter((a) => a.status !== "running");
-  // Newest first, so a narrow card cuts the oldest action, never the latest.
-  const trail = settled.slice(-3).reverse();
+  const sources = useToolSources(projectID);
+  const latest = activity.actions[activity.actions.length - 1];
   const since = activity.thinkingSince || (!activity.actions.length && !activity.turns.length ? activity.firstEventAt || item.created_at : undefined);
   const now = useNow(!!since);
   if (!target) return null;
   const elapsed = since ? duration(Math.max(0, now - Date.parse(since))) : "";
-  const marker = running.length
-    ? running[running.length - 1].label
-    : activity.thinkingSince
-      ? `Thinking ${elapsed}`
-      : since
-        ? `Starting ${elapsed}`
-        : "";
+  const marker = latest?.status === "running" ? "Running" : activity.thinkingSince ? `Thinking ${elapsed}` : since ? `Starting ${elapsed}` : "";
+  const title = [target.label, latest && `${latest.label} (${latest.tool})`, activity.thought && `“${activity.thought}”`].filter(Boolean).join("\n");
   return (
-    <>
-      <span className="po-thought" title={activity.thought || undefined}>
-        {activity.thought ? `“${activity.thought}”` : <span className="po-faint">No thoughts yet</span>}
-      </span>
-      <span className="po-trail" title={settled.map((a) => `${a.status === "failed" ? "✗" : "✓"} ${a.label} (${a.tool})`).join("\n") || undefined}>
-        <span className="po-trail-items">
-          {trail.length
-            ? trail.map((a, i) => (
-                <span key={a.id} data-status={a.status}>
-                  {i > 0 && <span className="po-sep" aria-hidden="true">·</span>}
-                  <StatusIcon status={a.status} />
-                  {a.label}
-                </span>
-              ))
-            : <span className="po-faint">No actions yet</span>}
-        </span>
-        {marker && (
-          <span className="po-marker">
-            <span className="po-pulse" aria-hidden="true" />
-            {marker}
-          </span>
+    <span className="po-live" title={title}>
+      <span className="po-live-text">
+        {latest ? (
+          <>
+            <ToolIcon tool={latest.tool} sources={sources} />
+            <span className={latest.status === "failed" ? "po-failed" : undefined}>{latest.label}</span>
+          </>
+        ) : (
+          <span className="po-live-step">{target.label}</span>
         )}
       </span>
-    </>
+      {marker && (
+        <span className="po-marker">
+          <span className="po-pulse" aria-hidden="true" />
+          {marker}
+        </span>
+      )}
+    </span>
   );
 }
 type FeedEntry =
@@ -496,8 +545,9 @@ const pretty = (value: unknown) => {
   return JSON.stringify(value, null, 2);
 };
 /** The selected step's full timeline: thoughts and actions with timings. */
-function ActivityFeed({ target, running }: { target: LiveTarget; running: boolean }) {
+function ActivityFeed({ target, running, projectID }: { target: LiveTarget; running: boolean; projectID?: string }) {
   const { activity, loading, error } = useActivity(target, true);
+  const sources = useToolSources(projectID);
   const [all, setAll] = useState(false);
   const [open, setOpen] = useState("");
   const now = useNow(!!activity.thinkingSince);
@@ -557,6 +607,7 @@ function ActivityFeed({ target, running }: { target: LiveTarget; running: boolea
             <li key={`action:${a.id}`} data-kind="action" data-status={a.status}>
               <button type="button" className="po-feed-line" aria-expanded={expanded} title={a.tool} onClick={() => setOpen(expanded ? "" : a.id)}>
                 <StatusIcon status={a.status} />
+                <ToolIcon tool={a.tool} sources={sources} />
                 <span className="po-feed-title">{a.label}</span>
                 <span className="po-feed-tool">{a.tool.replace(/_/g, " ")}</span>
                 <span className="po-feed-time">{duration(a.durationMs)}</span>
@@ -680,7 +731,7 @@ function DetailModal({
           {target && (
             <div className="po-activity">
               <h4>{steps.length ? `${target.label} · activity` : "Activity"}</h4>
-              <ActivityFeed key={`${target.executionID}:${target.stepID}`} target={target} running={running} />
+              <ActivityFeed key={`${target.executionID}:${target.stepID}`} target={target} running={running} projectID={x.project_id || props.projectId} />
             </div>
           )}
         </div>
@@ -708,7 +759,8 @@ const css = `
 .po-steps{list-style:none;margin:0;padding:0;border:1px solid var(--color-border,#303030);border-radius:4px}.po-steps li+li{border-top:1px solid var(--color-border,#303030)}.po-steps button{display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:transparent;color:inherit;border:0;text-align:left;font:inherit;font-size:12px;cursor:pointer}.po-steps button:disabled{cursor:default}.po-steps button[aria-pressed=true]{background:var(--color-bg-hover,#202020)}.po-steps .po-step-copy{flex:1;min-width:0}.po-steps small{display:block;margin-top:2px;font-size:10px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-step-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--color-border,#555)}li[data-state=running] .po-step-dot{background:#8eabff;animation:po-pulse 1.2s ease-in-out infinite}li[data-state=completed] .po-step-dot{background:#43c878}li[data-state=blocked] .po-step-dot,li[data-state=waiting] .po-step-dot{background:#e3b86d}li[data-state=failed] .po-step-dot{background:#f08b8b}
 .po-badge{display:inline-block;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa);white-space:nowrap}.po-badge.running,.po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-badge.completed{color:#43c878;border-color:#43c87860}.po-badge.blocked,.po-badge.waiting,.po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
 .po-feed{border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 0}.po-feed ol{list-style:none;margin:0;padding:0;max-height:240px;overflow:auto}.po-feed li{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:11px;line-height:16px;min-width:0}.po-feed-title{flex:none;font-weight:600;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed li[data-kind=thought] .po-feed-title{font-weight:500;color:var(--color-text-muted,#aaa)}.po-feed-text{flex:1;min-width:0;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed li[data-status=failed] .po-feed-title{color:#f08b8b}.po-muted{margin:0;padding:6px 12px;font-size:11px;color:var(--color-text-muted,#aaa)}.po-link-button{margin:0 12px 4px;padding:0;background:none;border:0;color:var(--color-accent,#ff8c36);font:inherit;font-size:11px;cursor:pointer}
-.po-widget .po-thought,.po-widget .po-trail{display:flex;align-items:center;gap:6px;min-width:0;margin-top:3px;font-size:11px;line-height:16px;color:var(--color-text-muted,#aaa)}.po-widget .po-thought{display:block;margin-top:4px;font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-faint{opacity:.6;font-style:normal}.po-widget .po-trail-items{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-trail-items>span{display:inline}.po-widget .po-trail-items .po-icon{display:inline-block;vertical-align:-2px;margin-right:3px}.po-sep{margin:0 6px;opacity:.6}.po-icon.completed{color:#43c878}.po-icon.failed{color:#f08b8b}.po-widget .po-marker{flex:none;display:inline-flex;align-items:center;gap:5px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8eabff;font-variant-numeric:tabular-nums}.po-widget .po-progress{margin-top:7px}
+.po-faint{opacity:.6;font-style:normal}.po-sep{margin:0 6px;opacity:.6}.po-icon.completed{color:#43c878}.po-icon.failed{color:#f08b8b}.po-widget .po-marker{flex:none;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:#8eabff;font-variant-numeric:tabular-nums}.po-widget .po-progress{margin-top:7px}
+.po-widget .po-live{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;line-height:18px;color:var(--color-text-muted,#aaa);min-width:0}.po-widget .po-live-text{flex:1;min-width:0;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-live-text>*{vertical-align:middle}.po-widget .po-live-step{color:var(--color-text-muted,#aaa)}.po-widget .po-live-text .po-tool-icon{margin-right:5px}.po-widget .po-live-text>span:last-child:not(.po-live-step){color:var(--color-text,#eceef2)}.po-failed{color:#f08b8b!important}.po-tool-icon{display:inline-block;flex:none;width:14px;height:14px;border-radius:3px;object-fit:contain;vertical-align:middle}.po-tool-icon.fallback{color:var(--color-text-muted,#aaa)}.po-tool-icon.mono{position:relative;color:var(--color-accent,#ff8c36)}.po-tool-icon.mono>span{display:block;width:100%;height:100%;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.po-tool-icon.mono>img{position:absolute;width:1px;height:1px;opacity:0}
 .po-timing{display:grid;gap:5px;padding:4px 12px 8px;font-size:11px;color:var(--color-text-muted,#aaa);border-bottom:1px solid var(--color-border,#303030);margin-bottom:4px}.po-split{display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--color-border,#303030)}.po-split .model{background:#8eabff80}.po-split .tools{background:#43c878}.po-feed li{display:block;padding:0}.po-feed-line{display:flex;align-items:center;gap:8px;width:100%;padding:5px 12px;font:inherit;font-size:11px;line-height:16px;color:inherit;background:transparent;border:0;text-align:left;min-width:0}button.po-feed-line{cursor:pointer}button.po-feed-line:hover{background:var(--color-bg-hover,#202020)}.po-feed li[data-kind=thought] .po-feed-text{color:var(--color-text-muted,#aaa)}.po-feed-tool{flex:none;max-width:30%;font-size:10px;color:var(--color-text-muted,#888);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed-title{flex:1;min-width:0;max-width:none;font-weight:500}.po-feed-time{flex:none;min-width:36px;text-align:right;font-size:10px;color:var(--color-text-muted,#999);font-variant-numeric:tabular-nums}.po-call{padding:2px 12px 8px 32px;font-size:10px;color:var(--color-text-muted,#aaa)}.po-call strong{display:block;margin:4px 0 2px;font-weight:600}.po-call pre{margin:0;max-height:160px;overflow:auto;padding:6px 8px;background:var(--color-bg-hover,#1d1d1d);border-radius:3px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:14px}
 .po-modal footer{padding:10px 16px;border-top:1px solid var(--color-border,#303030);font-size:11px}.po-modal footer a{color:var(--color-accent,#ff8c36);text-decoration:none}
 @media(max-width:480px){.po-modal-backdrop{padding:0;align-items:flex-end}.po-modal{max-height:90vh;border-radius:8px 8px 0 0}}
@@ -954,11 +1006,12 @@ function Overview(props: Props) {
                 >
                   <span className="po-copy">
                     <span className="po-title">{x.process_name}</span>
-                    <span className={`po-summary${terminal(x.state) && x.state !== "completed" || ["blocked", "waiting"].includes(x.state) ? ` ${tone}` : ""}`}>
-                      {context}
-                    </span>
-                    {!entry.assignment && !terminal(x.state) && live(x.state) && (
-                      <LiveLines item={x} />
+                    {!entry.assignment && x.state === "running" && liveTarget(x) ? (
+                      <LiveLine item={x} projectID={x.project_id || props.projectId} />
+                    ) : (
+                      <span className={`po-summary${terminal(x.state) && x.state !== "completed" || ["blocked", "waiting"].includes(x.state) ? ` ${tone}` : ""}`}>
+                        {context}
+                      </span>
                     )}
                     {!entry.assignment && !terminal(x.state) && !!x.steps_total && (
                       <Progress done={x.steps_completed || 0} total={x.steps_total} />

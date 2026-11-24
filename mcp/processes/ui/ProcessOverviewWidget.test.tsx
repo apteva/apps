@@ -278,9 +278,11 @@ test("running rows show live activity; details open in a modal with the step's a
   await act(async () => new Promise((r) => setTimeout(r, 20)));
   expect(reads.some((u) => u.includes("/api/telemetry?") && u.includes("thread_id=worker-2"))).toBe(true);
   const row = el.querySelector<HTMLButtonElement>('.po-row[data-state="running"]')!;
-  expect(row.querySelector(".po-thought")!.textContent).toBe("“Checking the conversation first.”");
-  expect(row.querySelector(".po-marker")!.textContent).toBe("Post the forecast");
-  expect(row.querySelector(".po-trail-items")!.textContent).toBe("No actions yet");
+  const line = row.querySelector(".po-live")!;
+  expect(line.querySelector(".po-live-text")!.textContent).toBe("Post the forecast");
+  expect(line.querySelector(".po-marker")!.textContent).toBe("Running");
+  expect(line.getAttribute("title")).toContain("“Checking the conversation first.”");
+  expect(row.querySelectorAll(".po-summary").length).toBe(0);
   expect(row.querySelector('[role="progressbar"]')!.getAttribute("aria-valuenow")).toBe("1");
   expect(el.querySelector('.po-row[data-state="completed"]')!.textContent).toContain("Sent the forecast to 3 subscribers.");
   await act(async () => row.click());
