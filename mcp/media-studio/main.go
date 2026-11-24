@@ -36,8 +36,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.12.3
+version: 0.12.4
 description: |
+  v0.12.4 makes the generating placeholder quieter: small muted dots, a
+  plain border and a hairline progress line only when the job has an
+  estimate.
   v0.12.3 replaces the generating spinner with an animated placeholder
   shaped like the result, showing elapsed time and a progress bar when the
   job has an estimate. In-flight image generations stay on their own tab
@@ -254,7 +257,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.12.3
+    ref: media-studio/v0.12.4
     entry: mcp/media-studio
   port: 8080
   health_check: /health
