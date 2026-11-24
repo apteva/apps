@@ -162,6 +162,15 @@ func ensureDefaultSources(ctx *sdk.AppCtx, pid string) error {
 	return nil
 }
 
+// forecastAfterIngest revises forecasts with the clock read after this
+// cycle's ingestion. Evidence is stamped with the time it was stored, so
+// a cutoff taken when the cycle started would exclude the very evidence
+// that triggered the revision.
+func forecastAfterIngest(env *ingestEnv, llmBudget int) (map[string]int, error) {
+	env.now = nowUTC()
+	return updateForecasts(env, llmBudget)
+}
+
 // runCycle is one full pass: due connectors → extraction → forecasts.
 func (a *App) runCycle(ctx *sdk.AppCtx, pid string, force bool, only string, skipForecasts bool) (map[string]any, error) {
 	if err := ensureDefaultSources(ctx, pid); err != nil {
@@ -190,7 +199,7 @@ func (a *App) runCycle(ctx *sdk.AppCtx, pid string, force bool, only string, ski
 		out["retention_expired"] = n
 	}
 	if !skipForecasts {
-		counts, err := updateForecasts(env, configInt(ctx, "forecast_llm_per_cycle", 20, 0, 1000))
+		counts, err := forecastAfterIngest(env, configInt(ctx, "forecast_llm_per_cycle", 20, 0, 1000))
 		out["forecasts"] = counts
 		if err != nil {
 			return out, err
