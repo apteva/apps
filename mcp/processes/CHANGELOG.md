@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Status badge back on widget rows (0.22.2)
+
+The status badge returns at the top right of each row, replacing 0.22.1's
+dot, with time and step count under it. See `docs-release-0.22.2.md`.
+
 ## Cleaner widget rows (0.22.1)
 
 Each widget row shows its state once, as a colored dot, with the summary or
