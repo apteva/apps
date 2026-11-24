@@ -48,6 +48,9 @@ type APIRoute struct {
 	TargetKind  string `json:"target_kind"`
 	TargetRef   string `json:"target_ref"`
 	TargetPath  string `json:"target_path,omitempty"`
+	// TargetStage is the Functions stage a function route invokes (0.15.0).
+	// It may reference {{stage.name}} / {{stage.vars.<key>}}.
+	TargetStage string `json:"target_stage,omitempty"`
 	EventsJSON  string `json:"events_json,omitempty"`
 	AuthJSON    string `json:"auth_json,omitempty"`
 	CORSJSON    string `json:"cors_json,omitempty"`
@@ -105,6 +108,7 @@ type RequestLog struct {
 	StatusCode      int    `json:"status_code"`
 	TargetKind      string `json:"target_kind,omitempty"`
 	TargetRef       string `json:"target_ref,omitempty"`
+	TargetStage     string `json:"target_stage,omitempty"`
 	AuthKind        string `json:"auth_kind,omitempty"`
 	Subject         string `json:"subject,omitempty"`
 	DurationMS      int64  `json:"duration_ms"`
@@ -136,6 +140,7 @@ type routeInput struct {
 	TargetKind  string
 	TargetRef   string
 	TargetPath  string
+	TargetStage string
 	EventsJSON  string
 	AuthJSON    string
 	CORSJSON    string
@@ -523,14 +528,14 @@ func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 }
 
 const routeCols = `id, project_id, api_id, method, path_pattern, target_kind, target_ref,
-	target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at`
+	target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage`
 
 func scanRoute(row interface{ Scan(dest ...any) error }) (*APIRoute, error) {
 	var r APIRoute
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.APIID, &r.Method, &r.PathPattern, &r.TargetKind,
 		&r.TargetRef, &r.TargetPath, &r.EventsJSON, &r.AuthJSON, &r.CORSJSON, &r.TimeoutMS, &enabled,
-		&r.Priority, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.Priority, &r.CreatedAt, &r.UpdatedAt, &r.TargetStage); err != nil {
 		return nil, err
 	}
 	r.Enabled = enabled != 0
@@ -552,7 +557,11 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	}
 	// Stage placeholders are validated for syntax here and substituted only
 	// for stage-served requests; structural checks run on a sample value.
-	if err := routeStageVarRefs(in.TargetRef, in.TargetPath, in.EventsJSON, map[string]struct{}{}); err != nil {
+	if err := routeStageVarRefs(in.TargetRef, in.TargetPath, in.TargetStage, in.EventsJSON, map[string]struct{}{}); err != nil {
+		return nil, "", err
+	}
+	in.TargetStage = strings.TrimSpace(in.TargetStage)
+	if err := validateRouteTargetStage(kind, in.TargetStage); err != nil {
 		return nil, "", err
 	}
 	if err := validateTemplatedTarget(kind, in.TargetRef); err != nil {
@@ -594,10 +603,10 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	}
 	if existing != nil {
 		_, err = db.Exec(`UPDATE api_routes SET target_kind=?, target_ref=?, target_path=?, events_json=?,
-			auth_json=?, cors_json=?, timeout_ms=?, enabled=?, priority=?, updated_at=?
+			auth_json=?, cors_json=?, timeout_ms=?, enabled=?, priority=?, updated_at=?, target_stage=?
 			WHERE id=? AND project_id=?`,
 			kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath), defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON),
-			defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, existing.ID, in.ProjectID)
+			defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, in.TargetStage, existing.ID, in.ProjectID)
 		if err != nil {
 			return nil, "", err
 		}
@@ -606,14 +615,14 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 		return r, "updated", err
 	}
 	res, err := db.Exec(`INSERT INTO api_routes
-		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
  ON CONFLICT(project_id,api_id,method,path_pattern) DO UPDATE SET
  target_kind=excluded.target_kind,target_ref=excluded.target_ref,target_path=excluded.target_path,
  events_json=excluded.events_json,auth_json=excluded.auth_json,cors_json=excluded.cors_json,
- timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,priority=excluded.priority,updated_at=excluded.updated_at`,
+ timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,priority=excluded.priority,updated_at=excluded.updated_at,target_stage=excluded.target_stage`,
 		in.ProjectID, in.APIID, method, pattern, kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath),
-		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now)
+		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now, in.TargetStage)
 	if err != nil {
 		return nil, "", err
 	}
@@ -982,7 +991,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 		limit = 100
 	}
 	query := `SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
-		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at
+		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at, target_stage
 		FROM api_request_logs WHERE project_id=? AND api_id=?`
 	args := []any{pid, apiID}
 	if beforeID > 0 {
@@ -1000,7 +1009,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 	for rows.Next() {
 		var l RequestLog
 		if err := rows.Scan(&l.ID, &l.ProjectID, &l.APIID, &l.RouteID, &l.Hostname, &l.Method, &l.Path,
-			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt); err != nil {
+			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt, &l.TargetStage); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)

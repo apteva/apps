@@ -3,6 +3,26 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Function route stages (0.15.0)
+
+A `function` route may set `stage` (via `api_route_add`), the Functions stage
+it invokes. It accepts a literal name or the same placeholders as targets:
+
+```json
+{ "target_kind": "function", "target_ref": "fx-ui-api", "stage": "{{stage.vars.functions_stage}}" }
+```
+
+The value is resolved per stage-served request and sent to Functions as
+`stage` (the `?stage=` proxy parameter for public routes, the `stage` input of
+`functions_invoke_authenticated` for authenticated ones, which needs Functions
+1.23.0). It is never sent as a raw placeholder: a missing variable, a resolved
+value that is not a valid stage name (`^[a-z0-9][a-z0-9-]{0,39}$`), or a
+templated stage on a request not served by an API stage fails with
+`stage_config_error` without calling Functions. A value that resolves to empty
+runs the function's active version. Functions refuses unknown or paused
+stages. Admission (`function_ids`) is unchanged: it is by function id and
+covers every stage. Request logs record the resolved `target_stage`.
+
 ## Stage variables and rollback (0.14.0)
 
 A stage may carry `vars`, a JSON object of string values set with

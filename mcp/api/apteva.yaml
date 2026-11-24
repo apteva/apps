@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.14.0
+version: 0.15.0
 description: |
+  v0.15.0 Function routes take an optional Functions stage, templatable with
+  {{stage.name}} / {{stage.vars.<key>}}, so each API stage runs its own
+  Functions stage of one stable function. It is resolved per request and sent
+  to Functions as stage (needs Functions 1.23.0 for authenticated routes);
+  missing or invalid values fail closed and request logs record the stage.
+
   v0.14.0 Stages carry string vars substituted into {{stage.name}} and
   {{stage.vars.<key>}} placeholders in route targets, so one configuration can
   serve several stages. Missing vars fail closed. Rollback without an id returns
@@ -124,7 +130,7 @@ provides:
     - name: api_delete
       description: "Delete an API, routes, keys, and logs."
     - name: api_route_add
-      description: "Add or update a route. target_kind may be function, app, http, or app_events. app_events routes support exact/bounded-in matching and projections only from explicitly constrained data fields."
+      description: "Add or update a route. target_kind may be function, app, http, or app_events. app_events routes support exact/bounded-in matching and projections only from explicitly constrained data fields. Function routes take an optional stage (Functions stage, templatable with {{stage.name}} / {{stage.vars.<key>}})."
     - name: api_route_list
       description: "List routes for an API."
     - name: api_route_delete
@@ -185,7 +191,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.14.0
+    ref: api/v0.15.0
     entry: mcp/api
   port: 8080
   health_check: /health

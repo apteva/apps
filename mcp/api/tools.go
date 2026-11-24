@@ -64,6 +64,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_kind":  map[string]any{"type": "string"},
 				"target_ref":   map[string]any{"type": "string"},
 				"target_path":  map[string]any{"type": "string"},
+				"stage":        map[string]any{"type": "string", "description": "Function routes only: the Functions stage to invoke (Functions 1.23.0+), e.g. \"{{stage.vars.functions_stage}}\". Resolved per stage-served request; unknown or paused stages are refused by Functions. Empty runs the active version."},
 				"events":       map[string]any{"type": "object"},
 				"auth":         authPolicySchema(),
 				"cors":         corsPolicySchema(),
@@ -325,7 +326,10 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateEffectivePolicies(ctx.AppDB(), api, candidate, 0); err != nil {
 		return nil, err
 	}
-	if err := routeStageVarRefs(stringArg(args, "target_ref", ""), stringArg(args, "target_path", ""), eventsJSON, map[string]struct{}{}); err != nil {
+	if err := routeStageVarRefs(stringArg(args, "target_ref", ""), stringArg(args, "target_path", ""), stringArg(args, "stage", ""), eventsJSON, map[string]struct{}{}); err != nil {
+		return nil, err
+	}
+	if err := validateRouteTargetStage(candidate.TargetKind, strings.TrimSpace(stringArg(args, "stage", ""))); err != nil {
 		return nil, err
 	}
 	if err := validateRouteTargetPath(sampleStageValue(stringArg(args, "target_path", ""))); err != nil {
@@ -353,6 +357,7 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		TargetKind:  stringArg(args, "target_kind", ""),
 		TargetRef:   stringArg(args, "target_ref", ""),
 		TargetPath:  stringArg(args, "target_path", ""),
+		TargetStage: stringArg(args, "stage", ""),
 		EventsJSON:  eventsJSON,
 		AuthJSON:    authJSON,
 		CORSJSON:    corsJSON,

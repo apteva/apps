@@ -166,11 +166,11 @@ func dbCreateConfiguration(db *sql.DB, pid string, apiID, sourceID int64, name s
 	}
 	id, _ := res.LastInsertId()
 	if sourceID != 0 {
-		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at)
- SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, id, pid, sourceID)
+		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage)
+ SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, id, pid, sourceID)
 	} else {
-		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at)
- SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at FROM api_routes WHERE project_id=? AND api_id=?`, id, pid, apiID)
+		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage)
+ SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage FROM api_routes WHERE project_id=? AND api_id=?`, id, pid, apiID)
 	}
 	if err != nil {
 		return nil, err
@@ -201,18 +201,18 @@ type rowQuerier interface {
 // configurationStageVarRefs lists the stage variable keys referenced by a
 // configuration's route targets.
 func configurationStageVarRefs(q rowQuerier, pid string, configurationID int64) (map[string]struct{}, error) {
-	rows, err := q.Query(`SELECT method,path_pattern,target_ref,target_path,events_json FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, pid, configurationID)
+	rows, err := q.Query(`SELECT method,path_pattern,target_ref,target_path,target_stage,events_json FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, pid, configurationID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	refs := map[string]struct{}{}
 	for rows.Next() {
-		var method, pattern, ref, path, events string
-		if err := rows.Scan(&method, &pattern, &ref, &path, &events); err != nil {
+		var method, pattern, ref, path, stage, events string
+		if err := rows.Scan(&method, &pattern, &ref, &path, &stage, &events); err != nil {
 			return nil, err
 		}
-		if err := routeStageVarRefs(ref, path, events, refs); err != nil {
+		if err := routeStageVarRefs(ref, path, stage, events, refs); err != nil {
 			return nil, fmt.Errorf("route %s %s: %w", method, pattern, err)
 		}
 	}

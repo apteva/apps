@@ -160,8 +160,8 @@ func substituteJSONStrings(raw string, fn func(string) (string, error)) (string,
 
 // routeStageVarRefs collects the variable keys a route's target fields
 // reference, rejecting malformed stage placeholders.
-func routeStageVarRefs(targetRef, targetPath, eventsJSON string, into map[string]struct{}) error {
-	for _, field := range []struct{ name, value string }{{"target_ref", targetRef}, {"target_path", targetPath}} {
+func routeStageVarRefs(targetRef, targetPath, targetStage, eventsJSON string, into map[string]struct{}) error {
+	for _, field := range []struct{ name, value string }{{"target_ref", targetRef}, {"target_path", targetPath}, {"stage", targetStage}} {
 		if err := stagePlaceholders(field.value, into); err != nil {
 			return fmt.Errorf("%s: %w", field.name, err)
 		}
@@ -206,6 +206,25 @@ func validateTemplatedTarget(kind, ref string) error {
 		}
 	}
 	return validateTarget(kind, sampleStageValue(ref))
+}
+
+// functionStageNameRe mirrors Functions' stage name rule.
+var functionStageNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+
+// validateRouteTargetStage checks a route's Functions stage at write time.
+// Only function routes take a stage; a templated value is checked on a
+// sample and again after resolution.
+func validateRouteTargetStage(kind, stage string) error {
+	if stage == "" {
+		return nil
+	}
+	if kind != "function" {
+		return errors.New("stage applies to function routes only")
+	}
+	if !functionStageNameRe.MatchString(sampleStageValue(stage)) {
+		return fmt.Errorf("stage %q must match ^[a-z0-9][a-z0-9-]{0,39}$ (placeholders allowed)", stage)
+	}
+	return nil
 }
 
 func sampleStageJSON(raw string) string {
@@ -295,10 +314,18 @@ func errMissingStageVars(stageName string, missing []string) error {
 // a stage-served request, re-validating the resolved target. Non-stage
 // requests return the route unchanged. The cached route is never mutated.
 func resolveStageRoute(api *API, route *APIRoute) (*APIRoute, error) {
-	if api.StageID == 0 || route == nil {
+	if route == nil {
 		return route, nil
 	}
-	if !strings.Contains(route.TargetRef, "{{") && !strings.Contains(route.TargetPath, "{{") && !strings.Contains(route.EventsJSON, "{{") {
+	if api.StageID == 0 {
+		// A templated function stage has no value outside a stage; never pass
+		// the raw placeholder to Functions.
+		if strings.Contains(route.TargetStage, "{{") {
+			return nil, stageConfigFailure(errors.New("route stage references stage variables but the request is not served by a stage"))
+		}
+		return route, nil
+	}
+	if !strings.Contains(route.TargetRef, "{{") && !strings.Contains(route.TargetPath, "{{") && !strings.Contains(route.TargetStage, "{{") && !strings.Contains(route.EventsJSON, "{{") {
 		return route, nil
 	}
 	vars := parseStageVarsJSON(api.StageVarsJSON)
@@ -313,6 +340,14 @@ func resolveStageRoute(api *API, route *APIRoute) (*APIRoute, error) {
 	}
 	if resolved.EventsJSON, err = substituteJSONStrings(route.EventsJSON, sub); err != nil {
 		return nil, stageConfigFailure(err)
+	}
+	if resolved.TargetStage, err = sub(route.TargetStage); err != nil {
+		return nil, stageConfigFailure(err)
+	}
+	// Empty after substitution runs the function's active version.
+	resolved.TargetStage = strings.TrimSpace(resolved.TargetStage)
+	if resolved.TargetStage != "" && !functionStageNameRe.MatchString(resolved.TargetStage) {
+		return nil, stageConfigFailure(fmt.Errorf("resolved stage %q invalid", resolved.TargetStage))
 	}
 	resolved.TargetRef = strings.TrimSpace(resolved.TargetRef)
 	if err := validateTarget(resolved.TargetKind, resolved.TargetRef); err != nil {

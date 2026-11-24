@@ -53,14 +53,15 @@ func (a *App) dispatchAuthenticatedFunction(w http.ResponseWriter, r *http.Reque
 	// event contains only the request envelope and legacy non-authoritative auth.
 	delete(event, "principal")
 	delete(event, "requestContext")
-	payload := map[string]any{
-		"tool": "functions_invoke_authenticated",
-		"input": map[string]any{
-			"name": route.TargetRef, "_project_id": api.ProjectID,
-			"principal": principal, "event": event,
-			"request_id": gatewayRequestID(r.Context()), "deadline": deadline.UTC().Format(time.RFC3339Nano),
-		},
+	input := map[string]any{
+		"name": route.TargetRef, "_project_id": api.ProjectID,
+		"principal": principal, "event": event,
+		"request_id": gatewayRequestID(r.Context()), "deadline": deadline.UTC().Format(time.RFC3339Nano),
 	}
+	if route.TargetStage != "" {
+		input["stage"] = route.TargetStage
+	}
+	payload := map[string]any{"tool": "functions_invoke_authenticated", "input": input}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return writeGatewayFailure(w, r.Context(), err)

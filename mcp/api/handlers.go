@@ -387,6 +387,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	} else {
 		route = resolved
 		logRow.TargetRef = route.TargetRef
+		logRow.TargetStage = route.TargetStage
 		status, err = a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
 	}
 	logRow.StatusCode = status
@@ -571,6 +572,9 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 		return http.StatusBadGateway, err
 	}
 	query := url.Values{"project_id": []string{api.ProjectID}}
+	if route.TargetStage != "" {
+		query.Set("stage", route.TargetStage)
+	}
 	target := base + "/api/apps/callback/apps/functions/proxy/fn/" + url.PathEscape(route.TargetRef) + "?" + query.Encode()
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(eventJSON))
 	if err != nil {
