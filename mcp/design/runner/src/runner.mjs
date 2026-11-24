@@ -1,5 +1,6 @@
 import {geometryFor,rememberGeometry,inheritCache,meshFor} from "./geometry-cache.mjs";
 import { ExpressionParser } from "./expressions.mjs";
+import { edgeFeature, shellFeature, extrudeProfile, loftFeature, holeFeature } from "./features.mjs";
 import { loadAsset, inspect, topology, count } from "./inspection.mjs";
 import initOpenCascade from "replicad-opencascadejs/src/replicad_single.js";
 import {
@@ -25,7 +26,7 @@ import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
 const importedGeometry=new WeakSet();
-const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.7";
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.8";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -96,6 +97,19 @@ function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) 
   let pen = draw(resolved[0]);
   for (const point of resolved.slice(1)) pen = pen.lineTo(point);
   return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
+}
+
+function featureContext(params, shape) {
+  let bounds;
+  return {
+    resolve: (value, label) => resolve(value, params, label),
+    vector: (value, label) => vector(value, params, label),
+    bounds: () => {
+      if (!shape) fail("side selectors need an input shape");
+      bounds ??= shapeBounds(shape);
+      return bounds;
+    },
+  };
 }
 
 function activeIds(ids, shapes) {
@@ -308,13 +322,33 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "fillet": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0) fail(`${operation.id}.radius must be positive`);
-      shape = shapeFor(operation.input, shapes).clone().fillet(radius);
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = edgeFeature(input, operation, "fillet", radius, featureContext(params, input));
       break;
     }
     case "chamfer": {
       const distance = resolve(operation.distance, params, `${operation.id}.distance`);
       if (distance <= 0) fail(`${operation.id}.distance must be positive`);
-      shape = shapeFor(operation.input, shapes).clone().chamfer(distance);
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = edgeFeature(input, operation, "chamfer", distance, featureContext(params, input));
+      break;
+    }
+    case "shell": {
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = shellFeature(input, operation, featureContext(params, input));
+      break;
+    }
+    case "hole": {
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = holeFeature(input, operation, featureContext(params, input), polygonSketch);
+      break;
+    }
+    case "extrude_profile": {
+      shape = extrudeProfile(operation, featureContext(params));
+      break;
+    }
+    case "loft": {
+      shape = loftFeature(operation, featureContext(params));
       break;
     }
     default:

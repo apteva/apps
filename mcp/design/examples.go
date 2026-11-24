@@ -27,6 +27,26 @@ func designExamples() map[string]any {
 			"box", "cylinder", "sphere", "extrude_rectangle", "extrude_circle", "extrude_polygon",
 			"revolve_profile", "sweep_circle", "fuse", "cut", "intersect", "compound", "translate", "rotate", "scale", "mirror",
 			"linear_pattern", "circular_pattern", "fillet", "chamfer", "component",
+			"shell", "hole", "extrude_profile", "loft",
+		},
+		"edge_and_face_selectors": map[string]any{
+			"keys":      []string{"side: top|bottom|+x|-x|+y|-y", "direction: X|Y|Z|[x,y,z] (edges)", "curve: line|circle (edges)", "surface: plane|cylinder|cone (faces)", "parallel_to: XY|XZ|YZ", "in_plane: {plane, offset}", "in_box: [[x,y,z],[x,y,z]]", "near: {point, distance}", "contains_point", "length (edges)", "not: selector", "any: [selectors]"},
+			"semantics": "An object matches when all its keys match; a list matches any entry. Selecting nothing is an error.",
+			"examples": []any{
+				map[string]any{"id": "soft", "type": "fillet", "input": "body", "radius": 2, "edges": map[string]any{"side": "top"}},
+				map[string]any{"id": "corners", "type": "fillet", "input": "body", "radius": 4, "edges": map[string]any{"direction": "Z"}},
+				map[string]any{"id": "hollow", "type": "shell", "input": "soft", "thickness": 2, "open_faces": map[string]any{"side": "bottom"}},
+			},
+		},
+		"profiles": map[string]any{
+			"kinds":   []string{"rectangle/rounded_rectangle {width,height,radius}", "slot {length (end to end), width}", "circle {radius|diameter}", "regular_polygon {radius,sides}", "polygon {points}", "path {start, segments:[{line},{arc,via},{arc,sagitta},{tangent_arc}]}"},
+			"common":  "center [x,y], angle (degrees), holes [profiles]",
+			"extrude": map[string]any{"id": "usb", "type": "extrude_profile", "plane": "YZ", "origin": []any{68, 0, 0}, "profile": map[string]any{"kind": "slot", "length": 9.5, "width": 3.5, "center": []any{20, 7}}, "height": 4},
+			"loft":    map[string]any{"id": "nozzle", "type": "loft", "sections": []any{map[string]any{"profile": map[string]any{"kind": "rectangle", "width": 10, "height": 10}, "offset": 0}, map[string]any{"profile": map[string]any{"kind": "circle", "radius": 3}, "offset": 10}}},
+		},
+		"holes": map[string]any{
+			"shape":   map[string]any{"id": "mount", "type": "hole", "input": "plate", "positions": []any{[]any{5, 5, 3}, []any{25, 5, 3}}, "direction": []any{0, 0, -1}, "thread": map[string]any{"size": "M3", "mode": "clearance"}, "counterbore": map[string]any{"diameter": 6, "depth": 3}},
+			"options": "diameter or thread {size M2-M8, mode clearance|tap|insert}; depth (omit = through); counterbore {diameter, depth} or countersink {diameter, angle=90}. position is on the surface; direction points into the material.",
 		},
 		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "manufacturing-package.zip"},
 		"linked_components": map[string]any{
