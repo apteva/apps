@@ -255,7 +255,8 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 	var cursor int64
 	_ = env.db.QueryRow(`SELECT CAST(cursor AS INTEGER) FROM intel_sources WHERE project_id = ? AND slug = 'extraction'`, env.pid).Scan(&cursor)
 	for b := 0; b < batches; b++ {
-		rows, err := env.db.Query(`SELECT id, title, source FROM intelligence_evidence WHERE project_id = ? AND id > ? AND kind = 'news' ORDER BY id LIMIT 10`, env.pid, cursor)
+		rows, err := env.db.Query(`SELECT id, title, source FROM intelligence_evidence WHERE project_id = ? AND id > ? AND kind = 'news'
+			AND basis <> 'synthetic' AND access <> 'restricted' AND content_expired_at IS NULL ORDER BY id LIMIT 10`, env.pid, cursor)
 		if err != nil {
 			return counts, err
 		}
@@ -310,7 +311,7 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 			counts["evidence"]++
 			names := map[string]int64{}
 			for _, e := range it.Entities {
-				ent, created, err := upsertWorldEntity(env.db, env.pid, WorldEntity{Name: e.Name, Kind: e.Kind})
+				ent, created, err := upsertWorldEntity(env.db, env.pid, WorldEntity{Name: e.Name, Kind: e.Kind, Basis: basisInferred})
 				if err != nil {
 					continue // includes refused person entities
 				}

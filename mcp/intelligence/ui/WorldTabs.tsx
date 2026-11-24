@@ -58,6 +58,36 @@ interface Overview {
   sources: { slug: string; enabled: boolean; freshness_sec: number; last_error: string; items_total: number }[];
   world: { entities: number; relationships: number; claims: number; evidence: number };
   llm: { enabled: boolean; model: string; calls_today: number; daily_limit: number };
+  quality?: { summary: Record<string, number>; issues: Issue[]; total: number; basis: Record<string, Record<string, number>>; access: Record<string, number> };
+}
+interface Issue { type: string; severity: string; code: string; title: string; detail: string; entity_ids?: number[] }
+
+const issueColor = (t: string) => (t === "conflict" ? "var(--color-error)" : t === "stale" ? "var(--color-warn)" : "var(--text-muted)");
+const basisColor = (b: string) => (b === "observed" ? "var(--color-green)" : b === "inferred" ? "var(--accent)" : "var(--color-purple, #9b87f5)");
+function BasisBadge({ basis }: { basis?: string }) {
+  if (!basis) return null;
+  return <span className="text-xs px-1.5 py-0.5 rounded border" style={{ color: basisColor(basis), borderColor: basisColor(basis) }}>{basis}</span>;
+}
+function IssueLine({ i }: { i: Issue }) {
+  return <div className="px-3 py-1.5 border-b border-border text-sm">
+    <div className="flex gap-2 items-start"><span className="text-xs px-1.5 rounded border shrink-0" style={{ color: issueColor(i.type), borderColor: issueColor(i.type) }}>{i.type}</span><span className="flex-1">{i.title}</span></div>
+    <div className="text-xs text-text-dim mt-0.5">{i.detail}</div>
+  </div>;
+}
+
+function DataHealth({ q }: { q: NonNullable<Overview["quality"]> }) {
+  const sum = (b: string) => Object.values(q.basis || {}).reduce((n, m) => n + (m[b] || 0), 0);
+  return <section className={card}>
+    <div className="px-3 py-2 border-b border-border flex flex-wrap gap-3 items-center">
+      <span className="font-semibold text-sm mr-auto">Data health</span>
+      {(["conflict", "stale", "missing"] as const).map(t => <span key={t} className="text-xs"><b style={{ color: q.summary[t] ? issueColor(t) : undefined }}>{q.summary[t] || 0}</b> <span className="text-text-muted">{t}</span></span>)}
+      <span className="text-xs text-text-dim">|</span>
+      {(["observed", "inferred", "synthetic"] as const).map(b => <span key={b} className="text-xs flex items-center gap-1"><BasisBadge basis={b} /><span className="text-text-muted">{sum(b)}</span></span>)}
+      <span className="text-xs text-text-dim">| {q.access.restricted || 0} restricted · {q.access.internal || 0} internal evidence</span>
+    </div>
+    {q.issues.length === 0 ? <Empty>No stale, missing or conflicting data found.</Empty> : q.issues.map((i, n) => <IssueLine key={n} i={i} />)}
+    {q.total > q.issues.length && <div className="px-3 py-2 text-xs text-text-dim">{q.total - q.issues.length} more on the Map tab.</div>}
+  </section>;
 }
 
 export function OverviewTab({ api, post, setError, openQuestion }: { api: Api; post: Post; setError: SetError; openQuestion: (id: number) => void }) {
@@ -86,6 +116,7 @@ export function OverviewTab({ api, post, setError, openQuestion }: { api: Api; p
     {failing.length > 0 && <div className={`${card} p-3 text-sm`} style={{ borderColor: "var(--color-warn)" }}>
       {failing.map(s => <div key={s.slug}><b>{s.slug}</b>: <span className="text-text-muted">{s.last_error}</span></div>)}
     </div>}
+    {data.quality && <DataHealth q={data.quality} />}
     <section className={card}>
       <div className="px-3 py-2 border-b border-border font-semibold text-sm">Forecasts that moved</div>
       {data.forecast_moves.length === 0 ? <Empty>No forecast moved by 3 points or more in this window.</Empty> :
@@ -246,10 +277,13 @@ function QuestionView({ id, api, post, setError, back }: { id: number; api: Api;
 
 // ─── World ─────────────────────────────────────────────────────────
 
-interface Entity { id: number; name: string; kind: string; description: string; aliases: string[]; external_ids: Record<string, string> }
-interface Rel { id: number; from_entity_id: number; from: string; type: string; to_entity_id: number; to: string; status: string; confidence?: number; evidence_ids: number[] }
-interface EntityDetail { entity: Entity; relationships: Rel[]; claims: { id: number; subject: string; predicate: string; object: string; status: string; evidence_id: number }[];
-  state: { variable: string; value: number; unit: string; valid_at: string; source: string }[]; open_questions: QRow[] }
+interface Entity { id: number; name: string; kind: string; description: string; aliases: string[]; external_ids: Record<string, string>; basis?: string }
+interface Rel { id: number; from_entity_id: number; from: string; type: string; to_entity_id: number; to: string; status: string; confidence?: number; evidence_ids: number[]; basis?: string }
+interface EntityLoc { lat: number; lon: number; label?: string; precision: string; provenance: string; source: string; basis: string; evidence_id?: number }
+interface Series { variable: string; source: string; latest_at: string; cadence_days: number; age_days: number; status: string }
+interface EntityDetail { entity: Entity; relationships: Rel[]; claims: { id: number; subject: string; predicate: string; object: string; status: string; evidence_id: number; basis?: string }[];
+  state: { variable: string; value: number; unit: string; valid_at: string; source: string; basis?: string }[]; open_questions: QRow[];
+  locations?: EntityLoc[]; issues?: Issue[]; series?: Series[] }
 
 const KINDS = ["", "organization", "facility", "place", "region", "commodity", "product", "technology", "market", "institution", "infrastructure", "event", "indicator", "public_role", "concept"];
 
@@ -301,23 +335,30 @@ function EntityView({ id, api, setError, select, openQuestion }: { id: number; a
   const latest = new Map<string, EntityDetail["state"][number]>();
   data.state.forEach(s => { if (!latest.has(s.variable)) latest.set(s.variable, s); });
   return <div className="space-y-3">
-    <div><div className="font-semibold">{data.entity.name} <span className="text-xs text-text-dim">{data.entity.kind}</span></div>
+    <div><div className="font-semibold flex items-center gap-2">{data.entity.name} <span className="text-xs text-text-dim font-normal">{data.entity.kind}</span><BasisBadge basis={data.entity.basis} /></div>
       {data.entity.aliases.length > 0 && <div className="text-xs text-text-muted">Also: {data.entity.aliases.join(", ")}</div>}
-      {data.entity.description && <div className="text-sm text-text-muted mt-1">{data.entity.description}</div>}</div>
+      {data.entity.description && <div className="text-sm text-text-muted mt-1">{data.entity.description}</div>}
+      <div className="text-xs mt-1">{data.locations && data.locations.length > 0
+        ? data.locations.map((l, i) => <div key={i} className="text-text-muted">Location: {l.label || `${l.lat.toFixed(2)}, ${l.lon.toFixed(2)}`} ({l.precision}) · {l.source}: {l.provenance}</div>)
+        : <span className="text-text-dim">No location recorded.</span>}</div></div>
+    {data.issues && data.issues.length > 0 && <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Data quality</div>
+      {data.issues.map((i, n) => <IssueLine key={n} i={i} />)}</section>}
     {data.relationships.length > 0 && <div className={`${card} p-2`}><EntityGraph center={data.entity} rels={data.relationships} select={select} />
       <div className="flex gap-3 text-xs text-text-dim px-2"><Badge tone="good">observed</Badge><Badge tone="accent">reported</Badge><Badge>inferred</Badge><Badge tone="warn">assumed</Badge></div></div>}
     {latest.size > 0 && <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))" }}>
-      {[...latest.values()].map(s => <Stat key={s.variable} label={`${s.variable} · ${s.source}`} value={`${s.value} ${s.unit}`} hint={`as of ${new Date(s.valid_at).toLocaleDateString()}`} />)}</div>}
+      {[...latest.values()].map(s => { const f = data.series?.find(x => x.variable === s.variable && x.source === s.source);
+        return <Stat key={`${s.variable}-${s.source}`} label={`${s.variable} · ${s.source}${s.basis && s.basis !== "observed" ? " · " + s.basis : ""}`} value={`${s.value} ${s.unit}`}
+          hint={`as of ${new Date(s.valid_at).toLocaleDateString()}${f ? f.status === "stale" ? ` · STALE (usually every ${f.cadence_days} d)` : f.cadence_days ? ` · every ~${f.cadence_days} d` : "" : ""}`} />; })}</div>}
     <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Relationships</div>
       {data.relationships.length === 0 ? <Empty>No relationships recorded.</Empty> : data.relationships.map(r => <div key={r.id} className="px-3 py-1.5 border-b border-border text-sm flex gap-2 items-center">
-        <span className="flex-1">{r.from} <span className="text-text-dim">{r.type}</span> {r.to}</span><Badge tone={statusTone(r.status)}>{r.status}</Badge>
+        <span className="flex-1">{r.from} <span className="text-text-dim">{r.type}</span> {r.to}</span><Badge tone={statusTone(r.status)}>{r.status}</Badge>{r.basis === "synthetic" && <BasisBadge basis="synthetic" />}
         <span className="text-xs text-text-dim">{r.evidence_ids.length ? `evidence ${r.evidence_ids.join(", ")}` : "no evidence"}</span></div>)}
     </section>
     {data.open_questions.length > 0 && <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Open questions</div>
       {data.open_questions.map(q => <QuestionLine key={q.id} q={q} onOpen={openQuestion} />)}</section>}
     {data.claims.length > 0 && <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Claims</div>
       {data.claims.map(c => <div key={c.id} className="px-3 py-1.5 border-b border-border text-sm flex gap-2"><span className="flex-1">{c.subject} <span className="text-text-dim">{c.predicate}</span> {c.object}</span>
-        <Badge tone={c.status === "accepted" ? "good" : c.status === "rejected" ? "bad" : "muted"}>{c.status}</Badge><span className="text-xs text-text-dim">#{c.evidence_id}</span></div>)}</section>}
+        <Badge tone={c.status === "accepted" ? "good" : c.status === "rejected" ? "bad" : "muted"}>{c.status}</Badge><BasisBadge basis={c.basis} /><span className="text-xs text-text-dim">#{c.evidence_id}</span></div>)}</section>}
   </div>;
 }
 

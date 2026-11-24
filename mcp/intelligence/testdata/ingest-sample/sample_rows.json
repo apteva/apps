@@ -1,7 +1,10 @@
 {
   "evidence_measurement": [
     {
+      "access": "open",
+      "basis": "observed",
       "body": "",
+      "content_expired_at": null,
       "content_hash": "ea414e8061f4554e144816e14fe22afa0daffd1a5da5d6d724ef6ce8194ed061",
       "entity_refs": [
         "US nonfarm payrolls"
@@ -29,7 +32,10 @@
       "valid_to": null
     },
     {
+      "access": "open",
+      "basis": "observed",
       "body": "",
+      "content_expired_at": null,
       "content_hash": "0565b4a5b13817f5d5ca5c2769fd1ca3eab72a8ee4c6cd0d4f174ced206e04a4",
       "entity_refs": [
         "US unemployment rate"

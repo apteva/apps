@@ -14,6 +14,11 @@ package main
 //	APTEVA_APP_TOKEN=<an install token with connections.execute> \
 //	GOWORK=off go test -run TestIngestionSample -v            # re-record
 //
+//	INTEL_SAMPLE_UPDATE=1 GOWORK=off go test -run TestIngestionSample
+//
+// rewrites manifest.json and sample_rows.json from the stored responses,
+// for code changes that alter what the same responses produce.
+//
 // Recording runs each call the way production does: through the
 // platform's keyless integration route and the catalog tool, so it
 // needs a running apteva-server. It stores successful responses only. A
@@ -181,6 +186,9 @@ func TestIngestionSample(t *testing.T) {
 	rc := &recordingClient{record: record}
 	env := &ingestEnv{db: db, pid: "sample", sc: rc, now: clock}
 	for _, s := range defaultSources() {
+		if s.Connector == "geocode" {
+			continue // not part of the recorded sample (no Wikipedia responses)
+		}
 		if err := ensureSource(db, env.pid, s); err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +206,7 @@ func TestIngestionSample(t *testing.T) {
 	manifest["calls"] = rc.calls
 	got, _ := json.MarshalIndent(manifest, "", "  ")
 	manifestPath := filepath.Join(sampleDir, "manifest.json")
-	if record {
+	if record || os.Getenv("INTEL_SAMPLE_UPDATE") == "1" {
 		if err := os.WriteFile(manifestPath, append(got, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}

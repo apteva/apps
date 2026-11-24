@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import GeographyView from "./GeographyView";
+import WorldMap from "./WorldMap";
 import { ConnectorsTab, LedgerTab, OverviewTab, QuestionsTab, ScenariosTab, WorldTab } from "./WorldTabs";
 
 // ─── Inlined SDK app-event hook (forward-compat; v0.2 emits signals) ──
@@ -51,9 +52,9 @@ const Icon = {
 
 type TabId = "overview" | "questions" | "world" | "scenarios" | "ledger" | "connectors" | "research" | "map" | "markets" | "signals" | "sources" | "query";
 const TABS: { id: TabId; label: string; group: "core" | "market" }[] = [
-  { id: "overview", label: "Overview", group: "core" }, { id: "questions", label: "Questions", group: "core" }, { id: "world", label: "World", group: "core" },
+  { id: "overview", label: "Overview", group: "core" }, { id: "map", label: "Map", group: "core" }, { id: "questions", label: "Questions", group: "core" }, { id: "world", label: "World", group: "core" },
   { id: "scenarios", label: "Scenarios", group: "core" }, { id: "ledger", label: "Ledger", group: "core" }, { id: "connectors", label: "Connectors", group: "core" },
-  { id: "research", label: "Research", group: "core" }, { id: "map", label: "Map", group: "core" },
+  { id: "research", label: "Research", group: "core" },
   { id: "markets", label: "Markets", group: "market" }, { id: "signals", label: "Signals", group: "market" }, { id: "sources", label: "Integrations", group: "market" }, { id: "query", label: "Query", group: "market" },
 ];
 
@@ -116,7 +117,7 @@ export default function IntelligencePanel({ projectId, installId }: NativePanelP
         {tab === "ledger" && <LedgerTab api={api} setError={setError} openQuestion={openQuestion} />}
         {tab === "connectors" && <ConnectorsTab api={api} post={post} setError={setError} />}
         {tab === "research" && <ResearchTab api={api} setError={setError} />}
-        {tab === "map" && <GeographyView api={api} />}
+        {tab === "map" && <MapTab api={api} post={post} />}
         {tab === "signals" && <SignalsTab api={api} projectId={projectId} setError={setError} />}
         {tab === "markets" && <MarketsTab api={api} setError={setError} />}
         {tab === "sources" && <SourcesTab api={api} setError={setError} />}
@@ -127,6 +128,18 @@ export default function IntelligencePanel({ projectId, installId }: NativePanelP
 }
 
 interface EvidenceRow { id: number; kind: string; title: string; body: string; source: string; source_ref?: string; event_time?: string; published_time?: string; observed_at?: string; payload?: unknown }
+
+// Map: the world map of all data, and the evidence atlas (evidence with
+// its own coordinates, with timeline playback).
+function MapTab({ api, post }: { api: <T>(p: string, q?: Record<string, string>) => Promise<T>; post: <T>(p: string, b: unknown) => Promise<T> }) {
+  const [mode, setMode] = useState<"world" | "atlas">("world");
+  const seg = (on: boolean) => `px-3 py-1 text-xs border border-border ${on ? "bg-bg-input text-text font-semibold" : "text-text-muted"}`;
+  return <div className="space-y-3">
+    <div className="flex"><button className={`${seg(mode === "world")} rounded-l`} onClick={() => setMode("world")}>All data</button>
+      <button className={`${seg(mode === "atlas")} rounded-r -ml-px`} onClick={() => setMode("atlas")}>Evidence atlas</button></div>
+    {mode === "world" ? <WorldMap api={api} post={post} /> : <GeographyView api={api} />}
+  </div>;
+}
 
 function ResearchTab({ api, setError }: { api: <T>(p: string, q?: Record<string, string>) => Promise<T>; setError: (e: string | null) => void }) {
   const [query, setQuery] = useState("");

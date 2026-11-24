@@ -90,8 +90,8 @@
   "layers": {
     "estimated": {
       "claims": 0,
-      "entities": 3,
-      "relationships": 0,
+      "entities": 4,
+      "relationships": 3,
       "state_values": 100
     },
     "futures": {

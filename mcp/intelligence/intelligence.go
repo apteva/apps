@@ -23,6 +23,10 @@ type Evidence struct {
 	ContentHash                                              string `json:"content_hash"`
 	IngestedAt                                               *time.Time
 	OriginKey                                                string `json:"origin_key"`
+	// Basis is observed, inferred or synthetic; Access is open, internal or
+	// restricted. Empty values take the defaults at insert.
+	Basis, Access    string
+	ContentExpiredAt *time.Time
 }
 
 func (e Evidence) Map() map[string]any {
@@ -32,7 +36,8 @@ func (e Evidence) Map() map[string]any {
 		"event_time": timeString(e.EventTime), "published_time": timeString(e.PublishedTime),
 		"observed_at": timeString(e.ObservedAt), "valid_from": timeString(e.ValidFrom), "valid_to": timeString(e.ValidTo),
 		"supersedes_id": e.SupersedesID, "content_hash": e.ContentHash,
-		"ingested_at": timeString(e.IngestedAt), "origin_key": e.OriginKey}
+		"ingested_at": timeString(e.IngestedAt), "origin_key": e.OriginKey,
+		"basis": fallback(e.Basis, basisObserved), "access": fallback(e.Access, accessOpen), "content_expired_at": timeString(e.ContentExpiredAt)}
 }
 
 type EvidenceQuery struct {
@@ -45,6 +50,9 @@ type EvidenceQuery struct {
 	// forecasts use, so they can never see evidence that arrived later.
 	Knowledge string
 	IDs       []int64
+	// Basis filters by basis; ExcludeSynthetic drops synthetic rows.
+	Basis            string
+	ExcludeSynthetic bool
 }
 
 func parseOptionalTime(value string) (*time.Time, error) {
@@ -133,6 +141,14 @@ func recordEvidenceDetailed(db *sql.DB, e Evidence, projectID string) (map[strin
 	if e.OriginKey == "" {
 		e.OriginKey = originKey(e.Title)
 	}
+	e.Basis = fallback(e.Basis, basisObserved)
+	if !validBasis(e.Basis) {
+		return nil, false, fmt.Errorf("basis must be observed, inferred or synthetic, got %q", e.Basis)
+	}
+	e.Access = fallback(e.Access, accessOpen)
+	if !validAccess(e.Access) {
+		return nil, false, fmt.Errorf("access must be open, internal or restricted, got %q", e.Access)
+	}
 	var existing int64
 	if err := db.QueryRow(`SELECT id FROM intelligence_evidence WHERE project_id = ? AND content_hash = ?`, projectID, e.ContentHash).Scan(&existing); err == nil {
 		rows, err := searchEvidence(db, EvidenceQuery{ProjectID: projectID, IDs: []int64{existing}, Limit: 1})
@@ -152,11 +168,11 @@ func recordEvidenceDetailed(db *sql.DB, e Evidence, projectID string) (map[strin
 	}
 	var id int64
 	err := db.QueryRow(`INSERT INTO intelligence_evidence
- (project_id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
+ (project_id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key,basis,access)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
 		projectID, fallback(e.Kind, "document"), e.Title, e.Body, string(e.Payload), string(refs), e.Source, e.SourceRef,
 		timeString(e.EventTime), timeString(e.PublishedTime), timeString(e.ObservedAt), timeString(e.ValidFrom), timeString(e.ValidTo), e.SupersedesID, e.ContentHash,
-		timeString(e.IngestedAt), e.OriginKey).Scan(&id)
+		timeString(e.IngestedAt), e.OriginKey, e.Basis, e.Access).Scan(&id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -198,6 +214,13 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 			args = append(args, like, like, like)
 		}
 	}
+	if q.Basis != "" {
+		where = append(where, "basis = ?")
+		args = append(args, q.Basis)
+	}
+	if q.ExcludeSynthetic {
+		where = append(where, "basis <> 'synthetic'")
+	}
 	if q.Kind != "" {
 		where = append(where, "kind = ?")
 		args = append(args, q.Kind)
@@ -235,7 +258,7 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		where = append(where, clock+" <= ? AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)")
 		args = append(args, asOf, asOf, asOf)
 	}
-	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
+	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash,ingested_at,origin_key,basis,access,content_expired_at FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
 	if err != nil {
 		return nil, err
 	}
@@ -247,9 +270,9 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		// SQLite may return DATETIME values as either time.Time or strings
 		// depending on the driver/schema affinity. Scan as flexible values so
 		// historical databases created by older releases remain readable.
-		var event, published, observed, from, to, ingested flexibleTime
+		var event, published, observed, from, to, ingested, expired flexibleTime
 		var supersedes sql.NullInt64
-		if err := rows.Scan(&e.ID, &e.Kind, &e.Title, &e.Body, &payload, &refs, &e.Source, &e.SourceRef, &event, &published, &observed, &from, &to, &supersedes, &e.ContentHash, &ingested, &e.OriginKey); err != nil {
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Title, &e.Body, &payload, &refs, &e.Source, &e.SourceRef, &event, &published, &observed, &from, &to, &supersedes, &e.ContentHash, &ingested, &e.OriginKey, &e.Basis, &e.Access, &expired); err != nil {
 			return nil, err
 		}
 		e.Payload = json.RawMessage(payload)
@@ -260,6 +283,7 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		e.ValidFrom = from.Time()
 		e.ValidTo = to.Time()
 		e.IngestedAt = ingested.Time()
+		e.ContentExpiredAt = expired.Time()
 		if supersedes.Valid {
 			v := supersedes.Int64
 			e.SupersedesID = &v

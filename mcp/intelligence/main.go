@@ -130,6 +130,16 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  resources:
+    - name: access
+      label: "Evidence access class"
+      list_endpoint: /access-classes
+      matcher: id_set
+      picker: list
+  permissions:
+    - name: intelligence.evidence.read
+      resource: access
+      description: "Read evidence content of an access class (open, internal, restricted). Restricted needs an explicit allow; without one, agents get the record with its content removed."
   mcp_tools:
     - name: overview
       description: "What changed: new evidence, forecast moves with reasons, questions closing soon, resolutions, source health."
@@ -171,6 +181,16 @@ provides:
       description: "Hypothetical shock propagation through typed relationships, with assumption chains."
     - name: scenarios_list
       description: "Saved scenario runs."
+    - name: world_map
+      description: "Located entities, links, evidence points, per-country totals and unmapped entities with reasons, with basis and quality flags."
+    - name: data_quality
+      description: "Stale, missing and conflicting data, plus row counts by basis and evidence by access class."
+    - name: entity_locate
+      description: "Place an entity on the map with attributed coordinates and precision."
+    - name: synthetic_seed
+      description: "Load a labelled synthetic sample scenario for trying the map and quality checks."
+    - name: synthetic_clear
+      description: "Delete every synthetic row."
     - name: search
       description: "Generic bitemporal search across recorded evidence with event, publication and as-of filters."
     - name: evidence_record
@@ -381,8 +401,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func intelligenceArgs(r *http.Request) map[string]any {
-	args := map[string]any{"_project_id": r.URL.Query().Get("project_id")}
-	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset", "knowledge", "forecast_id"} {
+	args := map[string]any{"_project_id": r.URL.Query().Get("project_id"), readerArg: operatorReader}
+	for _, key := range []string{"basis", "query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset", "knowledge", "forecast_id"} {
 		if v := r.URL.Query().Get(key); v != "" {
 			args[key] = v
 		}
