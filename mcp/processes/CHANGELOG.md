@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Compact process list (0.23.4)
+
+Two lines per process on desktop: name with tags, then a one-line
+description. See `docs-release-0.23.4.md`.
+
 ## Calmer progress animation (0.23.3)
 
 The running step segment fades gently instead of flashing. See
