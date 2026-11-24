@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-//go:embed runner/dist/runner.mjs runner/dist/replicad_single.wasm runner/dist/step-import.mjs runner/dist/import.wasm
+//go:embed runner/dist/runner.mjs runner/dist/replicad_single.wasm runner/dist/step-import.mjs runner/dist/import.wasm runner/dist/font-sans.ttf runner/dist/font-sans-bold.ttf runner/dist/font-mono.ttf runner/dist/FONTS-LICENSE.txt
 var runnerAssets embed.FS
 
 const bunVersion = "1.2.22"
@@ -70,7 +70,7 @@ func (e *Engine) materializeAssets() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	for _, name := range []string{"runner.mjs", "replicad_single.wasm", "step-import.mjs", "import.wasm"} {
+	for _, name := range []string{"runner.mjs", "replicad_single.wasm", "step-import.mjs", "import.wasm", "font-sans.ttf", "font-sans-bold.ttf", "font-mono.ttf", "FONTS-LICENSE.txt"} {
 		body, err := runnerAssets.ReadFile("runner/dist/" + name)
 		if err != nil {
 			return err

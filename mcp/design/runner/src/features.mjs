@@ -2,7 +2,11 @@
 // shell, 2D profiles (rounded rectangles, slots, arcs), holes, and loft.
 // Helpers that need the expression resolver are passed in so this module
 // stays independent of runner.mjs internals.
-import { EdgeFinder, FaceFinder, draw, drawCircle, drawPolysides, drawRoundedRectangle } from "replicad";
+import { EdgeFinder, FaceFinder, draw, drawCircle, drawPolysides, drawRoundedRectangle, drawText } from "replicad";
+import { pathDrawing } from "./svgpath.mjs";
+
+export const FONTS = { sans: "DejaVu Sans", "sans-bold": "DejaVu Sans Bold", mono: "DejaVu Sans Mono" };
+export const loadedFonts = new Set();
 
 function fail(message) {
   throw new Error(message);
@@ -182,8 +186,39 @@ export function drawProfile(profile, ctx, label) {
       drawing = pen.close();
       break;
     }
+    case "text": {
+      if (typeof profile.text !== "string" || !profile.text.trim()) fail(`${label}.text is required`);
+      if (profile.text.length > 200) fail(`${label}.text allows at most 200 characters`);
+      const size = num(profile.size ?? 10, "size");
+      if (size <= 0) fail(`${label}.size must be positive`);
+      const font = profile.font || "sans";
+      if (!FONTS[font]) fail(`${label}.font must be one of ${Object.keys(FONTS).join(", ")}`);
+      if (!loadedFonts.has(font)) fail(`${label}: font ${font} is not loaded`);
+      drawing = drawText(profile.text, { fontSize: size, fontFamily: FONTS[font] });
+      const [[minX, minY], [maxX, maxY]] = drawing.boundingBox.bounds;
+      const align = profile.align || "left";
+      const valign = profile.valign || "baseline";
+      if (!["left", "center", "right"].includes(align)) fail(`${label}.align must be left, center or right`);
+      if (!["baseline", "middle", "bottom", "top"].includes(valign)) fail(`${label}.valign must be baseline, middle, bottom or top`);
+      const dx = align === "center" ? -(minX + maxX) / 2 : align === "right" ? -maxX : -minX;
+      const dy = valign === "middle" ? -(minY + maxY) / 2 : valign === "bottom" ? -minY : valign === "top" ? -maxY : 0;
+      drawing = drawing.translate(dx, dy);
+      break;
+    }
+    case "svg_path": {
+      const scale = num(profile.scale ?? 1, "scale");
+      if (!(scale > 0)) fail(`${label}.scale must be positive`);
+      // SVG's y axis points down; flip it unless told otherwise.
+      const flip = profile.flip_y !== false ? -1 : 1;
+      drawing = pathDrawing(profile.d, draw, ([x, y]) => [x * scale, y * scale * flip]);
+      if (profile.center_on_origin) {
+        const [[minX, minY], [maxX, maxY]] = drawing.boundingBox.bounds;
+        drawing = drawing.translate(-(minX + maxX) / 2, -(minY + maxY) / 2);
+      }
+      break;
+    }
     default:
-      fail(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon or path`);
+      fail(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon, path, text or svg_path`);
   }
   if (profile.offset !== undefined) {
     // Grow (positive) or shrink (negative) the outline; corners round.

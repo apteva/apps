@@ -3,9 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build src/runner.mjs --target=bun --format=esm --outfile=dist/runner.mjs && cp node_modules/replicad-opencascadejs/src/replicad_single.wasm dist/replicad_single.wasm && bun build src/step-import.mjs --target=bun --format=esm --outfile=dist/step-import.mjs && cp node_modules/opencascade.js/dist/opencascade.wasm.wasm dist/import.wasm"
+    "build": "bun build src/runner.mjs --target=bun --format=esm --outfile=dist/runner.mjs && cp node_modules/replicad-opencascadejs/src/replicad_single.wasm dist/replicad_single.wasm && bun build src/step-import.mjs --target=bun --format=esm --outfile=dist/step-import.mjs && cp node_modules/opencascade.js/dist/opencascade.wasm.wasm dist/import.wasm && cp node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf dist/font-sans.ttf && cp node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf dist/font-sans-bold.ttf && cp node_modules/dejavu-fonts-ttf/ttf/DejaVuSansMono.ttf dist/font-mono.ttf && cp node_modules/dejavu-fonts-ttf/LICENSE dist/FONTS-LICENSE.txt"
   },
   "dependencies": {
+    "dejavu-fonts-ttf": "2.37.3",
     "opencascade.js": "1.1.1",
     "replicad": "0.23.1",
     "replicad-opencascadejs": "0.23.0"

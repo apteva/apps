@@ -52,6 +52,14 @@ Parameter types are `length` (default), `number`, `angle`, `integer` (whole numb
 
 Make features optional with `when` on any operation (a boolean, number, or expression such as `"has_vent"` or `"width > 60"`). A skipped operation drops out of `fuse`, `cut` tools, `intersect` and `compound` inputs; using it any other way (as a cut base, a transform input, or an output) is an error, so the mistake is visible.
 
+## Text, logos, reference meshes, drawings and moulding
+
+Profiles also take `{"kind":"text","text":"…","size":6,"font":"sans|sans-bold|mono","align":"left|center|right","valign":"baseline|middle|bottom|top"}` (bundled DejaVu fonts, so builds are reproducible) and `{"kind":"svg_path","d":"…","scale":1,"flip_y":true,"center_on_origin":false}`. SVG subpaths nested inside others become holes. Extrude them with `extrude_profile`, then cut to engrave or fuse to emboss.
+
+Use `design_stl_import` for scans or meshes you only need to design around (up to 50000 triangles, `units` mm/cm/m/in). It creates a reference design you can link into assemblies for placement, measurement and clearance checks; it is never printed. Model printable parts parametrically.
+
+Builds can export `dxf` and `pdf` drawings (front, top and right views with hidden lines dashed, a standard scale, and overall size), and GLB/3MF now carry part colours and material names. Add a `moulding` check (`part`, `pull` direction, `min_draft_deg`) before choosing injection moulding: it lists faces under the draft angle and undercut faces that block a straight pull.
+
 ## Mates and joints
 
 Give parts named mechanical interfaces in `assembly.interfaces`: `{id, kind, part_id, position, direction, up}` in the part's own coordinates. `direction` is the outward normal of the mating face; `up` fixes the turn about it (default: world +Z projected onto the face, or +Y for horizontal faces). Place an instance with `mate: {interface, to_instance, to_interface, gap, angle, flip}` instead of a transform: the faces oppose, the up vectors align, then `gap` (mm along the target normal) and `angle` (degrees about it) apply. Mates chain: a part mated to a mated part follows it. An instance uses one of transform, alignment or mate; an interface takes one mate; cycles are rejected.
