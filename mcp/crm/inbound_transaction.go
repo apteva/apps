@@ -321,6 +321,9 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		payload["thread_state"] = "new"
 	}
 	payload["messaging_id"] = body.MessageID
+	if err = addInboundRoutingFields(tx, pid, convoID, &body, automated, reason, payload); err != nil {
+		return nil, err
+	}
 	if err = queueCRMEvent(tx, pid, "conversation.message.received", payload); err != nil {
 		return nil, err
 	}

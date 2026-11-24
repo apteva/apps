@@ -245,7 +245,7 @@ func TestManifestDeclaresListContextFields(t *testing.T) {
 		"contact.merged":                         {"winner_list_ids", "loser_list_ids_before_merge"},
 		"contact.activity.added":                 {"list_ids", "attributed_list_ids"},
 		"conversation.status.changed":            {"list_ids"},
-		"conversation.message.received":          {"list_ids", "attributed_list_ids"},
+		"conversation.message.received":          {"list_ids", "attributed_list_ids", "to_address", "to_addresses", "receiving_domain", "from_address", "from_domain", "is_reply", "reply_to_from_address", "is_auto_generated", "auto_generated_reason"},
 		"segment.created":                        {"list_id"},
 		"segment.updated":                        {"list_id"},
 		"segment.archived":                       {"list_id"},

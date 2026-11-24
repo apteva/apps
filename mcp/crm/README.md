@@ -1,4 +1,14 @@
-# CRM v0.9.31
+# CRM v0.9.32
+
+Release `crm/v0.9.32`: `conversation.message.received` carries email routing
+fields so triggers can route by receiving address without reading the CRM:
+`to_address` (our mailbox that actually received the message, from the
+delivery address, also when we were only in Cc or it was forwarded/aliased),
+`to_addresses` (To + Cc), `receiving_domain`, `from_address`, `from_domain`,
+`is_reply` (In-Reply-To/References name one of our sent emails in the
+conversation) with `reply_to_from_address`, and `is_auto_generated` with
+`auto_generated_reason`. All lowercase; empty/false for SMS and WhatsApp;
+existing fields unchanged. Declared in the event schema. No migrations.
 
 Release `crm/v0.9.31`: closing an email conversation marks its Gmail threads
 read instead of archiving them. The thread stays in the inbox with its labels;
