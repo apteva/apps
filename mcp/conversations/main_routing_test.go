@@ -672,3 +672,19 @@ func TestChatThreadDirectiveCarriesSelfPacingAndReportBack(t *testing.T) {
 		}
 	}
 }
+
+// Main answering a chat must do the requested work itself: Core tells main to
+// hand independent units to helper threads, which turned a quick inbox triage
+// into four spawned threads on prod (2026-11-24).
+func TestMainReplyContractKeepsRequestedWorkOnMain(t *testing.T) {
+	contract := mainReplyContract(&Conversation{ID: "conv-1", Title: "Messaging"})
+	for _, fragment := range []string{
+		"very small work you do yourself in this turn",
+		"do not spawn a thread for them",
+		"Spawn only for work that must continue after your reply",
+	} {
+		if !strings.Contains(contract, fragment) {
+			t.Errorf("main reply contract missing %q:\n%s", fragment, contract)
+		}
+	}
+}

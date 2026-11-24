@@ -99,7 +99,11 @@ func mainReplyContract(conv *Conversation) string {
 		" Reply in it with conversations_send conversation_id=%s."+
 		" Before calling any work tool, send phase=acknowledgement alone and briefly say what you are about to do;"+
 		" finish with phase=final carrying the outcome. Answers needing no tool go straight to phase=final."+
-		" Use this conversation for reports, alerts, approvals and questions about work requested here.",
+		" Use this conversation for reports, alerts, approvals and questions about work requested here."+
+		" The person is waiting: a request made here is very small work you do yourself in this turn, even when it"+
+		" covers several items. Make the reads, lookups and approved writes directly, in parallel when they are"+
+		" independent; do not spawn a thread for them. Spawn only for work that must continue after your reply"+
+		" (waiting, polling, retries or a schedule) or that is too large to finish in this turn.",
 		conv.Title, conv.ID, conv.ID)
 }
 

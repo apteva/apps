@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.31.0 — 2026-11-24
+
+- Agents now do the work requested in a conversation themselves instead of spawning helper threads for it. Core tells an agent's main thread to hand independent units of work to separate threads. When main answered its operator chat, a quick request such as "read these threads, mark three as spam and close three" turned into four helper threads for about ten CRM calls, which added delay and hid the work behind "Assigning…" rows. The reply rule main receives with each chat message, and the Conversations skill for main and conversation threads, now treat a request made in the conversation as small work done in the same turn (in parallel when the calls are independent). Spawning stays for work that has to continue after the reply (waiting, polling, retries, a schedule) or is too large for one turn.
+- New live scenario 28 (`main-does-requested-work`) fails if main spawns while reading three lists and completing two todos.
+
 ## 0.30.1 — 2026-11-24
 
 - Stop code block headers covering what is above them. 0.30.0 painted a 16px strip of page background above every code block header, meant to hide text scrolling past a stuck header. It was painted all the time, so it hid the block's top border and rounded corners and cut off the bottom of the line above the block. The strip now appears only while the header is stuck at the top of the transcript (browsers with scroll-state container queries: Chrome and Edge 133+); elsewhere nothing is painted.

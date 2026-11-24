@@ -1702,3 +1702,103 @@ func TestScenario_InteractiveComponents(t *testing.T) {
 	idle()
 	t.Log("optional question survived completion, late answer resumed its owner, retries were safe, blocking form waited and resumed")
 }
+
+// TestScenario_MainDoesRequestedWork mirrors a prod inbox triage (2026-11-24)
+// where main, answering its first operator chat, spawned four helper threads
+// for about ten quick reads and approved writes. Main must do the requested
+// reads and writes itself; the YAML asserts spawn is never called.
+func TestScenario_MainDoesRequestedWork(t *testing.T) {
+	c := newScenarioClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	type todo struct {
+		ID     int64  `json:"id"`
+		Title  string `json:"title"`
+		Status string `json:"status"`
+	}
+	lists := map[string][]string{
+		"Partner replies": {"Green Cleaning agreed to a call", "Brava Serveis wants one-off jobs"},
+		"Vendor pitches":  {"AI SEO agency follow-up", "Booking software demo offer"},
+		"Bounced emails":  {"Delivery failure contacto@liumera.test", "Delivery failure info@valekelimpio.test"},
+	}
+	listIDs := map[string]int64{}
+	for name, titles := range lists {
+		var list struct {
+			ID int64 `json:"id"`
+		}
+		if status := c.do("POST", "/api/apps/todo/lists", map[string]any{"name": name}, &list); status != http.StatusOK || list.ID == 0 {
+			t.Fatalf("seed list %q: status=%d", name, status)
+		}
+		listIDs[name] = list.ID
+		for _, title := range titles {
+			if status := c.do("POST", "/api/apps/todo/todos", map[string]any{"title": title, "list_id": list.ID, "source": "human"}, nil); status != http.StatusOK {
+				t.Fatalf("seed todo %q: status=%d", title, status)
+			}
+		}
+	}
+
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agentID, "title": "Inbox triage"}, &conv); status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d", status)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	content := "Go through my three todo lists Partner replies, Vendor pitches and Bounced emails. " +
+		"Read every todo in each and tell me which ones look like unsolicited sales pitches. " +
+		"Then mark both todos in Bounced emails as done. Include TRIAGE_DONE in your final answer."
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": content, "client_message_id": "main-requested-work-1",
+	}, nil); status != http.StatusOK {
+		t.Fatalf("post message: status=%d", status)
+	}
+
+	// The first operator chat is main's.
+	var participants struct {
+		Agents []AgentModelInfo `json:"agents"`
+	}
+	c.do("GET", "/api/apps/conversations/participants?id="+conv.ID, nil, &participants)
+	if len(participants.Agents) != 1 || participants.Agents[0].ThreadID != mainThreadID {
+		t.Fatalf("first operator chat should be answered by main: %+v", participants.Agents)
+	}
+
+	deadline := time.Now().Add(240 * time.Second)
+	var final *Message
+	for time.Now().Before(deadline) && final == nil {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for i := range transcript {
+			if transcript[i].Role == "agent" && transcript[i].Phase == "final" && strings.Contains(transcript[i].Content, "TRIAGE_DONE") {
+				final = &transcript[i]
+			}
+		}
+		if final == nil {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if final == nil {
+		t.Fatal("no final triage reply within 240s")
+	}
+	for _, pitch := range lists["Vendor pitches"] {
+		if !strings.Contains(strings.ToLower(final.Content), strings.ToLower(strings.Fields(pitch)[0])) {
+			t.Errorf("final answer does not name pitch %q: %s", pitch, final.Content)
+		}
+	}
+	var bounced []todo
+	c.do("GET", fmt.Sprintf("/api/apps/todo/todos?view=all&list_id=%d", listIDs["Bounced emails"]), nil, &bounced)
+	var done []todo
+	c.do("GET", fmt.Sprintf("/api/apps/todo/todos?view=done&list_id=%d", listIDs["Bounced emails"]), nil, &done)
+	if len(done) != 2 {
+		t.Fatalf("both Bounced emails todos should be done: open=%+v done=%+v", bounced, done)
+	}
+	for _, other := range []string{"Partner replies", "Vendor pitches"} {
+		var untouched []todo
+		c.do("GET", fmt.Sprintf("/api/apps/todo/todos?view=done&list_id=%d", listIDs[other]), nil, &untouched)
+		if len(untouched) != 0 {
+			t.Fatalf("%s todos should stay open: %+v", other, untouched)
+		}
+	}
+	t.Logf("main triaged three lists and completed two todos itself: %s", final.Content)
+}

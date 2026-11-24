@@ -159,6 +159,22 @@ main with the conversation id and a short reply rule; answer there with
 alerts and approvals from main's own work that belong to no other conversation.
 Main keeps its own instructions and tools; this routing never changes them.
 
+### Do conversation requests yourself
+
+Someone is waiting for the answer. Whether main or a conversation thread
+answers, a request made in the conversation is very small work for that thread,
+even when it covers several items: reading a handful of records, triaging an
+inbox, looking up statuses, or applying the changes the person just approved.
+Make those calls yourself in the same turn, in parallel when they are
+independent, then reply. Do not spawn helper threads for them: each one adds
+delay, repeats context, and hides the work from the person.
+
+Spawn only for work that has to continue after your reply (waiting, polling,
+retries or a schedule), that a single turn cannot finish, or that needs its own
+context because it is large. Main's general rule to hand independent units to
+focused owners applies to standing and background work, not to a request you
+are answering in a conversation.
+
 ### Pacing, report-back and idle threads
 
 Conversation threads pace themselves, like main. End every turn with an explicit

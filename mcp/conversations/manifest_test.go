@@ -252,7 +252,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.30.1"
+	const releaseVersion = "0.31.0"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -321,6 +321,9 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		"For short flows, including several related tool calls",
 		"substantial batch before sending",
 		"Do not narrate individual tool calls",
+		"### Do conversation requests yourself",
+		"Do not spawn helper threads for them",
+		"applies to standing and background work, not to a request you",
 	} {
 		if !strings.Contains(string(skill), fragment) {
 			t.Errorf("using-conversations skill missing %q", fragment)
