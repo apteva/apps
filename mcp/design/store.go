@@ -408,3 +408,33 @@ func (s *Store) ListArtifacts(project string, designID, revisionID int64) ([]Art
 	}
 	return out, nil
 }
+
+// DesignHead is one active design with its current revision's source, used
+// to answer "who links to this design" without loading full Design rows.
+type DesignHead struct {
+	DesignID   int64
+	Name       string
+	RevisionID int64
+	Definition json.RawMessage
+}
+
+func (s *Store) ActiveDesignHeads(project string) ([]DesignHead, error) {
+	rows, err := s.db.Query(`SELECT d.id, d.name, r.id, r.definition_json
+		FROM designs d JOIN design_revisions r ON r.id = d.current_revision_id
+		WHERE d.project_id = ? AND d.status = 'active' ORDER BY d.id`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DesignHead{}
+	for rows.Next() {
+		var item DesignHead
+		var definition string
+		if err := rows.Scan(&item.DesignID, &item.Name, &item.RevisionID, &definition); err != nil {
+			return nil, err
+		}
+		item.Definition = json.RawMessage(definition)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}

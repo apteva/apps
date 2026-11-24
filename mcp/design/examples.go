@@ -5,19 +5,35 @@ func designExamples() map[string]any {
 		"schema": designSchema,
 		"units":  "mm",
 		"expressions": map[string]any{
-			"syntax":   "Numbers or arithmetic strings using parameters, +, -, *, /, unary signs, and parentheses.",
-			"examples": []string{"width/2", "height-thickness*2", "(diameter+clearance)/2"},
+			"syntax":    "Numbers or strings over parameters: + - * / %, parentheses, comparisons (< <= > >= == !=), and/or/not (&& || !), cond ? a : b, true/false/pi. Booleans are 1/0.",
+			"functions": []string{"min", "max", "abs", "round(x[,step])", "floor", "ceil", "sqrt", "pow", "clamp(x,lo,hi)", "hypot", "sin/cos/tan (degrees)", "asin/acos/atan/atan2 (degrees)"},
+			"examples":  []string{"width/2", "(diameter+clearance)/2", "max(wall*2, 3)", "clamp(width-2*margin, 10, 80)", "has_vent and width > 40 ? 6 : 0"},
+		},
+		"parameter_types": map[string]any{
+			"length/number/angle": "Number with optional min, max, and options (allowed values).",
+			"integer":             "Whole number, with optional min/max/options; use for counts.",
+			"boolean":             "true/false (stored as 1/0); drive optional features with an operation's when field.",
+		},
+		"conditional_operations": map[string]any{
+			"field":     "when: boolean, number, or expression; 0/false skips the operation.",
+			"semantics": "Skipped operations drop out of fuse, cut tools, intersect, and compound inputs. Referring to a skipped operation any other way (cut base, transform input, part or definition output) is an error.",
+			"example":   map[string]any{"id": "vent", "type": "cylinder", "radius": 3, "height": 10, "when": "has_vent"},
+		},
+		"component_operation": map[string]any{
+			"shape":     map[string]any{"id": "body", "type": "component", "source": map[string]any{"design_id": 12, "revision_id": 34, "source_sha256": "...", "part_id": "optional"}, "parameters": map[string]any{"width": "size", "depth": 30}, "transform": map[string]any{"translate": []any{0, 0, 0}}},
+			"semantics": "Brings another design's pinned geometry in as an ordinary shape you can cut, fuse, or pattern. parameters override the source revision's values: numbers are checked against the source's ranges; strings are expressions over this design's parameters. Linked parts (part.source) accept the same parameters overrides.",
 		},
 		"operations": []string{
 			"box", "cylinder", "sphere", "extrude_rectangle", "extrude_circle", "extrude_polygon",
 			"revolve_profile", "sweep_circle", "fuse", "cut", "intersect", "compound", "translate", "rotate", "scale", "mirror",
-			"linear_pattern", "circular_pattern", "fillet", "chamfer",
+			"linear_pattern", "circular_pattern", "fillet", "chamfer", "component",
 		},
 		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "manufacturing-package.zip"},
 		"linked_components": map[string]any{
 			"source_contract": map[string]any{"design_id": 12, "revision_id": 34, "source_sha256": "64 lowercase hex characters", "part_id": "optional_named_part"},
 			"create_tool":     "assembly_create", "refresh_tool": "assembly_sources_refresh",
-			"semantics": "Revision and hash pins are immutable; refresh creates a new assembly revision.",
+			"semantics":       "Revision and hash pins are immutable; refresh creates a new assembly revision.",
+			"dependents_tool": "component_dependents", "refresh_all_tool": "component_sources_refresh_all",
 		},
 		"pcb_enclosures": map[string]any{
 			"source_schema": pcbMechanicalEnvelopeSchema,

@@ -1,4 +1,5 @@
 import {geometryFor,rememberGeometry,inheritCache,meshFor} from "./geometry-cache.mjs";
+import { ExpressionParser } from "./expressions.mjs";
 import { loadAsset, inspect, topology, count } from "./inspection.mjs";
 import initOpenCascade from "replicad-opencascadejs/src/replicad_single.js";
 import {
@@ -24,7 +25,7 @@ import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
 const importedGeometry=new WeakSet();
-const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.5";
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.7";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -38,92 +39,11 @@ function finite(value, label) {
   return number;
 }
 
-class ExpressionParser {
-  constructor(source, params) {
-    this.source = source;
-    this.params = params;
-    this.index = 0;
-  }
-
-  parse() {
-    const result = this.expression();
-    this.space();
-    if (this.index !== this.source.length) {
-      fail(`unexpected token in expression ${JSON.stringify(this.source)} at ${this.index}`);
-    }
-    return finite(result, `expression ${JSON.stringify(this.source)}`);
-  }
-
-  expression() {
-    let value = this.term();
-    for (;;) {
-      this.space();
-      if (this.take("+")) value += this.term();
-      else if (this.take("-")) value -= this.term();
-      else return value;
-    }
-  }
-
-  term() {
-    let value = this.unary();
-    for (;;) {
-      this.space();
-      if (this.take("*")) value *= this.unary();
-      else if (this.take("/")) {
-        const divisor = this.unary();
-        if (divisor === 0) fail(`division by zero in expression ${JSON.stringify(this.source)}`);
-        value /= divisor;
-      } else return value;
-    }
-  }
-
-  unary() {
-    this.space();
-    if (this.take("+")) return this.unary();
-    if (this.take("-")) return -this.unary();
-    return this.primary();
-  }
-
-  primary() {
-    this.space();
-    if (this.take("(")) {
-      const value = this.expression();
-      this.space();
-      if (!this.take(")")) fail(`missing ')' in expression ${JSON.stringify(this.source)}`);
-      return value;
-    }
-    const number = this.match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
-    if (number) return Number(number);
-    const identifier = this.match(/^[A-Za-z_][A-Za-z0-9_]*/);
-    if (identifier) {
-      if (!Object.hasOwn(this.params, identifier)) fail(`unknown parameter ${identifier}`);
-      return finite(this.params[identifier], `parameter ${identifier}`);
-    }
-    fail(`expected number, parameter, or '(' in expression ${JSON.stringify(this.source)} at ${this.index}`);
-  }
-
-  match(pattern) {
-    const found = this.source.slice(this.index).match(pattern);
-    if (!found) return "";
-    this.index += found[0].length;
-    return found[0];
-  }
-
-  take(value) {
-    if (!this.source.startsWith(value, this.index)) return false;
-    this.index += value.length;
-    return true;
-  }
-
-  space() {
-    while (/\s/.test(this.source[this.index] || "")) this.index += 1;
-  }
-}
-
 function resolve(value, params, label = "value") {
   if (typeof value === "number") return finite(value, label);
+  if (typeof value === "boolean") return value ? 1 : 0;
   if (typeof value === "string") return new ExpressionParser(value, params).parse();
-  fail(`${label} must be a number or arithmetic parameter expression`);
+  fail(`${label} must be a number or parameter expression`);
 }
 
 function vector(value, params, label, fallback = [0, 0, 0]) {
@@ -138,7 +58,12 @@ function parameterValues(definition, supplied) {
     const profile=(definition.print_profiles||[]).find(p=>p.id===definition.fit_profile_id);
     const fitValue=spec.fit?profile?.fits_mm?.[spec.fit]:undefined;
     const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : fitValue??spec.default;
-    const value = finite(candidate, `parameter ${name}`);
+    const value = typeof candidate === "boolean" ? (candidate ? 1 : 0) : finite(candidate, `parameter ${name}`);
+    if (spec.type === "boolean" && value !== 0 && value !== 1) fail(`parameter ${name} must be true/false (1/0)`);
+    if (spec.type === "integer" && !Number.isInteger(value)) fail(`parameter ${name} must be an integer`);
+    if (Array.isArray(spec.options) && spec.options.length && !spec.options.some((option) => Math.abs(Number(option) - value) <= 1e-9)) {
+      fail(`parameter ${name} must be one of ${spec.options.join(", ")}`);
+    }
     if (spec.min !== undefined && value < finite(spec.min, `${name}.min`)) {
       fail(`parameter ${name} is below its minimum`);
     }
@@ -153,8 +78,11 @@ function parameterValues(definition, supplied) {
   return output;
 }
 
+const SKIPPED = Symbol("skipped");
+
 function shapeFor(id, shapes) {
   const shape = shapes.get(id);
+  if (shape === SKIPPED) fail(`operation references ${id}, which is skipped because its when condition is false`);
   if (!shape) fail(`operation references unknown shape ${id}`);
   return shape;
 }
@@ -170,13 +98,41 @@ function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) 
   return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
 }
 
-function buildOperation(operation, shapes, params, assets, importedVisuals) {
+function activeIds(ids, shapes) {
+  return ids.filter((id) => shapes.get(id) !== SKIPPED);
+}
+
+function componentParameters(component, params, label) {
+  const merged = { ...(component.parameters || {}) };
+  for (const [name, expression] of Object.entries(component.parameter_expressions || {})) {
+    merged[name] = resolve(expression, params, `${label}.parameters.${name}`);
+  }
+  return merged;
+}
+
+function buildComponentShape(component, params, label) {
+  const child = buildDefinitionGeometry(component.definition, componentParameters(component, params, label));
+  const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
+  if (!selected) fail(`${label} source part ${component.source_part_id} has no geometry`);
+  const shape = selected.clone();
+  if (importedGeometry.has(selected)) importedGeometry.add(shape);
+  inheritCache(selected, shape);
+  return { child, selected: shape };
+}
+
+function buildOperation(operation, shapes, params, assets, importedVisuals, components = {}) {
   if (!operation || typeof operation !== "object") fail("every operation must be an object");
   if (!operation.id || typeof operation.id !== "string") fail("every operation requires a string id");
   if (shapes.has(operation.id)) fail(`duplicate operation id ${operation.id}`);
 
   let shape;
   switch (operation.type) {
+    case "component": {
+      const component = components?.[operation.id];
+      if (!component) fail(`component operation ${operation.id} was not resolved by Design Studio`);
+      shape = applyAssemblyTransform(buildComponentShape(component, params, operation.id).selected, operation.transform || {}, params);
+      break;
+    }
     case "import_step": {
       const loaded=loadAsset(assets?.[operation.asset_id],operation.component_id);
       importedGeometry.add(loaded.shape);for(const v of loaded.visuals)importedGeometry.add(v.shape);
@@ -276,8 +232,12 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
       if (!Array.isArray(ids) || ids.length < 2 || ids.some((id) => typeof id !== "string")) {
         fail(`${operation.id}.${operation.type} needs at least two input ids`);
       }
-      shape = shapeFor(ids[0], shapes).clone();
-      for (const id of ids.slice(1)) {
+      // Skipped inputs drop out. A cut keeps its base (a skipped base is an
+      // error); a fuse/intersect needs at least one remaining input.
+      const active = operation.type === "cut" ? [ids[0], ...activeIds(ids.slice(1), shapes)] : activeIds(ids, shapes);
+      if (active.length === 0) fail(`${operation.id}: every input is skipped by its when condition`);
+      shape = shapeFor(active[0], shapes).clone();
+      for (const id of active.slice(1)) {
         const tool = shapeFor(id, shapes).clone();
         shape = operation.type === "fuse" ? shape.fuse(tool) : operation.type === "cut" ? shape.cut(tool) : shape.intersect(tool);
       }
@@ -286,7 +246,9 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "compound": {
       const ids = operation.inputs;
       if (!Array.isArray(ids) || ids.length === 0) fail(`${operation.id}.inputs is required`);
-      shape = makeCompound(ids.map((id) => shapeFor(id, shapes).clone()));
+      const active = activeIds(ids, shapes);
+      if (active.length === 0) fail(`${operation.id}: every input is skipped by its when condition`);
+      shape = makeCompound(active.map((id) => shapeFor(id, shapes).clone()));
       break;
     }
     case "translate": {
@@ -501,7 +463,16 @@ function buildDefinitionGeometry(definition, supplied) {
   validateDefinition(definition);
   const params = parameterValues(definition, supplied || {});
   const shapes = new Map(), importedVisuals=new Map();
-  for (const operation of definition.operations) buildOperation(operation, shapes, params, definition._assets, importedVisuals);
+  for (const operation of definition.operations) {
+    if (operation && operation.when !== undefined && operation.when !== null) {
+      if (shapes.has(operation.id)) fail(`duplicate operation id ${operation.id}`);
+      if (resolve(operation.when, params, `${operation.id}.when`) === 0) {
+        shapes.set(operation.id, SKIPPED);
+        continue;
+      }
+    }
+    buildOperation(operation, shapes, params, definition._assets, importedVisuals, definition._resolved_operation_components || {});
+  }
   const resolved = new Map((definition._resolved_components || []).map((component) => [component.part_id, component]));
   const partShapes = new Map();
   const partPhysical = new Map();
@@ -511,15 +482,11 @@ function buildDefinitionGeometry(definition, supplied) {
     if (part.source) {
       const component = resolved.get(part.id);
       if (!component) fail(`linked part ${part.id} was not resolved by Design Studio`);
-      const child = buildDefinitionGeometry(component.definition, component.parameters || {});
+      const { child, selected: selectedShape } = buildComponentShape(component, params, `part ${part.id}`);
       const sourcePart=component.source_part_id?(component.definition.parts||[]).find(p=>p.id===component.source_part_id):null;
       if(sourcePart && !part.manufacturing) part.manufacturing=sourcePart.manufacturing;
       if(!component.source_part_id && (component.definition.parts||[]).some(p=>['purchased','reference'].includes(p.manufacturing?.classification)||p._exclude_print))part._exclude_print=true;
 
-      const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
-      if (!selected) fail(`linked part ${part.id} source part ${component.source_part_id} has no geometry`);
-      const selectedShape=selected.clone();if(importedGeometry.has(selected))importedGeometry.add(selectedShape);
-      inheritCache(selected,selectedShape);
       partShapes.set(part.id, selectedShape);
       const physical = component.source_part_id ? child.partPhysical.get(component.source_part_id) : child.physical;
       if (physical) partPhysical.set(part.id, physical);
