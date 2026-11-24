@@ -86,7 +86,7 @@ func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 		names = append(names, f.Name)
 	}
 	sort.Strings(names)
-	want := []string{"manifest.json", "manufacturing/board.gbrjob", "manufacturing/drill/board.drl", "manufacturing/gerbers/B_Cu.gbr", "manufacturing/gerbers/Edge_Cuts.gbr", "manufacturing/gerbers/F_Cu.gbr", "outputs/board.svg", "outputs/bom.csv", "source/pcb.json", "validation/report.json", "verification/fabrication.json"}
+	want := []string{"assembly/bom.csv", "assembly/pick-and-place.csv", "exchange/board.kicad_pcb", "manifest.json", "manufacturing/board.gbrjob", "manufacturing/drill/board.drl", "manufacturing/gerbers/B_Cu.gbr", "manufacturing/gerbers/Edge_Cuts.gbr", "manufacturing/gerbers/F_Cu.gbr", "outputs/board.svg", "outputs/bom.csv", "production/bring-up-plan.json", "production/bring-up-plan.txt", "production/readiness.json", "source/pcb.json", "validation/report.json", "verification/fabrication.json", "verification/kicad.json"}
 	if len(names) != len(want) {
 		t.Fatalf("release files: %v", names)
 	}

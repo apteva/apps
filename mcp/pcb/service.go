@@ -48,6 +48,11 @@ type FabricationVerificationRun struct {
 	Artifact *Artifact                `json:"artifact"`
 }
 
+type KiCadVerificationRun struct {
+	Result   *KiCadVerification `json:"result"`
+	Artifact *Artifact          `json:"artifact"`
+}
+
 func (s *Service) revision(designID, revisionID int64) (*Design, *Revision, *Definition, error) {
 	design, err := s.store.GetDesign(s.project, designID)
 	if err != nil {
@@ -85,6 +90,94 @@ func (s *Service) Render(designID, revisionID int64) (*Artifact, error) {
 		return nil, err
 	}
 	return s.persistArtifact(design, revision, "preview", "svg", "image/svg+xml", renderSVG(def), map[string]any{"engine": engineVersion, "units": "nm"})
+}
+
+func (s *Service) MechanicalGet(designID, revisionID int64) (*MechanicalEnvelopeArtifact, *MechanicalValidation, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	report := validateMechanical(def)
+	if def.Mechanical == nil {
+		return nil, &report, errors.New("revision has no mechanical envelope")
+	}
+	envelope := mechanicalEnvelope(design, revision, def)
+	return &envelope, &report, nil
+}
+
+func (s *Service) MechanicalValidate(designID, revisionID int64) (*MechanicalValidation, error) {
+	_, _, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	report := validateMechanical(def)
+	return &report, nil
+}
+
+func (s *Service) MechanicalPreview(designID, revisionID int64) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	report := validateMechanical(def)
+	if report.Status == "failed" {
+		return nil, fmt.Errorf("mechanical envelope failed validation with %d errors; preview refused", report.Errors)
+	}
+	return s.persistArtifact(design, revision, "mechanical-preview", "svg", "image/svg+xml", renderMechanicalSVG(def), map[string]any{"engine": engineVersion, "schema": mechanicalSchema, "validation_status": report.Status})
+}
+
+func (s *Service) MechanicalExport(designID, revisionID int64) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	report := validateMechanical(def)
+	if report.Status == "failed" {
+		return nil, fmt.Errorf("mechanical envelope failed validation with %d errors; export refused", report.Errors)
+	}
+	return s.persistArtifact(design, revision, "mechanical-envelope", "json", "application/json", mechanicalJSON(design, revision, def), map[string]any{"engine": engineVersion, "schema": mechanicalEnvelopeSchema, "validation_status": report.Status})
+}
+
+func (s *Service) MechanicalSolidExport(designID, revisionID int64, format string) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	report := validateMechanical(def)
+	if report.Status == "failed" {
+		return nil, fmt.Errorf("mechanical envelope failed validation with %d errors; solid export refused", report.Errors)
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	var body []byte
+	contentType := ""
+	metadata := map[string]any{"engine": engineVersion, "schema": mechanicalEnvelopeSchema, "validation_status": report.Status}
+	switch format {
+	case "step", "stp":
+		format = "step"
+		body, contentType = renderMechanicalSTEP(def), "model/step"
+		if err = verifyMechanicalSTEP(def, body); err != nil {
+			return nil, err
+		}
+		metadata["cad_exchange_assembly"] = true
+		metadata["authoritative_profile"] = false
+		metadata["step_schema"] = "AP242 faceted BREP"
+	case "stl":
+		body, contentType = renderMechanicalSTL(def), "model/stl"
+		metadata["reference_mesh"] = true
+	case "3mf":
+		body, err = renderMechanical3MF(def)
+		contentType = "model/3mf"
+		metadata["reference_mesh"] = true
+	case "dxf":
+		body, contentType = renderMechanicalDXF(def), "image/vnd.dxf"
+		metadata["authoritative_profile"] = true
+	default:
+		return nil, errors.New("mechanical solid format must be step, stl, 3mf, or dxf")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.persistArtifact(design, revision, "mechanical-assembly", format, contentType, body, metadata)
 }
 
 func (s *Service) BOM(designID, revisionID int64) (*Artifact, error) {
@@ -330,6 +423,55 @@ func (s *Service) VerifyManufacturing(designID, revisionID int64) (*FabricationV
 	return &FabricationVerificationRun{Result: result, Artifact: artifact}, nil
 }
 
+func (s *Service) KiCadExport(designID, revisionID int64) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	body := renderKiCadPCB(def)
+	verification := verifyKiCadPCB(def, body)
+	if verification.Status == "failed" {
+		return nil, fmt.Errorf("KiCad exchange verification failed with %d errors", verification.Errors)
+	}
+	return s.persistArtifact(design, revision, "kicad-exchange", "kicad_pcb", "application/x-kicad-pcb", body, map[string]any{"engine": engineVersion, "schema": kicadExchangeSchema, "verification_status": verification.Status, "counts": verification.Counts})
+}
+
+func (s *Service) KiCadVerify(designID, revisionID int64) (*KiCadVerificationRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result := verifyKiCadPCB(def, renderKiCadPCB(def))
+	artifact, err := s.persistArtifact(design, revision, "kicad-verification", "json", "application/json", kicadVerificationJSON(result), map[string]any{"engine": engineVersion, "schema": kicadExchangeSchema, "status": result.Status, "errors": result.Errors})
+	return &KiCadVerificationRun{Result: result, Artifact: artifact}, err
+}
+
+func (s *Service) KiCadImport(name string, content []byte, note, author string) (*Design, error) {
+	def, err := importKiCadPCB(name, content)
+	if err != nil {
+		return nil, err
+	}
+	canonical, _, hash, err := normalizeDefinition(mustJSON(def), name)
+	if err != nil {
+		return nil, err
+	}
+	design, err := s.store.CreateDesign(s.project, name, canonical, nil, hash, strings.TrimSpace(note), author)
+	if err == nil && s.ctx != nil {
+		s.ctx.Emit("pcb.design.created", map[string]any{"design_id": design.ID, "revision_id": design.CurrentRevisionID, "name": design.Name, "source_format": "kicad_pcb"})
+	}
+	return design, err
+}
+
+func (s *Service) ProductionReadiness(designID, revisionID int64) (*ProductionReadinessReport, *Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	report := productionReadinessWith(def, s.readinessInputs(design, revision, def))
+	artifact, err := s.persistArtifact(design, revision, "production-readiness", "json", "application/json", productionReadinessJSON(report), map[string]any{"engine": engineVersion, "schema": productionSchema, "status": report.Status, "errors": report.Errors, "physical_validation": report.PhysicalValidation})
+	return report, artifact, err
+}
+
 func (s *Service) Release(_ context.Context, designID, revisionID int64, note string) (*Artifact, error) {
 	design, revision, def, err := s.revision(designID, revisionID)
 	if err != nil {
@@ -363,6 +505,34 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 	files["validation/report.json"] = append(validation, '\n')
 	verificationBody, _ := json.MarshalIndent(verification, "", "  ")
 	files["verification/fabrication.json"] = append(verificationBody, '\n')
+	kicadBoard := renderKiCadPCB(def)
+	kicadVerification := verifyKiCadPCB(def, kicadBoard)
+	if kicadVerification.Status == "failed" {
+		return nil, fmt.Errorf("KiCad exchange verification failed with %d errors; release refused", kicadVerification.Errors)
+	}
+	files["exchange/board.kicad_pcb"] = kicadBoard
+	files["verification/kicad.json"] = kicadVerificationJSON(kicadVerification)
+	readiness := productionReadinessWith(def, s.readinessInputs(design, revision, def))
+	files["production/readiness.json"] = productionReadinessJSON(readiness)
+	files["production/bring-up-plan.txt"] = productionTestPlan(def)
+	planBody, _ := json.MarshalIndent(bringUpPlan(def), "", "  ")
+	files["production/bring-up-plan.json"] = append(planBody, '\n')
+	for name, body := range assemblyFiles(def) {
+		files[name] = body
+	}
+	if len(firmwareBoardPins(def)) > 0 {
+		files["firmware/board_pins.h"] = renderFirmwareHeader(def)
+	}
+	if def.Firmware != nil && strings.TrimSpace(def.Firmware.Source) != "" {
+		files["firmware/main.ino"] = []byte(def.Firmware.Source)
+	}
+	if def.Mechanical != nil {
+		stepBody := renderMechanicalSTEP(def)
+		if err := verifyMechanicalSTEP(def, stepBody); err != nil {
+			return nil, err
+		}
+		files["mechanical/assembly.step"] = stepBody
+	}
 	files["outputs/board.svg"] = renderSVG(def)
 	files["outputs/bom.csv"] = renderBOM(def)
 	if def.Wiring != nil {
@@ -378,7 +548,7 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 		sum := sha256.Sum256(body)
 		hashes[name] = hex.EncodeToString(sum[:])
 	}
-	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "fabrication_verification_status": verification.Status, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "original_sources_preserved": true}}
+	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "fabrication_verification_status": verification.Status, "kicad_verification_status": kicadVerification.Status, "production_readiness_status": readiness.Status, "physical_validation": readiness.PhysicalValidation, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "kicad_board": "20240108", "step": "AP242 faceted BREP", "original_sources_preserved": true}}
 	manifestBody, _ := json.MarshalIndent(manifest, "", "  ")
 	files["manifest.json"] = append(manifestBody, '\n')
 	body, err := deterministicZip(files)
@@ -481,7 +651,7 @@ func (s *Service) uploadStorage(name, contentType string, body []byte, designID,
 func renderBOM(def *Definition) []byte {
 	type group struct {
 		Value, MPN, Footprint, Name string
-		Refs                        []string
+		Refs, Reasons, Datasheets   []string
 	}
 	groups := map[string]*group{}
 	for _, c := range def.Components {
@@ -492,6 +662,12 @@ func renderBOM(def *Definition) []byte {
 			groups[key] = g
 		}
 		g.Refs = append(g.Refs, c.Designator)
+		if reason := strings.TrimSpace(c.Reason); reason != "" && !containsString(g.Reasons, reason) {
+			g.Reasons = append(g.Reasons, reason)
+		}
+		if ref := strings.TrimSpace(c.DatasheetRef); ref != "" && !containsString(g.Datasheets, ref) {
+			g.Datasheets = append(g.Datasheets, ref)
+		}
 	}
 	keys := make([]string, 0, len(groups))
 	for k := range groups {
@@ -500,11 +676,11 @@ func renderBOM(def *Definition) []byte {
 	sort.Strings(keys)
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"quantity", "designators", "value", "manufacturer_part_number", "footprint", "name"})
+	_ = w.Write([]string{"quantity", "designators", "value", "manufacturer_part_number", "footprint", "name", "reason", "datasheet_ref"})
 	for _, key := range keys {
 		g := groups[key]
 		sort.Strings(g.Refs)
-		_ = w.Write([]string{strconv.Itoa(len(g.Refs)), strings.Join(g.Refs, " "), g.Value, g.MPN, g.Footprint, g.Name})
+		_ = w.Write([]string{strconv.Itoa(len(g.Refs)), strings.Join(g.Refs, " "), g.Value, g.MPN, g.Footprint, g.Name, strings.Join(g.Reasons, "; "), strings.Join(g.Datasheets, " ")})
 	}
 	w.Flush()
 	return buf.Bytes()

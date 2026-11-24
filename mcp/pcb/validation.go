@@ -7,6 +7,7 @@ import (
 )
 
 func validateDefinition(def *Definition) ValidationReport {
+	def = withFabProfile(def)
 	report := ValidationReport{
 		Schema: "apteva-pcb-validation/v1",
 		Engine: engineVersion,
@@ -45,6 +46,15 @@ func validateDefinition(def *Definition) ValidationReport {
 	}
 	if def.Rules.MinAnnularRingNM <= 0 {
 		add("RULE_ANNULAR_RING_INVALID", "error", "Minimum annular ring must be positive")
+	}
+	if def.Rules.MinSolderMaskSliverNM <= 0 {
+		add("RULE_MASK_SLIVER_INVALID", "error", "Minimum solder-mask sliver must be positive")
+	}
+	if def.Rules.MinCopperToHoleNM <= 0 {
+		add("RULE_COPPER_HOLE_INVALID", "error", "Minimum copper-to-hole clearance must be positive")
+	}
+	if def.Rules.MinCourtyardClearanceNM < 0 {
+		add("RULE_COURTYARD_INVALID", "error", "Courtyard clearance cannot be negative")
 	}
 
 	layers := map[string]Layer{}
@@ -216,8 +226,8 @@ func validateDefinition(def *Definition) ValidationReport {
 			if _, ok := nets[source.NetID]; !ok {
 				add("SIMULATION_SOURCE_NET", "error", "Simulation source references a missing net", source.ID, source.NetID)
 			}
-			if source.Kind != "dc" && source.Kind != "digital" && source.Kind != "clock" {
-				add("SIMULATION_SOURCE_KIND", "error", "Simulation source kind must be dc, digital, or clock", source.ID)
+			if source.Kind != "dc" && source.Kind != "digital" && source.Kind != "clock" && source.Kind != "load" {
+				add("SIMULATION_SOURCE_KIND", "error", "Simulation source kind must be dc, digital, clock, or load", source.ID)
 			}
 		}
 		probeIDs := map[string]bool{}
@@ -309,7 +319,16 @@ func validateDefinition(def *Definition) ValidationReport {
 	for _, check := range validateManufacturing(def) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
+	for _, check := range validateProductionGeometry(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
 	for _, check := range wiringChecks(def.Wiring) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
+	for _, check := range fabProfileChecks(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
+	for _, check := range schematicChecks(def) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
 

@@ -91,10 +91,15 @@ func verifyManufacturingFiles(def *Definition, files map[string][]byte) *Fabrica
 	}
 	expectedHoles := expectedDrillCount(def)
 	if report.Summary["holes"] != expectedHoles {
-		add("FAB_DRILL_RECONCILIATION", fmt.Sprintf("Parsed %d holes but native geometry contains %d drilled pads/vias", report.Summary["holes"], expectedHoles), "drill/board.drl")
+		add("FAB_DRILL_RECONCILIATION", fmt.Sprintf("Parsed %d holes but native geometry contains %d drilled pads, vias, and mounting holes", report.Summary["holes"], expectedHoles), "drill/board.drl")
 	}
-	if edge := fileMetrics(report.Files, "gerbers/Edge_Cuts.gbr"); edge == nil || edge.Draws != 4 {
-		add("FAB_OUTLINE_RECONCILIATION", "Parsed board outline must contain exactly four closed rectangular edges", "gerbers/Edge_Cuts.gbr")
+	expectedEdges := expectedEdgeDrawCount(def)
+	if edge := fileMetrics(report.Files, "gerbers/Edge_Cuts.gbr"); edge == nil || edge.Draws != expectedEdges {
+		actual := 0
+		if edge != nil {
+			actual = edge.Draws
+		}
+		add("FAB_OUTLINE_RECONCILIATION", fmt.Sprintf("Parsed %d outline/cutout segments but native geometry contains %d", actual, expectedEdges), "gerbers/Edge_Cuts.gbr")
 	}
 	if report.Summary["draws"] == 0 {
 		add("FAB_NO_GEOMETRY", "Fabrication package contains no parsed drawing geometry")
@@ -235,6 +240,21 @@ func expectedDrillCount(def *Definition) int {
 				count++
 			}
 		}
+	}
+	if def.Mechanical != nil {
+		for _, hole := range def.Mechanical.MountingHoles {
+			if hole.DiameterNM > 0 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func expectedEdgeDrawCount(def *Definition) int {
+	count := len(boardOutline(def.Board))
+	for _, cutout := range def.Board.Cutouts {
+		count += len(boardCutoutContour(cutout))
 	}
 	return count
 }

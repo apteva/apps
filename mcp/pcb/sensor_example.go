@@ -156,5 +156,6 @@ func sensorNodeExample() Definition {
 			def.Vias = append(def.Vias, Via{ID: id + "_via", NetID: "gnd", XNM: viaPoint.XNM, YNM: viaPoint.YNM, DiameterNM: 650_000, DrillNM: 300_000, FromLayer: "F.Cu", ToLayer: "B.Cu"})
 		}
 	}
+	attachNativeContracts(&def)
 	return def
 }

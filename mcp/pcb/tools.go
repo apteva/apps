@@ -18,13 +18,28 @@ func (a *App) MCPTools() []sdk.Tool {
 	operation := map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string"}}, "required": []string{"type"}}
 	routeOptions := map[string]any{"type": "object", "description": "Native deterministic routing options including net_ids, layers, grid_nm, clearance_nm, widths, via geometry, and replace_existing."}
 	simulationOptions := map[string]any{"type": "object", "description": "Simulation duration, step, sources, probes, and fault injection."}
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{Name: "pcb_examples", Description: "Return the native PCB schema example, units, operations, and compatibility boundary.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolExamples},
 		{Name: "pcb_wiring_library", Description: "List native reference parts and named pins for programmatic wiring illustrations.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolWiringLibrary},
 		{Name: "pcb_wiring_example_create", Description: "Create the native Arduino Uno, breadboard, 220 ohm resistor, and red LED tutorial as an editable design.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolWiringExampleCreate},
 		{Name: "pcb_wiring_validate", Description: "Validate named wiring endpoints, electrical compatibility, and tutorial references.", InputSchema: designActionSchema(id), HandlerCtx: a.toolWiringValidate},
 		{Name: "pcb_wiring_export", Description: "Persist a native wiring SVG, PNG, tutorial JSON, or complete tutorial ZIP.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "format": map[string]any{"type": "string", "enum": []string{"svg", "png", "tutorial-json", "tutorial-zip"}}}, []string{"design_id", "format"}), HandlerCtx: a.toolWiringExport},
 		{Name: "pcb_wiring_simulate", Description: "Run the saved or supplied Arduino sketch and map GPIO state onto the physical wiring illustration.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "source": map[string]any{"type": "string"}, "iterations": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"design_id"}), HandlerCtx: a.toolWiringSimulate},
+		{Name: "pcb_mechanical_example_create", Description: "Create the native Raspberry Pi 4 mechanical-reference design.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolMechanicalExampleCreate},
+		{Name: "pcb_dht22_example_create", Description: "Create the routed USB-C ESP32-C3 DHT22 sensor node with native mechanical geometry.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolDHT22ExampleCreate},
+		{Name: "pcb_kicad_import", Description: "Import a KiCad .kicad_pcb board into a new native immutable PCB Studio design.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"}}, []string{"name", "content"}), HandlerCtx: a.toolKiCadImport},
+		{Name: "pcb_kicad_export", Description: "Export the current native revision as a deterministic KiCad .kicad_pcb artifact.", InputSchema: designActionSchema(id), HandlerCtx: a.toolKiCadExport},
+		{Name: "pcb_kicad_verify", Description: "Parse and reconcile the generated KiCad board against the native revision.", InputSchema: designActionSchema(id), HandlerCtx: a.toolKiCadVerify},
+		{Name: "pcb_schematic_get", Description: "Read a revision's schematic (sheets, resolved symbols and pin anchors, wires, labels, junctions) plus schematic ERC against the net list.", InputSchema: schematicToolSchemas(id)["get"], HandlerCtx: a.toolSchematicGet},
+		{Name: "pcb_schematic_generate", Description: "Generate a schematic from the net list (one symbol per component, net labels and power flags) and create an immutable revision.", InputSchema: schematicToolSchemas(id)["generate"], HandlerCtx: a.toolSchematicGenerate},
+		{Name: "pcb_schematic_render", Description: "Persist a deterministic SVG of one schematic sheet.", InputSchema: schematicToolSchemas(id)["render"], HandlerCtx: a.toolSchematicRender},
+		{Name: "pcb_kicad_schematic_import", Description: "Attach a single-sheet KiCad .kicad_sch to a design revision, mapping symbols by reference designator, and return a net comparison report.", InputSchema: schematicToolSchemas(id)["import"], HandlerCtx: a.toolKiCadSchematicImport},
+		{Name: "pcb_production_readiness", Description: "Run the fabrication, footprint, exchange, mechanical, test-fixture, and physical-validation readiness gate.", InputSchema: designActionSchema(id), HandlerCtx: a.toolProductionReadiness},
+		{Name: "pcb_mechanical_get", Description: "Read a deterministic mechanical envelope and validation report without creating an artifact.", InputSchema: designActionSchema(id), HandlerCtx: a.toolMechanicalGet},
+		{Name: "pcb_mechanical_validate", Description: "Validate board outline, thickness, mounting holes, component solids, openings, and clearance volumes.", InputSchema: designActionSchema(id), HandlerCtx: a.toolMechanicalValidate},
+		{Name: "pcb_mechanical_preview", Description: "Persist a deterministic native 3D mechanical SVG preview.", InputSchema: designActionSchema(id), HandlerCtx: a.toolMechanicalPreview},
+		{Name: "pcb_mechanical_export", Description: "Persist an immutable apteva-mechanical-envelope/v1 JSON artifact.", InputSchema: designActionSchema(id), HandlerCtx: a.toolMechanicalExport},
+		{Name: "pcb_mechanical_solid_export", Description: "Export a native AP242 STEP assembly, STL/3MF reference mesh, or authoritative DXF profile.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "format": map[string]any{"type": "string", "enum": []string{"step", "stl", "3mf", "dxf"}}}, []string{"design_id", "format"}), HandlerCtx: a.toolMechanicalSolidExport},
 		{Name: "pcb_designs_create", Description: "Create a project PCB design and immutable first revision.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "definition": definition, "note": map[string]any{"type": "string"}}, []string{"name"}), HandlerCtx: a.toolDesignCreate},
 		{Name: "pcb_designs_list", Description: "List PCB designs in the current project.", InputSchema: schemaObject(map[string]any{"q": map[string]any{"type": "string"}, "status": map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, nil), HandlerCtx: a.toolDesignList},
 		{Name: "pcb_designs_get", Description: "Fetch a PCB design with current revision, validation, and artifacts.", InputSchema: schemaObject(map[string]any{"id": id}, []string{"id"}), HandlerCtx: a.toolDesignGet},
@@ -55,9 +70,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pcb_artifacts_list", Description: "List generated PCB artifacts.", InputSchema: designActionSchema(id), HandlerCtx: a.toolArtifacts},
 		{Name: "pcb_release_create", Description: "Validate and create a traceable native release ZIP; errors block release.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRelease},
 		{Name: "pcb_components_search", Description: "Search the optional component-data integration without coupling the PCB model to it.", InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"query"}), HandlerCtx: a.toolComponentsSearch},
-		{Name: "pcb_bom_source", Description: "Match up to twenty revision MPNs through the optional component-data integration.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolBOMSource},
+		{Name: "pcb_bom_source", Description: "Check stock and price for every revision MPN through the component-data integration; stores a sourcing summary (feeds the sourcing readiness gate) and a priced BOM.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}, "build_quantity": map[string]any{"type": "integer", "minimum": 1, "maximum": 100000}}, []string{"design_id"}), HandlerCtx: a.toolBOMSource},
 		{Name: "pcb_providers_status", Description: "Report native app and provider integration bindings and the safe capabilities enabled by this version.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolProvidersStatus},
 	}
+	tools = append(tools, a.placementTools(id)...)
+	return append(tools, a.v010Tools()...)
 }
 
 func schemaObject(properties map[string]any, required []string) map[string]any {
@@ -102,6 +119,119 @@ func (a *App) toolWiringExampleCreate(ctx context.Context, app *sdk.AppCtx, args
 }
 
 func mustJSON(value any) []byte { body, _ := json.Marshal(value); return body }
+
+func (a *App) toolMechanicalExampleCreate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	def := raspberryPi4MechanicalExample()
+	if name := stringArg(args, "name"); name != "" {
+		def.Name = name
+	}
+	canonical, _, hash, err := normalizeDefinition(mustJSON(def), def.Name)
+	if err != nil {
+		return nil, err
+	}
+	design, err := s.store.CreateDesign(s.project, def.Name, canonical, nil, hash, stringArg(args, "note"), callerName(ctx))
+	if err == nil {
+		app.Emit("pcb.design.created", map[string]any{"design_id": design.ID, "revision_id": design.CurrentRevisionID, "name": design.Name, "template": "raspberry-pi-4-mechanical"})
+	}
+	return map[string]any{"design": design, "template": "raspberry-pi-4-mechanical"}, err
+}
+func (a *App) toolDHT22ExampleCreate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	def := dht22SensorNodeExample()
+	if name := stringArg(args, "name"); name != "" {
+		def.Name = name
+	}
+	canonical, _, hash, err := normalizeDefinition(mustJSON(def), def.Name)
+	if err != nil {
+		return nil, err
+	}
+	design, err := s.store.CreateDesign(s.project, def.Name, canonical, nil, hash, stringArg(args, "note"), callerName(ctx))
+	if err == nil {
+		app.Emit("pcb.design.created", map[string]any{"design_id": design.ID, "revision_id": design.CurrentRevisionID, "name": design.Name, "template": "dht22-sensor-node"})
+	}
+	return map[string]any{"design": design, "template": "dht22-sensor-node"}, err
+}
+func (a *App) toolMechanicalGet(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	envelope, validation, err := s.MechanicalGet(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+	return map[string]any{"envelope": envelope, "validation": validation}, err
+}
+func (a *App) toolMechanicalValidate(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	return s.MechanicalValidate(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+}
+func (a *App) toolMechanicalPreview(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.MechanicalPreview(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+	return map[string]any{"artifact": artifact}, err
+}
+func (a *App) toolMechanicalExport(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.MechanicalExport(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+	return map[string]any{"artifact": artifact}, err
+}
+func (a *App) toolMechanicalSolidExport(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.MechanicalSolidExport(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), stringArg(args, "format"))
+	return map[string]any{"artifact": artifact}, err
+}
+
+func (a *App) toolKiCadImport(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	design, err := s.KiCadImport(stringArg(args, "name"), []byte(stringArg(args, "content")), stringArg(args, "note"), callerName(ctx))
+	return map[string]any{"design": design}, err
+}
+
+func (a *App) toolKiCadExport(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.KiCadExport(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+	return map[string]any{"artifact": artifact}, err
+}
+
+func (a *App) toolKiCadVerify(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	return s.KiCadVerify(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+}
+
+func (a *App) toolProductionReadiness(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	report, artifact, err := s.ProductionReadiness(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+	return map[string]any{"result": report, "artifact": artifact}, err
+}
 
 func (a *App) toolWiringValidate(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	s, err := a.service(app)
@@ -529,46 +659,18 @@ func (a *App) toolBOMSource(_ context.Context, app *sdk.AppCtx, args map[string]
 	if err != nil {
 		return nil, err
 	}
-	_, revision, def, err := s.revision(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
-	if err != nil {
-		return nil, err
-	}
-	bound := app.IntegrationFor("component_data")
-	if bound == nil {
-		return nil, errors.New("no component-data provider is bound")
-	}
-	seen := map[string]bool{}
-	parts := []map[string]any{}
-	missing := []string{}
-	for _, c := range def.Components {
-		mpn := strings.TrimSpace(c.MPN)
-		if mpn == "" {
-			missing = append(missing, c.Designator)
-			continue
-		}
-		if !seen[mpn] && len(parts) < 20 {
-			seen[mpn] = true
-			parts = append(parts, map[string]any{"mpn": mpn})
-		}
-	}
-	if len(parts) == 0 {
-		return nil, errors.New("revision BOM has no manufacturer part numbers")
-	}
-	result, err := executeProvider(app, bound, bound.ToolFor("components.match_bom"), map[string]any{"parts": parts, "country": configOrArg(app, args, "country", "default_country", "US"), "currency": configOrArg(app, args, "currency", "default_currency", "USD"), "authorizedOnly": true})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"revision_id": revision.ID, "matched_mpns": len(parts), "missing_mpn_designators": missing, "provider": bound.AppSlug, "result": result}, nil
+	quantity := intArg(args, "build_quantity")
+	return s.BOMSource(app, int64Arg(args, "design_id"), int64Arg(args, "revision_id"), configOrArg(app, args, "country", "default_country", "US"), configOrArg(app, args, "currency", "default_currency", "USD"), quantity)
 }
 func (a *App) toolProvidersStatus(_ context.Context, app *sdk.AppCtx, _ map[string]any) (any, error) {
 	storage := app.IntegrationFor("storage")
 	component, fab := app.IntegrationFor("component_data"), app.IntegrationFor("pcb_fabricator")
 	executor := app.IntegrationFor("firmware_executor")
 	return map[string]any{
-		"native_engine":     map[string]any{"schema": pcbSchema, "engine": engineVersion, "routing": routingSchema, "simulation": simulationSchema, "wiring": wiringSchema, "wiring_exports": []string{"svg", "png", "tutorial-json", "tutorial-zip"}, "firmware_runtime": "apteva-arduino-behavioral/0.5", "fabrication_verification": fabricationVerificationSchema, "external_engine_dependency": false},
+		"native_engine":     map[string]any{"schema": pcbSchema, "engine": engineVersion, "routing": routingSchema, "simulation": simulationSchema, "wiring": wiringSchema, "mechanical": mechanicalSchema, "mechanical_envelope": mechanicalEnvelopeSchema, "production_readiness": productionSchema, "kicad_exchange": kicadExchangeSchema, "mechanical_exports": []string{"step", "stl", "3mf", "dxf"}, "wiring_exports": []string{"svg", "png", "tutorial-json", "tutorial-zip"}, "firmware_runtime": firmwareRuntimeName, "bring_up": bringUpSchema, "sourcing": sourcingSchema, "orders": orderSchema, "fab_profiles": len(builtinFabProfiles()), "fabrication_verification": fabricationVerificationSchema, "external_engine_dependency": false},
 		"storage":           bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
 		"component_data":    bindingStatus(component, true, "available through the selected component-data connection"),
-		"pcb_fabricator":    bindingStatus(fab, false, "provider discovery is available; quote/order remains approval-gated"),
+		"pcb_fabricator":    bindingStatus(fab, false, "provider discovery only: no fab in the catalog publishes a quote or order API; pcb_order_prepare builds the upload package and pcb_order_update records the fab's quote and order"),
 		"firmware_executor": bindingStatus(executor, true, "optional Functions sandbox for full Arduino compiler/runtime adapters; native behavioral execution works without it"),
 	}, nil
 }

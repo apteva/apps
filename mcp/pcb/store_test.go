@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -16,12 +18,19 @@ func testStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	migration, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
+	paths, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("migrations: %v", err)
 	}
-	if _, err = db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
+	sort.Strings(paths)
+	for _, path := range paths {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(migration)); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return NewStore(db)

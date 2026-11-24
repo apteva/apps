@@ -52,6 +52,7 @@ type SimulationResult struct {
 	FinalDigital map[string]string    `json:"final_digital"`
 	Waveforms    []SimulationWaveform `json:"waveforms"`
 	DeviceStates []map[string]any     `json:"device_states,omitempty"`
+	LoadSteps    []LoadStepReport     `json:"load_steps,omitempty"`
 	Warnings     []string             `json:"warnings,omitempty"`
 }
 
@@ -75,6 +76,10 @@ type regulatorBranch struct {
 	Ground      string
 	Voltage     float64
 	Dropout     float64
+	// Load-step dynamics; see load_step.go.
+	OutputResistance float64
+	ResponseTimeUS   float64
+	MaxCurrentA      float64
 }
 
 func simulateDefinition(def *Definition, options SimulationOptions) (*SimulationResult, error) {
@@ -154,11 +159,44 @@ func simulateDefinition(def *Definition, options SimulationOptions) (*Simulation
 		}
 		result.Waveforms = append(result.Waveforms, SimulationWaveform{ProbeID: probe.ID, NetID: probe.NetID, Kind: kind, Unit: unit, Points: []WavePoint{}})
 	}
+	hasLoads := false
+	for _, source := range merged.Sources {
+		if strings.EqualFold(source.Kind, "load") {
+			hasLoads = true
+		}
+	}
+	regulatorCapacitance := map[string]float64{}
+	if hasLoads {
+		reports, warnings := loadStepReports(regulators, capacitors, merged.Sources, ground)
+		result.LoadSteps = reports
+		for _, warning := range warnings {
+			result.Warnings = appendUnique(result.Warnings, warning)
+		}
+		for _, regulator := range regulators {
+			c := outputCapacitance(capacitors, regulator.Output, firstNonEmpty(regulator.Ground, ground))
+			if c <= 0 {
+				c = defaultOutputCapacitanceF
+			}
+			regulatorCapacitance[regulator.ComponentID] = c
+		}
+		regulated := map[string]bool{}
+		for _, regulator := range regulators {
+			regulated[regulator.Output] = true
+		}
+		for _, source := range merged.Sources {
+			if strings.EqualFold(source.Kind, "load") && !regulated[source.NetID] {
+				result.Warnings = appendUnique(result.Warnings, "load "+source.ID+" is on net "+source.NetID+", which no regulator drives; it has no effect")
+			}
+		}
+	}
 	previous := map[string]float64{ground: 0}
 	for sample := 0; sample < samples; sample++ {
 		timeUS := int64(sample) * merged.StepUS
 		known := map[string]float64{ground: 0}
 		for _, source := range merged.Sources {
+			if strings.EqualFold(source.Kind, "load") {
+				continue // loads draw current; they do not fix a voltage
+			}
 			value := simulationSourceValue(source, timeUS)
 			if existing, ok := known[source.NetID]; ok && math.Abs(existing-value) > 1e-9 {
 				result.Warnings = appendUnique(result.Warnings, fmt.Sprintf("conflicting sources drive net %s", source.NetID))
@@ -176,8 +214,12 @@ func simulateDefinition(def *Definition, options SimulationOptions) (*Simulation
 					ok = input != 0
 				}
 				if ok && input >= regulator.Voltage+regulator.Dropout {
-					if old, exists := known[regulator.Output]; !exists || math.Abs(old-regulator.Voltage) > 1e-12 {
-						known[regulator.Output] = regulator.Voltage
+					output := regulator.Voltage
+					if hasLoads {
+						output = regulatorOutputV(regulator, merged.Sources, regulatorCapacitance[regulator.ComponentID], timeUS)
+					}
+					if old, exists := known[regulator.Output]; !exists || math.Abs(old-output) > 1e-12 {
+						known[regulator.Output] = output
 						changed = true
 					}
 				}
@@ -301,7 +343,15 @@ func compileSimulationModel(def *Definition, faults []SimulationFault) ([]resist
 						dropout = component.Model.DropoutVoltageV
 					}
 				}
-				regulators = append(regulators, regulatorBranch{ComponentID: component.ID, Input: input, Output: output, Ground: ground, Voltage: voltage, Dropout: dropout})
+				branch := regulatorBranch{ComponentID: component.ID, Input: input, Output: output, Ground: ground, Voltage: voltage, Dropout: dropout, ResponseTimeUS: defaultRegulatorResponseUS}
+				if component.Model != nil {
+					branch.OutputResistance = component.Model.OutputResistanceOhms
+					branch.MaxCurrentA = component.Model.MaxCurrentA
+					if component.Model.ResponseTimeUS > 0 {
+						branch.ResponseTimeUS = component.Model.ResponseTimeUS
+					}
+				}
+				regulators = append(regulators, branch)
 			}
 		case "led":
 			anode := netForRole(component, "anode", netByNode, "anode", "a", "1")

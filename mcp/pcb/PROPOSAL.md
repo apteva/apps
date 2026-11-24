@@ -1,5 +1,21 @@
 # PCB Studio App Proposal
 
+## Version 0.10 implementation status
+
+PCB Studio 0.10 adds automatic placement, schematic capture/ERC/KiCad schematic import, fab rule profiles, pick-and-place and assembly BOM output, stock-checked sourcing with a readiness gate, regulator load-step simulation, a behavioral Arduino firmware runtime with generated board pin headers and a firmware gate, per-board bring-up capture feeding physical validation, fab order packaging and status tracking, per-part reason and datasheet annotations, and the Release and Schematic panel workspaces. Not done: placing orders through a fab API (none is available), and live validation of the Nexar sourcing parser against a real account.
+
+## Version 0.9 implementation status
+
+PCB Studio 0.9 adds frozen footprint contracts with pad/pin counts, provenance hashes, courtyards, mask/paste intent, compatible MPNs, and native 3D-model identities. Its fabrication DRC operates on actual rotated pad polygons and additionally covers solder-mask slivers, via-to-via/trace/pad clearance, plated-drill declarations, slots, annular rings, and polygonal edge clearance.
+
+KiCad `.kicad_pcb` import/export is implemented as an Apteva-owned adapter around the native source, followed by an independent structural reconciliation pass. Mechanical designs can export named AP242 faceted-BREP STEP solids. The production-readiness gate combines electrical DRC, mechanical validation, Gerber/Excellon parsing, KiCad verification, footprint/MPN coverage, test-point coverage, and physical-validation status. The DHT22 proof now contains four production test points and a bring-up plan. Physical validation remains explicitly pending until a user approves and receives a prototype order.
+
+## Version 0.8 implementation status
+
+PCB Studio now owns a native Mechanical workspace and the `apteva-mechanical-envelope/v1` handoff. The revision model includes a polygonal board outline and thickness, dedicated mounting holes, component solids with Z extents, connector panel openings, cable/service/airflow/antenna clearance volumes, and a stable right-handed XYZ datum. Native validation checks bounds, positive dimensions, Z ordering, hole conflicts, component collisions, and interface ownership before export.
+
+The same domain model is exposed through HTTP and the `pcb_mechanical_get`, `pcb_mechanical_validate`, `pcb_mechanical_preview`, `pcb_mechanical_export`, and `pcb_mechanical_solid_export` tools. Preview and export are deterministic and carry immutable PCB design/revision/hash provenance. The first programmatic proof is a Raspberry Pi 4 Model B-class 85 × 56 mm board with a rounded outline, four toleranced M2.5 mounting holes, native component model references, connector bodies and openings, GPIO and microSD service access, and cooling clearances. PCB Studio renders and exports the proof itself; a generic external 3D component-library or enclosure engine is intentionally not required.
+
 ## Version 0.5 implementation status
 
 PCB Studio now includes a native physical Wiring workspace for Arduino and breadboard tutorials. Its semantic model stores reference parts, stable named pins, jumper endpoints, tutorial steps, and firmware pin mappings in the immutable PCB revision. PCB Studio renders that model itself as detailed SVG and PNG, packages tutorial JSON/ZIP, validates endpoint and LED/resistor compatibility, and maps Arduino GPIO execution back onto visible parts. The first reference design is an Arduino Uno R3 connected to a half breadboard, 220 Ω resistor, and red LED on pin 9. No Fritzing or external illustration engine is required.

@@ -94,12 +94,14 @@ type routeObstacleSet struct {
 	gridNM  int64
 	widthNM int64
 	clearNM int64
+	viaNM   int64
 }
 
 func suggestRoutes(def *Definition, options RouteOptions) (*RoutePlan, error) {
 	if def == nil {
 		return nil, fmt.Errorf("definition required")
 	}
+	def = withFabProfile(def)
 	if options.GridNM <= 0 {
 		options.GridNM = 500_000
 	}
@@ -163,17 +165,22 @@ func suggestRoutes(def *Definition, options RouteOptions) (*RoutePlan, error) {
 			continue
 		}
 		width, clearance, viaDiameter, viaDrill := routingRules(working, net.ID, options)
-		obstacles := routeObstacleSet{def: working, pads: allPads, gridNM: options.GridNM, widthNM: width, clearNM: clearance}
+		obstacles := routeObstacleSet{def: working, pads: allPads, gridNM: options.GridNM, widthNM: width, clearNM: clearance, viaNM: viaDiameter}
 		netOps := []Operation{}
 		failed := ""
-		for branch := 1; branch < len(pads); branch++ {
-			path, visited, pathErr := findGridRoute(obstacles, net.ID, pads[0].Center, pads[branch].Center, layers, options.MaxVisited)
+		// Connect pads as a minimum spanning tree (each new pad joins its
+		// nearest already-connected pad) instead of a star from one pad, so
+		// high-fanout nets do not fence in a single footprint.
+		for branchIndex, pair := range routingTreePairs(pads) {
+			branch := branchIndex + 1
+			from, to := pads[pair[0]], pads[pair[1]]
+			path, visited, pathErr := findGridRoute(obstacles, net.ID, from.Center, to.Center, layers, options.MaxVisited, from.Pad.Layers, to.Pad.Layers)
 			plan.Metrics.VisitedNodes += visited
 			if pathErr != nil {
-				failed = fmt.Sprintf("%s to %s: %v", pads[0].ComponentID+":"+pads[0].Pad.ID, pads[branch].ComponentID+":"+pads[branch].Pad.ID, pathErr)
+				failed = fmt.Sprintf("%s to %s: %v", from.ComponentID+":"+from.Pad.ID, to.ComponentID+":"+to.Pad.ID, pathErr)
 				break
 			}
-			ops, traces, vias := routePathOperations(working, net.ID, path, pads[0].Center, pads[branch].Center, layers, options.GridNM, width, viaDiameter, viaDrill, branch)
+			ops, traces, vias := routePathOperations(working, net.ID, path, from.Center, to.Center, layers, options.GridNM, width, viaDiameter, viaDrill, branch)
 			netOps = append(netOps, ops...)
 			for _, trace := range traces {
 				working.Traces = append(working.Traces, trace)
@@ -384,10 +391,66 @@ func padsForRoutingNet(def *Definition, net Net, all []*placedPad) []*placedPad 
 	return out
 }
 
-func findGridRoute(obstacles routeObstacleSet, netID string, start, goal Point, layers []string, maxVisited int) ([]routeGridState, int, error) {
+// routingTreePairs returns deterministic Prim-order (from, to) pad index pairs
+// over Manhattan distance, starting from pad 0. Ties break on lower index.
+func routingTreePairs(pads []*placedPad) [][2]int {
+	n := len(pads)
+	if n < 2 {
+		return nil
+	}
+	connected := make([]bool, n)
+	best := make([]int64, n)
+	parent := make([]int, n)
+	connected[0] = true
+	manhattan := func(a, b Point) int64 { return absInt64(a.XNM-b.XNM) + absInt64(a.YNM-b.YNM) }
+	for i := 1; i < n; i++ {
+		best[i], parent[i] = manhattan(pads[0].Center, pads[i].Center), 0
+	}
+	pairs := make([][2]int, 0, n-1)
+	for len(pairs) < n-1 {
+		next := -1
+		for i := 1; i < n; i++ {
+			if !connected[i] && (next < 0 || best[i] < best[next]) {
+				next = i
+			}
+		}
+		connected[next] = true
+		pairs = append(pairs, [2]int{parent[next], next})
+		for i := 1; i < n; i++ {
+			if !connected[i] {
+				if d := manhattan(pads[next].Center, pads[i].Center); d < best[i] {
+					best[i], parent[i] = d, next
+				}
+			}
+		}
+	}
+	return pairs
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func findGridRoute(obstacles routeObstacleSet, netID string, start, goal Point, layers []string, maxVisited int, startPadLayers, goalPadLayers []string) ([]routeGridState, int, error) {
 	grid := obstacles.gridNM
 	toGrid := func(v int64) int { return int(math.Round(float64(v) / float64(grid))) }
-	startState := routeGridState{X: toGrid(start.XNM), Y: toGrid(start.YNM), Layer: 0, Dir: 4}
+	// A route may only leave its start pad, and finish at its goal pad, on a
+	// copper layer that pad actually occupies. Pads with no declared layers
+	// keep the historical behaviour (any routing layer).
+	layerAllowed := func(padLayers []string, index int) bool {
+		return len(padLayers) == 0 || containsString(padLayers, layers[index])
+	}
+	startLayer := 0
+	for index := range layers {
+		if layerAllowed(startPadLayers, index) {
+			startLayer = index
+			break
+		}
+	}
+	startState := routeGridState{X: toGrid(start.XNM), Y: toGrid(start.YNM), Layer: startLayer, Dir: 4}
 	goalX, goalY := toGrid(goal.XNM), toGrid(goal.YNM)
 	q := &routePriorityQueue{}
 	heap.Init(q)
@@ -405,7 +468,7 @@ func findGridRoute(obstacles routeObstacleSet, netID string, start, goal Point, 
 			continue
 		}
 		visited++
-		if current.X == goalX && current.Y == goalY {
+		if current.X == goalX && current.Y == goalY && layerAllowed(goalPadLayers, current.Layer) {
 			path := []routeGridState{current}
 			for current != startState {
 				current = came[current]
@@ -428,14 +491,17 @@ func findGridRoute(obstacles routeObstacleSet, netID string, start, goal Point, 
 			}
 			updateRouteNode(q, cost, came, current, next, item.Cost+step, heuristic(next), &sequence)
 		}
-		if len(layers) > 1 {
+		// Never drop a via on the start or goal pad itself: the pad would then
+		// be joined only by a via-in-pad with no same-layer trace touching it.
+		atTerminal := (current.X == goalX && current.Y == goalY) || (current.X == startState.X && current.Y == startState.Y)
+		if len(layers) > 1 && !atTerminal {
 			for layer := range layers {
 				if layer == current.Layer {
 					continue
 				}
 				next := routeGridState{X: current.X, Y: current.Y, Layer: layer, Dir: 4}
 				point := Point{XNM: int64(next.X) * grid, YNM: int64(next.Y) * grid}
-				if obstacles.blocked(netID, layers[next.Layer], point) {
+				if obstacles.viaBlocked(netID, layers, point) {
 					continue
 				}
 				updateRouteNode(q, cost, came, current, next, item.Cost+80, heuristic(next), &sequence)
@@ -456,6 +522,21 @@ func updateRouteNode(q *routePriorityQueue, costs map[routeGridState]int64, came
 	came[to] = from
 	*sequence++
 	heap.Push(q, &routeQueueItem{State: to, Cost: nextCost, Priority: nextCost + heuristic, Sequence: *sequence})
+}
+
+// viaBlocked checks a layer transition with the via's own diameter on every
+// routed layer it spans, so via-to-trace and via-to-pad clearance hold.
+func (o routeObstacleSet) viaBlocked(netID string, layers []string, point Point) bool {
+	via := o
+	if o.viaNM > via.widthNM {
+		via.widthNM = o.viaNM
+	}
+	for _, layer := range layers {
+		if via.blocked(netID, layer, point) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o routeObstacleSet) blocked(netID, layer string, point Point) bool {

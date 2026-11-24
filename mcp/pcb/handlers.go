@@ -294,6 +294,42 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 201, run)
+	case "mechanical":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		envelope, validation, err := s.MechanicalGet(id, queryRevisionID(r))
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"envelope": envelope, "validation": validation})
+	case "mechanical-validate":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.MechanicalValidate(id, bodyRevisionID(r)) })
+	case "mechanical-preview":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.MechanicalPreview(id, bodyRevisionID(r)) })
+	case "mechanical-export":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.MechanicalExport(id, bodyRevisionID(r)) })
+	case "mechanical-solid":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64  `json:"revision_id"`
+			Format     string `json:"format"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		artifact, err := s.MechanicalSolidExport(id, body.RevisionID, body.Format)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, artifact)
 	case "validate":
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.Validate(id, bodyRevisionID(r)) })
 	case "render":
@@ -304,6 +340,17 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.Manufacturing(id, bodyRevisionID(r)) })
 	case "manufacturing-verify":
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.VerifyManufacturing(id, bodyRevisionID(r)) })
+	case "kicad-export":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.KiCadExport(id, bodyRevisionID(r)) })
+	case "kicad-verify":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.KiCadVerify(id, bodyRevisionID(r)) })
+	case "schematic", "schematic-generate", "schematic-render", "kicad-schematic-import":
+		a.handleDesignSchematic(w, r, app, s, id, action)
+	case "production-readiness":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) {
+			report, artifact, err := s.ProductionReadiness(id, bodyRevisionID(r))
+			return map[string]any{"result": report, "artifact": artifact}, err
+		})
 	case "release":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -323,6 +370,8 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 201, map[string]any{"artifact": artifact})
+	case "release-overview", "bringup", "orders", "assembly", "firmware-header", "fab-profiles", "bom-source":
+		a.handleDesignV010(w, r, app, id, action)
 	case "artifacts":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, http.MethodGet)
@@ -338,6 +387,42 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONError(w, 404, "not found")
 	}
+}
+
+func (a *App) handleKiCadImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	s, err := a.service(a.requestCtx(r))
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	var body struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+		Note    string `json:"note"`
+	}
+	if err = decodeBody(r, &body); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" || strings.TrimSpace(body.Content) == "" {
+		writeHTTPError(w, errors.New("name and KiCad content are required"))
+		return
+	}
+	design, err := s.KiCadImport(body.Name, []byte(body.Content), body.Note, "ui")
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, 201, map[string]any{"design": design})
+}
+
+func queryRevisionID(r *http.Request) int64 {
+	id, _ := strconv.ParseInt(r.URL.Query().Get("revision_id"), 10, 64)
+	return id
 }
 
 func handleServiceArtifact(w http.ResponseWriter, r *http.Request, method string, fn func() (any, error)) {
@@ -369,9 +454,21 @@ func (a *App) handleRevision(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, err)
 		return
 	}
-	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/revisions/"), "/"), 10, 64)
+	revisionParts := splitPath(strings.TrimPrefix(r.URL.Path, "/api/revisions/"))
+	if len(revisionParts) == 0 {
+		writeJSONError(w, 400, "invalid revision id")
+		return
+	}
+	id, err := strconv.ParseInt(revisionParts[0], 10, 64)
 	if err != nil || id <= 0 {
 		writeJSONError(w, 400, "invalid revision id")
+		return
+	}
+	if len(revisionParts) == 2 {
+		a.handleRevisionSchematic(w, r, s, id, revisionParts[1])
+		return
+	} else if len(revisionParts) > 2 {
+		writeJSONError(w, 404, "not found")
 		return
 	}
 	revision, err := s.store.GetRevision(s.project, id)
@@ -455,6 +552,48 @@ func (a *App) handleWiringExample(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.toolWiringExampleCreate(r.Context(), a.requestCtx(r), args)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, 201, result)
+}
+func (a *App) handleMechanicalExample(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"template": "raspberry-pi-4-mechanical", "definition": raspberryPi4MechanicalExample()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		return
+	}
+	var args map[string]any
+	if err := decodeBody(r, &args); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	result, err := a.toolMechanicalExampleCreate(r.Context(), a.requestCtx(r), args)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, 201, result)
+}
+func (a *App) handleDHT22Example(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"template": "dht22-sensor-node", "definition": dht22SensorNodeExample()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		return
+	}
+	var args map[string]any
+	if err := decodeBody(r, &args); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	result, err := a.toolDHT22ExampleCreate(r.Context(), a.requestCtx(r), args)
 	if err != nil {
 		writeHTTPError(w, err)
 		return

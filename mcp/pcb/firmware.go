@@ -2,9 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -17,7 +15,26 @@ type FirmwareOptions struct {
 	Iterations       int                `json:"iterations,omitempty"`
 	ExecutorFunction string             `json:"executor_function,omitempty"`
 	SensorValues     map[string]float64 `json:"sensor_values,omitempty"`
+	// DigitalInputs and AnalogInputs drive digitalRead and analogRead by pin
+	// (number or name such as A0). Analog values are raw ADC counts.
+	DigitalInputs map[string]int     `json:"digital_inputs,omitempty"`
+	AnalogInputs  map[string]float64 `json:"analog_inputs,omitempty"`
 }
+
+// FirmwareSpec stores a board's firmware in the revision so the readiness
+// gate can run it. ExpectSerial lists substrings the serial output must
+// contain for the run to count as passing.
+type FirmwareSpec struct {
+	Board         string             `json:"board,omitempty"`
+	Source        string             `json:"source"`
+	Iterations    int                `json:"iterations,omitempty"`
+	SensorValues  map[string]float64 `json:"sensor_values,omitempty"`
+	DigitalInputs map[string]int     `json:"digital_inputs,omitempty"`
+	AnalogInputs  map[string]float64 `json:"analog_inputs,omitempty"`
+	ExpectSerial  []string           `json:"expect_serial,omitempty"`
+}
+
+const maxFirmwareSourceBytes = 256 * 1024
 
 type I2CTransaction struct {
 	TimeUS  int64  `json:"time_us"`
@@ -44,177 +61,13 @@ type FirmwareRunResult struct {
 	Variables       map[string]float64 `json:"variables,omitempty"`
 	Warnings        []string           `json:"warnings,omitempty"`
 	Executor        map[string]any     `json:"executor,omitempty"`
-}
-
-var (
-	firmwareCallPattern   = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_.]*)\s*\((.*)\)$`)
-	firmwareAssignPattern = regexp.MustCompile(`^(?:(?:const|float|double|int|long|bool|auto)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$`)
-)
-
-func runFirmwareLab(def *Definition, options FirmwareOptions) (*FirmwareRunResult, error) {
-	if strings.TrimSpace(options.Source) == "" {
-		return nil, fmt.Errorf("firmware source required")
-	}
-	if options.Language == "" {
-		options.Language = "arduino"
-	}
-	if strings.ToLower(options.Language) != "arduino" && strings.ToLower(options.Language) != "cpp" {
-		return nil, fmt.Errorf("v0.5 firmware lab supports Arduino-compatible C++")
-	}
-	if options.Board == "" {
-		options.Board = inferFirmwareBoard(def)
-	}
-	if options.Iterations <= 0 {
-		options.Iterations = 1
-	}
-	if options.Iterations > 100 {
-		return nil, fmt.Errorf("iterations must not exceed 100")
-	}
-	values := map[string]float64{"temperature": 23.5, "temperature_c": 23.5, "humidity": 45, "humidity_percent": 45}
-	for key, value := range options.SensorValues {
-		values[strings.ToLower(key)] = value
-	}
-	result := &FirmwareRunResult{Schema: firmwareSchema, Engine: engineVersion, Status: "passed", Language: "arduino", Board: options.Board, Runtime: "apteva-arduino-behavioral/0.5", Iterations: options.Iterations, SerialOutput: []string{}, PinModes: map[string]string{}, PinStates: map[string]string{}, I2CTransactions: []I2CTransaction{}, Variables: map[string]float64{}, Warnings: []string{}}
-	_, _, _, devices := compileSimulationModel(def, nil)
-	result.VirtualDevices = devices
-	setup, setupOK := extractFirmwareFunction(options.Source, "setup")
-	loop, loopOK := extractFirmwareFunction(options.Source, "loop")
-	if !setupOK && !loopOK {
-		return nil, fmt.Errorf("Arduino source must define setup() or loop()")
-	}
-	state := &firmwareRuntimeState{result: result, variables: values, i2cAddress: -1, i2cBytes: []int{}}
-	if setupOK {
-		executeFirmwareStatements(setup, state)
-	}
-	for iteration := 0; iteration < options.Iterations; iteration++ {
-		if loopOK {
-			executeFirmwareStatements(loop, state)
-		}
-	}
-	for key, value := range state.variables {
-		if key != "temperature" && key != "temperature_c" && key != "humidity" && key != "humidity_percent" {
-			result.Variables[key] = roundFloat(value, 6)
-		}
-	}
-	return result, nil
-}
-
-type firmwareRuntimeState struct {
-	result     *FirmwareRunResult
-	variables  map[string]float64
-	serialLine string
-	i2cAddress int
-	i2cBytes   []int
-}
-
-func executeFirmwareStatements(body string, state *firmwareRuntimeState) {
-	for _, statement := range splitFirmwareStatements(stripFirmwareComments(body)) {
-		statement = strings.TrimSpace(statement)
-		if statement == "" || strings.HasPrefix(statement, "return ") {
-			continue
-		}
-		if match := firmwareAssignPattern.FindStringSubmatch(statement); len(match) == 3 {
-			state.variables[match[1]] = firmwareExpressionValue(match[2], state)
-			continue
-		}
-		match := firmwareCallPattern.FindStringSubmatch(statement)
-		if len(match) != 3 {
-			state.result.Warnings = appendUnique(state.result.Warnings, "unsupported statement: "+shortLabel(statement, 80))
-			continue
-		}
-		call := match[1]
-		args := splitFirmwareArgs(match[2])
-		switch call {
-		case "Serial.begin":
-			state.result.SerialBaud = int(firmwareArgNumber(args, 0, state))
-		case "Serial.print", "Serial.println":
-			value := firmwarePrintable(args, state)
-			state.serialLine += value
-			if call == "Serial.println" {
-				state.result.SerialOutput = append(state.result.SerialOutput, state.serialLine)
-				state.serialLine = ""
-			}
-		case "pinMode":
-			if len(args) >= 2 {
-				state.result.PinModes[firmwarePin(args[0])] = strings.ToUpper(strings.TrimSpace(args[1]))
-			}
-		case "digitalWrite":
-			if len(args) >= 2 {
-				state.result.PinStates[firmwarePin(args[0])] = strings.ToLower(strings.TrimSpace(args[1]))
-			}
-		case "delay":
-			state.result.DurationUS += int64(firmwareArgNumber(args, 0, state) * 1_000)
-		case "delayMicroseconds":
-			state.result.DurationUS += int64(firmwareArgNumber(args, 0, state))
-		case "Wire.begin":
-			// The native virtual bus is ready immediately.
-		case "Wire.beginTransmission":
-			state.i2cAddress = int(firmwareArgNumber(args, 0, state))
-			state.i2cBytes = []int{}
-		case "Wire.write":
-			state.i2cBytes = append(state.i2cBytes, int(firmwareArgNumber(args, 0, state)))
-		case "Wire.endTransmission":
-			status := "ack"
-			if !virtualI2CAddressPresent(state.result.VirtualDevices, state.i2cAddress) {
-				status = "nack"
-			}
-			state.result.I2CTransactions = append(state.result.I2CTransactions, I2CTransaction{TimeUS: state.result.DurationUS, Address: state.i2cAddress, Bytes: append([]int(nil), state.i2cBytes...), Status: status})
-			state.i2cAddress, state.i2cBytes = -1, nil
-		default:
-			if !strings.HasPrefix(call, "sensor.") {
-				state.result.Warnings = appendUnique(state.result.Warnings, "unsupported call: "+call)
-			}
-		}
-	}
-	if state.serialLine != "" {
-		state.result.SerialOutput = append(state.result.SerialOutput, state.serialLine)
-		state.serialLine = ""
-	}
-}
-
-func firmwareExpressionValue(expression string, state *firmwareRuntimeState) float64 {
-	expression = strings.TrimSpace(expression)
-	switch {
-	case strings.Contains(expression, "readTemperature"):
-		return firstFirmwareValue(state.variables, "temperature_c", "temperature")
-	case strings.Contains(expression, "readHumidity"):
-		return firstFirmwareValue(state.variables, "humidity_percent", "humidity")
-	case strings.HasPrefix(expression, "analogRead("):
-		return 512
-	case strings.HasPrefix(expression, "digitalRead("):
-		args := splitFirmwareArgs(strings.TrimSuffix(strings.TrimPrefix(expression, "digitalRead("), ")"))
-		if len(args) > 0 && state.result.PinStates[firmwarePin(args[0])] == "high" {
-			return 1
-		}
-		return 0
-	}
-	if value, ok := state.variables[expression]; ok {
-		return value
-	}
-	value, _ := strconv.ParseFloat(strings.TrimSpace(expression), 64)
-	return value
-}
-
-func firmwarePrintable(args []string, state *firmwareRuntimeState) string {
-	if len(args) == 0 {
-		return ""
-	}
-	value := strings.TrimSpace(args[0])
-	if strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
-		if decoded, err := strconv.Unquote(value); err == nil {
-			return decoded
-		}
-	}
-	if number, ok := state.variables[value]; ok {
-		return strconv.FormatFloat(number, 'f', -1, 64)
-	}
-	if strings.Contains(value, "readTemperature") {
-		return strconv.FormatFloat(firstFirmwareValue(state.variables, "temperature_c", "temperature"), 'f', -1, 64)
-	}
-	if strings.Contains(value, "readHumidity") {
-		return strconv.FormatFloat(firstFirmwareValue(state.variables, "humidity_percent", "humidity"), 'f', -1, 64)
-	}
-	return value
+	// Unsupported counts statements and calls the behavioral runtime could not
+	// execute. A run with unsupported code still completes but cannot pass
+	// the firmware readiness gate.
+	Unsupported int `json:"unsupported"`
+	Statements  int `json:"statements"`
+	SensorReads int `json:"sensor_reads"`
+	InputReads  int `json:"input_reads"`
 }
 
 func extractFirmwareFunction(source, name string) (string, bool) {
@@ -308,26 +161,7 @@ func splitFirmwareArgs(body string) []string {
 	return append(out, strings.TrimSpace(body[start:]))
 }
 
-func firmwareArgNumber(args []string, index int, state *firmwareRuntimeState) float64 {
-	if index >= len(args) {
-		return 0
-	}
-	value := strings.TrimSpace(args[index])
-	if strings.HasPrefix(strings.ToLower(value), "0x") {
-		parsed, _ := strconv.ParseInt(value[2:], 16, 64)
-		return float64(parsed)
-	}
-	return firmwareExpressionValue(value, state)
-}
 func firmwarePin(value string) string { return strings.Trim(strings.TrimSpace(value), `"'`) }
-func firstFirmwareValue(values map[string]float64, keys ...string) float64 {
-	for _, key := range keys {
-		if value, ok := values[key]; ok {
-			return value
-		}
-	}
-	return 0
-}
 func virtualI2CAddressPresent(devices []map[string]any, address int) bool {
 	for _, device := range devices {
 		if device["kind"] != "i2c_sensor" {

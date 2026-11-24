@@ -69,6 +69,7 @@ func applyOperation(def *Definition, op Operation) error {
 			}
 			def.Nets[i].Nodes = nodes
 		}
+		removeSchematicComponent(def, op.ComponentID)
 	case "placement.set":
 		if op.Position == nil {
 			return errors.New("position is required")
@@ -235,6 +236,8 @@ func applyOperation(def *Definition, op Operation) error {
 		def.NetClasses = append(def.NetClasses[:idx], def.NetClasses[idx+1:]...)
 	case "simulation.set":
 		def.Simulation = op.Simulation
+	case "mechanical.set":
+		def.Mechanical = op.Mechanical
 	case "wiring.set":
 		def.Wiring = op.Wiring
 	case "wiring.part.add":
@@ -308,6 +311,14 @@ func applyOperation(def *Definition, op Operation) error {
 			return fmt.Errorf("wiring wire %q not found", op.WiringWireID)
 		}
 		def.Wiring.Wires = append(def.Wiring.Wires[:idx], def.Wiring.Wires[idx+1:]...)
+	case "annotation.set":
+		return applyAnnotation(def, op)
+	case "fab_profile.add", "fab_profile.remove", "fab_profile.select":
+		return applyFabProfileOperation(def, op)
+	case "firmware.set":
+		def.Firmware = op.Firmware
+	case "schematic.set", "schematic.symbol.place", "schematic.symbol.remove", "schematic.wire.add", "schematic.wire.remove", "schematic.label.add", "schematic.label.remove":
+		return applySchematicOperation(def, op)
 	default:
 		return fmt.Errorf("unsupported operation type %q", op.Type)
 	}
