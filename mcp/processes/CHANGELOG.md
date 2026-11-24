@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Calmer progress animation (0.23.3)
+
+The running step segment fades gently instead of flashing. See
+`docs-release-0.23.3.md`.
+
 ## Current step on the widget row (0.23.2)
 
 The title line names the current step and the progress bar has one segment
