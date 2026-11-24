@@ -50,6 +50,7 @@ import {
   heygenResolutionLabel,
   type DurationKind,
   type VideoReferencePurpose,
+  parseServerTimestamp,
 } from "./mediaPanelLogic";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
@@ -173,6 +174,7 @@ interface VideoJob {
   error: string;
   cost_usd?: number;
   estimated_duration_seconds?: number;
+  created_at?: string;
 }
 
 // LiveModel mirrors the sidecar's modelEntry JSON. Constraints arrays
@@ -449,6 +451,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [bindings, setBindings] = useState<BindingsStatus | null>(null);
   const [status, setStatus] = useState("");
   const [generating, setGenerating] = useState(false);
+  // Snapshot of the request in flight so its placeholder card stays on the
+  // tab it was submitted from and keeps the submitted prompt and model.
+  const [inFlight, setInFlight] = useState<{ kind: string; prompt: string; model: string; costUSD: number } | null>(null);
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [generatingDraftId, setGeneratingDraftId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
@@ -1546,6 +1551,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
     if (mode === "generate") {
       setGenerating(true);
+      setInFlight({
+        kind: submittedKind,
+        prompt: submittedPrompt,
+        model: activeGeneratingModel,
+        costUSD: estimate?.cost_usd || 0,
+      });
       setStatus("Generating…");
     } else {
       setCreatingDraft(true);
@@ -1621,6 +1632,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       return false;
     } finally {
       setGenerating(false);
+      setInFlight(null);
       setCreatingDraft(false);
     }
   };
@@ -1914,6 +1926,111 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .ms-composer-options input[type="text"],
         .ms-composer-options input[type="number"] { width: 100%; min-width: 0 !important; }
         .ms-option-wide { grid-column: 1 / -1; }
+        .ms-gen-card {
+          align-self: start;
+          display: flex;
+          flex-direction: column;
+          border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+          background: var(--bg-card);
+          animation: ms-gen-enter 260ms ease-out both;
+        }
+        .ms-gen-stage {
+          position: relative;
+          width: 100%;
+          overflow: hidden;
+          background: var(--bg-input);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .ms-gen-stage-square { aspect-ratio: 1 / 1; }
+        .ms-gen-stage-wide { aspect-ratio: 16 / 10; }
+        .ms-gen-stage-short { min-height: 140px; }
+        .ms-gen-glow {
+          position: absolute;
+          inset: -20%;
+          background: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--accent) 26%, transparent) 0%, transparent 55%);
+          animation: ms-gen-pulse 2.4s ease-in-out infinite;
+        }
+        .ms-gen-shimmer {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(110deg, transparent 30%, color-mix(in srgb, var(--text, #fff) 7%, transparent) 50%, transparent 70%);
+          background-size: 250% 100%;
+          animation: ms-gen-sweep 1.8s linear infinite;
+        }
+        .ms-gen-center {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+        }
+        .ms-gen-dots { display: flex; gap: 7px; }
+        .ms-gen-dots span {
+          width: 9px;
+          height: 9px;
+          border-radius: 999px;
+          background: var(--accent);
+          animation: ms-gen-bounce 1.2s ease-in-out infinite;
+        }
+        .ms-gen-dots span:nth-child(2) { animation-delay: 0.15s; }
+        .ms-gen-dots span:nth-child(3) { animation-delay: 0.3s; }
+        .ms-gen-label {
+          display: flex;
+          align-items: baseline;
+          gap: 8px;
+          font-size: 13px;
+          color: var(--text);
+        }
+        .ms-gen-time { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .ms-gen-progress {
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          height: 3px;
+          overflow: hidden;
+          background: color-mix(in srgb, var(--accent) 15%, transparent);
+        }
+        .ms-gen-progress-fill {
+          height: 100%;
+          background: var(--accent);
+          transition: width 1s linear;
+        }
+        .ms-gen-progress-indeterminate {
+          height: 100%;
+          width: 35%;
+          background: var(--accent);
+          animation: ms-gen-slide 1.6s ease-in-out infinite;
+        }
+        .ms-gen-meta { padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+        .ms-gen-prompt {
+          font-size: 12px;
+          color: var(--text);
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .ms-gen-facts {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          font-size: 10px;
+          color: var(--text-dim);
+          min-width: 0;
+        }
+        .ms-gen-cost { color: var(--accent); flex-shrink: 0; }
+        @keyframes ms-gen-enter { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+        @keyframes ms-gen-pulse { 0%, 100% { opacity: 0.45; transform: scale(0.92); } 50% { opacity: 1; transform: scale(1.05); } }
+        @keyframes ms-gen-sweep { from { background-position: 150% 0; } to { background-position: -100% 0; } }
+        @keyframes ms-gen-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-7px); opacity: 1; } }
+        @keyframes ms-gen-slide { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
+        @media (prefers-reduced-motion: reduce) {
+          .ms-gen-card, .ms-gen-glow, .ms-gen-shimmer, .ms-gen-dots span, .ms-gen-progress-indeterminate { animation: none; }
+          .ms-gen-dots span { opacity: 0.8; }
+        }
         .ms-option-check { min-height: 34px; }
         .ms-tts-settings {
           grid-column: 1 / -1;
@@ -2516,7 +2633,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
-            {items.length === 0 && !generating && pendingVideoJobs.length === 0 ? (
+            {items.length === 0 && !(inFlight && inFlight.kind === activeKind) && pendingVideoJobs.length === 0 ? (
               <div className="py-12 px-6 text-center text-text-muted text-sm">
                 {historyLoading ? "Loading…" : status || "No generations yet for this kind."}
               </div>
@@ -2529,10 +2646,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   onSelect={setSelected}
                   onOpenLightbox={setLightbox}
                   onGenerateDraft={generateDraft}
-                  generating={generating}
-                  generatingPrompt={prompt}
-                  generatingModel={activeGeneratingModel}
-                  generatingCostUSD={estimate?.cost_usd || 0}
+                  generating={!!inFlight && inFlight.kind === activeKind}
+                  generatingPrompt={inFlight?.prompt || ""}
+                  generatingModel={inFlight?.model || ""}
+                  generatingCostUSD={inFlight?.costUSD || 0}
                   pendingJobs={pendingVideoJobs}
                   generatingDraftId={generatingDraftId}
                 />
@@ -5185,7 +5302,7 @@ function Gallery({
         }}
       >
         {generating && (
-          <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
+          <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} kind="image" />
         )}
         {items.map((g) => {
           const src = imageSrc(g);
@@ -5235,7 +5352,7 @@ function Gallery({
   return (
     <div className={`ms-gallery-grid ${videoKind ? "ms-gallery-video" : "ms-gallery-audio"}`}>
       {generating && (
-        <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
+        <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} kind={kind} />
       )}
       {(kind === "video" || kind === "avatar") &&
         pendingJobs.map((job) => (
@@ -5244,6 +5361,10 @@ function Gallery({
             prompt={job.prompt}
             model={job.model ? `#${job.id} · ${job.model}` : `#${job.id}`}
             costUSD={job.cost_usd || 0}
+            kind={kind}
+            status={job.status}
+            estimatedSeconds={job.estimated_duration_seconds || 0}
+            startedAt={parseServerTimestamp(job.created_at)}
           />
         ))}
       {(() => {
@@ -5266,6 +5387,9 @@ function Gallery({
                 prompt={g.prompt}
                 model={g.model ? `#${g.id} · ${g.model}` : `#${g.id}`}
                 costUSD={g.cost_usd || 0}
+                kind={kind}
+                status={g.status}
+                startedAt={parseServerTimestamp(g.created_at)}
               />
             );
           }
@@ -5336,44 +5460,87 @@ function DraftPreview({
   );
 }
 
-function GeneratingCard({ prompt, model, costUSD = 0 }: { prompt: string; model: string; costUSD?: number }) {
+function GeneratingCard({
+  prompt,
+  model,
+  costUSD = 0,
+  kind = "image",
+  status = "",
+  estimatedSeconds = 0,
+  startedAt: startedAtProp = 0,
+}: {
+  prompt: string;
+  model: string;
+  costUSD?: number;
+  kind?: string;
+  status?: string;
+  estimatedSeconds?: number;
+  startedAt?: number;
+}) {
   const cost = formatCost(costUSD);
+  const [mountedAt] = useState(() => Date.now());
+  // Trust a server start time only when it is sane (not in the future and
+  // not older than a day), otherwise count from when the card appeared.
+  const startedAt =
+    startedAtProp > 0 && startedAtProp <= mountedAt + 5000 && mountedAt - startedAtProp < 86_400_000
+      ? Math.min(startedAtProp, mountedAt)
+      : mountedAt;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const queued = status === "queued" || status === "pending";
+  const label = queued ? "Queued" : kind === "image" ? "Generating" : "Rendering";
+  const progress =
+    estimatedSeconds > 0 && !queued ? Math.min(0.95, elapsed / estimatedSeconds) : 0;
+  const stageClass =
+    kind === "image" ? "ms-gen-stage-square" : kind === "video" || kind === "avatar" ? "ms-gen-stage-wide" : "ms-gen-stage-short";
   return (
-    <div
-      className="border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center"
-      style={{ minHeight: 220, alignSelf: "start" }}
-    >
-      <Spinner />
-      <div className="mt-3 text-sm text-text">Generating…</div>
-      {prompt && (
-        <div className="mt-1 px-3 text-xs text-text-muted text-center" style={{ maxWidth: 260 }} title={prompt}>
-          {prompt.length > 80 ? prompt.slice(0, 77) + "…" : prompt}
+    <div className="ms-gen-card rounded overflow-hidden" role="status" aria-live="polite" aria-label={`${label}: ${prompt}`}>
+      <div className={`ms-gen-stage ${stageClass}`}>
+        <div className="ms-gen-glow" aria-hidden="true" />
+        <div className="ms-gen-shimmer" aria-hidden="true" />
+        <div className="ms-gen-center">
+          <div className="ms-gen-dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="ms-gen-label">
+            {label}
+            <span className="ms-gen-time">{formatElapsed(elapsed)}</span>
+          </div>
         </div>
-      )}
-      {model && <div className="mt-1 text-text-dim" style={{ fontSize: 10 }}>{model}</div>}
-      {cost && <div className="mt-1 text-accent" style={{ fontSize: 10 }}>est. {cost}</div>}
+        <div className="ms-gen-progress" aria-hidden="true">
+          {progress > 0 ? (
+            <div className="ms-gen-progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
+          ) : (
+            <div className="ms-gen-progress-indeterminate" />
+          )}
+        </div>
+      </div>
+      <div className="ms-gen-meta">
+        {prompt && (
+          <div className="ms-gen-prompt" title={prompt}>
+            {prompt}
+          </div>
+        )}
+        <div className="ms-gen-facts">
+          {model && <span className="truncate">{model}</span>}
+          {cost && <span className="ms-gen-cost">est. {cost}</span>}
+        </div>
+      </div>
     </div>
   );
 }
 
-function Spinner() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 24 24">
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeDasharray="44"
-        strokeDashoffset="22"
-        style={{ animation: "ms-spin 0.9s linear infinite" }}
-      />
-      <style>{`@keyframes ms-spin { to { transform: rotate(360deg); transform-origin: 12px 12px; } }`}</style>
-    </svg>
-  );
+function formatElapsed(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function CardMeta({ g }: { g: Generation }) {

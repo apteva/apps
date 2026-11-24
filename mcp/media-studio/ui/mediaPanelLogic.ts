@@ -393,3 +393,15 @@ export function estimateHeyGenAvatarCostUSD(
   if (res === "4k") rate = type === "photo_avatar" ? 0.0667 : 0.0833;
   return seconds * rate;
 }
+
+// parseServerTimestamp reads a sidecar timestamp as epoch milliseconds.
+// SQLite's CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC with no zone,
+// which browsers would otherwise read as local time. Returns 0 when the
+// value is missing or unparseable.
+export function parseServerTimestamp(value: string | undefined | null): number {
+  if (!value) return 0;
+  let v = value.trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(v)) v = v.replace(" ", "T") + "Z";
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? ms : 0;
+}
