@@ -2007,6 +2007,104 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           .ms-gen-dots span { opacity: 0.7; }
         }
         .ms-option-check { min-height: 34px; }
+        .ms-lightbox {
+          position: fixed;
+          inset: 0;
+          z-index: 9999;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+          padding: clamp(12px, 3vw, 24px);
+          background: rgba(0, 0, 0, 0.88);
+        }
+        .ms-lightbox:focus { outline: none; }
+        .ms-lightbox-close {
+          position: absolute;
+          top: 12px;
+          right: 12px;
+          z-index: 1;
+          width: 34px;
+          height: 34px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+          border: 1px solid var(--border);
+          background: var(--bg-card);
+          color: var(--text-muted);
+        }
+        .ms-lightbox-close:hover { color: var(--text); }
+        .ms-lightbox-media {
+          flex: 1 1 auto;
+          min-height: 0;
+          width: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .ms-lightbox-media img {
+          max-width: 100%;
+          max-height: 100%;
+          object-fit: contain;
+          border-radius: 4px;
+        }
+        .ms-lightbox-info {
+          flex: 0 0 auto;
+          width: min(820px, 100%);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding: 12px 14px;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--bg-card);
+        }
+        .ms-lightbox-prompt {
+          font-size: 13px;
+          line-height: 1.5;
+          color: var(--text);
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .ms-lightbox-prompt.is-open {
+          display: block;
+          max-height: 32vh;
+          overflow-y: auto;
+          padding-right: 4px;
+        }
+        .ms-lightbox-bar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px 16px;
+        }
+        .ms-lightbox-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px 12px;
+          min-width: 0;
+          font-size: 11px;
+          color: var(--text-dim);
+        }
+        .ms-lightbox-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+        .ms-lightbox-actions button,
+        .ms-lightbox-actions a {
+          font-size: 12px;
+          padding: 5px 10px;
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          color: var(--text-muted);
+          background: transparent;
+          text-decoration: none;
+        }
+        .ms-lightbox-actions button:hover,
+        .ms-lightbox-actions a:hover { color: var(--text); border-color: var(--text-dim); }
         .ms-tts-settings {
           grid-column: 1 / -1;
           display: flex;
@@ -2167,7 +2265,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           object-fit: contain;
         }
         .ms-video-player.ms-player-lightbox {
-          width: min(1100px, 92vw, calc(82vh * 1.6));
+          width: min(1100px, 92vw, calc((100vh - 220px) * 1.6));
         }
         .ms-video-player:fullscreen,
         .ms-video-player:-webkit-full-screen {
@@ -5705,6 +5803,20 @@ function Lightbox({
       previouslyFocused?.focus();
     };
   }, [onClose]);
+  const prompt = item.prompt || "";
+  const longPrompt = prompt.length > 220 || prompt.includes("\n");
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable; ignore */
+    }
+  };
+  const cost = formatCost(item.cost_usd);
   return (
     <div
       ref={dialogRef}
@@ -5713,93 +5825,73 @@ function Lightbox({
       aria-label={`${item.kind} preview`}
       tabIndex={-1}
       onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.85)",
-        zIndex: 9999,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "clamp(12px, 4vw, 24px)",
-      }}
+      className="ms-lightbox"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          maxWidth: "100%",
-          maxHeight: "100%",
-          gap: 12,
-        }}
-      >
+      <button type="button" className="ms-lightbox-close" onClick={onClose} aria-label="Close preview" title="Close (Esc)">
+        <CloseIcon />
+      </button>
+      <div className="ms-lightbox-media">
         {url && item.kind === "image" && (
-          <img
-            src={url}
-            alt=""
-            style={{ maxWidth: "92vw", maxHeight: "82vh", objectFit: "contain", borderRadius: 4 }}
-          />
+          <img src={url} alt="" onClick={(e) => e.stopPropagation()} />
         )}
         {url && (item.kind === "video" || item.kind === "avatar") && (
-          <StudioMediaPlayer
-            src={url}
-            mediaType="video"
-            label={playerLabel}
-            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
-            poster={generationPoster(item)}
-            variant="lightbox"
-          />
+          <div onClick={(e) => e.stopPropagation()}>
+            <StudioMediaPlayer
+              src={url}
+              mediaType="video"
+              label={playerLabel}
+              durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+              poster={generationPoster(item)}
+              variant="lightbox"
+            />
+          </div>
         )}
         {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (
-          <StudioMediaPlayer
-            src={url}
-            mediaType="audio"
-            label={playerLabel}
-            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
-            variant="lightbox"
-          />
+          <div onClick={(e) => e.stopPropagation()}>
+            <StudioMediaPlayer
+              src={url}
+              mediaType="audio"
+              label={playerLabel}
+              durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+              variant="lightbox"
+            />
+          </div>
         )}
-        <div className="text-text text-sm text-center" style={{ maxWidth: 700 }}>
-          {item.prompt}
-        </div>
-        <div className="text-text-dim" style={{ fontSize: 11 }}>
-          {item.provider} · {item.model || item.size || "—"} ·{" "}
-          {new Date(item.created_at).toLocaleString()}
-          {formatCost(item.cost_usd) && (
-            <>
-              {" · "}
-              <span className="text-accent">{formatCost(item.cost_usd)}</span>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {onUseAsReference && (
-            <button
-              onClick={onUseAsReference}
-              className="text-xs px-3 py-1.5 border border-border rounded text-accent hover:border-accent"
-            >
-              Use as reference
-            </button>
-          )}
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener"
-              className="text-xs px-3 py-1.5 border border-border rounded text-text"
-            >
-              Open original
-            </a>
-          )}
-          <button
-            onClick={onClose}
-            className="text-xs px-3 py-1.5 border border-border rounded text-text-muted"
-          >
-            Close (Esc)
-          </button>
+      </div>
+      <div className="ms-lightbox-info" onClick={(e) => e.stopPropagation()}>
+        {prompt && (
+          <div className={`ms-lightbox-prompt ${promptOpen ? "is-open" : ""}`} title={promptOpen ? undefined : prompt}>
+            {prompt}
+          </div>
+        )}
+        <div className="ms-lightbox-bar">
+          <div className="ms-lightbox-meta">
+            <span className="truncate">{item.provider} · {item.model || item.size || "—"}</span>
+            <span>{new Date(item.created_at).toLocaleString()}</span>
+            {cost && <span className="text-accent">{cost}</span>}
+          </div>
+          <div className="ms-lightbox-actions">
+            {longPrompt && (
+              <button type="button" onClick={() => setPromptOpen((v) => !v)} aria-expanded={promptOpen}>
+                {promptOpen ? "Show less" : "Show full prompt"}
+              </button>
+            )}
+            {prompt && (
+              <button type="button" onClick={copyPrompt}>
+                {copied ? "Copied" : "Copy prompt"}
+              </button>
+            )}
+            {onUseAsReference && (
+              <button type="button" onClick={onUseAsReference}>
+                Use as reference
+              </button>
+            )}
+            {url && (
+              <a href={url} target="_blank" rel="noopener">
+                Open original
+              </a>
+            )}
+          </div>
         </div>
       </div>
     </div>
