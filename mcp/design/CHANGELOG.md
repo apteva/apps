@@ -1,5 +1,15 @@
 # Design Studio changes
 
+## 0.8.0
+
+- Fillet and chamfer on selected edges. `edges` takes a selector by description (side of the shape, direction, curve type, plane, box, nearby point, length, `not`, lists for "any of"), instead of always rounding every edge. Selecting nothing, or an unknown selector key, is a clear error.
+- `shell` hollows a solid with chosen open faces.
+- `extrude_profile` with rounded rectangles, slots, circles, regular polygons, polygons and paths with three-point, sagitta and tangent arcs; profiles can carry holes and be rotated.
+- `hole` feature: one or many positions, any direction, through or blind, counterbore or countersink, and metric threads M2-M8 as clearance, tap-drill or heat-set insert sizes.
+- `loft` between two or more profile sections, smooth or ruled.
+- Acceptance test: a Pocket-style shell (rounded body, softened top edges, open-bottom shell, corner bosses, USB-C slot, countersunk lanyard hole, insert holes) builds as one valid solid.
+- Engine version `ds0.8`.
+
 ## 0.7.0
 
 - Richer formulas. Expressions gain `%`, comparisons, `and`/`or`/`not` (`&& || !`), `cond ? a : b`, `true`/`false`/`pi`, and the functions `min`, `max`, `abs`, `round(x[, step])`, `floor`, `ceil`, `sqrt`, `pow`, `clamp`, `hypot` and degree-based trigonometry. The parser lives in `runner/src/expressions.mjs` with shared cases in `testdata/expressions.json`.

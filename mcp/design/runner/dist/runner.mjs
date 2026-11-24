@@ -5072,6 +5072,22 @@ var organiseBlueprints = (blueprints) => {
     return new CompoundBlueprint(compounds.map(({ blueprint }) => blueprint));
   }));
 };
+var polysidesBlueprint = (radius, sidesCount, sagitta = 0) => {
+  const points = [...Array(sidesCount).keys()].map((i) => {
+    const theta = -(Math.PI * 2 / sidesCount) * i;
+    return [radius * Math.sin(theta), radius * Math.cos(theta)];
+  });
+  const blueprint = new BlueprintSketcher().movePointerTo([
+    points[points.length - 1][0],
+    points[points.length - 1][1]
+  ]);
+  if (sagitta) {
+    points.forEach(([x, y]) => blueprint.sagittaArcTo([x, y], sagitta));
+  } else {
+    points.forEach(([x, y]) => blueprint.lineTo([x, y]));
+  }
+  return blueprint.done();
+};
 var roundedRectangleBlueprint = (width, height, r = 0) => {
   const { rx: inputRx = 0, ry: inputRy = 0 } = typeof r === "number" ? { ry: r, rx: r } : r;
   let rx = Math.min(inputRx, width / 2);
@@ -16598,6 +16614,9 @@ var drawRectangle = drawRoundedRectangle;
 function drawCircle(radius) {
   return draw().movePointerTo([-radius, 0]).sagittaArc(2 * radius, 0, radius).sagittaArc(-2 * radius, 0, radius).close();
 }
+function drawPolysides(radius, sidesCount, sagitta = 0) {
+  return new Drawing(polysidesBlueprint(radius, sidesCount, sagitta));
+}
 function uuidv() {
   return ([1e7] + -1000 + -4000 + -8000 + -100000000000).replace(/[018]/g, (c) => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
 }
@@ -16671,6 +16690,337 @@ function exportSTEP(shapes = [], { unit, modelUnit } = {}) {
   } else {
     throw new Error("WRITE STEP FILE FAILED.");
   }
+}
+
+// src/features.mjs
+function fail3(message) {
+  throw new Error(message);
+}
+var PLANES = new Set(["XY", "XZ", "YZ"]);
+var CURVES = { line: "LINE", circle: "CIRCLE", ellipse: "ELLIPSE", bspline: "BSPLINE_CURVE", bezier: "BEZIER_CURVE" };
+var SURFACES = { plane: "PLANE", cylinder: "CYLINDRE", cone: "CONE", sphere: "SPHERE", torus: "TORUS", bspline: "BSPLINE_SURFACE", revolution: "REVOLUTION_SURFACE", extrusion: "EXTRUSION_SURFACE" };
+var SIDES = { top: ["XY", 2, "max"], bottom: ["XY", 2, "min"], "+z": ["XY", 2, "max"], "-z": ["XY", 2, "min"], "+x": ["YZ", 0, "max"], "-x": ["YZ", 0, "min"], "+y": ["XZ", 1, "max"], "-y": ["XZ", 1, "min"] };
+var EDGE_KEYS = new Set(["side", "direction", "curve", "parallel_to", "in_plane", "in_box", "near", "contains_point", "length", "not", "any"]);
+var FACE_KEYS = new Set(["side", "surface", "parallel_to", "in_plane", "in_box", "near", "contains_point", "not", "any"]);
+function applySelector(finder, selector, ctx, kind, label) {
+  if (Array.isArray(selector)) {
+    if (!selector.length)
+      fail3(`${label} must not be an empty list`);
+    return finder.either(selector.map((entry, index) => (f2) => applySelector(f2, entry, ctx, kind, `${label}[${index}]`)));
+  }
+  if (!selector || typeof selector !== "object")
+    fail3(`${label} must be a selector object or list`);
+  const allowed = kind === "edge" ? EDGE_KEYS : FACE_KEYS;
+  for (const key of Object.keys(selector)) {
+    if (!allowed.has(key))
+      fail3(`${label}.${key} is not a ${kind} selector (use ${[...allowed].join(", ")})`);
+  }
+  const point = (value, name) => ctx.vector(value, `${label}.${name}`);
+  let f = finder;
+  if (selector.side !== undefined) {
+    const side = SIDES[String(selector.side).toLowerCase()];
+    if (!side)
+      fail3(`${label}.side must be one of ${Object.keys(SIDES).join(", ")}`);
+    const [plane, axis, end] = side;
+    f = f.inPlane(plane, ctx.bounds()[end][axis]);
+  }
+  if (selector.direction !== undefined) {
+    const direction = typeof selector.direction === "string" ? selector.direction.toUpperCase() : point(selector.direction, "direction");
+    if (typeof direction === "string" && !["X", "Y", "Z"].includes(direction))
+      fail3(`${label}.direction must be X, Y, Z or [x,y,z]`);
+    f = f.inDirection(direction);
+  }
+  if (selector.curve !== undefined) {
+    const curve = CURVES[String(selector.curve).toLowerCase()];
+    if (!curve)
+      fail3(`${label}.curve must be one of ${Object.keys(CURVES).join(", ")}`);
+    f = f.ofCurveType(curve);
+  }
+  if (selector.surface !== undefined) {
+    const surface = SURFACES[String(selector.surface).toLowerCase()];
+    if (!surface)
+      fail3(`${label}.surface must be one of ${Object.keys(SURFACES).join(", ")}`);
+    f = f.ofSurfaceType(surface);
+  }
+  if (selector.parallel_to !== undefined) {
+    if (!PLANES.has(selector.parallel_to))
+      fail3(`${label}.parallel_to must be XY, XZ or YZ`);
+    f = f.parallelTo(selector.parallel_to);
+  }
+  if (selector.in_plane !== undefined) {
+    const spec = typeof selector.in_plane === "string" ? { plane: selector.in_plane } : selector.in_plane;
+    if (!PLANES.has(spec?.plane))
+      fail3(`${label}.in_plane.plane must be XY, XZ or YZ`);
+    f = f.inPlane(spec.plane, ctx.resolve(spec.offset ?? 0, `${label}.in_plane.offset`));
+  }
+  if (selector.in_box !== undefined) {
+    if (!Array.isArray(selector.in_box) || selector.in_box.length !== 2)
+      fail3(`${label}.in_box must be [[x,y,z],[x,y,z]]`);
+    f = f.inBox(point(selector.in_box[0], "in_box[0]"), point(selector.in_box[1], "in_box[1]"));
+  }
+  if (selector.near !== undefined) {
+    const distance = ctx.resolve(selector.near.distance ?? 0.01, `${label}.near.distance`);
+    if (distance <= 0)
+      fail3(`${label}.near.distance must be positive`);
+    f = f.withinDistance(distance, point(selector.near.point, "near.point"));
+  }
+  if (selector.contains_point !== undefined)
+    f = f.containsPoint(point(selector.contains_point, "contains_point"));
+  if (selector.length !== undefined) {
+    const length = ctx.resolve(selector.length, `${label}.length`);
+    f = f.ofLength((value) => Math.abs(value - length) <= 0.0001);
+  }
+  if (selector.any !== undefined)
+    f = applySelector(f, Array.isArray(selector.any) ? selector.any : [selector.any], ctx, kind, `${label}.any`);
+  if (selector.not !== undefined)
+    f = f.not((inner) => applySelector(inner, selector.not, ctx, kind, `${label}.not`));
+  return f;
+}
+function selectionCount(shape, selector, ctx, kind, label) {
+  const finder = applySelector(kind === "edge" ? new EdgeFinder : new FaceFinder, selector, ctx, kind, label);
+  const found = finder.find(shape);
+  const count = Array.isArray(found) ? found.length : found ? 1 : 0;
+  if (count === 0)
+    fail3(`${label} selected no ${kind}s on the input shape`);
+  return count;
+}
+function edgeFeature(shape, operation, kind, amount, ctx) {
+  if (operation.edges === undefined || operation.edges === "all") {
+    return kind === "fillet" ? shape.fillet(amount) : shape.chamfer(amount);
+  }
+  selectionCount(shape, operation.edges, ctx, "edge", `${operation.id}.edges`);
+  const filter = (e) => applySelector(e, operation.edges, ctx, "edge", `${operation.id}.edges`);
+  try {
+    return kind === "fillet" ? shape.fillet(amount, filter) : shape.chamfer(amount, filter);
+  } catch (error) {
+    fail3(`${operation.id}: ${kind} of ${amount} mm failed on the selected edges (radius too large for adjacent faces?): ${error?.message || error}`);
+  }
+}
+function shellFeature(shape, operation, ctx) {
+  const thickness = ctx.resolve(operation.thickness, `${operation.id}.thickness`);
+  if (thickness <= 0)
+    fail3(`${operation.id}.thickness must be positive`);
+  if (operation.open_faces === undefined)
+    fail3(`${operation.id}.open_faces is required (for example {"side":"top"})`);
+  selectionCount(shape, operation.open_faces, ctx, "face", `${operation.id}.open_faces`);
+  try {
+    return shape.shell(thickness, (f) => applySelector(f, operation.open_faces, ctx, "face", `${operation.id}.open_faces`));
+  } catch (error) {
+    fail3(`${operation.id}: shell failed (wall thicker than a feature, or fillets smaller than the wall?): ${error?.message || error}`);
+  }
+}
+function drawProfile(profile, ctx, label) {
+  if (!profile || typeof profile !== "object")
+    fail3(`${label} must be a profile object`);
+  const num = (value, name) => ctx.resolve(value, `${label}.${name}`);
+  const pt = (value, name) => {
+    if (!Array.isArray(value) || value.length !== 2)
+      fail3(`${label}.${name} must be [x,y]`);
+    return [num(value[0], `${name}[0]`), num(value[1], `${name}[1]`)];
+  };
+  const center = profile.center === undefined ? [0, 0] : pt(profile.center, "center");
+  let drawing;
+  switch (profile.kind) {
+    case "rectangle":
+    case "rounded_rectangle": {
+      const width = num(profile.width, "width");
+      const height = num(profile.height, "height");
+      if (width <= 0 || height <= 0)
+        fail3(`${label} width and height must be positive`);
+      const radius = profile.radius === undefined ? 0 : num(profile.radius, "radius");
+      if (radius < 0 || radius * 2 > Math.min(width, height) + 0.000000001)
+        fail3(`${label}.radius must be between 0 and half the shorter side`);
+      drawing = drawRoundedRectangle(width, height, radius > 0 ? Math.min(radius, Math.min(width, height) / 2 - 0.000001) : 0);
+      break;
+    }
+    case "slot": {
+      const length = num(profile.length, "length");
+      const width = num(profile.width, "width");
+      if (width <= 0 || length < width)
+        fail3(`${label} needs width > 0 and length >= width (length is end to end)`);
+      drawing = length - width < 0.000001 ? drawCircle(width / 2) : drawRoundedRectangle(length, width, width / 2 - 0.000001);
+      break;
+    }
+    case "circle": {
+      const radius = profile.diameter !== undefined ? num(profile.diameter, "diameter") / 2 : num(profile.radius, "radius");
+      if (radius <= 0)
+        fail3(`${label}.radius must be positive`);
+      drawing = drawCircle(radius);
+      break;
+    }
+    case "regular_polygon": {
+      const radius = num(profile.radius, "radius");
+      const sides = Math.round(num(profile.sides, "sides"));
+      if (radius <= 0 || sides < 3 || sides > 64)
+        fail3(`${label} needs radius > 0 and 3-64 sides`);
+      drawing = drawPolysides(radius, sides);
+      break;
+    }
+    case "polygon": {
+      if (!Array.isArray(profile.points) || profile.points.length < 3)
+        fail3(`${label}.points needs at least three [x,y] points`);
+      const points = profile.points.map((p, i) => pt(p, `points[${i}]`));
+      let pen = draw(points[0]);
+      for (const p of points.slice(1))
+        pen = pen.lineTo(p);
+      drawing = pen.close();
+      break;
+    }
+    case "path": {
+      if (!Array.isArray(profile.segments) || !profile.segments.length)
+        fail3(`${label}.segments is required`);
+      let pen = draw(pt(profile.start, "start"));
+      profile.segments.forEach((segment, index) => {
+        const name = `segments[${index}]`;
+        if (segment.line)
+          pen = pen.lineTo(pt(segment.line, `${name}.line`));
+        else if (segment.arc && segment.via)
+          pen = pen.threePointsArcTo(pt(segment.arc, `${name}.arc`), pt(segment.via, `${name}.via`));
+        else if (segment.arc && segment.sagitta !== undefined)
+          pen = pen.sagittaArcTo(pt(segment.arc, `${name}.arc`), num(segment.sagitta, `${name}.sagitta`));
+        else if (segment.tangent_arc)
+          pen = pen.tangentArcTo(pt(segment.tangent_arc, `${name}.tangent_arc`));
+        else
+          fail3(`${label}.${name} must be {line}, {arc, via}, {arc, sagitta} or {tangent_arc}`);
+      });
+      drawing = pen.close();
+      break;
+    }
+    default:
+      fail3(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon or path`);
+  }
+  if (profile.angle !== undefined)
+    drawing = drawing.rotate(num(profile.angle, "angle"), [0, 0]);
+  if (center[0] !== 0 || center[1] !== 0)
+    drawing = drawing.translate(center[0], center[1]);
+  if (profile.holes !== undefined) {
+    if (!Array.isArray(profile.holes))
+      fail3(`${label}.holes must be a list of profiles`);
+    profile.holes.forEach((hole, index) => {
+      drawing = drawing.cut(drawProfile(hole, ctx, `${label}.holes[${index}]`));
+    });
+  }
+  return drawing;
+}
+function sketchProfile(profile, plane, origin, ctx, label) {
+  if (!PLANES.has(plane))
+    fail3(`${label}.plane must be XY, XZ or YZ`);
+  return drawProfile(profile, ctx, label).sketchOnPlane(plane, origin);
+}
+function extrudeProfile(operation, ctx) {
+  const height = ctx.resolve(operation.height, `${operation.id}.height`);
+  if (height === 0)
+    fail3(`${operation.id}.height must not be 0`);
+  const origin = ctx.vector(operation.origin, `${operation.id}.origin`);
+  return sketchProfile(operation.profile, operation.plane || "XY", origin, ctx, `${operation.id}.profile`).extrude(height);
+}
+function loftFeature(operation, ctx) {
+  if (!Array.isArray(operation.sections) || operation.sections.length < 2)
+    fail3(`${operation.id}.sections needs at least two sections`);
+  if (operation.sections.length > 16)
+    fail3(`${operation.id}.sections allows at most 16 sections`);
+  const plane = operation.plane || "XY";
+  const sketches = operation.sections.map((section, index) => {
+    const label = `${operation.id}.sections[${index}]`;
+    if (section.profile?.holes)
+      fail3(`${label}: loft sections cannot have holes`);
+    const origin = section.origin !== undefined ? ctx.vector(section.origin, `${label}.origin`) : ctx.resolve(section.offset ?? 0, `${label}.offset`);
+    return sketchProfile(section.profile, section.plane || plane, origin, ctx, `${label}.profile`);
+  });
+  try {
+    return sketches[0].loftWith(sketches.slice(1), { ruled: operation.ruled === true });
+  } catch (error) {
+    fail3(`${operation.id}: loft failed (sections must be single closed outlines that do not cross): ${error?.message || error}`);
+  }
+}
+var THREADS = {
+  M2: { clearance: 2.4, tap: 1.6, insert: 3.2, insert_depth: 3 },
+  "M2.5": { clearance: 2.9, tap: 2.05, insert: 3.6, insert_depth: 4 },
+  M3: { clearance: 3.4, tap: 2.5, insert: 4, insert_depth: 5.7 },
+  M4: { clearance: 4.5, tap: 3.3, insert: 5.6, insert_depth: 8.1 },
+  M5: { clearance: 5.5, tap: 4.2, insert: 6.4, insert_depth: 9.5 },
+  M6: { clearance: 6.6, tap: 5, insert: 8, insert_depth: 12.7 },
+  M8: { clearance: 9, tap: 6.8, insert: 10, insert_depth: 12.7 }
+};
+function normalize(v) {
+  const length = Math.hypot(...v);
+  if (length < 0.000000001)
+    fail3("hole direction must not be zero");
+  return v.map((x) => x / length);
+}
+function holeTool(operation, ctx, polygonSketch) {
+  const label = operation.id;
+  let diameter = operation.diameter === undefined ? undefined : ctx.resolve(operation.diameter, `${label}.diameter`);
+  let depth = operation.depth === undefined ? undefined : ctx.resolve(operation.depth, `${label}.depth`);
+  if (operation.thread) {
+    const size = THREADS[operation.thread.size];
+    if (!size)
+      fail3(`${label}.thread.size must be one of ${Object.keys(THREADS).join(", ")}`);
+    const mode = operation.thread.mode || "clearance";
+    if (!["clearance", "tap", "insert"].includes(mode))
+      fail3(`${label}.thread.mode must be clearance, tap or insert`);
+    if (diameter === undefined)
+      diameter = size[mode];
+    if (depth === undefined && mode === "insert")
+      depth = size.insert_depth + 1;
+  }
+  if (!(diameter > 0))
+    fail3(`${label}.diameter (or thread) is required and must be positive`);
+  const through = operation.through === true || depth === undefined;
+  if (through)
+    depth = 1000;
+  if (!(depth > 0))
+    fail3(`${label}.depth must be positive`);
+  const r = diameter / 2;
+  const lead = 0.5;
+  const profile = [[0, lead]];
+  if (operation.counterbore) {
+    const cb = operation.counterbore;
+    const cr = ctx.resolve(cb.diameter, `${label}.counterbore.diameter`) / 2;
+    const cd = ctx.resolve(cb.depth, `${label}.counterbore.depth`);
+    if (cr <= r || cd <= 0 || cd >= depth)
+      fail3(`${label}.counterbore needs diameter > hole diameter and 0 < depth < hole depth`);
+    profile.push([cr, lead], [cr, -cd], [r, -cd]);
+  } else if (operation.countersink) {
+    const cs = operation.countersink;
+    const sr = ctx.resolve(cs.diameter, `${label}.countersink.diameter`) / 2;
+    const angle = ctx.resolve(cs.angle ?? 90, `${label}.countersink.angle`);
+    if (sr <= r || angle <= 0 || angle >= 180)
+      fail3(`${label}.countersink needs diameter > hole diameter and 0 < angle < 180`);
+    const sinkDepth = (sr - r) / Math.tan(angle / 2 * Math.PI / 180);
+    if (sinkDepth >= depth)
+      fail3(`${label}.countersink is deeper than the hole`);
+    profile.push([sr, lead], [sr, 0], [r, -sinkDepth]);
+  } else {
+    profile.push([r, lead]);
+  }
+  profile.push([r, -depth], [0, -depth]);
+  let tool = polygonSketch(profile, {}, `${label}.profile`, "XZ", [0, 0, 0]).revolve([0, 0, 1], { origin: [0, 0, 0], angle: 360 });
+  const direction = normalize(operation.direction === undefined ? [0, 0, -1] : ctx.vector(operation.direction, `${label}.direction`));
+  const dot = -direction[2];
+  if (dot < 1 - 0.000000001) {
+    if (dot <= -1 + 0.000000001)
+      tool = tool.rotate(180, [0, 0, 0], [1, 0, 0]);
+    else {
+      const axis = [direction[1], -direction[0], 0];
+      tool = tool.rotate(Math.acos(dot) * 180 / Math.PI, [0, 0, 0], axis);
+    }
+  }
+  return { tool, depth: through ? null : depth, diameter };
+}
+function holeFeature(shape, operation, ctx, polygonSketch) {
+  const positions = operation.positions ?? (operation.position !== undefined ? [operation.position] : undefined);
+  if (!Array.isArray(positions) || !positions.length)
+    fail3(`${operation.id} needs position [x,y,z] or positions`);
+  if (positions.length > 256)
+    fail3(`${operation.id}.positions allows at most 256 holes`);
+  const { tool } = holeTool(operation, ctx, polygonSketch);
+  let result = shape;
+  positions.forEach((position, index) => {
+    const at = ctx.vector(position, `${operation.id}.positions[${index}]`);
+    result = result.cut(tool.clone().translate(at));
+  });
+  return result;
 }
 
 // src/inspection.mjs
@@ -19563,9 +19913,9 @@ var Module = (() => {
         var db = openRequest.result;
         var transaction = db.transaction([FS.DB_STORE_NAME], "readwrite");
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail3 = 0, total = paths.length;
+        var ok = 0, fail4 = 0, total = paths.length;
         function finish() {
-          if (fail3 == 0)
+          if (fail4 == 0)
             onload();
           else
             onerror();
@@ -19574,12 +19924,12 @@ var Module = (() => {
           var putRequest = files.put(FS.analyzePath(path).object.contents, path);
           putRequest.onsuccess = () => {
             ok++;
-            if (ok + fail3 == total)
+            if (ok + fail4 == total)
               finish();
           };
           putRequest.onerror = () => {
-            fail3++;
-            if (ok + fail3 == total)
+            fail4++;
+            if (ok + fail4 == total)
               finish();
           };
         });
@@ -19605,9 +19955,9 @@ var Module = (() => {
           return;
         }
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail3 = 0, total = paths.length;
+        var ok = 0, fail4 = 0, total = paths.length;
         function finish() {
-          if (fail3 == 0)
+          if (fail4 == 0)
             onload();
           else
             onerror();
@@ -19620,12 +19970,12 @@ var Module = (() => {
             }
             FS.createDataFile(PATH.dirname(path), PATH.basename(path), getRequest.result, true, true, true);
             ok++;
-            if (ok + fail3 == total)
+            if (ok + fail4 == total)
               finish();
           };
           getRequest.onerror = () => {
-            fail3++;
-            if (ok + fail3 == total)
+            fail4++;
+            if (ok + fail4 == total)
               finish();
           };
         });
@@ -22305,8 +22655,8 @@ import { mkdir } from "fs/promises";
 import { dirname, join } from "path";
 var SCHEMA = "apteva-design/v1";
 var importedGeometry = new WeakSet;
-var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.7";
-function fail3(message, details = undefined) {
+var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.8";
+function fail4(message, details = undefined) {
   const err = new Error(message);
   if (details !== undefined)
     err.details = details;
@@ -22315,7 +22665,7 @@ function fail3(message, details = undefined) {
 function finite2(value, label) {
   const number = Number(value);
   if (!Number.isFinite(number))
-    fail3(`${label} must resolve to a finite number`);
+    fail4(`${label} must resolve to a finite number`);
   return number;
 }
 function resolve(value, params, label = "value") {
@@ -22325,12 +22675,12 @@ function resolve(value, params, label = "value") {
     return value ? 1 : 0;
   if (typeof value === "string")
     return new ExpressionParser(value, params).parse();
-  fail3(`${label} must be a number or parameter expression`);
+  fail4(`${label} must be a number or parameter expression`);
 }
 function vector(value, params, label, fallback = [0, 0, 0]) {
   const source = value ?? fallback;
   if (!Array.isArray(source) || source.length !== 3)
-    fail3(`${label} must contain three values`);
+    fail4(`${label} must contain three values`);
   return source.map((part, index) => resolve(part, params, `${label}[${index}]`));
 }
 function parameterValues(definition, supplied) {
@@ -22341,23 +22691,23 @@ function parameterValues(definition, supplied) {
     const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : fitValue ?? spec.default;
     const value = typeof candidate === "boolean" ? candidate ? 1 : 0 : finite2(candidate, `parameter ${name}`);
     if (spec.type === "boolean" && value !== 0 && value !== 1)
-      fail3(`parameter ${name} must be true/false (1/0)`);
+      fail4(`parameter ${name} must be true/false (1/0)`);
     if (spec.type === "integer" && !Number.isInteger(value))
-      fail3(`parameter ${name} must be an integer`);
+      fail4(`parameter ${name} must be an integer`);
     if (Array.isArray(spec.options) && spec.options.length && !spec.options.some((option) => Math.abs(Number(option) - value) <= 0.000000001)) {
-      fail3(`parameter ${name} must be one of ${spec.options.join(", ")}`);
+      fail4(`parameter ${name} must be one of ${spec.options.join(", ")}`);
     }
     if (spec.min !== undefined && value < finite2(spec.min, `${name}.min`)) {
-      fail3(`parameter ${name} is below its minimum`);
+      fail4(`parameter ${name} is below its minimum`);
     }
     if (spec.max !== undefined && value > finite2(spec.max, `${name}.max`)) {
-      fail3(`parameter ${name} is above its maximum`);
+      fail4(`parameter ${name} is above its maximum`);
     }
     output[name] = value;
   }
   for (const name of Object.keys(supplied || {})) {
     if (!Object.hasOwn(output, name))
-      fail3(`unknown parameter ${name}`);
+      fail4(`unknown parameter ${name}`);
   }
   return output;
 }
@@ -22365,23 +22715,36 @@ var SKIPPED = Symbol("skipped");
 function shapeFor(id, shapes) {
   const shape = shapes.get(id);
   if (shape === SKIPPED)
-    fail3(`operation references ${id}, which is skipped because its when condition is false`);
+    fail4(`operation references ${id}, which is skipped because its when condition is false`);
   if (!shape)
-    fail3(`operation references unknown shape ${id}`);
+    fail4(`operation references unknown shape ${id}`);
   return shape;
 }
 function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) {
   if (!Array.isArray(points) || points.length < 3)
-    fail3(`${label} needs at least three [x,y] points`);
+    fail4(`${label} needs at least three [x,y] points`);
   const resolved = points.map((point, index) => {
     if (!Array.isArray(point) || point.length !== 2)
-      fail3(`${label}[${index}] must be [x,y]`);
+      fail4(`${label}[${index}] must be [x,y]`);
     return [resolve(point[0], params), resolve(point[1], params)];
   });
   let pen = draw(resolved[0]);
   for (const point of resolved.slice(1))
     pen = pen.lineTo(point);
   return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
+}
+function featureContext(params, shape) {
+  let bounds2;
+  return {
+    resolve: (value, label) => resolve(value, params, label),
+    vector: (value, label) => vector(value, params, label),
+    bounds: () => {
+      if (!shape)
+        fail4("side selectors need an input shape");
+      bounds2 ??= shapeBounds(shape);
+      return bounds2;
+    }
+  };
 }
 function activeIds(ids, shapes) {
   return ids.filter((id) => shapes.get(id) !== SKIPPED);
@@ -22397,7 +22760,7 @@ function buildComponentShape(component, params, label) {
   const child = buildDefinitionGeometry(component.definition, componentParameters(component, params, label));
   const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
   if (!selected)
-    fail3(`${label} source part ${component.source_part_id} has no geometry`);
+    fail4(`${label} source part ${component.source_part_id} has no geometry`);
   const shape = selected.clone();
   if (importedGeometry.has(selected))
     importedGeometry.add(shape);
@@ -22406,17 +22769,17 @@ function buildComponentShape(component, params, label) {
 }
 function buildOperation(operation, shapes, params, assets, importedVisuals, components = {}) {
   if (!operation || typeof operation !== "object")
-    fail3("every operation must be an object");
+    fail4("every operation must be an object");
   if (!operation.id || typeof operation.id !== "string")
-    fail3("every operation requires a string id");
+    fail4("every operation requires a string id");
   if (shapes.has(operation.id))
-    fail3(`duplicate operation id ${operation.id}`);
+    fail4(`duplicate operation id ${operation.id}`);
   let shape;
   switch (operation.type) {
     case "component": {
       const component = components?.[operation.id];
       if (!component)
-        fail3(`component operation ${operation.id} was not resolved by Design Studio`);
+        fail4(`component operation ${operation.id} was not resolved by Design Studio`);
       shape = applyAssemblyTransform(buildComponentShape(component, params, operation.id).selected, operation.transform || {}, params);
       break;
     }
@@ -22432,7 +22795,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "swept_box": {
       const origin = vector(operation.origin, params, "swept_box.origin"), size = vector(operation.size, params, "swept_box.size"), travel = vector(operation.travel, params, "swept_box.travel");
       if (size.some((x) => x <= 0))
-        fail3("swept_box size must be positive");
+        fail4("swept_box size must be positive");
       const min = origin.map((x, k) => Math.min(x, x + travel[k])), max = origin.map((x, k) => Math.max(x + size[k], x + size[k] + travel[k]));
       shape = makeBox(min, max);
       break;
@@ -22440,7 +22803,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "box": {
       const [width, depth, height] = vector(operation.size, params, `${operation.id}.size`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail3(`${operation.id}.size must be positive`);
+        fail4(`${operation.id}.size must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = makeBox([x, y, z], [x + width, y + depth, z + height]);
       break;
@@ -22449,14 +22812,14 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail3(`${operation.id} radius and height must be positive`);
+        fail4(`${operation.id} radius and height must be positive`);
       shape = makeCylinder(radius, height, vector(operation.origin, params, `${operation.id}.origin`), vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]));
       break;
     }
     case "sphere": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail3(`${operation.id}.radius must be positive`);
+        fail4(`${operation.id}.radius must be positive`);
       shape = makeSphere(radius).translate(vector(operation.center, params, `${operation.id}.center`));
       break;
     }
@@ -22465,7 +22828,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const depth = resolve(operation.depth, params, `${operation.id}.depth`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail3(`${operation.id} dimensions must be positive`);
+        fail4(`${operation.id} dimensions must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawRectangle(width, depth).translate(x + width / 2, y + depth / 2).sketchOnPlane("XY", z).extrude(height);
       break;
@@ -22474,18 +22837,18 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail3(`${operation.id} radius and height must be positive`);
+        fail4(`${operation.id} radius and height must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawCircle(radius).translate(x, y).sketchOnPlane("XY", z).extrude(height);
       break;
     }
     case "extrude_polygon": {
       if (!Array.isArray(operation.points) || operation.points.length < 3) {
-        fail3(`${operation.id}.points needs at least three [x,y] points`);
+        fail4(`${operation.id}.points needs at least three [x,y] points`);
       }
       const points = operation.points.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail3(`${operation.id}.points[${index}] must be [x,y]`);
+          fail4(`${operation.id}.points[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(points[0]);
@@ -22503,10 +22866,10 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     }
     case "sweep_circle": {
       if (!Array.isArray(operation.path) || operation.path.length < 2)
-        fail3(`${operation.id}.path needs at least two [x,y] points`);
+        fail4(`${operation.id}.path needs at least two [x,y] points`);
       const path = operation.path.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail3(`${operation.id}.path[${index}] must be [x,y]`);
+          fail4(`${operation.id}.path[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(path[0]);
@@ -22515,7 +22878,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const spine = pen.done().sketchOnPlane(operation.plane || "XY", vector(operation.origin, params, `${operation.id}.origin`));
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail3(`${operation.id}.radius must be positive`);
+        fail4(`${operation.id}.radius must be positive`);
       shape = spine.sweepSketch((profilePlane, profileOrigin) => drawCircle(radius).sketchOnPlane(profilePlane, profileOrigin));
       break;
     }
@@ -22524,11 +22887,11 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "intersect": {
       const ids = operation.inputs || [operation.base, ...operation.tools || []];
       if (!Array.isArray(ids) || ids.length < 2 || ids.some((id) => typeof id !== "string")) {
-        fail3(`${operation.id}.${operation.type} needs at least two input ids`);
+        fail4(`${operation.id}.${operation.type} needs at least two input ids`);
       }
       const active = operation.type === "cut" ? [ids[0], ...activeIds(ids.slice(1), shapes)] : activeIds(ids, shapes);
       if (active.length === 0)
-        fail3(`${operation.id}: every input is skipped by its when condition`);
+        fail4(`${operation.id}: every input is skipped by its when condition`);
       shape = shapeFor(active[0], shapes).clone();
       for (const id of active.slice(1)) {
         const tool = shapeFor(id, shapes).clone();
@@ -22539,10 +22902,10 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "compound": {
       const ids = operation.inputs;
       if (!Array.isArray(ids) || ids.length === 0)
-        fail3(`${operation.id}.inputs is required`);
+        fail4(`${operation.id}.inputs is required`);
       const active = activeIds(ids, shapes);
       if (active.length === 0)
-        fail3(`${operation.id}: every input is skipped by its when condition`);
+        fail4(`${operation.id}: every input is skipped by its when condition`);
       shape = makeCompound(active.map((id) => shapeFor(id, shapes).clone()));
       break;
     }
@@ -22565,7 +22928,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "linear_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail3(`${operation.id}.count must be between 1 and 128`);
+        fail4(`${operation.id}.count must be between 1 and 128`);
       const step = vector(operation.step, params, `${operation.id}.step`);
       const copies = [];
       for (let index = 0;index < count2; index += 1) {
@@ -22581,7 +22944,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "circular_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail3(`${operation.id}.count must be between 1 and 128`);
+        fail4(`${operation.id}.count must be between 1 and 128`);
       const totalAngle = resolve(operation.angle ?? 360, params, `${operation.id}.angle`);
       const center = vector(operation.center, params, `${operation.id}.center`);
       const direction = vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]);
@@ -22599,19 +22962,39 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "fillet": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail3(`${operation.id}.radius must be positive`);
-      shape = shapeFor(operation.input, shapes).clone().fillet(radius);
+        fail4(`${operation.id}.radius must be positive`);
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = edgeFeature(input, operation, "fillet", radius, featureContext(params, input));
       break;
     }
     case "chamfer": {
       const distance = resolve(operation.distance, params, `${operation.id}.distance`);
       if (distance <= 0)
-        fail3(`${operation.id}.distance must be positive`);
-      shape = shapeFor(operation.input, shapes).clone().chamfer(distance);
+        fail4(`${operation.id}.distance must be positive`);
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = edgeFeature(input, operation, "chamfer", distance, featureContext(params, input));
+      break;
+    }
+    case "shell": {
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = shellFeature(input, operation, featureContext(params, input));
+      break;
+    }
+    case "hole": {
+      const input = shapeFor(operation.input, shapes).clone();
+      shape = holeFeature(input, operation, featureContext(params, input), polygonSketch);
+      break;
+    }
+    case "extrude_profile": {
+      shape = extrudeProfile(operation, featureContext(params));
+      break;
+    }
+    case "loft": {
+      shape = loftFeature(operation, featureContext(params));
       break;
     }
     default:
-      fail3(`unsupported operation type ${JSON.stringify(operation.type)}`);
+      fail4(`unsupported operation type ${JSON.stringify(operation.type)}`);
   }
   shapes.set(operation.id, shape);
 }
@@ -22659,7 +23042,7 @@ function rotatePoint(point, angleDegrees, center, axis) {
   const radians = angleDegrees * Math.PI / 180;
   const length = Math.hypot(...axis);
   if (length === 0)
-    fail3("assembly rotation direction must not be zero");
+    fail4("assembly rotation direction must not be zero");
   const [ux, uy, uz] = axis.map((value) => value / length);
   const [x, y, z] = point.map((value, index) => value - center[index]);
   const cosine = Math.cos(radians), sine = Math.sin(radians), dot = ux * x + uy * y + uz * z;
@@ -22705,7 +23088,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
   let attempts = 0;
   while (pending.length) {
     if (++attempts > definition.assembly.instances.length ** 2 + 1)
-      fail3("Datum alignment dependency cycle");
+      fail4("Datum alignment dependency cycle");
     const instance = pending.shift();
     if (instance.alignment && !instances.some((i) => i.id === instance.alignment.target_instance)) {
       pending.push(instance);
@@ -22713,10 +23096,10 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     }
     const part = parts.get(instance.part_id);
     if (!part)
-      fail3(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
+      fail4(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
     const sourceShape = partShapes.get(part.id);
     if (!sourceShape)
-      fail3(`assembly part ${part.id} has no resolved geometry`);
+      fail4(`assembly part ${part.id} has no resolved geometry`);
     let resolvedTransform = instance.transform || {};
     if (instance.alignment) {
       const a = instance.alignment, target = instances.find((i) => i.id === a.target_instance);
@@ -22727,7 +23110,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
       resolvedTransform = { ...resolvedTransform, translate: old.map((v, k) => v + delta[k]) };
     }
     if (part.manufacturing?.classification === "purchased" && resolvedTransform.scale !== undefined && resolve(resolvedTransform.scale, params) !== 1)
-      fail3("Purchased components require rigid placement; normalize import units separately");
+      fail4("Purchased components require rigid placement; normalize import units separately");
     const shape = applyAssemblyTransform(sourceShape, resolvedTransform, params);
     const material = materials.get(part.material_id);
     const visuals = (partVisuals.get(part.id) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || material?.color), shape: sourceShape }]).map((visual) => ({
@@ -22751,7 +23134,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     });
   }
   if (!instances.length)
-    fail3("assembly has no visible instances");
+    fail4("assembly has no visible instances");
   const assemblyShape = makeCompound(instances.map((item) => item.shape.clone()));
   if (instances.every((i) => importedGeometry.has(i.shape)))
     importedGeometry.add(assemblyShape);
@@ -22764,20 +23147,20 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
 }
 function validateDefinition(definition) {
   if (!definition || typeof definition !== "object")
-    fail3("definition must be an object");
+    fail4("definition must be an object");
   if (definition.schema !== SCHEMA)
-    fail3(`schema must be ${SCHEMA}`);
+    fail4(`schema must be ${SCHEMA}`);
   if ((definition.units || "mm") !== "mm")
-    fail3("v0.1 supports millimetres only");
+    fail4("v0.1 supports millimetres only");
   if (!Array.isArray(definition.operations))
-    fail3("definition.operations must be an array");
+    fail4("definition.operations must be an array");
   if (definition.operations.length === 0 && !definition.assembly?.instances?.length) {
-    fail3("definition requires operations or an assembly with instances");
+    fail4("definition requires operations or an assembly with instances");
   }
   if ((!definition.output || typeof definition.output !== "string") && !definition.assembly)
-    fail3("definition.output is required outside an assembly");
+    fail4("definition.output is required outside an assembly");
   if (definition.operations.length > 256)
-    fail3("definition exceeds the 256-operation limit");
+    fail4("definition exceeds the 256-operation limit");
 }
 function buildDefinitionGeometry(definition, supplied) {
   validateDefinition(definition);
@@ -22786,7 +23169,7 @@ function buildDefinitionGeometry(definition, supplied) {
   for (const operation of definition.operations) {
     if (operation && operation.when !== undefined && operation.when !== null) {
       if (shapes.has(operation.id))
-        fail3(`duplicate operation id ${operation.id}`);
+        fail4(`duplicate operation id ${operation.id}`);
       if (resolve(operation.when, params, `${operation.id}.when`) === 0) {
         shapes.set(operation.id, SKIPPED);
         continue;
@@ -22803,7 +23186,7 @@ function buildDefinitionGeometry(definition, supplied) {
     if (part.source) {
       const component = resolved.get(part.id);
       if (!component)
-        fail3(`linked part ${part.id} was not resolved by Design Studio`);
+        fail4(`linked part ${part.id} was not resolved by Design Studio`);
       const { child, selected: selectedShape } = buildComponentShape(component, params, `part ${part.id}`);
       const sourcePart = component.source_part_id ? (component.definition.parts || []).find((p) => p.id === component.source_part_id) : null;
       if (sourcePart && !part.manufacturing)
@@ -22907,7 +23290,7 @@ function printOrientation(shape, part, params) {
   if (!angles)
     return shape;
   if (angles.length !== 3)
-    fail3("manufacturing.orientation must be Euler X/Y/Z degrees");
+    fail4("manufacturing.orientation must be Euler X/Y/Z degrees");
   let out = shape.clone();
   for (let axis = 0;axis < 3; axis++) {
     const direction = [0, 0, 0];
@@ -22919,7 +23302,7 @@ function printOrientation(shape, part, params) {
 }
 async function run(request) {
   if (request.expected_engine_version && request.expected_engine_version !== ENGINE_VERSION)
-    fail3(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
+    fail4(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
   const built = buildDefinitionGeometry(request.definition, request.parameters || {});
   const { params, partShapes, assembly } = built;
   const shape = assembly.shape;
@@ -22931,7 +23314,7 @@ async function run(request) {
       try {
         visualMesh = item.shape.mesh({ tolerance, angularTolerance });
       } catch (e) {
-        fail3(`Preview failed for ${item.name}: ${String(e)}`);
+        fail4(`Preview failed for ${item.name}: ${String(e)}`);
       }
       const faces = item.shape.faces, faceIndices = new Map(faces.map((f, index) => [f.hashCode, index]));
       visualMesh.faceGroups = visualMesh.faceGroups.map((g) => ({ ...g, faceId: faceIndices.get(g.faceId) }));
@@ -22954,17 +23337,17 @@ async function run(request) {
   try {
     report = geometryReport(shape, mesh, assembly.instances);
   } catch (e) {
-    fail3(`Geometry measurements failed: ${String(e)}`);
+    fail4(`Geometry measurements failed: ${String(e)}`);
   }
   const inspection = inspect(request.definition, built, applyAssemblyTransform, exactAssemblyTransform);
   report.topology = inspection.topology;
   report.exact_checks = inspection.exact_checks;
   report.body_count = inspection.topology.reduce((s, t) => s + t.solid_count, 0);
   if (!report.valid)
-    fail3("output geometry is empty or invalid", report);
+    fail4("output geometry is empty or invalid", report);
   const outputDir = request.output_dir;
   if (!outputDir || typeof outputDir !== "string")
-    fail3("output_dir is required");
+    fail4("output_dir is required");
   await mkdir(outputDir, { recursive: true });
   const artifacts = [];
   const formats = new Set(request.formats || ["mesh-json"]);
@@ -22979,7 +23362,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail3(`part ${part.id} has no export geometry`);
+        fail4(`part ${part.id} has no export geometry`);
       const partMesh = partShape.mesh({ tolerance, angularTolerance });
       await Bun.write(partPath, JSON.stringify({ ...partMesh }));
       artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
@@ -22997,7 +23380,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail3(`part ${part.id} has no export geometry`);
+        fail4(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, exportSTEP([{ shape: partShape, name: part.name }], { unit: "MM", modelUnit: "MM" }));
       artifacts.push({ format: "step", path: partPath, content_type: "model/step", part_id: part.id, part_name: part.name });
     }
@@ -23017,7 +23400,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail3(`part ${part.id} has no export geometry`);
+        fail4(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, partShape.blobSTL({ tolerance, angularTolerance, binary: true }));
       artifacts.push({ format: "stl", path: partPath, content_type: "model/stl", part_id: part.id, part_name: part.name });
     }

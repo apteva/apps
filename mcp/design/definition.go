@@ -27,6 +27,7 @@ var allowedOperations = map[string]bool{
 	"linear_pattern": true, "circular_pattern": true,
 	"fillet": true, "chamfer": true,
 	"component": true,
+	"shell": true, "hole": true, "extrude_profile": true, "loft": true,
 }
 
 func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefinition, error) {

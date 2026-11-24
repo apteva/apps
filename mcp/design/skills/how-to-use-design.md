@@ -50,6 +50,16 @@ Parameter types are `length` (default), `number`, `angle`, `integer` (whole numb
 
 Make features optional with `when` on any operation (a boolean, number, or expression such as `"has_vent"` or `"width > 60"`). A skipped operation drops out of `fuse`, `cut` tools, `intersect` and `compound` inputs; using it any other way (as a cut base, a transform input, or an output) is an error, so the mistake is visible.
 
+## Edges, shells, profiles, holes and lofts
+
+`fillet` and `chamfer` take an optional `edges` selector; without it every edge is rounded. Selectors pick by description instead of index, so they survive parameter changes: `{"side":"top"}` (edges in the shape's top plane), `{"direction":"Z"}` (vertical edges), `{"curve":"circle"}`, `{"in_box":[[x,y,z],[x,y,z]]}`, `{"near":{"point":[x,y,z],"distance":1}}`, `{"in_plane":{"plane":"XY","offset":"height"}}`, `{"not":…}`. Keys in one object must all match; a list matches any entry. A selector that finds nothing is an error. Large radii can fail where faces are too small; the error says so.
+
+`shell` hollows a solid inward by `thickness`, removing the faces chosen by `open_faces` (same selector keys for faces, plus `surface`). Fillet the outside before shelling so the inside follows.
+
+`extrude_profile` extrudes a 2D profile on `XY`, `XZ` or `YZ` at `origin`: `rounded_rectangle`, `slot` (length end to end), `circle`, `regular_polygon`, `polygon`, or `path` with `line`, three-point `arc`+`via`, `arc`+`sagitta` and `tangent_arc` segments. Profiles accept `center`, `angle`, and `holes` (more profiles cut out). `loft` blends two or more single-outline sections at different `offset`s (`ruled: true` for straight sides).
+
+`hole` cuts at one `position` or many `positions` on a surface, drilling along `direction` (default `[0,0,-1]`). Give `diameter` or `thread: {size: "M3", mode: "clearance"|"tap"|"insert"}`; omit `depth` for a through hole (inserts default to the insert length plus 1 mm). Add `counterbore: {diameter, depth}` or `countersink: {diameter, angle}`. Insert sizes are typical values; check the insert's datasheet.
+
 ## Reusable components and variants
 
 To reuse one design's geometry inside another as an ordinary shape (to cut openings into a shared base, fuse a boss onto it, or pattern it), add a `component` operation: `{"id":"body","type":"component","source":{"design_id":12,"revision_id":34,"source_sha256":"…","part_id":"optional"},"parameters":{"width":"size","depth":30},"transform":{…}}`. `parameters` overrides the source revision's values for this link only: numbers are checked against the source's min/max/options, and strings are expressions over this design's parameters. Linked assembly parts (`part.source`) accept the same `parameters`.
