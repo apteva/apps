@@ -644,3 +644,38 @@ func TestManifestAndMigrations(t *testing.T) {
 		t.Fatalf("migration defaults progress=%q priorities=%q", progress, priorities)
 	}
 }
+
+// TestQueryIndexer_ApibayOutlivesConfiguredTimeout — ApiBay cache
+// misses take ~20s upstream. The configured per-indexer timeout (8s by
+// default) must not cut them off, or every uncached query fails with
+// "context deadline exceeded".
+func TestQueryIndexer_ApibayOutlivesConfiguredTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"id":"1","name":"Slow Origin","info_hash":"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF","seeders":"7","leechers":"1","num_files":"1","size":"100","added":"1700000000","category":"205","username":"x"}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	app := &App{}
+	ix := Indexer{Name: "apibay", Kind: "apibay", BaseURL: srv.URL}
+	results, err := app.queryIndexer(context.Background(), ix, "slow", "", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("apibay query cut off by configured timeout: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "Slow Origin" {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+}
+
+func TestIndexerTimeout(t *testing.T) {
+	if got := indexerTimeout("apibay", 8*time.Second); got != apibayMinTimeout {
+		t.Errorf("apibay with 8s configured = %v, want %v", got, apibayMinTimeout)
+	}
+	if got := indexerTimeout("apibay", 50*time.Second); got != 50*time.Second {
+		t.Errorf("apibay with 50s configured = %v, want 50s", got)
+	}
+	if got := indexerTimeout("jackett", 8*time.Second); got != 8*time.Second {
+		t.Errorf("jackett = %v, want configured 8s", got)
+	}
+}

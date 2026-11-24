@@ -4,7 +4,8 @@
 // fan out a query to every enabled indexer in parallel, deduplicate
 // by infohash, sort by seeders descending, and return a normalised
 // list. Per-indexer timeout is short (~8s default) so a single dead
-// source doesn't stall the agent.
+// source doesn't stall the agent; ApiBay gets a 35s floor because its
+// Cloudflare cache misses take ~20s.
 //
 // Wire shape per kind:
 //
@@ -98,8 +99,12 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 		return nil, fmt.Errorf("no enabled indexers — add at least one in the panel's Indexers tab")
 	}
 
-	timeout := time.Duration(max(1, min(60, configInt(a.ctx, "indexer_query_timeout_seconds", 8)))) * time.Second
-	cctx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
+	timeout := a.configuredIndexerTimeout()
+	longest := timeout
+	for _, ix := range indexers {
+		longest = max(longest, indexerTimeout(ix.Kind, timeout))
+	}
+	cctx, cancel := context.WithTimeout(ctx, longest+2*time.Second)
 	defer cancel()
 
 	type indexerOutcome struct {
@@ -166,7 +171,28 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 	return merged, nil
 }
 
+// apibayMinTimeout — ApiBay sits behind a Cloudflare cache. Cached
+// queries answer in well under a second, but a cache miss waits on the
+// origin for ~20s. With the generic 8s per-indexer default every
+// uncached query timed out, and because the aborted request never
+// populated the cache, the same query kept failing on every retry.
+const apibayMinTimeout = 35 * time.Second
+
+func (a *App) configuredIndexerTimeout() time.Duration {
+	return time.Duration(max(1, min(60, configInt(a.ctx, "indexer_query_timeout_seconds", 8)))) * time.Second
+}
+
+// indexerTimeout returns the effective per-query timeout for an
+// indexer kind given the operator-configured default.
+func indexerTimeout(kind string, configured time.Duration) time.Duration {
+	if kind == "apibay" {
+		return max(configured, apibayMinTimeout)
+	}
+	return configured
+}
+
 func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category string, timeout time.Duration) ([]SearchResult, error) {
+	timeout = indexerTimeout(ix.Kind, timeout)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := a.acquireSearchSlot(ctx); err != nil {

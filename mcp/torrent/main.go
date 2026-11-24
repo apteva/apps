@@ -1093,7 +1093,7 @@ func (a *App) testIndexers(ctx context.Context, appCtx *sdk.AppCtx) ([]IndexerPr
 		return nil, err
 	}
 	out := make([]IndexerProbe, len(indexers))
-	timeout := time.Duration(configInt(a.ctx, "indexer_query_timeout_seconds", 8)) * time.Second
+	timeout := a.configuredIndexerTimeout()
 	var wg sync.WaitGroup
 	for i, ix := range indexers {
 		wg.Add(1)
