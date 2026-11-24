@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.30.0 — 2026-11-24
+
+- Make code blocks in messages easy to read and copy. Agents put text meant to be pasted elsewhere (prompts, commands, configs) in fenced code blocks, which showed as a plain box: no copy button, prose cut off at the right edge behind a sideways scrollbar at the very bottom, and no height limit. Each block now has a header with its language ("Text" when the fence names none), a wrap toggle and a Copy button that copies exactly what the agent wrote and confirms with "Copied". Prose (unlabelled, text and Markdown blocks) wraps; code keeps its lines and scrolls sideways. Blocks over 18 lines or 1,400 characters start collapsed behind "Show all N lines". The header stays at the top of the transcript while you scroll through a long block.
+- Applies to agent messages, streaming replies, interactive question text and report cards. Labels are translated (English, French, Spanish). Message data is unchanged.
+
 ## 0.29.1 — 2026-11-24
 
 - Refresh the model in Details when a reply arrives. Details read the model only when a conversation was opened, so with Details open it kept "Model not recorded yet" after the agent answered. It now reloads whenever the conversation updates. Recording was already correct in 0.29.0.

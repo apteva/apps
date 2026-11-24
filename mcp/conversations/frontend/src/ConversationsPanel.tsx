@@ -14,7 +14,7 @@ import { pendingResponsePhase, responseToolGroup, responseWaitingToolGroup } fro
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
-import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
+import { useCodeBlockLabels, useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, reportSectionsText } from "./messageContent";
 // ConversationsPanel — chat + inbox for the conversations app.
 //
@@ -281,7 +281,8 @@ function MessageCards({message,onAction,projectId}: {message:Message;onAction:(i
 // dashboard: a full-width markdown message growing in place, with
 // half-open markdown tokens closed so the render doesn't flicker.
 function StreamingBubble({ text }: { text: string }) {
-  const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text)), [text]);
+  const codeLabels = useCodeBlockLabels();
+  const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text), codeLabels), [text, codeLabels]);
   return (
     <div className="min-w-0 shrink-0">
       <div
@@ -990,16 +991,17 @@ function MessageBody({
   onAction: (messageId: number, actionId: string, note: string) => Promise<void>;
 }) {
   const { t, relativeTime } = useConversationLocalization();
+  const codeLabels = useCodeBlockLabels();
   const isMarkdown = message.role !== "user" && message.role !== "system" && !message.component_kind;
   const html = useMemo(
-    () => (isMarkdown ? renderSafeMarkdown(message.content) : ""),
-    [isMarkdown, message.content],
+    () => (isMarkdown ? renderSafeMarkdown(message.content, codeLabels) : ""),
+    [isMarkdown, message.content, codeLabels],
   );
 
   if (message.component_kind) {
     return (
       <div className="w-full min-w-0 shrink-0">
-        {message.component_kind === "interactive" && message.content && <div className="chat-md mb-2" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(message.content)}}/>}
+        {message.component_kind === "interactive" && message.content && <div className="chat-md mb-2" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(message.content, codeLabels)}}/>}
         <MessageCards message={message} onAction={onAction} />
       </div>
     );

@@ -90,3 +90,12 @@ export function ConversationLocaleRegion({ children, className = "", fill = true
   const { locale, direction } = useConversationLocalization();
   return <div lang={locale} dir={direction} className={`apteva-conversations ${className}`} style={fill ? { height: "100%", minHeight: 0 } : undefined}>{children}</div>;
 }
+
+/** Labels for the header and footer of fenced code blocks in Markdown. */
+export function useCodeBlockLabels() {
+  const { t } = useConversationLocalization();
+  return useMemo(() => ({
+    text: t("code.text"), copy: t("code.copy"), copied: t("code.copied"), copyFailed: t("code.copyFailed"),
+    wrap: t("code.wrap"), showAll: t("code.showAll"), showLess: t("code.showLess"),
+  }), [t]);
+}

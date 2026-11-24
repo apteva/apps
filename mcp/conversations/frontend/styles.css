@@ -143,6 +143,93 @@
   padding: 0;
   font-size: 0.85em;
 }
+/* Fenced blocks: a header with the language, wrap and copy; tall blocks
+   collapse behind "Show all". No overflow on .chat-code itself, so the
+   header can stick to the top of the transcript while scrolling a long one. */
+.chat-md .chat-code {
+  margin: 0.6rem 0;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-subtle, #333333);
+  border-radius: 8px;
+  background: var(--bg-card, #141414);
+}
+.chat-md .chat-code-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 34px;
+  padding: 0 4px 0 12px;
+  border-bottom: 1px solid var(--border-subtle, #333333);
+  border-radius: 8px 8px 0 0;
+  background: var(--bg-card, #141414);
+  /* The transcript's top padding sits above a stuck header; cover it so text
+     scrolling under the header doesn't show through. */
+  box-shadow: 0 -16px 0 0 var(--bg, #0a0a0a);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted, #aaaaaa);
+}
+.chat-md .chat-code-lang {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono-fixed, ui-monospace, monospace);
+}
+.chat-md .chat-code-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #aaaaaa);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-md .chat-code-btn:hover { background: var(--bg-hover, #1c1c1c); color: var(--text, #e8e8e8); }
+.chat-md .chat-code-btn:focus-visible { outline: 2px solid var(--accent, #f97316); outline-offset: -2px; }
+.chat-md .chat-code-btn[aria-pressed="true"] { color: var(--text, #e8e8e8); }
+.chat-md .chat-code-btn.is-copied { color: var(--success, #22c55e); }
+.chat-md .chat-code-btn.is-failed { color: var(--error, #ef4444); }
+.chat-md .chat-code-btn svg { flex: none; }
+.chat-md .chat-code-body { position: relative; }
+.chat-md .chat-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0 0 8px 8px;
+  background: none;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+.chat-md .chat-code--wrap pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+.chat-md .chat-code--collapsible pre { border-radius: 0; }
+.chat-md .chat-code--collapsed .chat-code-body { max-height: 22rem; overflow: hidden; }
+.chat-md .chat-code--collapsed .chat-code-body::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 4.5rem;
+  background: linear-gradient(to bottom, transparent, var(--bg-card, #141414));
+  pointer-events: none;
+}
+.chat-md .chat-code-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px;
+  border-top: 1px solid var(--border-subtle, #333333);
+}
 .chat-md a {
   color: var(--accent, #f97316);
   text-decoration: underline;

@@ -126,7 +126,9 @@ for (const host of ["dashboard", "external"]) {
    expect(style.font).toContain(theme==="clean"?"Arial":"monospace");
    expect(style.color).toBe(theme==="clean"?"rgb(32, 32, 32)":"rgb(232, 232, 232)");
    expect(await answer.locator("ul").evaluate(el=>getComputedStyle(el).listStyleType)).toBe("disc");
-   expect(await answer.locator("pre").evaluate(el=>getComputedStyle(el).borderTopWidth)).toBe("1px");
+   // Code blocks: the border is on the 0.30 wrapper, with its header above the <pre>.
+   expect(await answer.locator(".chat-code").evaluate(el=>getComputedStyle(el).borderTopWidth)).toBe("1px");
+   expect(await answer.locator(".chat-code-header").evaluate(el=>getComputedStyle(el).position)).toBe("sticky");
    expect(await answer.locator("strong").evaluate(el=>getComputedStyle(el).fontWeight)).toBe("600");
    expect(await page.locator("#host-sentinel").evaluate(el=>({spacing:getComputedStyle(el).getPropertyValue("--spacing"),color:getComputedStyle(el).getPropertyValue("--color-border")}))).toEqual({spacing:"13px",color:""});
    for (const width of [1280,390]) {

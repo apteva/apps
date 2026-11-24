@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Message } from "./types";
-import { useConversationLocalization } from "./i18n";
+import { useCodeBlockLabels, useConversationLocalization } from "./i18n";
 import { reportSectionsText } from "./messageContent";
 import { renderSafeMarkdown } from "./markdown";
 
@@ -127,6 +127,7 @@ export function ApprovalCard({
 
 export function ReportCard({ message }: { message: Message }) {
   const { t } = useConversationLocalization();
+  const codeLabels = useCodeBlockLabels();
   const card = message.components.find((c) => c.name === "report-card");
   if (!card) return null;
   const sections = reportSectionsText(card.props.sections);
@@ -144,7 +145,7 @@ export function ReportCard({ message }: { message: Message }) {
         {String(card.props.summary ?? "")}
       </p>
       {sections && (
-        <div className="chat-md mt-3" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(sections)}} />
+        <div className="chat-md mt-3" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(sections, codeLabels)}} />
       )}
     </div>
   );
