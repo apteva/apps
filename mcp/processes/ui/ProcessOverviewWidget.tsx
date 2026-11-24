@@ -1,11 +1,7 @@
 import { timingLabel, useTimingNow } from "./Timing";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import {
-  eventsForStep,
-  thoughtsFromEvents,
-  useWorkerActivity,
-} from "./execution-activity";
+import { eventsForStep, useWorkerActivity } from "./execution-activity";
 import { callsForExecution } from "./ExecutionTools";
 
 type Props = {
@@ -247,57 +243,151 @@ export function liveTarget(x: Item, stepID?: string): LiveTarget | null {
     label: step.name,
   };
 }
-export type ActivityItem = {
+type TelemetryEvents = Parameters<typeof eventsForStep>[0];
+export type StepAction = {
   id: string;
-  kind: "thought" | "tool" | "wait";
+  tool: string;
+  label: string;
   time: string;
-  title: string;
+  durationMs?: number;
+  status: "running" | "completed" | "failed";
+  args: Record<string, unknown>;
+  result?: unknown;
+};
+export type ModelTurn = {
+  id: string;
+  start: string;
+  end?: string;
   text: string;
   status: "running" | "completed" | "failed";
 };
-const toolLabel = (name: string) => name.replace(/_/g, " ");
-const tail = (text: string, n = 160) => {
-  const t = text.replace(/\s+/g, " ").trim();
-  return t.length > n ? `…${t.slice(-n)}` : t;
+export type StepActivity = {
+  actions: StepAction[];
+  turns: ModelTurn[];
+  /** Latest finished model message: the card's thought line. */
+  thought: string;
+  /** Start of the model turn in progress, when the worker is thinking now. */
+  thinkingSince?: string;
+  firstEventAt?: string;
+  lastEventAt?: string;
+  modelMs: number;
+  toolMs: number;
 };
-/** Thoughts and tool calls of one worker execution, oldest first. */
-export function activityItems(events: Parameters<typeof eventsForStep>[0], target: LiveTarget): ActivityItem[] {
+const MODEL_EVENTS = ["llm.start", "llm.thinking", "llm.chunk", "llm.done", "llm.error", "llm.cancelled"];
+const clean = (text: string) => text.replace(/\s+/g, " ").trim();
+const baseName = (name: string) => name.replace(/^processes_/, "");
+/** Plain words for a tool call: the agent's stated reason, or a fixed verb
+ * for Processes' own protocol calls. The raw tool name stays in tooltips. */
+export function actionLabel(tool: string, reason: string, args: Record<string, unknown> = {}) {
+  switch (baseName(tool)) {
+    case "step_update": {
+      const state = String(args.state || "");
+      return state === "blocked" ? "Reported blocker" : state === "waiting" ? "Started waiting" : "Completed step";
+    }
+    case "run_update":
+      return "Completed run";
+    case "step_evidence_save":
+      return "Saved evidence";
+    case "summary_update":
+      return "Saved run summary";
+    case "step_claim":
+      return "Claimed step";
+    case "step_read":
+      return reason || "Read earlier result";
+    case "pace":
+      return "Waiting";
+    case "search_tools":
+      return reason || "Looked up tools";
+  }
+  return reason || tool.replace(/_/g, " ");
+}
+/** Events of one worker execution: execution-tagged events plus, for an
+ * isolated worker (its thread serves one step and never claims it), the
+ * thread's model turns, which carry no execution ID. */
+function scopedEvents(events: TelemetryEvents, target: LiveTarget) {
   let scoped = eventsForStep(events, target.executionID || "", target.stepID, target.completedAt);
-  // An isolated worker's thread serves one step and never claims it, and
-  // model events carry no execution ID, so keep that thread's model turns.
   const claimed = events.some((e) => e.type === "tool.call" && String(e.data?.name || "").endsWith("step_claim"));
   if (!claimed) {
     const end = target.completedAt ? Date.parse(target.completedAt) : Infinity;
+    const seen = new Set(scoped);
+    const untagged = (e: TelemetryEvents[number]) => {
+      const ids = e.data?.execution_ids;
+      return !e.data?.execution_id && !(Array.isArray(ids) && ids.length);
+    };
     const model = events.filter(
-      (e) =>
-        ["llm.start", "llm.thinking", "llm.chunk", "llm.done", "llm.error"].includes(e.type) &&
-        !(e.data?.execution_id || e.data?.execution_ids) &&
-        Date.parse(e.time) <= end,
+      (e) => MODEL_EVENTS.includes(e.type) && !seen.has(e) && untagged(e) && Date.parse(e.time) <= end + 2000,
     );
-    scoped = [...scoped, ...model].sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+    // Calls made before the worker claims its event carry no execution ID yet;
+    // on a dedicated worker thread they still belong to this step.
+    const early = events
+      .filter((e) => (e.type === "tool.call" || e.type === "tool.result") && !seen.has(e) && untagged(e) && Date.parse(e.time) <= end)
+      .map((e) => ({ ...e, data: { ...e.data, execution_ids: [target.executionID] } }));
+    scoped = [...scoped, ...model, ...early].sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
   }
-  const turns = thoughtsFromEvents(scoped);
-  const thoughts = turns.filter((t, i) => (t.reasoning || t.response) || (t.status === "running" && i === turns.length - 1)).map((t): ActivityItem => ({
-    id: `thought:${t.id}`,
-    kind: "thought",
-    time: t.time,
-    title: t.status === "running" ? "Thinking" : t.status === "failed" ? "Model error" : "Thought",
-    text: tail(t.reasoning || t.response || ""),
-    status: t.status as ActivityItem["status"],
-  }));
-  const calls = callsForExecution(scoped, target.executionID || "").map((c): ActivityItem => ({
-    id: `tool:${c.id}`,
-    kind: c.name === "pace" ? "wait" : "tool",
-    time: c.time,
-    title: c.name === "pace" ? "Waiting" : toolLabel(c.name),
-    text: c.reason,
-    // A finished step has no call in flight, even when its result went unrecorded.
-    status: target.completedAt && c.status === "running" ? "completed" : c.status,
-  }));
-  const all = [...thoughts, ...calls].sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
-  // A model turn in progress only matters while it is the latest activity.
-  return all.filter((a, i) => !(a.kind === "thought" && a.status === "running" && !a.text && i !== all.length - 1));
+  return scoped;
 }
+export function stepActivity(events: TelemetryEvents, target: LiveTarget): StepActivity {
+  const scoped = scopedEvents(events, target);
+  const durations = new Map<string, number>();
+  for (const e of scoped) {
+    if (e.type !== "tool.result") continue;
+    const id = String(e.data?.id || e.data?.call_id || "");
+    const ms = Number(e.data?.duration_ms);
+    if (id && Number.isFinite(ms)) durations.set(id, ms);
+  }
+  const done = !!target.completedAt;
+  const actions = callsForExecution(scoped, target.executionID || "").map((c): StepAction => ({
+    id: c.id,
+    tool: c.name,
+    label: actionLabel(c.name, c.reason, c.args),
+    time: c.time,
+    durationMs: durations.get(c.id),
+    // A finished step has no call in flight, even when its result went unrecorded.
+    status: done && c.status === "running" ? "completed" : c.status,
+    args: c.args,
+    result: c.result,
+  }));
+  const turns = new Map<string, ModelTurn>();
+  for (const e of scoped) {
+    if (!MODEL_EVENTS.includes(e.type)) continue;
+    const data = e.data || {};
+    const id = String(data.iteration ?? data.request_id ?? e.id ?? e.time);
+    const turn = turns.get(id) || { id, start: e.time, text: "", status: "running" as ModelTurn["status"] };
+    if (e.type === "llm.thinking" || e.type === "llm.chunk") turn.text += String(data.text || data.chunk || "");
+    if (e.type === "llm.done") {
+      turn.status = "completed";
+      turn.end = e.time;
+      if (data.message) turn.text = String(data.message);
+    }
+    if (e.type === "llm.error") {
+      turn.status = "failed";
+      turn.end = e.time;
+      turn.text = String(data.error || data.message || "Model error");
+    }
+    // The worker is stopped after its final report; that cancelled turn is not work.
+    if (e.type === "llm.cancelled") {
+      turns.delete(id);
+      continue;
+    }
+    turns.set(id, turn);
+  }
+  const list = [...turns.values()].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+  const last = list[list.length - 1];
+  const finished = list.filter((t) => t.status === "completed" && clean(t.text));
+  const span = (t: ModelTurn) => (t.end ? Math.max(0, Date.parse(t.end) - Date.parse(t.start)) : 0);
+  const times = scoped.map((e) => e.time).sort();
+  return {
+    actions,
+    turns: list.filter((t) => t.status !== "running" || t === last),
+    thought: clean(finished[finished.length - 1]?.text || ""),
+    thinkingSince: !done && last?.status === "running" ? last.start : undefined,
+    firstEventAt: times[0],
+    lastEventAt: times[times.length - 1],
+    modelMs: list.reduce((n, t) => n + span(t), 0),
+    toolMs: actions.reduce((n, a) => n + (a.durationMs || 0), 0),
+  };
+}
+const EMPTY: StepActivity = { actions: [], turns: [], thought: "", modelMs: 0, toolMs: 0 };
 function useActivity(target: LiveTarget | null, enabled: boolean) {
   const { events, loading, error } = useWorkerActivity(
     target?.agentID,
@@ -305,70 +395,187 @@ function useActivity(target: LiveTarget | null, enabled: boolean) {
     enabled && !!target?.agentID && !!target?.threadID,
     enabled,
   );
-  const items = useMemo(() => (target ? activityItems(events, target) : []), [events, target?.executionID, target?.stepID, target?.completedAt]);
-  return { items, loading, error };
+  const activity = useMemo(() => (target ? stepActivity(events, target) : EMPTY), [events, target?.executionID, target?.stepID, target?.completedAt]);
+  return { activity, loading, error };
 }
-function ActivityIcon({ kind }: { kind: ActivityItem["kind"] }) {
-  const path =
-    kind === "thought"
-      ? "M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2V16h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"
-      : kind === "wait"
-        ? "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"
-        : "M14.7 6.3a4 4 0 0 0-5.4 5.4l-6 6 2 2 6-6a4 4 0 0 0 5.4-5.4l-2.4 2.4-2-2z";
+/** Re-renders every second while `active`, for elapsed-time counters. */
+function useNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+export function duration(ms?: number) {
+  if (ms === undefined || !Number.isFinite(ms)) return "";
+  if (ms < 10) return "<0.01s";
+  if (ms < 1000) return `${(ms / 1000).toFixed(ms < 100 ? 2 : 1)}s`;
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+function StatusIcon({ status }: { status: StepAction["status"] }) {
+  if (status === "running") return <span className="po-pulse" aria-label="in progress" />;
   return (
-    <svg className="po-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={path} />
+    <svg className={`po-icon ${status}`} viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-label={status === "failed" ? "failed" : "done"}>
+      <path d={status === "failed" ? "M6 6l12 12M18 6L6 18" : "M5 12.5l4.5 4.5L19 7"} />
     </svg>
   );
 }
-/** One-line latest activity for a running row. */
-function LiveLine({ item }: { item: Item }) {
-  const target = useMemo(() => liveTarget(item), [item]);
-  const { items } = useActivity(target, true);
-  const last = items[items.length - 1];
-  if (!target) return null;
+function ThoughtIcon() {
   return (
-    <span className="po-live" title={last ? `${last.title}: ${last.text}` : target.label}>
-      {last ? <ActivityIcon kind={last.kind} /> : <span className="po-pulse" aria-hidden="true" />}
-      <span className="po-live-text">
-        {last
-          ? `${last.status === "running" && last.kind === "tool" ? "Running " : ""}${last.title}${last.text ? ` · ${last.text}` : ""}`
-          : `${target.label} · starting`}
-      </span>
-    </span>
+    <svg className="po-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2V16h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z" />
+    </svg>
   );
 }
+/** The running row's two fixed lines: the last finished thought, and the
+ * last completed actions with a live marker. Only finished work is shown as
+ * text, so nothing flickers; the marker shows the worker is busy now. */
+function LiveLines({ item }: { item: Item }) {
+  const target = useMemo(() => liveTarget(item), [item]);
+  const { activity } = useActivity(target, true);
+  const running = activity.actions.filter((a) => a.status === "running");
+  const settled = activity.actions.filter((a) => a.status !== "running");
+  // Newest first, so a narrow card cuts the oldest action, never the latest.
+  const trail = settled.slice(-3).reverse();
+  const since = activity.thinkingSince || (!activity.actions.length && !activity.turns.length ? activity.firstEventAt || item.created_at : undefined);
+  const now = useNow(!!since);
+  if (!target) return null;
+  const elapsed = since ? duration(Math.max(0, now - Date.parse(since))) : "";
+  const marker = running.length
+    ? running[running.length - 1].label
+    : activity.thinkingSince
+      ? `Thinking ${elapsed}`
+      : since
+        ? `Starting ${elapsed}`
+        : "";
+  return (
+    <>
+      <span className="po-thought" title={activity.thought || undefined}>
+        {activity.thought ? `“${activity.thought}”` : <span className="po-faint">No thoughts yet</span>}
+      </span>
+      <span className="po-trail" title={settled.map((a) => `${a.status === "failed" ? "✗" : "✓"} ${a.label} (${a.tool})`).join("\n") || undefined}>
+        <span className="po-trail-items">
+          {trail.length
+            ? trail.map((a, i) => (
+                <span key={a.id} data-status={a.status}>
+                  {i > 0 && <span className="po-sep" aria-hidden="true">·</span>}
+                  <StatusIcon status={a.status} />
+                  {a.label}
+                </span>
+              ))
+            : <span className="po-faint">No actions yet</span>}
+        </span>
+        {marker && (
+          <span className="po-marker">
+            <span className="po-pulse" aria-hidden="true" />
+            {marker}
+          </span>
+        )}
+      </span>
+    </>
+  );
+}
+type FeedEntry =
+  | { kind: "turn"; time: string; turn: ModelTurn }
+  | { kind: "action"; time: string; action: StepAction };
+const pretty = (value: unknown) => {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+};
+/** The selected step's full timeline: thoughts and actions with timings. */
 function ActivityFeed({ target, running }: { target: LiveTarget; running: boolean }) {
-  const { items, loading, error } = useActivity(target, true);
-  const end = useRef<HTMLOListElement>(null);
+  const { activity, loading, error } = useActivity(target, true);
   const [all, setAll] = useState(false);
-  const shown = all ? items : items.slice(-8);
-  useEffect(() => {
-    end.current?.lastElementChild?.scrollIntoView?.({ block: "nearest" });
-  }, [items.length]);
+  const [open, setOpen] = useState("");
+  const now = useNow(!!activity.thinkingSince);
+  const entries: FeedEntry[] = [
+    ...activity.turns.filter((t) => t.status !== "completed" || clean(t.text)).map((turn): FeedEntry => ({ kind: "turn", time: turn.start, turn })),
+    ...activity.actions.map((action): FeedEntry => ({ kind: "action", time: action.time, action })),
+  ].sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+  const shown = all ? entries : entries.slice(-12);
   if (!target.agentID || !target.threadID)
     return <p className="po-muted">Activity was not tracked for this step.</p>;
+  const end = target.completedAt ? Date.parse(target.completedAt) : activity.lastEventAt ? Date.parse(activity.lastEventAt) : NaN;
+  const wall = activity.firstEventAt && Number.isFinite(end) ? Math.max(0, (activity.thinkingSince ? now : end) - Date.parse(activity.firstEventAt)) : 0;
+  const busy = activity.modelMs + activity.toolMs;
   return (
     <div className="po-feed">
-      {items.length > 8 && (
+      {busy > 0 && (
+        <div className="po-timing">
+          <span>
+            {wall ? `${duration(wall)} total · ` : ""}thinking {duration(activity.modelMs)} · tools {duration(activity.toolMs)}
+            {activity.actions.length ? ` · ${activity.actions.length} action${activity.actions.length === 1 ? "" : "s"}` : ""}
+          </span>
+          <span className="po-split" aria-hidden="true">
+            <span className="model" style={{ flexGrow: activity.modelMs }} />
+            <span className="tools" style={{ flexGrow: Math.max(activity.toolMs, busy * 0.01) }} />
+          </span>
+        </div>
+      )}
+      {entries.length > 12 && (
         <button type="button" className="po-link-button" onClick={() => setAll(!all)}>
-          {all ? "Show latest only" : `Show all ${items.length}`}
+          {all ? "Show latest only" : `Show all ${entries.length}`}
         </button>
       )}
-      <ol ref={end}>
-        {shown.map((a) => (
-          <li key={a.id} data-status={a.status} data-kind={a.kind}>
-            <ActivityIcon kind={a.kind} />
-            <span className="po-feed-title">{a.title}</span>
-            <span className="po-feed-text" title={a.text}>{a.text || (a.status === "running" ? "…" : "")}</span>
-            {a.status === "running" && <span className="po-pulse" aria-label="in progress" />}
-          </li>
-        ))}
+      <ol>
+        {shown.map((entry) => {
+          if (entry.kind === "turn") {
+            const t = entry.turn;
+            const thinking = t.status === "running";
+            return (
+              <li key={`turn:${t.id}`} data-kind="thought" data-status={t.status}>
+                <div className="po-feed-line">
+                  {thinking ? <span className="po-pulse" aria-label="in progress" /> : <ThoughtIcon />}
+                  <span className="po-feed-text" title={t.text || undefined}>
+                    {thinking ? "Thinking…" : t.status === "failed" ? `Model error · ${clean(t.text)}` : clean(t.text)}
+                  </span>
+                  <span className="po-feed-time">
+                    {thinking ? duration(Math.max(0, now - Date.parse(t.start))) : duration(t.end ? Date.parse(t.end) - Date.parse(t.start) : undefined)}
+                  </span>
+                </div>
+              </li>
+            );
+          }
+          const a = entry.action;
+          const expanded = open === a.id;
+          const args = pretty(Object.fromEntries(Object.entries(a.args).filter(([k]) => k !== "_reason")));
+          const result = pretty(a.result);
+          return (
+            <li key={`action:${a.id}`} data-kind="action" data-status={a.status}>
+              <button type="button" className="po-feed-line" aria-expanded={expanded} title={a.tool} onClick={() => setOpen(expanded ? "" : a.id)}>
+                <StatusIcon status={a.status} />
+                <span className="po-feed-title">{a.label}</span>
+                <span className="po-feed-tool">{a.tool.replace(/_/g, " ")}</span>
+                <span className="po-feed-time">{duration(a.durationMs)}</span>
+              </button>
+              {expanded && (
+                <div className="po-call">
+                  {args !== "{}" && <><strong>Arguments</strong><pre>{args}</pre></>}
+                  <strong>Result</strong>
+                  <pre>{result || (a.status === "running" ? "Still running." : "No result was recorded.")}</pre>
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ol>
       {error && <p className="po-muted" role="alert">{error}</p>}
-      {!items.length && (
+      {!entries.length && (
         <p className="po-muted">
-          {loading ? "Loading activity…" : running ? "Waiting for the worker's first thought or tool call." : "No activity was recorded."}
+          {loading ? "Loading activity…" : running ? "Waiting for the worker's first thought or action." : "No activity was recorded."}
         </p>
       )}
     </div>
@@ -501,6 +708,8 @@ const css = `
 .po-steps{list-style:none;margin:0;padding:0;border:1px solid var(--color-border,#303030);border-radius:4px}.po-steps li+li{border-top:1px solid var(--color-border,#303030)}.po-steps button{display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:transparent;color:inherit;border:0;text-align:left;font:inherit;font-size:12px;cursor:pointer}.po-steps button:disabled{cursor:default}.po-steps button[aria-pressed=true]{background:var(--color-bg-hover,#202020)}.po-steps .po-step-copy{flex:1;min-width:0}.po-steps small{display:block;margin-top:2px;font-size:10px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-step-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--color-border,#555)}li[data-state=running] .po-step-dot{background:#8eabff;animation:po-pulse 1.2s ease-in-out infinite}li[data-state=completed] .po-step-dot{background:#43c878}li[data-state=blocked] .po-step-dot,li[data-state=waiting] .po-step-dot{background:#e3b86d}li[data-state=failed] .po-step-dot{background:#f08b8b}
 .po-badge{display:inline-block;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa);white-space:nowrap}.po-badge.running,.po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-badge.completed{color:#43c878;border-color:#43c87860}.po-badge.blocked,.po-badge.waiting,.po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
 .po-feed{border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 0}.po-feed ol{list-style:none;margin:0;padding:0;max-height:240px;overflow:auto}.po-feed li{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:11px;line-height:16px;min-width:0}.po-feed-title{flex:none;font-weight:600;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed li[data-kind=thought] .po-feed-title{font-weight:500;color:var(--color-text-muted,#aaa)}.po-feed-text{flex:1;min-width:0;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed li[data-status=failed] .po-feed-title{color:#f08b8b}.po-muted{margin:0;padding:6px 12px;font-size:11px;color:var(--color-text-muted,#aaa)}.po-link-button{margin:0 12px 4px;padding:0;background:none;border:0;color:var(--color-accent,#ff8c36);font:inherit;font-size:11px;cursor:pointer}
+.po-widget .po-thought,.po-widget .po-trail{display:flex;align-items:center;gap:6px;min-width:0;margin-top:3px;font-size:11px;line-height:16px;color:var(--color-text-muted,#aaa)}.po-widget .po-thought{display:block;margin-top:4px;font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-faint{opacity:.6;font-style:normal}.po-widget .po-trail-items{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-trail-items>span{display:inline}.po-widget .po-trail-items .po-icon{display:inline-block;vertical-align:-2px;margin-right:3px}.po-sep{margin:0 6px;opacity:.6}.po-icon.completed{color:#43c878}.po-icon.failed{color:#f08b8b}.po-widget .po-marker{flex:none;display:inline-flex;align-items:center;gap:5px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8eabff;font-variant-numeric:tabular-nums}.po-widget .po-progress{margin-top:7px}
+.po-timing{display:grid;gap:5px;padding:4px 12px 8px;font-size:11px;color:var(--color-text-muted,#aaa);border-bottom:1px solid var(--color-border,#303030);margin-bottom:4px}.po-split{display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--color-border,#303030)}.po-split .model{background:#8eabff80}.po-split .tools{background:#43c878}.po-feed li{display:block;padding:0}.po-feed-line{display:flex;align-items:center;gap:8px;width:100%;padding:5px 12px;font:inherit;font-size:11px;line-height:16px;color:inherit;background:transparent;border:0;text-align:left;min-width:0}button.po-feed-line{cursor:pointer}button.po-feed-line:hover{background:var(--color-bg-hover,#202020)}.po-feed li[data-kind=thought] .po-feed-text{color:var(--color-text-muted,#aaa)}.po-feed-tool{flex:none;max-width:30%;font-size:10px;color:var(--color-text-muted,#888);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed-title{flex:1;min-width:0;max-width:none;font-weight:500}.po-feed-time{flex:none;min-width:36px;text-align:right;font-size:10px;color:var(--color-text-muted,#999);font-variant-numeric:tabular-nums}.po-call{padding:2px 12px 8px 32px;font-size:10px;color:var(--color-text-muted,#aaa)}.po-call strong{display:block;margin:4px 0 2px;font-weight:600}.po-call pre{margin:0;max-height:160px;overflow:auto;padding:6px 8px;background:var(--color-bg-hover,#1d1d1d);border-radius:3px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:14px}
 .po-modal footer{padding:10px 16px;border-top:1px solid var(--color-border,#303030);font-size:11px}.po-modal footer a{color:var(--color-accent,#ff8c36);text-decoration:none}
 @media(max-width:480px){.po-modal-backdrop{padding:0;align-items:flex-end}.po-modal{max-height:90vh;border-radius:8px 8px 0 0}}
 @media(max-width:480px){.po-widget .po-row{column-gap:10px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
@@ -749,7 +958,7 @@ function Overview(props: Props) {
                       {context}
                     </span>
                     {!entry.assignment && !terminal(x.state) && live(x.state) && (
-                      <LiveLine item={x} />
+                      <LiveLines item={x} />
                     )}
                     {!entry.assignment && !terminal(x.state) && !!x.steps_total && (
                       <Progress done={x.steps_completed || 0} total={x.steps_total} />

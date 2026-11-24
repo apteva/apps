@@ -6,6 +6,9 @@ import Widget, {
   overviewLink,
   overviewQueue,
   executionStatus,
+  stepActivity,
+  actionLabel,
+  duration,
   type Data,
 } from "./ProcessOverviewWidget";
 import { overviewFixture } from "./tests/overview-fixture";
@@ -275,7 +278,9 @@ test("running rows show live activity; details open in a modal with the step's a
   await act(async () => new Promise((r) => setTimeout(r, 20)));
   expect(reads.some((u) => u.includes("/api/telemetry?") && u.includes("thread_id=worker-2"))).toBe(true);
   const row = el.querySelector<HTMLButtonElement>('.po-row[data-state="running"]')!;
-  expect(row.querySelector(".po-live")!.textContent).toContain("Running conversations post · Post the forecast");
+  expect(row.querySelector(".po-thought")!.textContent).toBe("“Checking the conversation first.”");
+  expect(row.querySelector(".po-marker")!.textContent).toBe("Post the forecast");
+  expect(row.querySelector(".po-trail-items")!.textContent).toBe("No actions yet");
   expect(row.querySelector('[role="progressbar"]')!.getAttribute("aria-valuenow")).toBe("1");
   expect(el.querySelector('.po-row[data-state="completed"]')!.textContent).toContain("Sent the forecast to 3 subscribers.");
   await act(async () => row.click());
@@ -284,10 +289,43 @@ test("running rows show live activity; details open in a modal with the step's a
   expect(el.contains(dialog)).toBe(false);
   expect(dialog.querySelector('[aria-pressed="true"]')!.textContent).toContain("Post conversation");
   const feed = dialog.querySelector(".po-feed")!.textContent!;
-  expect(feed).toContain("Thought");
   expect(feed).toContain("Checking the conversation first.");
+  expect(feed).toContain("Post the forecast");
   expect(feed).toContain("conversations post");
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Close details");
   await act(async () => document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }) as any));
   expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+test("step activity keeps finished thoughts, labels actions and times them", () => {
+  const t = (s: number) => new Date(Date.UTC(2026, 10, 24, 8, 33, 0) + s * 1000).toISOString();
+  const x = { execution_ids: ["exe-1"] };
+  const events = [
+    { id: "1", type: "llm.start", time: t(0.6), data: { iteration: 1 } },
+    { id: "2", type: "llm.done", time: t(5.7), data: { iteration: 1, message: "I'll read the CRM totals." } },
+    { id: "3", type: "tool.call", time: t(5.7), data: { execution_ids: [], id: "a", name: "search_tools", reason: "Finding CRM statistics", args: {} } },
+    { id: "4", type: "tool.result", time: t(5.7), data: { execution_ids: [], id: "a", name: "search_tools", duration_ms: 1, success: true } },
+    { id: "5", type: "llm.start", time: t(6), data: { iteration: 2 } },
+    { id: "6", type: "llm.done", time: t(12.2), data: { iteration: 2 } },
+    { id: "7", type: "tool.call", time: t(12.2), data: { ...x, id: "b", name: "crm_contacts_search", reason: "Reading contact count", args: { limit: 1 } } },
+    { id: "8", type: "tool.result", time: t(12.5), data: { ...x, id: "b", duration_ms: 271, success: true, result: "{\"total\":66}" } },
+    { id: "9", type: "tool.call", time: t(30), data: { ...x, id: "c", name: "processes_step_update", args: { state: "completed" } } },
+    { id: "10", type: "tool.result", time: t(30.1), data: { ...x, id: "c", duration_ms: 91, success: true } },
+    { id: "11", type: "llm.start", time: t(30.1), data: { iteration: 3 } },
+    { id: "12", type: "llm.cancelled", time: t(30.1), data: { iteration: 3 } },
+  ];
+  const target = { agentID: 1, threadID: "w", executionID: "exe-1", stepID: "s1", completedAt: t(30.1), label: "Get CRM stats" };
+  const a = stepActivity(events as any, target);
+  expect(a.thought).toBe("I'll read the CRM totals.");
+  expect(a.thinkingSince).toBeUndefined();
+  expect(a.actions.map((c) => c.label)).toEqual(["Finding CRM statistics", "Reading contact count", "Completed step"]);
+  expect(a.actions[1].durationMs).toBe(271);
+  expect(a.toolMs).toBe(363);
+  expect(a.modelMs).toBe(11300);
+  expect(a.turns.length).toBe(2);
+  const live = stepActivity(events.slice(0, 5) as any, { ...target, completedAt: undefined });
+  expect(live.thinkingSince).toBe(t(6));
+  expect(actionLabel("processes_step_update", "", { state: "blocked" })).toBe("Reported blocker");
+  expect(actionLabel("search_tools", "")).toBe("Looked up tools");
+  expect([duration(0), duration(91), duration(271), duration(5081), duration(29000), duration(75000)]).toEqual(["<0.01s", "0.09s", "0.3s", "5.1s", "29s", "1m 15s"]);
 });

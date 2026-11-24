@@ -2,6 +2,13 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Followable live activity in the widget (0.23.0)
+
+Running rows show the last finished thought, the last three actions in plain
+words and a live "Thinking 6s" marker; the details modal lists every thought
+and action with timings and expandable arguments and results. See
+`docs-release-0.23.0.md`.
+
 ## Status badge back on widget rows (0.22.2)
 
 The status badge returns at the top right of each row, replacing 0.22.1's
