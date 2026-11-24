@@ -1914,6 +1914,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .ms-composer-options input[type="text"],
         .ms-composer-options input[type="number"] { width: 100%; min-width: 0 !important; }
         .ms-option-wide { grid-column: 1 / -1; }
+        .ms-option-check { min-height: 34px; }
         .ms-tts-settings {
           grid-column: 1 / -1;
           display: flex;
@@ -4086,7 +4087,7 @@ function SafeModeToggle({
 }) {
   return (
     <label
-      className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none"
+      className="ms-option-check flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none"
       title="When on, Venice blurs adult-classified output. Off = pass-through (default)."
     >
       <input
@@ -4152,16 +4153,15 @@ function EditOptions({
       <div>
         <label className="text-text-muted text-xs block">
           Edit model
-          {liveModels.length > 0 && (
-            <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
-              · {liveProvider} ({liveModels.length})
-            </span>
-          )}
+          <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
+            · max {maxSources} ref{maxSources === 1 ? "" : "s"}
+          </span>
         </label>
         <select
           value={model}
           onChange={(e) => setModel(e.target.value)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          title={liveModels.length > 0 ? `${liveModels.length} models from ${liveProvider}` : undefined}
         >
           {modelOptions.map((m) => (
             <option key={m.id} value={m.id}>
@@ -4169,9 +4169,6 @@ function EditOptions({
             </option>
           ))}
         </select>
-        <div className="text-text-dim mt-0.5" style={{ fontSize: 10 }}>
-          max {maxSources} reference{maxSources === 1 ? "" : "s"}
-        </div>
       </div>
       <div>
         <label className="text-text-muted text-xs block">Format</label>
@@ -4914,7 +4911,6 @@ function StorageFolderField({
         placeholder={placeholder}
         list="media-storage-folder-suggestions"
         className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-        style={{ width: 220 }}
         title="Storage folder for generated output. Leave empty for the default."
       />
       <datalist id="media-storage-folder-suggestions">
