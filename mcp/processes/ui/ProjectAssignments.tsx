@@ -12,7 +12,22 @@ export type ProjectAssignment = Assignment & {
   last_run_id?: string;
   last_run_state?: string;
   last_run_at?: string;
+  triggers?: AssignmentTrigger[];
 };
+
+export type AssignmentTrigger = {
+  id: string;
+  name: string;
+  topic: string;
+  source_install_id: number;
+  status: string;
+  subscription_enabled: boolean;
+  sync_error?: string;
+};
+
+const liveTriggers = (x: ProjectAssignment) => (x.triggers || []).filter((t) => t.status !== "archived");
+const startsAutomatically = (x: ProjectAssignment) =>
+  !!x.schedule || liveTriggers(x).some((t) => t.status === "active" && t.subscription_enabled);
 
 type Props = {
   api: (path: string) => Promise<any>;
@@ -48,14 +63,14 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
     (!needle || [x.name, x.process_name, ownerName(x.owner_agent_id)].some((v) => v?.toLowerCase().includes(needle)) || assignmentAgentIDs(x).some((id) => ownerName(id).toLowerCase().includes(needle))),
   );
   const active = items.filter((x) => x.status === "active").length;
-  const scheduled = items.filter((x) => x.status === "active" && x.schedule).length;
+  const automatic = items.filter((x) => x.status === "active" && startsAutomatically(x)).length;
   const ongoing = items.reduce((n, x) => n + x.ongoing_count, 0);
   const count = (v: string) => items.filter((x) => x.status === v).length;
   return (
     <>
       <div className="stats">
         <div className="stat"><strong>{active}</strong><span>Active assignments</span></div>
-        <div className="stat"><strong>{scheduled}</strong><span>On a schedule</span></div>
+        <div className="stat"><strong>{automatic}</strong><span>Start automatically</span></div>
         <div className="stat"><strong>{ongoing}</strong><span>Runs in progress</span></div>
       </div>
       <div className="row filters">
@@ -76,7 +91,7 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
               <tr>
                 <th>Assignment</th>
                 <th>Agent</th>
-                <th className="hide-small">Schedule</th>
+                <th className="hide-small">Starts</th>
                 <th>Runs</th>
                 <th>Last run</th>
               </tr>
@@ -104,9 +119,23 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
                       <div className="sub">+ {assignmentAgentIDs(x).slice(1).map(ownerName).join(", ")}</div>
                     )}
                   </td>
-                  <td className="hide-small">
-                    {cadence(x.schedule)}
-                    {x.status === "active" && x.next_run_at && <div className="sub">Next {date(x.next_run_at)}</div>}
+                  <td className="hide-small starts">
+                    {x.schedule && (
+                      <div className="start-line">
+                        <span className="start-kind">Schedule</span> {cadence(x.schedule)}
+                        {x.status === "active" && x.next_run_at && <div className="sub">Next {date(x.next_run_at)}</div>}
+                      </div>
+                    )}
+                    {liveTriggers(x).map((t) => {
+                      const issue = t.sync_error ? "Sync error" : t.status !== "active" ? t.status : !t.subscription_enabled ? "Not listening" : "";
+                      return (
+                        <div className="start-line" key={t.id} title={`${t.topic}${t.sync_error ? `\n${t.sync_error}` : ""}`}>
+                          <span className="start-kind">On event</span> {t.name || t.topic}
+                          <div className="sub">{t.topic}{issue && <> · <span className="start-issue">{issue}</span></>}</div>
+                        </div>
+                      );
+                    })}
+                    {!x.schedule && !liveTriggers(x).length && <span className="muted">Manual only</span>}
                   </td>
                   <td>
                     {x.run_count}
@@ -143,4 +172,9 @@ export const projectAssignmentStyles = `
 .ap-processes td button.link:hover{color:var(--pc-text)}
 .ap-processes td button.last-run{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-weight:400}
 .ap-processes td button.last-run .sub{margin-top:2px}
+.ap-processes td.starts{min-width:180px}
+.ap-processes .start-line+.start-line{margin-top:8px}
+.ap-processes .start-kind{display:inline-block;font-size:10.5px;padding:1px 6px;border:1px solid var(--pc-line);border-radius:5px;color:var(--pc-muted);margin-right:4px}
+.ap-processes .start-line .sub{margin-top:3px;overflow-wrap:anywhere}
+.ap-processes .start-issue{color:#e3b86d}
 `;

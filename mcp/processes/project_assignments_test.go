@@ -29,6 +29,9 @@ func TestProjectAssignmentsAndProcessFilteredRuns(t *testing.T) {
 		}
 	}
 
+	if _, err = a.db.Exec(`INSERT INTO process_triggers(id,process_id,assignment_id,project_id,status,config_json,subscription_enabled,created_at,updated_at) VALUES('trigger-email',?,?,'project-a','active','{"name":"Inbound email","source_install_id":48,"topic":"conversation.message.received"}',1,'2026-11-01T09:00:00Z','2026-11-01T09:00:00Z')`, p.ID, x.ID); err != nil {
+		t.Fatal(err)
+	}
 	w := overviewGET(t, a, "/processes/assignments?project_id=project-a", "project-a")
 	if w.Code != 200 {
 		t.Fatalf("assignments route: %d %s", w.Code, w.Body.String())
@@ -50,6 +53,9 @@ func TestProjectAssignmentsAndProcessFilteredRuns(t *testing.T) {
 	}
 	if got.ID != x.ID || got.Name != "Daily digest" || got.ProcessName != p.Name || got.ProcessVersion != p.Version || got.RunCount != 2 || got.OngoingCount != 1 || got.LastRunID != "run-new" || got.LastRunState != "running" {
 		t.Fatalf("assignment summary: %+v", got)
+	}
+	if len(got.Triggers) != 1 || got.Triggers[0].Name != "Inbound email" || got.Triggers[0].Topic != "conversation.message.received" || got.Triggers[0].SourceInstallID != 48 || got.Triggers[0].Status != "active" || !got.Triggers[0].SubscriptionEnabled {
+		t.Fatalf("assignment triggers: %+v", got.Triggers)
 	}
 
 	w = overviewGET(t, a, "/processes/runs?project_id=project-a&view=compact&process_id="+other.ID, "project-a")

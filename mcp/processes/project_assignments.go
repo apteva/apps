@@ -6,14 +6,27 @@ import "strings"
 // compact view of its run activity, for the project-wide Assignments view.
 type projectAssignment struct {
 	Assignment
-	ProcessName    string `json:"process_name"`
-	ProcessStatus  string `json:"process_status"`
-	ProcessVersion int    `json:"process_version"`
-	RunCount       int    `json:"run_count"`
-	OngoingCount   int    `json:"ongoing_count"`
-	LastRunID      string `json:"last_run_id,omitempty"`
-	LastRunState   string `json:"last_run_state,omitempty"`
-	LastRunAt      string `json:"last_run_at,omitempty"`
+	ProcessName    string                     `json:"process_name"`
+	ProcessStatus  string                     `json:"process_status"`
+	ProcessVersion int                        `json:"process_version"`
+	RunCount       int                        `json:"run_count"`
+	OngoingCount   int                        `json:"ongoing_count"`
+	LastRunID      string                     `json:"last_run_id,omitempty"`
+	LastRunState   string                     `json:"last_run_state,omitempty"`
+	LastRunAt      string                     `json:"last_run_at,omitempty"`
+	Triggers       []assignmentTriggerSummary `json:"triggers"`
+}
+
+// assignmentTriggerSummary is the slice of an event trigger the Assignments
+// view needs to say how an assignment starts.
+type assignmentTriggerSummary struct {
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	Topic               string `json:"topic"`
+	SourceInstallID     int64  `json:"source_install_id"`
+	Status              string `json:"status"`
+	SubscriptionEnabled bool   `json:"subscription_enabled"`
+	SyncError           string `json:"sync_error,omitempty"`
 }
 
 // projectAssignments lists every assignment in a project. Run statistics use
@@ -43,9 +56,45 @@ func (a *App) projectAssignments(project string) (map[string]any, error) {
 		if parts := strings.Split(last, "\x1f"); len(parts) == 3 {
 			y.LastRunID, y.LastRunState, y.LastRunAt = parts[0], parts[1], parts[2]
 		}
+		y.Triggers = []assignmentTriggerSummary{}
 		out = append(out, y)
 	}
-	return map[string]any{"assignments": out}, rows.Err()
+	if e := rows.Err(); e != nil {
+		return nil, e
+	}
+	rows.Close()
+	triggers, e := a.projectTriggerSummaries(project)
+	if e != nil {
+		return nil, e
+	}
+	for i := range out {
+		if ts := triggers[out[i].ID]; ts != nil {
+			out[i].Triggers = ts
+		}
+	}
+	return map[string]any{"assignments": out}, nil
+}
+
+// projectTriggerSummaries returns the project's event triggers keyed by
+// assignment, in creation order.
+func (a *App) projectTriggerSummaries(project string) (map[string][]assignmentTriggerSummary, error) {
+	rows, e := a.db.Query(`SELECT `+triggerColumns+` FROM process_triggers WHERE project_id=? ORDER BY created_at,id`, project)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string][]assignmentTriggerSummary{}
+	for rows.Next() {
+		t, e := scanTrigger(rows)
+		if e != nil {
+			return nil, e
+		}
+		out[t.AssignmentID] = append(out[t.AssignmentID], assignmentTriggerSummary{
+			ID: t.ID, Name: t.Config.Name, Topic: t.Config.Topic, SourceInstallID: t.Config.SourceInstallID,
+			Status: t.Status, SubscriptionEnabled: t.SubscriptionEnabled, SyncError: t.SyncError,
+		})
+	}
+	return out, rows.Err()
 }
 
 // multiScanner lets scanAssignment read its fixed columns while extra trailing

@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Assignments show how they start (0.24.0)
+
+Project assignments include their event triggers; the Starts column shows
+schedule, triggers or "Manual only". See `docs-release-0.24.0.md`.
+
 ## Active assignments by default (0.23.5)
 
 Assignments tab defaults to active, with per-status counts; process rows
