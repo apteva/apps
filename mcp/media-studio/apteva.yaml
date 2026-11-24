@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.12.1
+version: 0.12.2
 description: |
+  v0.12.2 lines up the image edit options: the edit model, format, Safe
+  mode and output folder controls now sit on one row, with the reference
+  limit shown next to the model label.
   v0.12.1 replaces the browser alert on Delete with a red Delete button and
   a confirmation dialog that previews the item, lists the linked Storage
   files, and keeps errors inside the dialog. Generation details close when
@@ -289,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.12.1
+    ref: media-studio/v0.12.2
     entry: mcp/media-studio
   port: 8080
   health_check: /health
