@@ -2,6 +2,12 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Cleaner widget rows (0.22.1)
+
+Each widget row shows its state once, as a colored dot, with the summary or
+live step beside it and time and step count right-aligned. See
+`docs-release-0.22.1.md`.
+
 ## Dashboard widget redesign (0.22.0)
 
 Run details open in a modal above the dashboard with the run summary,
