@@ -6,6 +6,7 @@ import Widget, {
   overviewLink,
   overviewQueue,
   executionStatus,
+  currentStepLabel,
   stepActivity,
   actionLabel,
   duration,
@@ -283,6 +284,11 @@ test("running rows show live activity; details open in a modal with the step's a
   expect(line.querySelector(".po-marker")!.textContent).toBe("Running");
   expect(line.getAttribute("title")).toContain("“Checking the conversation first.”");
   expect(row.querySelectorAll(".po-summary").length).toBe(0);
+  expect(row.querySelector(".po-title-step")!.textContent).toBe("› Post conversation");
+  const segments = [...row.querySelectorAll(".po-stepbar > span")].map((s) => s.getAttribute("data-state"));
+  expect(segments).toEqual(data.active[0].steps.map((s: any) => s.state));
+  expect(currentStepLabel([{ id: "a", name: "Read CRM", state: "running" }, { id: "b", name: "Read deals", state: "running" }, { id: "c", name: "Send", state: "pending" }] as any)).toBe("Read CRM +1");
+  expect(currentStepLabel([{ id: "a", name: "Done", state: "completed" }] as any)).toBe("");
   expect(row.querySelector('[role="progressbar"]')!.getAttribute("aria-valuenow")).toBe("1");
   expect(el.querySelector('.po-row[data-state="completed"]')!.textContent).toContain("Sent the forecast to 3 subscribers.");
   await act(async () => row.click());

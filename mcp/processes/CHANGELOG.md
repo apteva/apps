@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Current step on the widget row (0.23.2)
+
+The title line names the current step and the progress bar has one segment
+per step. See `docs-release-0.23.2.md`.
+
 ## One-line live row with app icons (0.23.1)
 
 Running rows show just the latest tool call with its app icon and a live
