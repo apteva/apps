@@ -29,3 +29,16 @@ test("panel: Details shows each agent's thread and the model behind its last rep
  await page.getByText("Main chat",{exact:true}).first().click();
  await expect(page.locator('[data-agent-model="41"] .chat-agent-model')).toHaveAttribute("title",/claude-sonnet-5-5\nmain\nModel of the last reply, /);
 });
+
+test("panel: Details picks up the model of a reply that lands while it is open",async({page,request})=>{
+ await request.post("/reset");
+ await request.post("/seed-panel",{data:[{...mk("conv-nomodel-live","Live chat"),updated_at:new Date(Date.now()-600000).toISOString()}]});
+ await page.setViewportSize({width:1280,height:800});
+ await page.goto("/?host=dashboard&surface=panel");
+ await page.getByText("Live chat",{exact:true}).first().click();
+ const row=page.locator('[data-agent-model="41"]');
+ await expect(row.locator(".chat-agent-model-name")).toHaveText("Model not recorded yet");
+ await request.post("/seed-reply-model",{data:{chat_id:"conv-nomodel-live",provider:"venice",model:"deepseek-v4-1-flash"}});
+ await expect(row.locator(".chat-agent-model-name")).toHaveText("deepseek-v4-1-flash");
+ await expect(row.locator(".chat-agent-model-source")).toHaveText("Main thread · venice");
+});

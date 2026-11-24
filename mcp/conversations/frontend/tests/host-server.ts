@@ -12,6 +12,7 @@ let panelRows:any[]=[],panelOlderRows:any[]=[];
 let activeConversations:string[]=[];
 const unreadConversations=new Map<string,number>();
 const activityRows=new Map<string,any[]>();
+const replyModels=new Map<string,any>();
 const responseFrames=new Map<string,any>();
 const resolved=new Set<string>();
 let room=false;let deliveryStatus="delivered";
@@ -29,9 +30,11 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
  if(url.pathname==="/__app-card-test")return new Response(appCardHTML.replace('<script type="module"', '<script>window.APP_CARD_TEST={projectId:"project",installId:7,agentId:41}</script><script type="module"'),{headers:{"Content-Type":"text/html","Set-Cookie":"host_session=fixture; SameSite=Lax; Path=/"}});
  if(url.pathname.startsWith("/__card-assets/")){const file=cardAssets.get(url.pathname);return file?new Response(file,{headers:{"Content-Type":"text/javascript"}}):new Response("missing",{status:404});}
- if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();responseFrames.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();replyModels.clear();responseFrames.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
  if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();publishActivity();return Response.json({ok:true});}
+ // An agent reply that records a model lands in an open conversation.
+ if(url.pathname==="/seed-reply-model" && req.method==="POST"){const {chat_id,provider,model}=await req.json();replyModels.set(chat_id,{agent_id:41,thread_id:"main",last_reply:{provider,model},reply_thread_id:"main",replied_at:new Date().toISOString()});const row=panelRows.find(c=>c.id===chat_id);if(row)row.updated_at=new Date().toISOString();publishListMessage(chat_id);return Response.json({ok:true});}
  if(url.pathname==="/seed-unread" && req.method==="POST"){const {chat_id,count}=await req.json();unreadConversations.set(chat_id,count);publishListMessage(chat_id);return Response.json({ok:true});}
  if(url.pathname==="/seed" && req.method==="POST") {
   const options=await req.json();room=Boolean(options.room);deliveryStatus=options.deliveryStatus || "delivered";
@@ -107,7 +110,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
   if(req.method==="DELETE"){panelRows.splice(index,1);return Response.json({ok:true});}
   const body=await req.json();calls.at(-1).body=body;panelRows[index]={...panelRows[index],...body,...(body.archived!==undefined?{archived_at:body.archived?new Date().toISOString():null}:{})};return Response.json(panelRows[index]);
  }
- if(path==="/participants"){const id=url.searchParams.get("id")||"";return Response.json({agent_ids:[41],user_ids:[],lead_agent_id:41,agents:[id.includes("nomodel")?{agent_id:41}:id.includes("main")?{agent_id:41,thread_id:"main",last_reply:{provider:"anthropic",model:"claude-sonnet-5-5"},reply_thread_id:"main",replied_at:new Date(Date.now()-120000).toISOString()}:{agent_id:41,thread_id:`chat-${id}`,last_reply:{provider:"openai",model:"gpt-5.6-terra"},reply_thread_id:`chat-${id}`,replied_at:new Date(Date.now()-60000).toISOString()}]});}
+ if(path==="/participants"){const id=url.searchParams.get("id")||"";return Response.json({agent_ids:[41],user_ids:[],lead_agent_id:41,agents:[replyModels.get(id)??(id.includes("nomodel")?{agent_id:41}:id.includes("main")?{agent_id:41,thread_id:"main",last_reply:{provider:"anthropic",model:"claude-sonnet-5-5"},reply_thread_id:"main",replied_at:new Date(Date.now()-120000).toISOString()}:{agent_id:41,thread_id:`chat-${id}`,last_reply:{provider:"openai",model:"gpt-5.6-terra"},reply_thread_id:`chat-${id}`,replied_at:new Date(Date.now()-60000).toISOString()})]});}
  if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;const created={...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience};panelRows=[created,...panelRows];return Response.json(created);}
  if(path==="/chats"&&url.searchParams.has("id"))return Response.json(panelRows.find(item=>item.id===url.searchParams.get("id"))??conversation(user));
  if(path==="/chats"&&url.searchParams.has("page"))return Response.json({conversations:(url.searchParams.get("cursor")==="older"?panelOlderRows:panelRows).filter(c=>Boolean(c.archived_at)===(url.searchParams.get("archived")==="1")),next_cursor:url.searchParams.get("cursor")!=="older"&&panelOlderRows.length?"older":""});

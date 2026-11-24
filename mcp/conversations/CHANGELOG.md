@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.29.1 — 2026-11-24
+
+- Refresh the model in Details when a reply arrives. Details read the model only when a conversation was opened, so with Details open it kept "Model not recorded yet" after the agent answered. It now reloads whenever the conversation updates. Recording was already correct in 0.29.0.
+
 ## 0.29.0 — 2026-11-24
 
 - Show which model answers in a conversation. Details now lists, under each agent, the model behind the agent's latest reply here, its provider, and whether the agent answers from its main thread or the conversation's own thread. The full model name, thread id and reply time show on hover. A conversation with no reply since 0.29.0 shows "Model not recorded yet".

@@ -874,7 +874,9 @@ function ContextColumn({
     return () => {
       cancelled = true;
     };
-  }, [conversation.id, refreshHold]);
+    // updated_at moves with every message, so a reply that lands while
+    // Details is open refreshes the model it shows.
+  }, [conversation.id, conversation.updated_at, refreshHold]);
 
   const agentName = (id: number) => agents?.find((a) => a.id === id)?.name || t("chat.agentName", { id: String(id) });
   const facts: Array<[string, string]> = [
