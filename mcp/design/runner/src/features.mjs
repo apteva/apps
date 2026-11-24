@@ -185,6 +185,14 @@ export function drawProfile(profile, ctx, label) {
     default:
       fail(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon or path`);
   }
+  if (profile.offset !== undefined) {
+    // Grow (positive) or shrink (negative) the outline; corners round.
+    const distance = num(profile.offset, "offset");
+    if (Math.abs(distance) > 1e-9) {
+      try { drawing = drawing.offset(distance); }
+      catch (error) { fail(`${label}.offset ${distance} failed (shrinking past the shape's width?): ${error?.message || error}`); }
+    }
+  }
   if (profile.angle !== undefined) drawing = drawing.rotate(num(profile.angle, "angle"), [0, 0]);
   if (center[0] !== 0 || center[1] !== 0) drawing = drawing.translate(center[0], center[1]);
   if (profile.holes !== undefined) {

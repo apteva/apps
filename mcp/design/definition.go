@@ -27,7 +27,7 @@ var allowedOperations = map[string]bool{
 	"linear_pattern": true, "circular_pattern": true,
 	"fillet": true, "chamfer": true,
 	"component": true,
-	"shell": true, "hole": true, "extrude_profile": true, "loft": true,
+	"shell":     true, "hole": true, "extrude_profile": true, "loft": true,
 }
 
 func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefinition, error) {
@@ -252,9 +252,9 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 			}
 			instances[instance.ID] = true
 		}
-		interfaces := map[string]bool{}
+		interfaces := map[string]string{}
 		for _, mechanical := range definition.Assembly.Interfaces {
-			if !parameterNameRE.MatchString(mechanical.ID) || interfaces[mechanical.ID] {
+			if !parameterNameRE.MatchString(mechanical.ID) {
 				return fmt.Errorf("invalid or duplicate mechanical interface id %q", mechanical.ID)
 			}
 			if _, exists := parts[mechanical.PartID]; !exists {
@@ -263,7 +263,16 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 			if len(mechanical.Position) != 3 {
 				return fmt.Errorf("mechanical interface %q position must contain three values", mechanical.ID)
 			}
-			interfaces[mechanical.ID] = true
+			if (len(mechanical.Direction) != 0 && len(mechanical.Direction) != 3) || (len(mechanical.Up) != 0 && len(mechanical.Up) != 3) {
+				return fmt.Errorf("mechanical interface %q direction and up must contain three values", mechanical.ID)
+			}
+			if _, exists := interfaces[mechanical.ID]; exists {
+				return fmt.Errorf("duplicate mechanical interface id %q", mechanical.ID)
+			}
+			interfaces[mechanical.ID] = mechanical.PartID
+		}
+		if err := validatePlacementGraph(definition.Assembly, interfaces); err != nil {
+			return err
 		}
 		joints := map[string]bool{}
 		for _, joint := range definition.Assembly.Joints {
@@ -280,6 +289,16 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 			}
 			if len(joint.Origin) != 3 {
 				return fmt.Errorf("joint %q origin must contain three values", joint.ID)
+			}
+			if len(joint.Limits) != 0 {
+				if len(joint.Limits) != 2 || joint.Limits[0] > joint.Limits[1] {
+					return fmt.Errorf("joint %q limits must be [min, max]", joint.ID)
+				}
+				if _, isText := joint.State.(string); joint.State != nil && !isText {
+					if state := anyNumber(joint.State); state < joint.Limits[0] || state > joint.Limits[1] {
+						return fmt.Errorf("joint %q state %v is outside its limits", joint.ID, joint.State)
+					}
+				}
 			}
 			joints[joint.ID] = true
 		}
@@ -451,4 +470,84 @@ func anyNumber(value any) float64 {
 		return float64(typed)
 	}
 	return 0
+}
+
+// validatePlacementGraph checks mates and the placement dependencies
+// (alignment target, mate target, joint parent): every reference resolves,
+// an instance is placed one way, interfaces belong to the right parts, no
+// interface takes two mates, an instance has at most one joint as child, and
+// the graph is acyclic.
+func validatePlacementGraph(assembly *AssemblySpec, interfaces map[string]string) error {
+	partOf := map[string]string{}
+	for _, instance := range assembly.Instances {
+		partOf[instance.ID] = instance.PartID
+	}
+	edges := map[string][]string{}
+	targets := map[string]string{}
+	for _, instance := range assembly.Instances {
+		if instance.Alignment != nil {
+			edges[instance.ID] = append(edges[instance.ID], instance.Alignment.TargetInstance)
+		}
+		mate := instance.Mate
+		if mate == nil {
+			continue
+		}
+		if instance.Alignment != nil {
+			return fmt.Errorf("assembly instance %q has both alignment and mate", instance.ID)
+		}
+		if len(instance.Transform.Rotate) != 0 || len(instance.Transform.Translate) != 0 {
+			return fmt.Errorf("assembly instance %q has both a transform and a mate; use mate.gap and mate.angle", instance.ID)
+		}
+		targetPart, ok := partOf[mate.ToInstance]
+		if !ok || mate.ToInstance == instance.ID {
+			return fmt.Errorf("assembly instance %q mates to unknown instance %q", instance.ID, mate.ToInstance)
+		}
+		if owner, ok := interfaces[mate.Interface]; !ok || owner != instance.PartID {
+			return fmt.Errorf("assembly instance %q mate.interface %q is not an interface of part %q", instance.ID, mate.Interface, instance.PartID)
+		}
+		if owner, ok := interfaces[mate.ToInterface]; !ok || owner != targetPart {
+			return fmt.Errorf("assembly instance %q mate.to_interface %q is not an interface of part %q", instance.ID, mate.ToInterface, targetPart)
+		}
+		key := mate.ToInstance + "/" + mate.ToInterface
+		if other, taken := targets[key]; taken {
+			return fmt.Errorf("assembly instances %q and %q both mate to %s", other, instance.ID, key)
+		}
+		targets[key] = instance.ID
+		edges[instance.ID] = append(edges[instance.ID], mate.ToInstance)
+	}
+	children := map[string]string{}
+	for _, joint := range assembly.Joints {
+		if joint.ParentInstance == joint.ChildInstance {
+			return fmt.Errorf("joint %q connects an instance to itself", joint.ID)
+		}
+		if other, taken := children[joint.ChildInstance]; taken {
+			return fmt.Errorf("instance %q is the child of two joints (%s, %s)", joint.ChildInstance, other, joint.ID)
+		}
+		children[joint.ChildInstance] = joint.ID
+		edges[joint.ChildInstance] = append(edges[joint.ChildInstance], joint.ParentInstance)
+	}
+	state := map[string]int{}
+	var visit func(string, []string) error
+	visit = func(id string, path []string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("assembly placement cycle: %s", strings.Join(append(path, id), " -> "))
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, next := range edges[id] {
+			if err := visit(next, append(path, id)); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	for _, instance := range assembly.Instances {
+		if err := visit(instance.ID, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
