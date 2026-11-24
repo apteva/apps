@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.30.1 — 2026-11-24
+
+- Stop code block headers covering what is above them. 0.30.0 painted a 16px strip of page background above every code block header, meant to hide text scrolling past a stuck header. It was painted all the time, so it hid the block's top border and rounded corners and cut off the bottom of the line above the block. The strip now appears only while the header is stuck at the top of the transcript (browsers with scroll-state container queries: Chrome and Edge 133+); elsewhere nothing is painted.
+
 ## 0.30.0 — 2026-11-24
 
 - Make code blocks in messages easy to read and copy. Agents put text meant to be pasted elsewhere (prompts, commands, configs) in fenced code blocks, which showed as a plain box: no copy button, prose cut off at the right edge behind a sideways scrollbar at the very bottom, and no height limit. Each block now has a header with its language ("Text" when the fence names none), a wrap toggle and a Copy button that copies exactly what the agent wrote and confirms with "Copied". Prose (unlabelled, text and Markdown blocks) wraps; code keeps its lines and scrolls sideways. Blocks over 18 lines or 1,400 characters start collapsed behind "Show all N lines". The header stays at the top of the transcript while you scroll through a long block.

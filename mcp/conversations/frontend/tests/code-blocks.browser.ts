@@ -63,12 +63,21 @@ for (const width of [1280, 390]) {
       await expect(text.getByRole("button", { name: "Copy" })).toBeVisible({ timeout: 3000 });
     }
 
+    // An unstuck header covers nothing: the block's top border and the line
+    // above it stay visible (0.30.0 painted the stuck-header mask always).
+    await go.scrollIntoViewIfNeeded();
+    // Shadows are not hit-testable, so check the paint itself.
+    expect(await go.locator(".chat-code-bar").evaluate((el) => getComputedStyle(el).boxShadow)).toBe("none");
+
     // The header stays in view while scrolling through the expanded block.
     const header = text.locator(".chat-code-header");
     await text.locator("pre").evaluate((el) => el.scrollIntoView({ block: "center" }));
     const headerBox = (await header.boundingBox())!;
     expect(headerBox.y).toBeGreaterThanOrEqual(0);
     expect(headerBox.y).toBeLessThan(800);
+    if (await page.evaluate(() => CSS.supports("container-type", "scroll-state"))) {
+      await expect.poll(() => text.locator(".chat-code-bar").evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe("none");
+    }
 
     // Inline code stays inline; the page never scrolls sideways.
     await expect(page.locator(".chat-md p code", { hasText: SHELL })).toHaveCount(1);

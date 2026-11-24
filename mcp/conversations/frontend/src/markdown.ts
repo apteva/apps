@@ -103,7 +103,12 @@ export function decorateCodeBlocks(html: string, labels: CodeBlockLabels = DEFAU
     const copy = codeButton("copy", ICON_COPY, labels.copy, true);
     copy.dataset.copied = labels.copied;
     copy.dataset.failed = labels.copyFailed;
-    header.append(name, wrap, copy);
+    // The sticky outer header is the scroll-state container; the visible bar
+    // inside it can style itself by whether the header is stuck.
+    const bar = document.createElement("div");
+    bar.className = "chat-code-bar";
+    bar.append(name, wrap, copy);
+    header.append(bar);
     const body = document.createElement("div");
     body.className = "chat-code-body";
     pre.replaceWith(box);

@@ -158,20 +158,27 @@
   position: sticky;
   top: 0;
   z-index: 1;
+  container-type: scroll-state;
+}
+.chat-md .chat-code-bar {
   display: flex;
   align-items: center;
   gap: 2px;
   min-height: 34px;
   padding: 0 4px 0 12px;
   border-bottom: 1px solid var(--border-subtle, #333333);
-  border-radius: 8px 8px 0 0;
+  border-radius: 7px 7px 0 0;
   background: var(--bg-card, #141414);
-  /* The transcript's top padding sits above a stuck header; cover it so text
-     scrolling under the header doesn't show through. */
-  box-shadow: 0 -16px 0 0 var(--bg, #0a0a0a);
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted, #aaaaaa);
+}
+/* Only while stuck: cover the transcript's top padding above the header so
+   text scrolling under it doesn't show through. Painted unconditionally, this
+   covered the block's top border and the line above it (0.30.0). Browsers
+   without scroll-state queries skip it. */
+@container scroll-state(stuck: top) {
+  .chat-md .chat-code-bar { box-shadow: 0 -16px 0 0 var(--bg, #0a0a0a); border-radius: 0; }
 }
 .chat-md .chat-code-lang {
   flex: 1;
