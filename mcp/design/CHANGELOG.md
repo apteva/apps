@@ -1,5 +1,14 @@
 # Design Studio changes
 
+## 0.10.0
+
+- STL import as reference geometry: `design_stl_import` (binary or ASCII, up to 50000 triangles, unit scaling) creates a reference design with an `import_stl` operation. The mesh becomes B-rep faces, so it can be placed, measured and clearance-checked exactly; it is never exported for printing.
+- Text profiles with bundled DejaVu fonts (sans, sans-bold, mono; alignment), and `svg_path` profiles supporting M/L/H/V/C/S/Q/T/A/Z with nested subpaths as holes.
+- GLB exports carry one node and PBR material per visible part in its colour; 3MF exports carry the part colour and material name as a base material.
+- New `dxf` and `pdf` export formats: an A4/A3 sheet with front, top and right views, dashed hidden lines, a standard scale and overall size.
+- New `moulding` exact check: draft angle per face against `min_draft_deg` and undercuts along the pull direction, by mesh normals and ray casting.
+- Engine version `ds0.10`.
+
 ## 0.9.0
 
 - Place parts by mating interfaces. Mechanical interfaces gain an `up` vector; an instance can use `mate: {interface, to_instance, to_interface, gap, angle, flip}` instead of a transform. Mates chain, and conflicts are rejected when saving: unknown or wrong-part interfaces, two mates on one interface, transform plus mate, alignment plus mate, two joints on one child, and placement cycles.

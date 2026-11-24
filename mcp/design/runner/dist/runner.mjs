@@ -4357,6 +4357,81 @@ function curvesAsEdgesOnFace(curves, face, scale22 = "original") {
   gc();
   return edges;
 }
+function edgeToCurve(e, face) {
+  const oc = getOC();
+  const r = GCWithScope();
+  const adaptor = r(new oc.BRepAdaptor_Curve2d_2(e.wrapped, face.wrapped));
+  const trimmed = new oc.Geom2d_TrimmedCurve(adaptor.Curve(), adaptor.FirstParameter(), adaptor.LastParameter(), true, true);
+  if (e.orientation === "backward") {
+    trimmed.Reverse();
+  }
+  return new Curve2D(new oc.Handle_Geom2d_Curve_2(trimmed));
+}
+var poles3dTo2d = (poles, register) => {
+  const oc = getOC();
+  const poles2d = register(new oc.TColgp_Array1OfPnt2d_2(poles.Lower(), poles.Upper()));
+  for (let i = poles.Lower();i <= poles.Upper(); i++) {
+    const pole = register(poles.Value(i));
+    poles2d.SetValue(i, register(new oc.gp_Pnt2d_3(pole.X(), pole.Y())));
+  }
+  return poles2d;
+};
+var point3dTo2d = (point) => [point.X(), point.Y()];
+var direction3dTo2d = (direction) => [
+  direction.X(),
+  direction.Y()
+];
+var axis3dTo2d = (axis, register) => {
+  const oc = getOC();
+  const location = register(axis.Location());
+  const xDirection = register(axis.XDirection());
+  const yDirection = register(axis.YDirection());
+  return register(new oc.gp_Ax22d_2(register(new oc.gp_Pnt2d_3(location.X(), location.Y())), register(new oc.gp_Dir2d_4(direction3dTo2d(xDirection)[0], direction3dTo2d(xDirection)[1])), register(new oc.gp_Dir2d_4(direction3dTo2d(yDirection)[0], direction3dTo2d(yDirection)[1]))));
+};
+var orientCurveLikeEdge = (curve, edge) => {
+  if (edge.orientation === "backward")
+    curve.reverse();
+  return curve;
+};
+function edgeToCurveOnPlane(e) {
+  const oc = getOC();
+  const r = GCWithScope();
+  const adaptor = r(new oc.BRepAdaptor_Curve_2(e.wrapped));
+  const curveType = findCurveType(adaptor.GetType());
+  const firstParameter = adaptor.FirstParameter();
+  const lastParameter = adaptor.LastParameter();
+  const wrapAndTrim = (curve) => orientCurveLikeEdge(new Curve2D(new oc.Handle_Geom2d_Curve_2(new oc.Geom2d_TrimmedCurve(new oc.Handle_Geom2d_Curve_2(curve), firstParameter, lastParameter, true, true))), e);
+  if (curveType === "LINE") {
+    const start = point3dTo2d(r(adaptor.Value(firstParameter)));
+    const end = point3dTo2d(r(adaptor.Value(lastParameter)));
+    return orientCurveLikeEdge(make2dSegmentCurve(start, end), e);
+  }
+  if (curveType === "CIRCLE") {
+    const circle = adaptor.Circle();
+    const curveCopy = new oc.Geom2d_Circle_1(r(new oc.gp_Circ2d_3(axis3dTo2d(r(circle.Position()), r), circle.Radius())));
+    return wrapAndTrim(curveCopy);
+  }
+  if (curveType === "ELLIPSE") {
+    const ellipse = adaptor.Ellipse();
+    const curveCopy = new oc.Geom2d_Ellipse_1(r(new oc.gp_Elips2d_3(axis3dTo2d(r(ellipse.Position()), r), ellipse.MajorRadius(), ellipse.MinorRadius())));
+    return wrapAndTrim(curveCopy);
+  }
+  if (curveType === "BEZIER_CURVE") {
+    const bezier = adaptor.Bezier().get();
+    const poles = poles3dTo2d(r(bezier.Poles_2()), r);
+    const curveCopy = bezier.IsRational() ? new oc.Geom2d_BezierCurve_2(poles, bezier.Weights_2()) : new oc.Geom2d_BezierCurve_1(poles);
+    curveCopy.Segment(firstParameter, lastParameter);
+    return orientCurveLikeEdge(new Curve2D(new oc.Handle_Geom2d_Curve_2(curveCopy)), e);
+  }
+  if (curveType === "BSPLINE_CURVE") {
+    const bspline = adaptor.BSpline().get();
+    const poles = poles3dTo2d(r(bspline.Poles_2()), r);
+    const curveCopy = bspline.IsRational() ? new oc.Geom2d_BSplineCurve_2(poles, bspline.Weights_2(), bspline.Knots_2(), bspline.Multiplicities_2(), bspline.Degree(), bspline.IsPeriodic()) : new oc.Geom2d_BSplineCurve_1(poles, bspline.Knots_2(), bspline.Multiplicities_2(), bspline.Degree(), bspline.IsPeriodic());
+    curveCopy.Segment(firstParameter, lastParameter, 0.000000001);
+    return orientCurveLikeEdge(new Curve2D(new oc.Handle_Geom2d_Curve_2(curveCopy)), e);
+  }
+  throw new Error(`Unsupported projected curve type: ${curveType}`);
+}
 var viewbox = (bbox, margin = 1) => {
   const minX = bbox.bounds[0][0] - margin;
   const minY = -bbox.bounds[1][1] - margin;
@@ -5850,9 +5925,21 @@ if (!String.prototype.codePointAt) {
     }
   })();
 }
+var TINF_OK = 0;
+var TINF_DATA_ERROR = -3;
 function Tree() {
   this.table = new Uint16Array(16);
   this.trans = new Uint16Array(288);
+}
+function Data(source, dest) {
+  this.source = source;
+  this.sourceIndex = 0;
+  this.tag = 0;
+  this.bitcount = 0;
+  this.dest = dest;
+  this.destLen = 0;
+  this.ltree = new Tree;
+  this.dtree = new Tree;
 }
 var sltree = new Tree;
 var sdtree = new Tree;
@@ -5925,11 +6012,187 @@ function tinf_build_fixed_trees(lt, dt) {
   }
 }
 var offs = new Uint16Array(16);
+function tinf_build_tree(t, lengths2, off, num) {
+  var i, sum;
+  for (i = 0;i < 16; ++i) {
+    t.table[i] = 0;
+  }
+  for (i = 0;i < num; ++i) {
+    t.table[lengths2[off + i]]++;
+  }
+  t.table[0] = 0;
+  for (sum = 0, i = 0;i < 16; ++i) {
+    offs[i] = sum;
+    sum += t.table[i];
+  }
+  for (i = 0;i < num; ++i) {
+    if (lengths2[off + i]) {
+      t.trans[offs[lengths2[off + i]]++] = i;
+    }
+  }
+}
+function tinf_getbit(d) {
+  if (!d.bitcount--) {
+    d.tag = d.source[d.sourceIndex++];
+    d.bitcount = 7;
+  }
+  var bit = d.tag & 1;
+  d.tag >>>= 1;
+  return bit;
+}
+function tinf_read_bits(d, num, base) {
+  if (!num) {
+    return base;
+  }
+  while (d.bitcount < 24) {
+    d.tag |= d.source[d.sourceIndex++] << d.bitcount;
+    d.bitcount += 8;
+  }
+  var val = d.tag & 65535 >>> 16 - num;
+  d.tag >>>= num;
+  d.bitcount -= num;
+  return val + base;
+}
+function tinf_decode_symbol(d, t) {
+  while (d.bitcount < 24) {
+    d.tag |= d.source[d.sourceIndex++] << d.bitcount;
+    d.bitcount += 8;
+  }
+  var sum = 0, cur = 0, len = 0;
+  var tag = d.tag;
+  do {
+    cur = 2 * cur + (tag & 1);
+    tag >>>= 1;
+    ++len;
+    sum += t.table[len];
+    cur -= t.table[len];
+  } while (cur >= 0);
+  d.tag = tag;
+  d.bitcount -= len;
+  return t.trans[sum + cur];
+}
+function tinf_decode_trees(d, lt, dt) {
+  var hlit, hdist, hclen;
+  var i, num, length;
+  hlit = tinf_read_bits(d, 5, 257);
+  hdist = tinf_read_bits(d, 5, 1);
+  hclen = tinf_read_bits(d, 4, 4);
+  for (i = 0;i < 19; ++i) {
+    lengths[i] = 0;
+  }
+  for (i = 0;i < hclen; ++i) {
+    var clen = tinf_read_bits(d, 3, 0);
+    lengths[clcidx[i]] = clen;
+  }
+  tinf_build_tree(code_tree, lengths, 0, 19);
+  for (num = 0;num < hlit + hdist; ) {
+    var sym = tinf_decode_symbol(d, code_tree);
+    switch (sym) {
+      case 16:
+        var prev = lengths[num - 1];
+        for (length = tinf_read_bits(d, 2, 3);length; --length) {
+          lengths[num++] = prev;
+        }
+        break;
+      case 17:
+        for (length = tinf_read_bits(d, 3, 3);length; --length) {
+          lengths[num++] = 0;
+        }
+        break;
+      case 18:
+        for (length = tinf_read_bits(d, 7, 11);length; --length) {
+          lengths[num++] = 0;
+        }
+        break;
+      default:
+        lengths[num++] = sym;
+        break;
+    }
+  }
+  tinf_build_tree(lt, lengths, 0, hlit);
+  tinf_build_tree(dt, lengths, hlit, hdist);
+}
+function tinf_inflate_block_data(d, lt, dt) {
+  while (true) {
+    var sym = tinf_decode_symbol(d, lt);
+    if (sym === 256) {
+      return TINF_OK;
+    }
+    if (sym < 256) {
+      d.dest[d.destLen++] = sym;
+    } else {
+      var length, dist, offs2;
+      var i;
+      sym -= 257;
+      length = tinf_read_bits(d, length_bits[sym], length_base[sym]);
+      dist = tinf_decode_symbol(d, dt);
+      offs2 = d.destLen - tinf_read_bits(d, dist_bits[dist], dist_base[dist]);
+      for (i = offs2;i < offs2 + length; ++i) {
+        d.dest[d.destLen++] = d.dest[i];
+      }
+    }
+  }
+}
+function tinf_inflate_uncompressed_block(d) {
+  var length, invlength;
+  var i;
+  while (d.bitcount > 8) {
+    d.sourceIndex--;
+    d.bitcount -= 8;
+  }
+  length = d.source[d.sourceIndex + 1];
+  length = 256 * length + d.source[d.sourceIndex];
+  invlength = d.source[d.sourceIndex + 3];
+  invlength = 256 * invlength + d.source[d.sourceIndex + 2];
+  if (length !== (~invlength & 65535)) {
+    return TINF_DATA_ERROR;
+  }
+  d.sourceIndex += 4;
+  for (i = length;i; --i) {
+    d.dest[d.destLen++] = d.source[d.sourceIndex++];
+  }
+  d.bitcount = 0;
+  return TINF_OK;
+}
+function tinf_uncompress(source, dest) {
+  var d = new Data(source, dest);
+  var bfinal, btype, res;
+  do {
+    bfinal = tinf_getbit(d);
+    btype = tinf_read_bits(d, 2, 0);
+    switch (btype) {
+      case 0:
+        res = tinf_inflate_uncompressed_block(d);
+        break;
+      case 1:
+        res = tinf_inflate_block_data(d, sltree, sdtree);
+        break;
+      case 2:
+        tinf_decode_trees(d, d.ltree, d.dtree);
+        res = tinf_inflate_block_data(d, d.ltree, d.dtree);
+        break;
+      default:
+        res = TINF_DATA_ERROR;
+    }
+    if (res !== TINF_OK) {
+      throw new Error("Data error");
+    }
+  } while (!bfinal);
+  if (d.destLen < d.dest.length) {
+    if (typeof d.dest.slice === "function") {
+      return d.dest.slice(0, d.destLen);
+    } else {
+      return d.dest.subarray(0, d.destLen);
+    }
+  }
+  return d.dest;
+}
 tinf_build_fixed_trees(sltree, sdtree);
 tinf_build_bits_base(length_bits, length_base, 4, 3);
 tinf_build_bits_base(dist_bits, dist_base, 2, 1);
 length_bits[28] = 0;
 length_base[28] = 258;
+var tinyInflate = tinf_uncompress;
 function derive(v0, v1, v2, v3, t) {
   return Math.pow(1 - t, 3) * v0 + 3 * Math.pow(1 - t, 2) * t * v1 + 3 * (1 - t) * Math.pow(t, 2) * v2 + Math.pow(t, 3) * v3;
 }
@@ -8780,6 +9043,52 @@ GlyphNames.prototype.nameToGlyphIndex = function(name) {
 GlyphNames.prototype.glyphIndexToName = function(gid) {
   return this.names[gid];
 };
+function addGlyphNamesAll(font) {
+  var glyph;
+  var glyphIndexMap = font.tables.cmap.glyphIndexMap;
+  var charCodes = Object.keys(glyphIndexMap);
+  for (var i = 0;i < charCodes.length; i += 1) {
+    var c = charCodes[i];
+    var glyphIndex = glyphIndexMap[c];
+    glyph = font.glyphs.get(glyphIndex);
+    glyph.addUnicode(parseInt(c));
+  }
+  for (var i$1 = 0;i$1 < font.glyphs.length; i$1 += 1) {
+    glyph = font.glyphs.get(i$1);
+    if (font.cffEncoding) {
+      if (font.isCIDFont) {
+        glyph.name = "gid" + i$1;
+      } else {
+        glyph.name = font.cffEncoding.charset[i$1];
+      }
+    } else if (font.glyphNames.names) {
+      glyph.name = font.glyphNames.glyphIndexToName(i$1);
+    }
+  }
+}
+function addGlyphNamesToUnicodeMap(font) {
+  font._IndexToUnicodeMap = {};
+  var glyphIndexMap = font.tables.cmap.glyphIndexMap;
+  var charCodes = Object.keys(glyphIndexMap);
+  for (var i = 0;i < charCodes.length; i += 1) {
+    var c = charCodes[i];
+    var glyphIndex = glyphIndexMap[c];
+    if (font._IndexToUnicodeMap[glyphIndex] === undefined) {
+      font._IndexToUnicodeMap[glyphIndex] = {
+        unicodes: [parseInt(c)]
+      };
+    } else {
+      font._IndexToUnicodeMap[glyphIndex].unicodes.push(parseInt(c));
+    }
+  }
+}
+function addGlyphNames(font, opt) {
+  if (opt.lowMemory) {
+    addGlyphNamesToUnicodeMap(font);
+  } else {
+    addGlyphNamesAll(font);
+  }
+}
 function line(ctx, x1, y1, x2, y2) {
   ctx.beginPath();
   ctx.moveTo(x1, y1);
@@ -12472,6 +12781,14 @@ Substitution.prototype.add = function(feature, sub2, script, language) {
 function isBrowser() {
   return typeof window !== "undefined";
 }
+function nodeBufferToArrayBuffer(buffer) {
+  var ab = new ArrayBuffer(buffer.length);
+  var view = new Uint8Array(ab);
+  for (var i = 0;i < buffer.length; ++i) {
+    view[i] = buffer[i];
+  }
+  return ab;
+}
 function arrayBufferToNodeBuffer(ab) {
   var buffer = new Buffer(ab.byteLength);
   var view = new Uint8Array(ab);
@@ -16153,6 +16470,162 @@ Font.prototype.usWeightClasses = {
   EXTRA_BOLD: 800,
   BLACK: 900
 };
+function addName(name, names) {
+  var nameString = JSON.stringify(name);
+  var nameID = 256;
+  for (var nameKey in names) {
+    var n = parseInt(nameKey);
+    if (!n || n < 256) {
+      continue;
+    }
+    if (JSON.stringify(names[nameKey]) === nameString) {
+      return n;
+    }
+    if (nameID <= n) {
+      nameID = n + 1;
+    }
+  }
+  names[nameID] = name;
+  return nameID;
+}
+function makeFvarAxis(n, axis, names) {
+  var nameID = addName(axis.name, names);
+  return [
+    { name: "tag_" + n, type: "TAG", value: axis.tag },
+    { name: "minValue_" + n, type: "FIXED", value: axis.minValue << 16 },
+    { name: "defaultValue_" + n, type: "FIXED", value: axis.defaultValue << 16 },
+    { name: "maxValue_" + n, type: "FIXED", value: axis.maxValue << 16 },
+    { name: "flags_" + n, type: "USHORT", value: 0 },
+    { name: "nameID_" + n, type: "USHORT", value: nameID }
+  ];
+}
+function parseFvarAxis(data, start, names) {
+  var axis = {};
+  var p = new parse.Parser(data, start);
+  axis.tag = p.parseTag();
+  axis.minValue = p.parseFixed();
+  axis.defaultValue = p.parseFixed();
+  axis.maxValue = p.parseFixed();
+  p.skip("uShort", 1);
+  axis.name = names[p.parseUShort()] || {};
+  return axis;
+}
+function makeFvarInstance(n, inst, axes, names) {
+  var nameID = addName(inst.name, names);
+  var fields = [
+    { name: "nameID_" + n, type: "USHORT", value: nameID },
+    { name: "flags_" + n, type: "USHORT", value: 0 }
+  ];
+  for (var i = 0;i < axes.length; ++i) {
+    var axisTag = axes[i].tag;
+    fields.push({
+      name: "axis_" + n + " " + axisTag,
+      type: "FIXED",
+      value: inst.coordinates[axisTag] << 16
+    });
+  }
+  return fields;
+}
+function parseFvarInstance(data, start, axes, names) {
+  var inst = {};
+  var p = new parse.Parser(data, start);
+  inst.name = names[p.parseUShort()] || {};
+  p.skip("uShort", 1);
+  inst.coordinates = {};
+  for (var i = 0;i < axes.length; ++i) {
+    inst.coordinates[axes[i].tag] = p.parseFixed();
+  }
+  return inst;
+}
+function makeFvarTable(fvar2, names) {
+  var result = new table.Table("fvar", [
+    { name: "version", type: "ULONG", value: 65536 },
+    { name: "offsetToData", type: "USHORT", value: 0 },
+    { name: "countSizePairs", type: "USHORT", value: 2 },
+    { name: "axisCount", type: "USHORT", value: fvar2.axes.length },
+    { name: "axisSize", type: "USHORT", value: 20 },
+    { name: "instanceCount", type: "USHORT", value: fvar2.instances.length },
+    { name: "instanceSize", type: "USHORT", value: 4 + fvar2.axes.length * 4 }
+  ]);
+  result.offsetToData = result.sizeOf();
+  for (var i = 0;i < fvar2.axes.length; i++) {
+    result.fields = result.fields.concat(makeFvarAxis(i, fvar2.axes[i], names));
+  }
+  for (var j = 0;j < fvar2.instances.length; j++) {
+    result.fields = result.fields.concat(makeFvarInstance(j, fvar2.instances[j], fvar2.axes, names));
+  }
+  return result;
+}
+function parseFvarTable(data, start, names) {
+  var p = new parse.Parser(data, start);
+  var tableVersion = p.parseULong();
+  check.argument(tableVersion === 65536, "Unsupported fvar table version.");
+  var offsetToData = p.parseOffset16();
+  p.skip("uShort", 1);
+  var axisCount = p.parseUShort();
+  var axisSize = p.parseUShort();
+  var instanceCount = p.parseUShort();
+  var instanceSize = p.parseUShort();
+  var axes = [];
+  for (var i = 0;i < axisCount; i++) {
+    axes.push(parseFvarAxis(data, start + offsetToData + i * axisSize, names));
+  }
+  var instances = [];
+  var instanceStart = start + offsetToData + axisCount * axisSize;
+  for (var j = 0;j < instanceCount; j++) {
+    instances.push(parseFvarInstance(data, instanceStart + j * instanceSize, axes, names));
+  }
+  return { axes, instances };
+}
+var fvar = { make: makeFvarTable, parse: parseFvarTable };
+var attachList = function() {
+  return {
+    coverage: this.parsePointer(Parser.coverage),
+    attachPoints: this.parseList(Parser.pointer(Parser.uShortList))
+  };
+};
+var caretValue = function() {
+  var format = this.parseUShort();
+  check.argument(format === 1 || format === 2 || format === 3, "Unsupported CaretValue table version.");
+  if (format === 1) {
+    return { coordinate: this.parseShort() };
+  } else if (format === 2) {
+    return { pointindex: this.parseShort() };
+  } else if (format === 3) {
+    return { coordinate: this.parseShort() };
+  }
+};
+var ligGlyph = function() {
+  return this.parseList(Parser.pointer(caretValue));
+};
+var ligCaretList = function() {
+  return {
+    coverage: this.parsePointer(Parser.coverage),
+    ligGlyphs: this.parseList(Parser.pointer(ligGlyph))
+  };
+};
+var markGlyphSets = function() {
+  this.parseUShort();
+  return this.parseList(Parser.pointer(Parser.coverage));
+};
+function parseGDEFTable(data, start) {
+  start = start || 0;
+  var p = new Parser(data, start);
+  var tableVersion = p.parseVersion(1);
+  check.argument(tableVersion === 1 || tableVersion === 1.2 || tableVersion === 1.3, "Unsupported GDEF table version.");
+  var gdef2 = {
+    version: tableVersion,
+    classDef: p.parsePointer(Parser.classDef),
+    attachList: p.parsePointer(attachList),
+    ligCaretList: p.parsePointer(ligCaretList),
+    markAttachClassDef: p.parsePointer(Parser.classDef)
+  };
+  if (tableVersion >= 1.2) {
+    gdef2.markGlyphSets = p.parsePointer(markGlyphSets);
+  }
+  return gdef2;
+}
+var gdef = { parse: parseGDEFTable };
 var subtableParsers$1 = new Array(10);
 subtableParsers$1[1] = function parseLookup12() {
   var start = this.offset + this.relativeOffset;
@@ -16237,7 +16710,600 @@ subtableParsers$1[8] = function parseLookup82() {
 subtableParsers$1[9] = function parseLookup9() {
   return { error: "GPOS Lookup 9 not supported" };
 };
+function parseGposTable(data, start) {
+  start = start || 0;
+  var p = new Parser(data, start);
+  var tableVersion = p.parseVersion(1);
+  check.argument(tableVersion === 1 || tableVersion === 1.1, "Unsupported GPOS table version " + tableVersion);
+  if (tableVersion === 1) {
+    return {
+      version: tableVersion,
+      scripts: p.parseScriptList(),
+      features: p.parseFeatureList(),
+      lookups: p.parseLookupList(subtableParsers$1)
+    };
+  } else {
+    return {
+      version: tableVersion,
+      scripts: p.parseScriptList(),
+      features: p.parseFeatureList(),
+      lookups: p.parseLookupList(subtableParsers$1),
+      variations: p.parseFeatureVariationsList()
+    };
+  }
+}
 var subtableMakers$1 = new Array(10);
+function makeGposTable(gpos2) {
+  return new table.Table("GPOS", [
+    { name: "version", type: "ULONG", value: 65536 },
+    { name: "scripts", type: "TABLE", value: new table.ScriptList(gpos2.scripts) },
+    { name: "features", type: "TABLE", value: new table.FeatureList(gpos2.features) },
+    { name: "lookups", type: "TABLE", value: new table.LookupList(gpos2.lookups, subtableMakers$1) }
+  ]);
+}
+var gpos = { parse: parseGposTable, make: makeGposTable };
+function parseWindowsKernTable(p) {
+  var pairs = {};
+  p.skip("uShort");
+  var subtableVersion = p.parseUShort();
+  check.argument(subtableVersion === 0, "Unsupported kern sub-table version.");
+  p.skip("uShort", 2);
+  var nPairs = p.parseUShort();
+  p.skip("uShort", 3);
+  for (var i = 0;i < nPairs; i += 1) {
+    var leftIndex = p.parseUShort();
+    var rightIndex = p.parseUShort();
+    var value = p.parseShort();
+    pairs[leftIndex + "," + rightIndex] = value;
+  }
+  return pairs;
+}
+function parseMacKernTable(p) {
+  var pairs = {};
+  p.skip("uShort");
+  var nTables = p.parseULong();
+  if (nTables > 1) {
+    console.warn("Only the first kern subtable is supported.");
+  }
+  p.skip("uLong");
+  var coverage = p.parseUShort();
+  var subtableVersion = coverage & 255;
+  p.skip("uShort");
+  if (subtableVersion === 0) {
+    var nPairs = p.parseUShort();
+    p.skip("uShort", 3);
+    for (var i = 0;i < nPairs; i += 1) {
+      var leftIndex = p.parseUShort();
+      var rightIndex = p.parseUShort();
+      var value = p.parseShort();
+      pairs[leftIndex + "," + rightIndex] = value;
+    }
+  }
+  return pairs;
+}
+function parseKernTable(data, start) {
+  var p = new parse.Parser(data, start);
+  var tableVersion = p.parseUShort();
+  if (tableVersion === 0) {
+    return parseWindowsKernTable(p);
+  } else if (tableVersion === 1) {
+    return parseMacKernTable(p);
+  } else {
+    throw new Error("Unsupported kern table version (" + tableVersion + ").");
+  }
+}
+var kern = { parse: parseKernTable };
+function parseLocaTable(data, start, numGlyphs, shortVersion) {
+  var p = new parse.Parser(data, start);
+  var parseFn = shortVersion ? p.parseUShort : p.parseULong;
+  var glyphOffsets = [];
+  for (var i = 0;i < numGlyphs + 1; i += 1) {
+    var glyphOffset = parseFn.call(p);
+    if (shortVersion) {
+      glyphOffset *= 2;
+    }
+    glyphOffsets.push(glyphOffset);
+  }
+  return glyphOffsets;
+}
+var loca = { parse: parseLocaTable };
+function loadFromFile(path, callback) {
+  var fs = __require("fs");
+  fs.readFile(path, function(err, buffer) {
+    if (err) {
+      return callback(err.message);
+    }
+    callback(null, nodeBufferToArrayBuffer(buffer));
+  });
+}
+function loadFromUrl(url, callback) {
+  var request = new XMLHttpRequest;
+  request.open("get", url, true);
+  request.responseType = "arraybuffer";
+  request.onload = function() {
+    if (request.response) {
+      return callback(null, request.response);
+    } else {
+      return callback("Font could not be loaded: " + request.statusText);
+    }
+  };
+  request.onerror = function() {
+    callback("Font could not be loaded");
+  };
+  request.send();
+}
+function parseOpenTypeTableEntries(data, numTables) {
+  var tableEntries = [];
+  var p = 12;
+  for (var i = 0;i < numTables; i += 1) {
+    var tag = parse.getTag(data, p);
+    var checksum = parse.getULong(data, p + 4);
+    var offset2 = parse.getULong(data, p + 8);
+    var length = parse.getULong(data, p + 12);
+    tableEntries.push({ tag, checksum, offset: offset2, length, compression: false });
+    p += 16;
+  }
+  return tableEntries;
+}
+function parseWOFFTableEntries(data, numTables) {
+  var tableEntries = [];
+  var p = 44;
+  for (var i = 0;i < numTables; i += 1) {
+    var tag = parse.getTag(data, p);
+    var offset2 = parse.getULong(data, p + 4);
+    var compLength = parse.getULong(data, p + 8);
+    var origLength = parse.getULong(data, p + 12);
+    var compression = undefined;
+    if (compLength < origLength) {
+      compression = "WOFF";
+    } else {
+      compression = false;
+    }
+    tableEntries.push({
+      tag,
+      offset: offset2,
+      compression,
+      compressedLength: compLength,
+      length: origLength
+    });
+    p += 20;
+  }
+  return tableEntries;
+}
+function uncompressTable(data, tableEntry) {
+  if (tableEntry.compression === "WOFF") {
+    var inBuffer = new Uint8Array(data.buffer, tableEntry.offset + 2, tableEntry.compressedLength - 2);
+    var outBuffer = new Uint8Array(tableEntry.length);
+    tinyInflate(inBuffer, outBuffer);
+    if (outBuffer.byteLength !== tableEntry.length) {
+      throw new Error("Decompression error: " + tableEntry.tag + " decompressed length doesn't match recorded length");
+    }
+    var view = new DataView(outBuffer.buffer, 0);
+    return { data: view, offset: 0 };
+  } else {
+    return { data, offset: tableEntry.offset };
+  }
+}
+function parseBuffer(buffer, opt) {
+  opt = opt === undefined || opt === null ? {} : opt;
+  var indexToLocFormat;
+  var ltagTable;
+  var font = new Font({ empty: true });
+  var data = new DataView(buffer, 0);
+  var numTables;
+  var tableEntries = [];
+  var signature = parse.getTag(data, 0);
+  if (signature === String.fromCharCode(0, 1, 0, 0) || signature === "true" || signature === "typ1") {
+    font.outlinesFormat = "truetype";
+    numTables = parse.getUShort(data, 4);
+    tableEntries = parseOpenTypeTableEntries(data, numTables);
+  } else if (signature === "OTTO") {
+    font.outlinesFormat = "cff";
+    numTables = parse.getUShort(data, 4);
+    tableEntries = parseOpenTypeTableEntries(data, numTables);
+  } else if (signature === "wOFF") {
+    var flavor = parse.getTag(data, 4);
+    if (flavor === String.fromCharCode(0, 1, 0, 0)) {
+      font.outlinesFormat = "truetype";
+    } else if (flavor === "OTTO") {
+      font.outlinesFormat = "cff";
+    } else {
+      throw new Error("Unsupported OpenType flavor " + signature);
+    }
+    numTables = parse.getUShort(data, 12);
+    tableEntries = parseWOFFTableEntries(data, numTables);
+  } else {
+    throw new Error("Unsupported OpenType signature " + signature);
+  }
+  var cffTableEntry;
+  var fvarTableEntry;
+  var glyfTableEntry;
+  var gdefTableEntry;
+  var gposTableEntry;
+  var gsubTableEntry;
+  var hmtxTableEntry;
+  var kernTableEntry;
+  var locaTableEntry;
+  var nameTableEntry;
+  var metaTableEntry;
+  var p;
+  for (var i = 0;i < numTables; i += 1) {
+    var tableEntry = tableEntries[i];
+    var table2 = undefined;
+    switch (tableEntry.tag) {
+      case "cmap":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.cmap = cmap.parse(table2.data, table2.offset);
+        font.encoding = new CmapEncoding(font.tables.cmap);
+        break;
+      case "cvt ":
+        table2 = uncompressTable(data, tableEntry);
+        p = new parse.Parser(table2.data, table2.offset);
+        font.tables.cvt = p.parseShortList(tableEntry.length / 2);
+        break;
+      case "fvar":
+        fvarTableEntry = tableEntry;
+        break;
+      case "fpgm":
+        table2 = uncompressTable(data, tableEntry);
+        p = new parse.Parser(table2.data, table2.offset);
+        font.tables.fpgm = p.parseByteList(tableEntry.length);
+        break;
+      case "head":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.head = head.parse(table2.data, table2.offset);
+        font.unitsPerEm = font.tables.head.unitsPerEm;
+        indexToLocFormat = font.tables.head.indexToLocFormat;
+        break;
+      case "hhea":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.hhea = hhea.parse(table2.data, table2.offset);
+        font.ascender = font.tables.hhea.ascender;
+        font.descender = font.tables.hhea.descender;
+        font.numberOfHMetrics = font.tables.hhea.numberOfHMetrics;
+        break;
+      case "hmtx":
+        hmtxTableEntry = tableEntry;
+        break;
+      case "ltag":
+        table2 = uncompressTable(data, tableEntry);
+        ltagTable = ltag.parse(table2.data, table2.offset);
+        break;
+      case "maxp":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.maxp = maxp.parse(table2.data, table2.offset);
+        font.numGlyphs = font.tables.maxp.numGlyphs;
+        break;
+      case "name":
+        nameTableEntry = tableEntry;
+        break;
+      case "OS/2":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.os2 = os2.parse(table2.data, table2.offset);
+        break;
+      case "post":
+        table2 = uncompressTable(data, tableEntry);
+        font.tables.post = post.parse(table2.data, table2.offset);
+        font.glyphNames = new GlyphNames(font.tables.post);
+        break;
+      case "prep":
+        table2 = uncompressTable(data, tableEntry);
+        p = new parse.Parser(table2.data, table2.offset);
+        font.tables.prep = p.parseByteList(tableEntry.length);
+        break;
+      case "glyf":
+        glyfTableEntry = tableEntry;
+        break;
+      case "loca":
+        locaTableEntry = tableEntry;
+        break;
+      case "CFF ":
+        cffTableEntry = tableEntry;
+        break;
+      case "kern":
+        kernTableEntry = tableEntry;
+        break;
+      case "GDEF":
+        gdefTableEntry = tableEntry;
+        break;
+      case "GPOS":
+        gposTableEntry = tableEntry;
+        break;
+      case "GSUB":
+        gsubTableEntry = tableEntry;
+        break;
+      case "meta":
+        metaTableEntry = tableEntry;
+        break;
+    }
+  }
+  var nameTable = uncompressTable(data, nameTableEntry);
+  font.tables.name = _name.parse(nameTable.data, nameTable.offset, ltagTable);
+  font.names = font.tables.name;
+  if (glyfTableEntry && locaTableEntry) {
+    var shortVersion = indexToLocFormat === 0;
+    var locaTable = uncompressTable(data, locaTableEntry);
+    var locaOffsets = loca.parse(locaTable.data, locaTable.offset, font.numGlyphs, shortVersion);
+    var glyfTable = uncompressTable(data, glyfTableEntry);
+    font.glyphs = glyf.parse(glyfTable.data, glyfTable.offset, locaOffsets, font, opt);
+  } else if (cffTableEntry) {
+    var cffTable = uncompressTable(data, cffTableEntry);
+    cff.parse(cffTable.data, cffTable.offset, font, opt);
+  } else {
+    throw new Error("Font doesn't contain TrueType or CFF outlines.");
+  }
+  var hmtxTable = uncompressTable(data, hmtxTableEntry);
+  hmtx.parse(font, hmtxTable.data, hmtxTable.offset, font.numberOfHMetrics, font.numGlyphs, font.glyphs, opt);
+  addGlyphNames(font, opt);
+  if (kernTableEntry) {
+    var kernTable = uncompressTable(data, kernTableEntry);
+    font.kerningPairs = kern.parse(kernTable.data, kernTable.offset);
+  } else {
+    font.kerningPairs = {};
+  }
+  if (gdefTableEntry) {
+    var gdefTable = uncompressTable(data, gdefTableEntry);
+    font.tables.gdef = gdef.parse(gdefTable.data, gdefTable.offset);
+  }
+  if (gposTableEntry) {
+    var gposTable = uncompressTable(data, gposTableEntry);
+    font.tables.gpos = gpos.parse(gposTable.data, gposTable.offset);
+    font.position.init();
+  }
+  if (gsubTableEntry) {
+    var gsubTable = uncompressTable(data, gsubTableEntry);
+    font.tables.gsub = gsub.parse(gsubTable.data, gsubTable.offset);
+  }
+  if (fvarTableEntry) {
+    var fvarTable = uncompressTable(data, fvarTableEntry);
+    font.tables.fvar = fvar.parse(fvarTable.data, fvarTable.offset, font.names);
+  }
+  if (metaTableEntry) {
+    var metaTable = uncompressTable(data, metaTableEntry);
+    font.tables.meta = meta.parse(metaTable.data, metaTable.offset);
+    font.metas = font.tables.meta;
+  }
+  return font;
+}
+function load(url, callback, opt) {
+  opt = opt === undefined || opt === null ? {} : opt;
+  var isNode = typeof window === "undefined";
+  var loadFn = isNode && !opt.isUrl ? loadFromFile : loadFromUrl;
+  return new Promise(function(resolve, reject) {
+    loadFn(url, function(err, arrayBuffer) {
+      if (err) {
+        if (callback) {
+          return callback(err);
+        } else {
+          reject(err);
+        }
+      }
+      var font;
+      try {
+        font = parseBuffer(arrayBuffer, opt);
+      } catch (e) {
+        if (callback) {
+          return callback(e, null);
+        } else {
+          reject(e);
+        }
+      }
+      if (callback) {
+        return callback(null, font);
+      } else {
+        resolve(font);
+      }
+    });
+  });
+}
+function loadSync(url, opt) {
+  var fs = __require("fs");
+  var buffer = fs.readFileSync(url);
+  return parseBuffer(nodeBufferToArrayBuffer(buffer), opt);
+}
+var opentype = /* @__PURE__ */ Object.freeze({
+  __proto__: null,
+  Font,
+  Glyph,
+  Path,
+  BoundingBox: BoundingBox2,
+  _parse: parse,
+  parse: parseBuffer,
+  load,
+  loadSync
+});
+var FONT_REGISTER = {};
+async function loadFont(fontPath, fontFamily = "default", force = false) {
+  if (!force && FONT_REGISTER[fontFamily]) {
+    console.log(`Font ${fontFamily} already loaded`);
+    return FONT_REGISTER[fontFamily];
+  }
+  let fontData;
+  if (typeof fontPath === "string") {
+    const response = await fetch(fontPath);
+    fontData = await response.arrayBuffer();
+  } else {
+    fontData = fontPath;
+  }
+  const font = opentype.parse(fontData);
+  FONT_REGISTER[fontFamily] = font;
+  if (!FONT_REGISTER.default)
+    FONT_REGISTER.default = font;
+  return font;
+}
+var getFont = (fontFamily = "default") => {
+  return FONT_REGISTER[fontFamily];
+};
+var sketchFontCommands = function* (commands) {
+  let sk = null;
+  let lastPoint = null;
+  for (const command of commands) {
+    if (command.type === "Z") {
+      if (sk)
+        yield sk.close();
+      sk = null;
+      continue;
+    }
+    const p = [-command.x, command.y];
+    if (command.type === "M") {
+      if (sk) {
+        yield sk.done();
+      }
+      sk = new BlueprintSketcher;
+      sk.movePointerTo(p);
+      lastPoint = p;
+      continue;
+    }
+    if (lastPoint && Math.abs(p[0] - lastPoint[0]) < 0.000000001 && Math.abs(p[1] - lastPoint[1]) < 0.000000001)
+      continue;
+    if (command.type === "L") {
+      sk == null || sk.lineTo(p);
+    }
+    if (command.type === "C") {
+      sk == null || sk.cubicBezierCurveTo(p, [-command.x1, command.y1], [-command.x2, command.y2]);
+    }
+    if (command.type === "Q") {
+      sk == null || sk.quadraticBezierCurveTo(p, [-command.x1, command.y1]);
+    }
+    lastPoint = p;
+  }
+};
+function textBlueprints(text, { startX = 0, startY = 0, fontSize = 16, fontFamily = "default" } = {}) {
+  let font = getFont(fontFamily);
+  if (!font) {
+    console.warn(`Font family "${fontFamily}" not found, please load it first, using the default`);
+    font = getFont();
+  }
+  const writtenText = font.getPath(text, -startX, -startY, fontSize);
+  const blueprints = Array.from(sketchFontCommands(writtenText.commands));
+  return organiseBlueprints(blueprints).mirror([0, 0]);
+}
+var uniqueId = () => Date.now().toString(36) + Math.random().toString(36).substring(2);
+async function importSTL(STLBlob) {
+  const oc = getOC();
+  const [r, gc] = localGC();
+  const fileName = uniqueId();
+  const bufferView = new Uint8Array(await STLBlob.arrayBuffer());
+  oc.FS.writeFile(`/${fileName}`, bufferView);
+  const reader = r(new oc.StlAPI_Reader);
+  const readShape = r(new oc.TopoDS_Shell);
+  if (reader.Read(readShape, fileName)) {
+    oc.FS.unlink("/" + fileName);
+    const shapeUpgrader = r(new oc.ShapeUpgrade_UnifySameDomain_2(readShape, true, true, false));
+    shapeUpgrader.Build();
+    const upgradedShape = r(shapeUpgrader.Shape());
+    const solidSTL = r(new oc.BRepBuilderAPI_MakeSolid_1);
+    solidSTL.Add(oc.TopoDS.Shell_1(upgradedShape));
+    const asSolid = r(solidSTL.Solid());
+    const shape = cast(asSolid);
+    gc();
+    return shape;
+  } else {
+    oc.FS.unlink("/" + fileName);
+    gc();
+    throw new Error("Failed to load STL file");
+  }
+}
+var PROJECTION_PLANES = {
+  XY: { dir: [0, 0, 1], xAxis: [1, 0, 0] },
+  XZ: { dir: [0, -1, 0], xAxis: [1, 0, 0] },
+  YZ: { dir: [1, 0, 0], xAxis: [0, 1, 0] },
+  YX: { dir: [0, 0, -1], xAxis: [0, 1, 0] },
+  ZX: { dir: [0, 1, 0], xAxis: [0, 0, 1] },
+  ZY: { dir: [-1, 0, 0], xAxis: [0, 0, 1] },
+  front: { dir: [0, -1, 0], xAxis: [1, 0, 0] },
+  back: { dir: [0, 1, 0], xAxis: [-1, 0, 0] },
+  right: { dir: [-1, 0, 0], xAxis: [0, -1, 0] },
+  left: { dir: [1, 0, 0], xAxis: [0, 1, 0] },
+  bottom: { dir: [0, 0, 1], xAxis: [1, 0, 0] },
+  top: { dir: [0, 0, -1], xAxis: [1, 0, 0] }
+};
+function lookFromPlane(projectionPlane) {
+  const { dir, xAxis } = PROJECTION_PLANES[projectionPlane];
+  return new ProjectionCamera([0, 0, 0], dir, xAxis);
+}
+function defaultXDir(direction) {
+  const dir = new Vector(direction);
+  let yAxis = new Vector([0, 0, 1]);
+  let xAxis = yAxis.cross(dir);
+  if (xAxis.Length === 0) {
+    yAxis = new Vector([0, 1, 0]);
+    xAxis = yAxis.cross(dir);
+  }
+  return xAxis.normalize();
+}
+
+class ProjectionCamera extends WrappingObj {
+  constructor(position = [0, 0, 0], direction = [0, 0, 1], xAxis) {
+    const xDir = xAxis ? new Vector(xAxis) : defaultXDir(direction);
+    const ax2 = makeAx2(position, direction, xDir);
+    super(ax2);
+  }
+  get position() {
+    return new Vector(this.wrapped.Location());
+  }
+  get direction() {
+    return new Vector(this.wrapped.Direction());
+  }
+  get xAxis() {
+    return new Vector(this.wrapped.XDirection());
+  }
+  get yAxis() {
+    return new Vector(this.wrapped.YDirection());
+  }
+  autoAxes() {
+    const xAxis = defaultXDir(this.direction);
+    this.wrapped.SetXDirection(asDir(xAxis));
+  }
+  setPosition(position) {
+    this.wrapped.SetLocation(asPnt(position));
+    return this;
+  }
+  setXAxis(xAxis) {
+    this.wrapped.SetYDirection(asDir(xAxis));
+    return this;
+  }
+  setYAxis(yAxis) {
+    this.wrapped.SetYDirection(asDir(yAxis));
+    return this;
+  }
+  lookAt(shape) {
+    const lootAtPoint = new Vector("boundingBox" in shape ? shape.boundingBox.center : shape);
+    const direction = this.position.sub(lootAtPoint).normalized();
+    this.wrapped.SetDirection(direction.toDir());
+    this.autoAxes();
+    return this;
+  }
+}
+var getEdges = (shape) => {
+  if (shape.IsNull())
+    return [];
+  return cast(shape).edges;
+};
+function makeProjectedEdges(shape, camera, withHiddenLines = true) {
+  const oc = getOC();
+  const r = GCWithScope();
+  const hiddenLineRemoval = r(new oc.HLRBRep_Algo_1);
+  hiddenLineRemoval.Add_2(shape.wrapped, 0);
+  const projector = r(new oc.HLRAlgo_Projector_2(camera.wrapped));
+  hiddenLineRemoval.Projector_1(projector);
+  hiddenLineRemoval.Update();
+  hiddenLineRemoval.Hide_1();
+  const hlrShapes = new oc.HLRBRep_HLRToShape(new oc.Handle_HLRBRep_Algo_2(hiddenLineRemoval));
+  const visible = [
+    ...getEdges(hlrShapes.VCompound_1()),
+    ...getEdges(hlrShapes.Rg1LineVCompound_1()),
+    ...getEdges(hlrShapes.OutLineVCompound_1())
+  ];
+  visible.forEach((e) => oc.BRepLib.BuildCurves3d_2(e.wrapped));
+  const hidden = withHiddenLines ? [
+    ...getEdges(hlrShapes.HCompound_1()),
+    ...getEdges(hlrShapes.Rg1LineHCompound_1()),
+    ...getEdges(hlrShapes.OutLineHCompound_1())
+  ] : [];
+  hidden.forEach((e) => oc.BRepLib.BuildCurves3d_2(e.wrapped));
+  return { visible, hidden };
+}
 var PRECISION = 0.00000001;
 var samePoint = (x, y) => samePoint$2(x, y, PRECISION * 10);
 var getIntersectionPoint = (line1Start, line1End, line2Start, line2End) => {
@@ -16730,6 +17796,38 @@ function drawCircle(radius) {
 function drawPolysides(radius, sidesCount, sagitta = 0) {
   return new Drawing(polysidesBlueprint(radius, sidesCount, sagitta));
 }
+function drawText(text, { startX = 0, startY = 0, fontSize = 16, fontFamily = "default" } = {}) {
+  return new Drawing(textBlueprints(text, { startX, startY, fontSize, fontFamily }));
+}
+var edgesToDrawing = (edges) => {
+  const planeFace = drawRectangle(1000, 1000).sketchOnPlane().face();
+  const curves = edges.map((e) => {
+    try {
+      return edgeToCurveOnPlane(e);
+    } catch (_error) {
+      return edgeToCurve(e, planeFace);
+    }
+  });
+  const stitchedCurves = stitchCurves(curves).map((s) => new Blueprint(s));
+  if (stitchedCurves.length === 0)
+    return new Drawing;
+  if (stitchedCurves.length === 1)
+    return new Drawing(stitchedCurves[0]);
+  return new Drawing(new Blueprints(stitchedCurves));
+};
+function drawProjection(shape, projectionCamera = "front") {
+  let camera;
+  if (projectionCamera instanceof ProjectionCamera) {
+    camera = projectionCamera;
+  } else {
+    camera = lookFromPlane(projectionCamera);
+  }
+  const { visible, hidden } = makeProjectedEdges(shape, camera);
+  return {
+    visible: edgesToDrawing(visible),
+    hidden: edgesToDrawing(hidden)
+  };
+}
 function uuidv() {
   return ([1e7] + -1000 + -4000 + -8000 + -100000000000).replace(/[018]/g, (c) => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
 }
@@ -16805,8 +17903,300 @@ function exportSTEP(shapes = [], { unit: unit2, modelUnit } = {}) {
   }
 }
 
-// src/features.mjs
+// src/svgpath.mjs
 function fail4(message) {
+  throw new Error(message);
+}
+function tokenize(d) {
+  if (typeof d !== "string" || !d.trim())
+    fail4("SVG path data is empty");
+  if (d.length > 200000)
+    fail4("SVG path data is longer than 200000 characters");
+  const tokens = [];
+  const raws = [];
+  tokens.raws = raws;
+  const re = /([MmLlHhVvCcSsQqTtAaZz])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)|([\s,]+)|(.)/g;
+  let match;
+  while (match = re.exec(d)) {
+    if (match[1])
+      tokens.push(match[1]);
+    else if (match[2] !== undefined) {
+      tokens.push(Number(match[2]));
+      raws[tokens.length - 1] = match[2];
+    } else if (match[4])
+      fail4(`unexpected character ${JSON.stringify(match[4])} in SVG path`);
+  }
+  return tokens;
+}
+function parsePath(d) {
+  const tokens = tokenize(d);
+  const subpaths = [];
+  let index = 0, command = null, current = [0, 0], start = [0, 0], path = null;
+  let lastControl = null, lastType = null;
+  const number = () => {
+    const value = tokens[index++];
+    if (typeof value !== "number")
+      fail4("SVG path is missing a number");
+    return value;
+  };
+  const flag = () => {
+    let value = tokens[index];
+    if (typeof value !== "number")
+      fail4("SVG arc flag missing");
+    if (value === 0 || value === 1) {
+      index++;
+      return value;
+    }
+    const text = tokens.raws[index] ?? String(value);
+    if ((text[0] === "0" || text[0] === "1") && text.length > 1) {
+      tokens.raws[index] = text.slice(1);
+      tokens[index] = Number(text.slice(1));
+      return Number(text[0]);
+    }
+    fail4("SVG arc flag must be 0 or 1");
+  };
+  while (index < tokens.length) {
+    if (typeof tokens[index] === "string")
+      command = tokens[index++];
+    else if (command === null)
+      fail4("SVG path must start with M");
+    const upper = command.toUpperCase();
+    const relative = command !== upper;
+    const base = relative ? current : [0, 0];
+    const point = () => [base[0] + number(), base[1] + number()];
+    if (upper !== "M" && !path)
+      fail4("SVG path must start with M");
+    switch (upper) {
+      case "M": {
+        current = point();
+        start = [...current];
+        path = { start: [...current], segments: [], closed: false };
+        subpaths.push(path);
+        command = relative ? "l" : "L";
+        lastType = "M";
+        continue;
+      }
+      case "L": {
+        const to = point();
+        path.segments.push({ type: "L", to });
+        current = to;
+        lastType = "L";
+        break;
+      }
+      case "H": {
+        const to = [(relative ? current[0] : 0) + number(), current[1]];
+        path.segments.push({ type: "L", to });
+        current = to;
+        lastType = "L";
+        break;
+      }
+      case "V": {
+        const to = [current[0], (relative ? current[1] : 0) + number()];
+        path.segments.push({ type: "L", to });
+        current = to;
+        lastType = "L";
+        break;
+      }
+      case "C": {
+        const c1 = point(), c2 = point(), to = point();
+        path.segments.push({ type: "C", c1, c2, to });
+        lastControl = c2;
+        current = to;
+        lastType = "C";
+        break;
+      }
+      case "S": {
+        const c1 = lastType === "C" ? [2 * current[0] - lastControl[0], 2 * current[1] - lastControl[1]] : [...current];
+        const c2 = point(), to = point();
+        path.segments.push({ type: "C", c1, c2, to });
+        lastControl = c2;
+        current = to;
+        lastType = "C";
+        break;
+      }
+      case "Q": {
+        const c = point(), to = point();
+        path.segments.push({ type: "Q", c, to });
+        lastControl = c;
+        current = to;
+        lastType = "Q";
+        break;
+      }
+      case "T": {
+        const c = lastType === "Q" ? [2 * current[0] - lastControl[0], 2 * current[1] - lastControl[1]] : [...current];
+        const to = point();
+        path.segments.push({ type: "Q", c, to });
+        lastControl = c;
+        current = to;
+        lastType = "Q";
+        break;
+      }
+      case "A": {
+        const rx = Math.abs(number()), ry = Math.abs(number()), rotation = number();
+        const large = flag(), sweep = flag();
+        const to = point();
+        if (rx < 0.000000000001 || ry < 0.000000000001)
+          path.segments.push({ type: "L", to });
+        else
+          path.segments.push({ type: "A", rx, ry, rotation, large: !!large, sweep: !!sweep, from: [...current], to });
+        current = to;
+        lastType = "A";
+        break;
+      }
+      case "Z": {
+        path.closed = true;
+        current = [...start];
+        lastType = "Z";
+        command = null;
+        if (index < tokens.length && typeof tokens[index] === "number")
+          fail4("SVG path has numbers after Z");
+        if (index < tokens.length && !/[Mm]/.test(tokens[index])) {
+          path = { start: [...current], segments: [], closed: false };
+          subpaths.push(path);
+        }
+        continue;
+      }
+      default:
+        fail4(`unsupported SVG command ${command}`);
+    }
+  }
+  return subpaths.filter((item) => item.segments.length);
+}
+function arcCenter(seg) {
+  const phi = seg.rotation * Math.PI / 180, cos = Math.cos(phi), sin = Math.sin(phi);
+  const [x1, y1] = seg.from, [x2, y2] = seg.to;
+  const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+  const xp = cos * dx + sin * dy, yp = -sin * dx + cos * dy;
+  let { rx, ry } = seg;
+  const lambda = xp * xp / (rx * rx) + yp * yp / (ry * ry);
+  if (lambda > 1) {
+    rx *= Math.sqrt(lambda);
+    ry *= Math.sqrt(lambda);
+  }
+  const num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp;
+  const den = rx * rx * yp * yp + ry * ry * xp * xp;
+  let coef = Math.sqrt(Math.max(0, num / den));
+  if (seg.large === seg.sweep)
+    coef = -coef;
+  const cxp = coef * rx * yp / ry, cyp = -coef * ry * xp / rx;
+  const cx = cos * cxp - sin * cyp + (x1 + x2) / 2, cy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const angle = (ux, uy, vx, vy) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const start = angle(1, 0, (xp - cxp) / rx, (yp - cyp) / ry);
+  let delta = angle((xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry);
+  if (!seg.sweep && delta > 0)
+    delta -= 2 * Math.PI;
+  if (seg.sweep && delta < 0)
+    delta += 2 * Math.PI;
+  return { cx, cy, rx, ry, cos, sin, start, delta };
+}
+function flattenPath(d, steps = 16) {
+  return parsePath(d).map((sub2) => {
+    const points = [sub2.start];
+    let current = sub2.start;
+    for (const seg of sub2.segments) {
+      if (seg.type === "L")
+        points.push(seg.to);
+      else if (seg.type === "C") {
+        for (let i = 1;i <= steps; i++) {
+          const t = i / steps, u = 1 - t;
+          points.push([0, 1].map((k) => u * u * u * current[k] + 3 * u * u * t * seg.c1[k] + 3 * u * t * t * seg.c2[k] + t * t * t * seg.to[k]));
+        }
+      } else if (seg.type === "Q") {
+        for (let i = 1;i <= steps; i++) {
+          const t = i / steps, u = 1 - t;
+          points.push([0, 1].map((k) => u * u * current[k] + 2 * u * t * seg.c[k] + t * t * seg.to[k]));
+        }
+      } else if (seg.type === "A") {
+        const a = arcCenter(seg);
+        const n = Math.max(4, Math.ceil(Math.abs(a.delta) / (2 * Math.PI) * steps * 4));
+        for (let i = 1;i <= n; i++) {
+          const theta = a.start + a.delta * i / n;
+          const x = a.rx * Math.cos(theta), y = a.ry * Math.sin(theta);
+          points.push([a.cos * x - a.sin * y + a.cx, a.sin * x + a.cos * y + a.cy]);
+        }
+      }
+      current = seg.to;
+    }
+    if (sub2.closed)
+      points.push(sub2.start);
+    return { points, closed: sub2.closed };
+  });
+}
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0;i < points.length; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[(i + 1) % points.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return area / 2;
+}
+function pointInPolygon([x, y], polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1;i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i], [xj, yj] = polygon[j];
+    if (yi > y !== yj > y && x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+function pathDrawing(d, draw2, map) {
+  const subs = parsePath(d);
+  if (!subs.length)
+    fail4("SVG path has no drawable segments");
+  if (subs.length > 256)
+    fail4("SVG path has more than 256 subpaths");
+  const flat = flattenPath(d, 8);
+  const items = subs.map((sub2, index) => {
+    const polygon = flat[index].points.map(map);
+    return { sub: sub2, polygon, area: Math.abs(polygonArea(polygon)) };
+  }).filter((item) => item.area > 0.000000001);
+  if (!items.length)
+    fail4("SVG path encloses no area");
+  for (const item of items) {
+    const probe = item.polygon[0];
+    item.depth = items.filter((other) => other !== item && other.area > item.area && pointInPolygon(probe, other.polygon)).length;
+  }
+  const flipped = (() => {
+    const a = map([0, 0]), b = map([1, 0]), c = map([0, 1]);
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0;
+  })();
+  const drawingFor = ({ sub: sub2 }) => {
+    let pen = draw2(map(sub2.start));
+    let current = sub2.start;
+    for (const seg of sub2.segments) {
+      const same = Math.hypot(seg.to[0] - current[0], seg.to[1] - current[1]) < 0.000000001;
+      if (same)
+        continue;
+      if (seg.type === "L")
+        pen = pen.lineTo(map(seg.to));
+      else if (seg.type === "C")
+        pen = pen.cubicBezierCurveTo(map(seg.to), map(seg.c1), map(seg.c2));
+      else if (seg.type === "Q")
+        pen = pen.quadraticBezierCurveTo(map(seg.to), map(seg.c));
+      else if (seg.type === "A") {
+        const scale3 = Math.hypot(...[0, 1].map((k) => map([1, 0])[k] - map([0, 0])[k]));
+        pen = pen.ellipseTo(map(seg.to), seg.rx * scale3, seg.ry * scale3, flipped ? -seg.rotation : seg.rotation, seg.large, flipped ? !seg.sweep : seg.sweep);
+      }
+      current = seg.to;
+    }
+    return pen.close();
+  };
+  items.sort((a, b) => a.depth - b.depth || b.area - a.area);
+  let result = null;
+  for (const item of items) {
+    const drawing = drawingFor(item);
+    if (!result)
+      result = drawing;
+    else
+      result = item.depth % 2 === 1 ? result.cut(drawing) : result.fuse(drawing);
+  }
+  return result;
+}
+
+// src/features.mjs
+var FONTS = { sans: "DejaVu Sans", "sans-bold": "DejaVu Sans Bold", mono: "DejaVu Sans Mono" };
+var loadedFonts = new Set;
+function fail5(message) {
   throw new Error(message);
 }
 var PLANES = new Set(["XY", "XZ", "YZ"]);
@@ -16818,63 +18208,63 @@ var FACE_KEYS = new Set(["side", "surface", "parallel_to", "in_plane", "in_box",
 function applySelector(finder, selector, ctx, kind, label) {
   if (Array.isArray(selector)) {
     if (!selector.length)
-      fail4(`${label} must not be an empty list`);
+      fail5(`${label} must not be an empty list`);
     return finder.either(selector.map((entry, index) => (f2) => applySelector(f2, entry, ctx, kind, `${label}[${index}]`)));
   }
   if (!selector || typeof selector !== "object")
-    fail4(`${label} must be a selector object or list`);
+    fail5(`${label} must be a selector object or list`);
   const allowed = kind === "edge" ? EDGE_KEYS : FACE_KEYS;
   for (const key of Object.keys(selector)) {
     if (!allowed.has(key))
-      fail4(`${label}.${key} is not a ${kind} selector (use ${[...allowed].join(", ")})`);
+      fail5(`${label}.${key} is not a ${kind} selector (use ${[...allowed].join(", ")})`);
   }
   const point = (value, name) => ctx.vector(value, `${label}.${name}`);
   let f = finder;
   if (selector.side !== undefined) {
     const side = SIDES[String(selector.side).toLowerCase()];
     if (!side)
-      fail4(`${label}.side must be one of ${Object.keys(SIDES).join(", ")}`);
+      fail5(`${label}.side must be one of ${Object.keys(SIDES).join(", ")}`);
     const [plane, axis, end] = side;
     f = f.inPlane(plane, ctx.bounds()[end][axis]);
   }
   if (selector.direction !== undefined) {
     const direction = typeof selector.direction === "string" ? selector.direction.toUpperCase() : point(selector.direction, "direction");
     if (typeof direction === "string" && !["X", "Y", "Z"].includes(direction))
-      fail4(`${label}.direction must be X, Y, Z or [x,y,z]`);
+      fail5(`${label}.direction must be X, Y, Z or [x,y,z]`);
     f = f.inDirection(direction);
   }
   if (selector.curve !== undefined) {
     const curve = CURVES[String(selector.curve).toLowerCase()];
     if (!curve)
-      fail4(`${label}.curve must be one of ${Object.keys(CURVES).join(", ")}`);
+      fail5(`${label}.curve must be one of ${Object.keys(CURVES).join(", ")}`);
     f = f.ofCurveType(curve);
   }
   if (selector.surface !== undefined) {
     const surface = SURFACES[String(selector.surface).toLowerCase()];
     if (!surface)
-      fail4(`${label}.surface must be one of ${Object.keys(SURFACES).join(", ")}`);
+      fail5(`${label}.surface must be one of ${Object.keys(SURFACES).join(", ")}`);
     f = f.ofSurfaceType(surface);
   }
   if (selector.parallel_to !== undefined) {
     if (!PLANES.has(selector.parallel_to))
-      fail4(`${label}.parallel_to must be XY, XZ or YZ`);
+      fail5(`${label}.parallel_to must be XY, XZ or YZ`);
     f = f.parallelTo(selector.parallel_to);
   }
   if (selector.in_plane !== undefined) {
     const spec = typeof selector.in_plane === "string" ? { plane: selector.in_plane } : selector.in_plane;
     if (!PLANES.has(spec?.plane))
-      fail4(`${label}.in_plane.plane must be XY, XZ or YZ`);
+      fail5(`${label}.in_plane.plane must be XY, XZ or YZ`);
     f = f.inPlane(spec.plane, ctx.resolve(spec.offset ?? 0, `${label}.in_plane.offset`));
   }
   if (selector.in_box !== undefined) {
     if (!Array.isArray(selector.in_box) || selector.in_box.length !== 2)
-      fail4(`${label}.in_box must be [[x,y,z],[x,y,z]]`);
+      fail5(`${label}.in_box must be [[x,y,z],[x,y,z]]`);
     f = f.inBox(point(selector.in_box[0], "in_box[0]"), point(selector.in_box[1], "in_box[1]"));
   }
   if (selector.near !== undefined) {
     const distance = ctx.resolve(selector.near.distance ?? 0.01, `${label}.near.distance`);
     if (distance <= 0)
-      fail4(`${label}.near.distance must be positive`);
+      fail5(`${label}.near.distance must be positive`);
     f = f.withinDistance(distance, point(selector.near.point, "near.point"));
   }
   if (selector.contains_point !== undefined)
@@ -16894,7 +18284,7 @@ function selectionCount(shape, selector, ctx, kind, label) {
   const found = finder.find(shape);
   const count = Array.isArray(found) ? found.length : found ? 1 : 0;
   if (count === 0)
-    fail4(`${label} selected no ${kind}s on the input shape`);
+    fail5(`${label} selected no ${kind}s on the input shape`);
   return count;
 }
 function edgeFeature(shape, operation, kind, amount, ctx) {
@@ -16906,29 +18296,29 @@ function edgeFeature(shape, operation, kind, amount, ctx) {
   try {
     return kind === "fillet" ? shape.fillet(amount, filter) : shape.chamfer(amount, filter);
   } catch (error) {
-    fail4(`${operation.id}: ${kind} of ${amount} mm failed on the selected edges (radius too large for adjacent faces?): ${error?.message || error}`);
+    fail5(`${operation.id}: ${kind} of ${amount} mm failed on the selected edges (radius too large for adjacent faces?): ${error?.message || error}`);
   }
 }
 function shellFeature(shape, operation, ctx) {
   const thickness = ctx.resolve(operation.thickness, `${operation.id}.thickness`);
   if (thickness <= 0)
-    fail4(`${operation.id}.thickness must be positive`);
+    fail5(`${operation.id}.thickness must be positive`);
   if (operation.open_faces === undefined)
-    fail4(`${operation.id}.open_faces is required (for example {"side":"top"})`);
+    fail5(`${operation.id}.open_faces is required (for example {"side":"top"})`);
   selectionCount(shape, operation.open_faces, ctx, "face", `${operation.id}.open_faces`);
   try {
     return shape.shell(thickness, (f) => applySelector(f, operation.open_faces, ctx, "face", `${operation.id}.open_faces`));
   } catch (error) {
-    fail4(`${operation.id}: shell failed (wall thicker than a feature, or fillets smaller than the wall?): ${error?.message || error}`);
+    fail5(`${operation.id}: shell failed (wall thicker than a feature, or fillets smaller than the wall?): ${error?.message || error}`);
   }
 }
 function drawProfile(profile, ctx, label) {
   if (!profile || typeof profile !== "object")
-    fail4(`${label} must be a profile object`);
+    fail5(`${label} must be a profile object`);
   const num = (value, name) => ctx.resolve(value, `${label}.${name}`);
   const pt = (value, name) => {
     if (!Array.isArray(value) || value.length !== 2)
-      fail4(`${label}.${name} must be [x,y]`);
+      fail5(`${label}.${name} must be [x,y]`);
     return [num(value[0], `${name}[0]`), num(value[1], `${name}[1]`)];
   };
   const center = profile.center === undefined ? [0, 0] : pt(profile.center, "center");
@@ -16939,10 +18329,10 @@ function drawProfile(profile, ctx, label) {
       const width = num(profile.width, "width");
       const height = num(profile.height, "height");
       if (width <= 0 || height <= 0)
-        fail4(`${label} width and height must be positive`);
+        fail5(`${label} width and height must be positive`);
       const radius = profile.radius === undefined ? 0 : num(profile.radius, "radius");
       if (radius < 0 || radius * 2 > Math.min(width, height) + 0.000000001)
-        fail4(`${label}.radius must be between 0 and half the shorter side`);
+        fail5(`${label}.radius must be between 0 and half the shorter side`);
       drawing = drawRoundedRectangle(width, height, radius > 0 ? Math.min(radius, Math.min(width, height) / 2 - 0.000001) : 0);
       break;
     }
@@ -16950,14 +18340,14 @@ function drawProfile(profile, ctx, label) {
       const length = num(profile.length, "length");
       const width = num(profile.width, "width");
       if (width <= 0 || length < width)
-        fail4(`${label} needs width > 0 and length >= width (length is end to end)`);
+        fail5(`${label} needs width > 0 and length >= width (length is end to end)`);
       drawing = length - width < 0.000001 ? drawCircle(width / 2) : drawRoundedRectangle(length, width, width / 2 - 0.000001);
       break;
     }
     case "circle": {
       const radius = profile.diameter !== undefined ? num(profile.diameter, "diameter") / 2 : num(profile.radius, "radius");
       if (radius <= 0)
-        fail4(`${label}.radius must be positive`);
+        fail5(`${label}.radius must be positive`);
       drawing = drawCircle(radius);
       break;
     }
@@ -16965,13 +18355,13 @@ function drawProfile(profile, ctx, label) {
       const radius = num(profile.radius, "radius");
       const sides = Math.round(num(profile.sides, "sides"));
       if (radius <= 0 || sides < 3 || sides > 64)
-        fail4(`${label} needs radius > 0 and 3-64 sides`);
+        fail5(`${label} needs radius > 0 and 3-64 sides`);
       drawing = drawPolysides(radius, sides);
       break;
     }
     case "polygon": {
       if (!Array.isArray(profile.points) || profile.points.length < 3)
-        fail4(`${label}.points needs at least three [x,y] points`);
+        fail5(`${label}.points needs at least three [x,y] points`);
       const points = profile.points.map((p, i) => pt(p, `points[${i}]`));
       let pen = draw(points[0]);
       for (const p of points.slice(1))
@@ -16981,7 +18371,7 @@ function drawProfile(profile, ctx, label) {
     }
     case "path": {
       if (!Array.isArray(profile.segments) || !profile.segments.length)
-        fail4(`${label}.segments is required`);
+        fail5(`${label}.segments is required`);
       let pen = draw(pt(profile.start, "start"));
       profile.segments.forEach((segment, index) => {
         const name = `segments[${index}]`;
@@ -16994,13 +18384,51 @@ function drawProfile(profile, ctx, label) {
         else if (segment.tangent_arc)
           pen = pen.tangentArcTo(pt(segment.tangent_arc, `${name}.tangent_arc`));
         else
-          fail4(`${label}.${name} must be {line}, {arc, via}, {arc, sagitta} or {tangent_arc}`);
+          fail5(`${label}.${name} must be {line}, {arc, via}, {arc, sagitta} or {tangent_arc}`);
       });
       drawing = pen.close();
       break;
     }
+    case "text": {
+      if (typeof profile.text !== "string" || !profile.text.trim())
+        fail5(`${label}.text is required`);
+      if (profile.text.length > 200)
+        fail5(`${label}.text allows at most 200 characters`);
+      const size = num(profile.size ?? 10, "size");
+      if (size <= 0)
+        fail5(`${label}.size must be positive`);
+      const font = profile.font || "sans";
+      if (!FONTS[font])
+        fail5(`${label}.font must be one of ${Object.keys(FONTS).join(", ")}`);
+      if (!loadedFonts.has(font))
+        fail5(`${label}: font ${font} is not loaded`);
+      drawing = drawText(profile.text, { fontSize: size, fontFamily: FONTS[font] });
+      const [[minX, minY], [maxX, maxY]] = drawing.boundingBox.bounds;
+      const align = profile.align || "left";
+      const valign = profile.valign || "baseline";
+      if (!["left", "center", "right"].includes(align))
+        fail5(`${label}.align must be left, center or right`);
+      if (!["baseline", "middle", "bottom", "top"].includes(valign))
+        fail5(`${label}.valign must be baseline, middle, bottom or top`);
+      const dx = align === "center" ? -(minX + maxX) / 2 : align === "right" ? -maxX : -minX;
+      const dy = valign === "middle" ? -(minY + maxY) / 2 : valign === "bottom" ? -minY : valign === "top" ? -maxY : 0;
+      drawing = drawing.translate(dx, dy);
+      break;
+    }
+    case "svg_path": {
+      const scale3 = num(profile.scale ?? 1, "scale");
+      if (!(scale3 > 0))
+        fail5(`${label}.scale must be positive`);
+      const flip = profile.flip_y !== false ? -1 : 1;
+      drawing = pathDrawing(profile.d, draw, ([x, y]) => [x * scale3, y * scale3 * flip]);
+      if (profile.center_on_origin) {
+        const [[minX, minY], [maxX, maxY]] = drawing.boundingBox.bounds;
+        drawing = drawing.translate(-(minX + maxX) / 2, -(minY + maxY) / 2);
+      }
+      break;
+    }
     default:
-      fail4(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon or path`);
+      fail5(`${label}.kind must be rectangle, rounded_rectangle, slot, circle, regular_polygon, polygon, path, text or svg_path`);
   }
   if (profile.offset !== undefined) {
     const distance = num(profile.offset, "offset");
@@ -17008,7 +18436,7 @@ function drawProfile(profile, ctx, label) {
       try {
         drawing = drawing.offset(distance);
       } catch (error) {
-        fail4(`${label}.offset ${distance} failed (shrinking past the shape's width?): ${error?.message || error}`);
+        fail5(`${label}.offset ${distance} failed (shrinking past the shape's width?): ${error?.message || error}`);
       }
     }
   }
@@ -17018,7 +18446,7 @@ function drawProfile(profile, ctx, label) {
     drawing = drawing.translate(center[0], center[1]);
   if (profile.holes !== undefined) {
     if (!Array.isArray(profile.holes))
-      fail4(`${label}.holes must be a list of profiles`);
+      fail5(`${label}.holes must be a list of profiles`);
     profile.holes.forEach((hole, index) => {
       drawing = drawing.cut(drawProfile(hole, ctx, `${label}.holes[${index}]`));
     });
@@ -17027,33 +18455,33 @@ function drawProfile(profile, ctx, label) {
 }
 function sketchProfile(profile, plane, origin, ctx, label) {
   if (!PLANES.has(plane))
-    fail4(`${label}.plane must be XY, XZ or YZ`);
+    fail5(`${label}.plane must be XY, XZ or YZ`);
   return drawProfile(profile, ctx, label).sketchOnPlane(plane, origin);
 }
 function extrudeProfile(operation, ctx) {
   const height = ctx.resolve(operation.height, `${operation.id}.height`);
   if (height === 0)
-    fail4(`${operation.id}.height must not be 0`);
+    fail5(`${operation.id}.height must not be 0`);
   const origin = ctx.vector(operation.origin, `${operation.id}.origin`);
   return sketchProfile(operation.profile, operation.plane || "XY", origin, ctx, `${operation.id}.profile`).extrude(height);
 }
 function loftFeature(operation, ctx) {
   if (!Array.isArray(operation.sections) || operation.sections.length < 2)
-    fail4(`${operation.id}.sections needs at least two sections`);
+    fail5(`${operation.id}.sections needs at least two sections`);
   if (operation.sections.length > 16)
-    fail4(`${operation.id}.sections allows at most 16 sections`);
+    fail5(`${operation.id}.sections allows at most 16 sections`);
   const plane = operation.plane || "XY";
   const sketches = operation.sections.map((section, index) => {
     const label = `${operation.id}.sections[${index}]`;
     if (section.profile?.holes)
-      fail4(`${label}: loft sections cannot have holes`);
+      fail5(`${label}: loft sections cannot have holes`);
     const origin = section.origin !== undefined ? ctx.vector(section.origin, `${label}.origin`) : ctx.resolve(section.offset ?? 0, `${label}.offset`);
     return sketchProfile(section.profile, section.plane || plane, origin, ctx, `${label}.profile`);
   });
   try {
     return sketches[0].loftWith(sketches.slice(1), { ruled: operation.ruled === true });
   } catch (error) {
-    fail4(`${operation.id}: loft failed (sections must be single closed outlines that do not cross): ${error?.message || error}`);
+    fail5(`${operation.id}: loft failed (sections must be single closed outlines that do not cross): ${error?.message || error}`);
   }
 }
 var THREADS = {
@@ -17068,7 +18496,7 @@ var THREADS = {
 function normalize(v) {
   const length = Math.hypot(...v);
   if (length < 0.000000001)
-    fail4("hole direction must not be zero");
+    fail5("hole direction must not be zero");
   return v.map((x) => x / length);
 }
 function holeTool(operation, ctx, polygonSketch) {
@@ -17078,22 +18506,22 @@ function holeTool(operation, ctx, polygonSketch) {
   if (operation.thread) {
     const size = THREADS[operation.thread.size];
     if (!size)
-      fail4(`${label}.thread.size must be one of ${Object.keys(THREADS).join(", ")}`);
+      fail5(`${label}.thread.size must be one of ${Object.keys(THREADS).join(", ")}`);
     const mode = operation.thread.mode || "clearance";
     if (!["clearance", "tap", "insert"].includes(mode))
-      fail4(`${label}.thread.mode must be clearance, tap or insert`);
+      fail5(`${label}.thread.mode must be clearance, tap or insert`);
     if (diameter === undefined)
       diameter = size[mode];
     if (depth === undefined && mode === "insert")
       depth = size.insert_depth + 1;
   }
   if (!(diameter > 0))
-    fail4(`${label}.diameter (or thread) is required and must be positive`);
+    fail5(`${label}.diameter (or thread) is required and must be positive`);
   const through = operation.through === true || depth === undefined;
   if (through)
     depth = 1000;
   if (!(depth > 0))
-    fail4(`${label}.depth must be positive`);
+    fail5(`${label}.depth must be positive`);
   const r = diameter / 2;
   const lead = 0.5;
   const profile = [[0, lead]];
@@ -17102,17 +18530,17 @@ function holeTool(operation, ctx, polygonSketch) {
     const cr = ctx.resolve(cb.diameter, `${label}.counterbore.diameter`) / 2;
     const cd = ctx.resolve(cb.depth, `${label}.counterbore.depth`);
     if (cr <= r || cd <= 0 || cd >= depth)
-      fail4(`${label}.counterbore needs diameter > hole diameter and 0 < depth < hole depth`);
+      fail5(`${label}.counterbore needs diameter > hole diameter and 0 < depth < hole depth`);
     profile.push([cr, lead], [cr, -cd], [r, -cd]);
   } else if (operation.countersink) {
     const cs = operation.countersink;
     const sr = ctx.resolve(cs.diameter, `${label}.countersink.diameter`) / 2;
     const angle = ctx.resolve(cs.angle ?? 90, `${label}.countersink.angle`);
     if (sr <= r || angle <= 0 || angle >= 180)
-      fail4(`${label}.countersink needs diameter > hole diameter and 0 < angle < 180`);
+      fail5(`${label}.countersink needs diameter > hole diameter and 0 < angle < 180`);
     const sinkDepth = (sr - r) / Math.tan(angle / 2 * Math.PI / 180);
     if (sinkDepth >= depth)
-      fail4(`${label}.countersink is deeper than the hole`);
+      fail5(`${label}.countersink is deeper than the hole`);
     profile.push([sr, lead], [sr, 0], [r, -sinkDepth]);
   } else {
     profile.push([r, lead]);
@@ -17134,9 +18562,9 @@ function holeTool(operation, ctx, polygonSketch) {
 function holeFeature(shape, operation, ctx, polygonSketch) {
   const positions = operation.positions ?? (operation.position !== undefined ? [operation.position] : undefined);
   if (!Array.isArray(positions) || !positions.length)
-    fail4(`${operation.id} needs position [x,y,z] or positions`);
+    fail5(`${operation.id} needs position [x,y,z] or positions`);
   if (positions.length > 256)
-    fail4(`${operation.id}.positions allows at most 256 holes`);
+    fail5(`${operation.id}.positions allows at most 256 holes`);
   const { tool } = holeTool(operation, ctx, polygonSketch);
   let result = shape;
   positions.forEach((position, index) => {
@@ -17144,6 +18572,106 @@ function holeFeature(shape, operation, ctx, polygonSketch) {
     result = result.cut(tool.clone().translate(at));
   });
   return result;
+}
+
+// src/moulding.mjs
+var sub2 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+var cross2 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+var dot2 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function rayHit(origin, direction, tri) {
+  const [a, b, c] = tri.p, e1 = sub2(b, a), e2 = sub2(c, a), h = cross2(direction, e2), det = dot2(e1, h);
+  if (Math.abs(det) < 0.000000000001)
+    return Infinity;
+  const f = 1 / det, s = sub2(origin, a), u = f * dot2(s, h);
+  if (u < 0 || u > 1)
+    return Infinity;
+  const q = cross2(s, e1), v = f * dot2(direction, q);
+  if (v < 0 || u + v > 1)
+    return Infinity;
+  const t = f * dot2(e2, q);
+  return t > 0.0001 ? t : Infinity;
+}
+function analyzeMoulding(shape, check2) {
+  const pullInput = Array.isArray(check2.pull) ? check2.pull.map(Number) : [0, 0, 1];
+  const length = Math.hypot(...pullInput);
+  if (!(length > 0.000000001))
+    throw new Error("pull direction must not be zero");
+  const pull = pullInput.map((v) => v / length);
+  const minDraft = Number(check2.min_draft_deg ?? 1);
+  if (!(minDraft >= 0 && minDraft < 45))
+    throw new Error("min_draft_deg must be between 0 and 45");
+  const mesh = shape.mesh({ tolerance: 0.05, angularTolerance: 0.1 });
+  const { vertices, triangles: indices } = mesh;
+  if (indices.length / 3 > 60000) {
+    return { status: "indeterminate", message: "Moulding analysis needs a simpler mesh (maximum 60000 triangles)" };
+  }
+  const faceOf = new Int32Array(indices.length / 3).fill(-1);
+  for (const group of mesh.faceGroups || []) {
+    for (let t = group.start / 3;t < (group.start + group.count) / 3; t++)
+      faceOf[t] = group.faceId;
+  }
+  const triangles = [];
+  for (let t = 0;t < indices.length; t += 3) {
+    const p = [0, 1, 2].map((k) => [vertices[indices[t + k] * 3], vertices[indices[t + k] * 3 + 1], vertices[indices[t + k] * 3 + 2]]);
+    const n = cross2(sub2(p[1], p[0]), sub2(p[2], p[0]));
+    const area2 = Math.hypot(...n);
+    if (area2 < 0.000000000001)
+      continue;
+    triangles.push({ p, n: n.map((v) => v / area2), area: area2 / 2, face: faceOf[t / 3], index: t / 3 });
+  }
+  const faces = new Map;
+  for (const tri of triangles) {
+    const draft = Math.asin(Math.min(1, Math.abs(dot2(tri.n, pull)))) * 180 / Math.PI;
+    const key = tri.face >= 0 ? tri.face : `t${tri.index}`;
+    const entry = faces.get(key) || { face: tri.face, min_draft_deg: 90, area_mm2: 0 };
+    entry.min_draft_deg = Math.min(entry.min_draft_deg, draft);
+    entry.area_mm2 += tri.area;
+    faces.set(key, entry);
+  }
+  const lowDraft = [...faces.values()].filter((face) => face.min_draft_deg + 0.000001 < minDraft && face.area_mm2 > 0.001);
+  const undercuts = [];
+  if (check2.undercuts !== false) {
+    const candidates = triangles.filter((tri) => Math.abs(dot2(tri.n, pull)) > Math.sin(Math.max(minDraft, 0.05) * Math.PI / 180) * 0.5);
+    const stride = Math.max(1, Math.ceil(candidates.length / 1024));
+    const trapped = new Map;
+    for (let i = 0;i < candidates.length; i += stride) {
+      const tri = candidates[i];
+      const direction = dot2(tri.n, pull) > 0 ? pull : pull.map((v) => -v);
+      const center = [0, 1, 2].map((k) => (tri.p[0][k] + tri.p[1][k] + tri.p[2][k]) / 3);
+      const origin = center.map((v, k) => v + tri.n[k] * 0.001);
+      for (const other of triangles) {
+        if (other === tri)
+          continue;
+        if (Number.isFinite(rayHit(origin, direction, other))) {
+          const key = tri.face >= 0 ? tri.face : `t${tri.index}`;
+          const entry = trapped.get(key) || { face: tri.face, point: center, side: dot2(tri.n, pull) > 0 ? "pull" : "against_pull", samples: 0 };
+          entry.samples += 1;
+          trapped.set(key, entry);
+          break;
+        }
+      }
+    }
+    undercuts.push(...trapped.values());
+  }
+  const failed = lowDraft.length > 0 || undercuts.length > 0;
+  const parts = [];
+  if (lowDraft.length)
+    parts.push(`${lowDraft.length} face(s) under ${minDraft}\xB0 draft`);
+  if (undercuts.length)
+    parts.push(`${undercuts.length} undercut face(s)`);
+  return {
+    status: failed ? "fail" : "pass",
+    message: failed ? `Not mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}]: ${parts.join(", ")}` : `Mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}] with at least ${minDraft}\xB0 draft and no undercuts`,
+    expected: minDraft,
+    actual: Math.min(...[...faces.values()].map((face) => face.min_draft_deg)),
+    details: {
+      pull,
+      min_draft_deg: minDraft,
+      low_draft_faces: lowDraft.sort((a, b) => a.min_draft_deg - b.min_draft_deg).slice(0, 64),
+      undercut_faces: undercuts.slice(0, 64),
+      method: "mesh_normals_and_ray_casting"
+    }
+  };
 }
 
 // src/inspection.mjs
@@ -17486,29 +19014,29 @@ function analyzePrint(instance, c) {
       message: "Print analysis requires a simplified mesh (maximum 60000 triangles)"
     };
   const triangles = [];
-  const sub2 = (a, b) => a.map((x, k) => x - b[k]), cross2 = (a, b) => [
+  const sub3 = (a, b) => a.map((x, k) => x - b[k]), cross3 = (a, b) => [
     a[1] * b[2] - a[2] * b[1],
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0]
-  ], dot2 = (a, b) => a.reduce((s, x, k) => s + x * b[k], 0);
+  ], dot3 = (a, b) => a.reduce((s, x, k) => s + x * b[k], 0);
   for (let t = 0;t < idx.length; t += 3) {
     const p = [0, 1, 2].map((k) => verts.slice(idx[t + k] * 3, idx[t + k] * 3 + 3));
-    const n = cross2(sub2(p[1], p[0]), sub2(p[2], p[0]));
+    const n = cross3(sub3(p[1], p[0]), sub3(p[2], p[0]));
     const len = Math.hypot(...n);
     if (len > 0.0000000001)
       triangles.push({ p, n: n.map((x) => x / len), index: t / 3 });
   }
   function ray(o, d, tri) {
-    const [a, b, cc] = tri.p, e1 = sub2(b, a), e2 = sub2(cc, a), h = cross2(d, e2), det = dot2(e1, h);
+    const [a, b, cc] = tri.p, e1 = sub3(b, a), e2 = sub3(cc, a), h = cross3(d, e2), det = dot3(e1, h);
     if (Math.abs(det) < 0.000000001)
       return Infinity;
-    const f = 1 / det, s = sub2(o, a), u = f * dot2(s, h);
+    const f = 1 / det, s = sub3(o, a), u = f * dot3(s, h);
     if (u < 0 || u > 1)
       return Infinity;
-    const q = cross2(s, e1), v = f * dot2(d, q);
+    const q = cross3(s, e1), v = f * dot3(d, q);
     if (v < 0 || u + v > 1)
       return Infinity;
-    const t = f * dot2(e2, q);
+    const t = f * dot3(e2, q);
     return t > 0.0001 ? t : Infinity;
   }
   let min = Infinity;
@@ -20036,9 +21564,9 @@ var Module = (() => {
         var db = openRequest.result;
         var transaction = db.transaction([FS.DB_STORE_NAME], "readwrite");
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail5 = 0, total = paths.length;
+        var ok = 0, fail6 = 0, total = paths.length;
         function finish() {
-          if (fail5 == 0)
+          if (fail6 == 0)
             onload();
           else
             onerror();
@@ -20047,12 +21575,12 @@ var Module = (() => {
           var putRequest = files.put(FS.analyzePath(path).object.contents, path);
           putRequest.onsuccess = () => {
             ok++;
-            if (ok + fail5 == total)
+            if (ok + fail6 == total)
               finish();
           };
           putRequest.onerror = () => {
-            fail5++;
-            if (ok + fail5 == total)
+            fail6++;
+            if (ok + fail6 == total)
               finish();
           };
         });
@@ -20078,9 +21606,9 @@ var Module = (() => {
           return;
         }
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail5 = 0, total = paths.length;
+        var ok = 0, fail6 = 0, total = paths.length;
         function finish() {
-          if (fail5 == 0)
+          if (fail6 == 0)
             onload();
           else
             onerror();
@@ -20093,12 +21621,12 @@ var Module = (() => {
             }
             FS.createDataFile(PATH.dirname(path), PATH.basename(path), getRequest.result, true, true, true);
             ok++;
-            if (ok + fail5 == total)
+            if (ok + fail6 == total)
               finish();
           };
           getRequest.onerror = () => {
-            fail5++;
-            if (ok + fail5 == total)
+            fail6++;
+            if (ok + fail6 == total)
               finish();
           };
         });
@@ -22778,8 +24306,8 @@ import { mkdir } from "fs/promises";
 import { dirname, join } from "path";
 var SCHEMA = "apteva-design/v1";
 var importedGeometry = new WeakSet;
-var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.9";
-function fail5(message, details = undefined) {
+var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.10";
+function fail6(message, details = undefined) {
   const err = new Error(message);
   if (details !== undefined)
     err.details = details;
@@ -22788,7 +24316,7 @@ function fail5(message, details = undefined) {
 function finite2(value, label) {
   const number = Number(value);
   if (!Number.isFinite(number))
-    fail5(`${label} must resolve to a finite number`);
+    fail6(`${label} must resolve to a finite number`);
   return number;
 }
 function resolve(value, params, label = "value") {
@@ -22798,12 +24326,12 @@ function resolve(value, params, label = "value") {
     return value ? 1 : 0;
   if (typeof value === "string")
     return new ExpressionParser(value, params).parse();
-  fail5(`${label} must be a number or parameter expression`);
+  fail6(`${label} must be a number or parameter expression`);
 }
 function vector(value, params, label, fallback = [0, 0, 0]) {
   const source = value ?? fallback;
   if (!Array.isArray(source) || source.length !== 3)
-    fail5(`${label} must contain three values`);
+    fail6(`${label} must contain three values`);
   return source.map((part, index) => resolve(part, params, `${label}[${index}]`));
 }
 function parameterValues(definition, supplied) {
@@ -22814,41 +24342,42 @@ function parameterValues(definition, supplied) {
     const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : fitValue ?? spec.default;
     const value = typeof candidate === "boolean" ? candidate ? 1 : 0 : finite2(candidate, `parameter ${name}`);
     if (spec.type === "boolean" && value !== 0 && value !== 1)
-      fail5(`parameter ${name} must be true/false (1/0)`);
+      fail6(`parameter ${name} must be true/false (1/0)`);
     if (spec.type === "integer" && !Number.isInteger(value))
-      fail5(`parameter ${name} must be an integer`);
+      fail6(`parameter ${name} must be an integer`);
     if (Array.isArray(spec.options) && spec.options.length && !spec.options.some((option) => Math.abs(Number(option) - value) <= 0.000000001)) {
-      fail5(`parameter ${name} must be one of ${spec.options.join(", ")}`);
+      fail6(`parameter ${name} must be one of ${spec.options.join(", ")}`);
     }
     if (spec.min !== undefined && value < finite2(spec.min, `${name}.min`)) {
-      fail5(`parameter ${name} is below its minimum`);
+      fail6(`parameter ${name} is below its minimum`);
     }
     if (spec.max !== undefined && value > finite2(spec.max, `${name}.max`)) {
-      fail5(`parameter ${name} is above its maximum`);
+      fail6(`parameter ${name} is above its maximum`);
     }
     output[name] = value;
   }
   for (const name of Object.keys(supplied || {})) {
     if (!Object.hasOwn(output, name))
-      fail5(`unknown parameter ${name}`);
+      fail6(`unknown parameter ${name}`);
   }
   return output;
 }
 var SKIPPED = Symbol("skipped");
+var stlShapes = new Map;
 function shapeFor(id, shapes) {
   const shape = shapes.get(id);
   if (shape === SKIPPED)
-    fail5(`operation references ${id}, which is skipped because its when condition is false`);
+    fail6(`operation references ${id}, which is skipped because its when condition is false`);
   if (!shape)
-    fail5(`operation references unknown shape ${id}`);
+    fail6(`operation references unknown shape ${id}`);
   return shape;
 }
 function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) {
   if (!Array.isArray(points) || points.length < 3)
-    fail5(`${label} needs at least three [x,y] points`);
+    fail6(`${label} needs at least three [x,y] points`);
   const resolved = points.map((point, index) => {
     if (!Array.isArray(point) || point.length !== 2)
-      fail5(`${label}[${index}] must be [x,y]`);
+      fail6(`${label}[${index}] must be [x,y]`);
     return [resolve(point[0], params), resolve(point[1], params)];
   });
   let pen = draw(resolved[0]);
@@ -22863,7 +24392,7 @@ function featureContext(params, shape) {
     vector: (value, label) => vector(value, params, label),
     bounds: () => {
       if (!shape)
-        fail5("side selectors need an input shape");
+        fail6("side selectors need an input shape");
       bounds2 ??= shapeBounds(shape);
       return bounds2;
     }
@@ -22883,7 +24412,7 @@ function buildComponentShape(component, params, label) {
   const child = buildDefinitionGeometry(component.definition, componentParameters(component, params, label));
   const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
   if (!selected)
-    fail5(`${label} source part ${component.source_part_id} has no geometry`);
+    fail6(`${label} source part ${component.source_part_id} has no geometry`);
   const shape = selected.clone();
   if (importedGeometry.has(selected))
     importedGeometry.add(shape);
@@ -22892,18 +24421,31 @@ function buildComponentShape(component, params, label) {
 }
 function buildOperation(operation, shapes, params, assets, importedVisuals, components = {}) {
   if (!operation || typeof operation !== "object")
-    fail5("every operation must be an object");
+    fail6("every operation must be an object");
   if (!operation.id || typeof operation.id !== "string")
-    fail5("every operation requires a string id");
+    fail6("every operation requires a string id");
   if (shapes.has(operation.id))
-    fail5(`duplicate operation id ${operation.id}`);
+    fail6(`duplicate operation id ${operation.id}`);
   let shape;
   switch (operation.type) {
     case "component": {
       const component = components?.[operation.id];
       if (!component)
-        fail5(`component operation ${operation.id} was not resolved by Design Studio`);
+        fail6(`component operation ${operation.id} was not resolved by Design Studio`);
       shape = applyAssemblyTransform(buildComponentShape(component, params, operation.id).selected, operation.transform || {}, params);
+      break;
+    }
+    case "import_stl": {
+      const loaded = stlShapes.get(operation.asset_id);
+      if (!loaded)
+        fail6(`STL asset ${operation.asset_id} was not resolved by Design Studio`);
+      const units = { mm: 1, cm: 10, m: 1000, in: 25.4, inch: 25.4 }[operation.units || "mm"];
+      if (!units)
+        fail6(`${operation.id}.units must be mm, cm, m or in`);
+      let mesh = loaded.clone();
+      if (units !== 1)
+        mesh = mesh.scale(units, [0, 0, 0]);
+      shape = applyAssemblyTransform(mesh, operation.transform || {}, params);
       break;
     }
     case "import_step": {
@@ -22918,7 +24460,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "swept_box": {
       const origin = vector(operation.origin, params, "swept_box.origin"), size = vector(operation.size, params, "swept_box.size"), travel = vector(operation.travel, params, "swept_box.travel");
       if (size.some((x) => x <= 0))
-        fail5("swept_box size must be positive");
+        fail6("swept_box size must be positive");
       const min = origin.map((x, k) => Math.min(x, x + travel[k])), max = origin.map((x, k) => Math.max(x + size[k], x + size[k] + travel[k]));
       shape = makeBox(min, max);
       break;
@@ -22926,7 +24468,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "box": {
       const [width, depth, height] = vector(operation.size, params, `${operation.id}.size`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail5(`${operation.id}.size must be positive`);
+        fail6(`${operation.id}.size must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = makeBox([x, y, z], [x + width, y + depth, z + height]);
       break;
@@ -22935,14 +24477,14 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail5(`${operation.id} radius and height must be positive`);
+        fail6(`${operation.id} radius and height must be positive`);
       shape = makeCylinder(radius, height, vector(operation.origin, params, `${operation.id}.origin`), vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]));
       break;
     }
     case "sphere": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail5(`${operation.id}.radius must be positive`);
+        fail6(`${operation.id}.radius must be positive`);
       shape = makeSphere(radius).translate(vector(operation.center, params, `${operation.id}.center`));
       break;
     }
@@ -22951,7 +24493,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const depth = resolve(operation.depth, params, `${operation.id}.depth`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail5(`${operation.id} dimensions must be positive`);
+        fail6(`${operation.id} dimensions must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawRectangle(width, depth).translate(x + width / 2, y + depth / 2).sketchOnPlane("XY", z).extrude(height);
       break;
@@ -22960,18 +24502,18 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail5(`${operation.id} radius and height must be positive`);
+        fail6(`${operation.id} radius and height must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawCircle(radius).translate(x, y).sketchOnPlane("XY", z).extrude(height);
       break;
     }
     case "extrude_polygon": {
       if (!Array.isArray(operation.points) || operation.points.length < 3) {
-        fail5(`${operation.id}.points needs at least three [x,y] points`);
+        fail6(`${operation.id}.points needs at least three [x,y] points`);
       }
       const points = operation.points.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail5(`${operation.id}.points[${index}] must be [x,y]`);
+          fail6(`${operation.id}.points[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(points[0]);
@@ -22989,10 +24531,10 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     }
     case "sweep_circle": {
       if (!Array.isArray(operation.path) || operation.path.length < 2)
-        fail5(`${operation.id}.path needs at least two [x,y] points`);
+        fail6(`${operation.id}.path needs at least two [x,y] points`);
       const path = operation.path.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail5(`${operation.id}.path[${index}] must be [x,y]`);
+          fail6(`${operation.id}.path[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(path[0]);
@@ -23001,7 +24543,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const spine = pen.done().sketchOnPlane(operation.plane || "XY", vector(operation.origin, params, `${operation.id}.origin`));
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail5(`${operation.id}.radius must be positive`);
+        fail6(`${operation.id}.radius must be positive`);
       shape = spine.sweepSketch((profilePlane, profileOrigin) => drawCircle(radius).sketchOnPlane(profilePlane, profileOrigin));
       break;
     }
@@ -23010,11 +24552,11 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "intersect": {
       const ids = operation.inputs || [operation.base, ...operation.tools || []];
       if (!Array.isArray(ids) || ids.length < 2 || ids.some((id) => typeof id !== "string")) {
-        fail5(`${operation.id}.${operation.type} needs at least two input ids`);
+        fail6(`${operation.id}.${operation.type} needs at least two input ids`);
       }
       const active = operation.type === "cut" ? [ids[0], ...activeIds(ids.slice(1), shapes)] : activeIds(ids, shapes);
       if (active.length === 0)
-        fail5(`${operation.id}: every input is skipped by its when condition`);
+        fail6(`${operation.id}: every input is skipped by its when condition`);
       shape = shapeFor(active[0], shapes).clone();
       for (const id of active.slice(1)) {
         const tool = shapeFor(id, shapes).clone();
@@ -23025,10 +24567,10 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "compound": {
       const ids = operation.inputs;
       if (!Array.isArray(ids) || ids.length === 0)
-        fail5(`${operation.id}.inputs is required`);
+        fail6(`${operation.id}.inputs is required`);
       const active = activeIds(ids, shapes);
       if (active.length === 0)
-        fail5(`${operation.id}: every input is skipped by its when condition`);
+        fail6(`${operation.id}: every input is skipped by its when condition`);
       shape = makeCompound(active.map((id) => shapeFor(id, shapes).clone()));
       break;
     }
@@ -23051,7 +24593,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "linear_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail5(`${operation.id}.count must be between 1 and 128`);
+        fail6(`${operation.id}.count must be between 1 and 128`);
       const step = vector(operation.step, params, `${operation.id}.step`);
       const copies = [];
       for (let index = 0;index < count2; index += 1) {
@@ -23067,7 +24609,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "circular_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail5(`${operation.id}.count must be between 1 and 128`);
+        fail6(`${operation.id}.count must be between 1 and 128`);
       const totalAngle = resolve(operation.angle ?? 360, params, `${operation.id}.angle`);
       const center = vector(operation.center, params, `${operation.id}.center`);
       const direction = vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]);
@@ -23085,7 +24627,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "fillet": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail5(`${operation.id}.radius must be positive`);
+        fail6(`${operation.id}.radius must be positive`);
       const input = shapeFor(operation.input, shapes).clone();
       shape = edgeFeature(input, operation, "fillet", radius, featureContext(params, input));
       break;
@@ -23093,7 +24635,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
     case "chamfer": {
       const distance = resolve(operation.distance, params, `${operation.id}.distance`);
       if (distance <= 0)
-        fail5(`${operation.id}.distance must be positive`);
+        fail6(`${operation.id}.distance must be positive`);
       const input = shapeFor(operation.input, shapes).clone();
       shape = edgeFeature(input, operation, "chamfer", distance, featureContext(params, input));
       break;
@@ -23117,7 +24659,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       break;
     }
     default:
-      fail5(`unsupported operation type ${JSON.stringify(operation.type)}`);
+      fail6(`unsupported operation type ${JSON.stringify(operation.type)}`);
   }
   shapes.set(operation.id, shape);
 }
@@ -23165,14 +24707,14 @@ function rotatePoint(point, angleDegrees, center, axis) {
   const radians = angleDegrees * Math.PI / 180;
   const length = Math.hypot(...axis);
   if (length === 0)
-    fail5("assembly rotation direction must not be zero");
+    fail6("assembly rotation direction must not be zero");
   const [ux, uy, uz] = axis.map((value) => value / length);
   const [x, y, z] = point.map((value, index) => value - center[index]);
-  const cosine = Math.cos(radians), sine = Math.sin(radians), dot2 = ux * x + uy * y + uz * z;
+  const cosine = Math.cos(radians), sine = Math.sin(radians), dot3 = ux * x + uy * y + uz * z;
   return [
-    center[0] + x * cosine + (uy * z - uz * y) * sine + ux * dot2 * (1 - cosine),
-    center[1] + y * cosine + (uz * x - ux * z) * sine + uy * dot2 * (1 - cosine),
-    center[2] + z * cosine + (ux * y - uy * x) * sine + uz * dot2 * (1 - cosine)
+    center[0] + x * cosine + (uy * z - uz * y) * sine + ux * dot3 * (1 - cosine),
+    center[1] + y * cosine + (uz * x - ux * z) * sine + uy * dot3 * (1 - cosine),
+    center[2] + z * cosine + (ux * y - uy * x) * sine + uz * dot3 * (1 - cosine)
   ];
 }
 function transformPhysical(physical, transform, params) {
@@ -23214,32 +24756,32 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
   const frameOf = (id, partID, label) => {
     const item = interfaces.get(id);
     if (!item)
-      fail5(`${label} references unknown interface ${id}`);
+      fail6(`${label} references unknown interface ${id}`);
     if (item.part_id !== partID)
-      fail5(`${label}: interface ${id} belongs to part ${item.part_id}, not ${partID}`);
+      fail6(`${label}: interface ${id} belongs to part ${item.part_id}, not ${partID}`);
     return interfaceFrame(vector(item.position, params, `interface ${id}.position`), item.direction ? vector(item.direction, params, `interface ${id}.direction`) : undefined, item.up ? vector(item.up, params, `interface ${id}.up`) : undefined, `interface ${id}`);
   };
   const usedTargets = new Map;
   let attempts = 0;
   while (pending.length) {
     if (++attempts > definition.assembly.instances.length ** 2 + 1)
-      fail5("Assembly placement cycle: alignment, mate and joint references must form a tree");
+      fail6("Assembly placement cycle: alignment, mate and joint references must form a tree");
     const instance = pending.shift();
     const joint = jointByChild.get(instance.id);
     const dependsOn = [instance.alignment?.target_instance, instance.mate?.to_instance, joint?.parent_instance].filter(Boolean);
     for (const id of dependsOn)
       if (id === instance.id)
-        fail5(`assembly instance ${instance.id} cannot be placed relative to itself`);
+        fail6(`assembly instance ${instance.id} cannot be placed relative to itself`);
     if (dependsOn.some((id) => !placed(id))) {
       pending.push(instance);
       continue;
     }
     const part = parts.get(instance.part_id);
     if (!part)
-      fail5(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
+      fail6(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
     const sourceShape = partShapes.get(part.id);
     if (!sourceShape)
-      fail5(`assembly part ${part.id} has no resolved geometry`);
+      fail6(`assembly part ${part.id} has no resolved geometry`);
     let resolvedTransform = instance.transform || {};
     if (instance.alignment) {
       const a = instance.alignment, target = instances.find((i) => i.id === a.target_instance);
@@ -23256,31 +24798,31 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     if (instance.mate || joint) {
       const label = `assembly instance ${instance.id}`;
       if (resolvedTransform.scale !== undefined && resolve(resolvedTransform.scale, params) !== 1)
-        fail5(`${label}: mated or jointed instances cannot be scaled`);
+        fail6(`${label}: mated or jointed instances cannot be scaled`);
       let pose = poseFromTransform(resolvedTransform, (v, l) => resolve(v, params, l), (v, l, f) => vector(v, params, l, f));
       if (instance.mate) {
         const mate = instance.mate;
         if (instance.alignment)
-          fail5(`${label} has both alignment and mate; use one`);
+          fail6(`${label} has both alignment and mate; use one`);
         if (resolvedTransform.rotate?.length || resolvedTransform.translate)
-          fail5(`${label} has both a transform and a mate; the mate decides placement (use mate.gap and mate.angle)`);
+          fail6(`${label} has both a transform and a mate; the mate decides placement (use mate.gap and mate.angle)`);
         const target = placed(mate.to_instance);
         if (!target.pose)
-          fail5(`${label} mates to scaled instance ${target.id}`);
+          fail6(`${label} mates to scaled instance ${target.id}`);
         const key = `${mate.to_instance}/${mate.to_interface}`;
         if (usedTargets.has(key))
-          fail5(`${label} and ${usedTargets.get(key)} both mate to ${key}`);
+          fail6(`${label} and ${usedTargets.get(key)} both mate to ${key}`);
         usedTargets.set(key, instance.id);
         pose = matePose(target.pose, frameOf(mate.to_interface, target.part.id, `${label}.mate.to_interface`), frameOf(mate.interface, part.id, `${label}.mate.interface`), resolve(mate.gap ?? 0, params, `${label}.mate.gap`), resolve(mate.angle ?? 0, params, `${label}.mate.angle`), mate.flip !== false);
       }
       if (joint && joint.type !== "fixed") {
         const parent = placed(joint.parent_instance);
         if (!parent.pose)
-          fail5(`joint ${joint.id} parent ${parent.id} is scaled`);
+          fail6(`joint ${joint.id} parent ${parent.id} is scaled`);
         const override = options.jointStates && Object.hasOwn(options.jointStates, joint.id) ? options.jointStates[joint.id] : undefined;
         const state = override !== undefined ? override : resolve(joint.state ?? 0, params, `joint ${joint.id}.state`);
         if (Array.isArray(joint.limits) && joint.limits.length === 2 && (state < joint.limits[0] - 0.000000001 || state > joint.limits[1] + 0.000000001)) {
-          fail5(`joint ${joint.id} state ${state} is outside its limits [${joint.limits.join(", ")}]`);
+          fail6(`joint ${joint.id} state ${state} is outside its limits [${joint.limits.join(", ")}]`);
         }
         const origin = applyPose(parent.pose, vector(joint.origin, params, `joint ${joint.id}.origin`));
         const axis = unit(applyR(parent.pose.R, vector(joint.axis, params, `joint ${joint.id}.axis`, [0, 0, 1])), `joint ${joint.id}.axis`);
@@ -23291,7 +24833,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
       resolvedTransform = transformFromPose(pose);
     }
     if (part.manufacturing?.classification === "purchased" && resolvedTransform.scale !== undefined && resolve(resolvedTransform.scale, params) !== 1)
-      fail5("Purchased components require rigid placement; normalize import units separately");
+      fail6("Purchased components require rigid placement; normalize import units separately");
     const shape = applyAssemblyTransform(sourceShape, resolvedTransform, params);
     const material = materials.get(part.material_id);
     const visuals = (partVisuals.get(part.id) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || material?.color), shape: sourceShape }]).map((visual) => ({
@@ -23317,7 +24859,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     });
   }
   if (!instances.length)
-    fail5("assembly has no visible instances");
+    fail6("assembly has no visible instances");
   const assemblyShape = makeCompound(instances.map((item) => item.shape.clone()));
   if (instances.every((i) => importedGeometry.has(i.shape)))
     importedGeometry.add(assemblyShape);
@@ -23330,20 +24872,20 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
 }
 function validateDefinition(definition) {
   if (!definition || typeof definition !== "object")
-    fail5("definition must be an object");
+    fail6("definition must be an object");
   if (definition.schema !== SCHEMA)
-    fail5(`schema must be ${SCHEMA}`);
+    fail6(`schema must be ${SCHEMA}`);
   if ((definition.units || "mm") !== "mm")
-    fail5("v0.1 supports millimetres only");
+    fail6("v0.1 supports millimetres only");
   if (!Array.isArray(definition.operations))
-    fail5("definition.operations must be an array");
+    fail6("definition.operations must be an array");
   if (definition.operations.length === 0 && !definition.assembly?.instances?.length) {
-    fail5("definition requires operations or an assembly with instances");
+    fail6("definition requires operations or an assembly with instances");
   }
   if ((!definition.output || typeof definition.output !== "string") && !definition.assembly)
-    fail5("definition.output is required outside an assembly");
+    fail6("definition.output is required outside an assembly");
   if (definition.operations.length > 256)
-    fail5("definition exceeds the 256-operation limit");
+    fail6("definition exceeds the 256-operation limit");
 }
 function buildDefinitionGeometry(definition, supplied) {
   validateDefinition(definition);
@@ -23352,7 +24894,7 @@ function buildDefinitionGeometry(definition, supplied) {
   for (const operation of definition.operations) {
     if (operation && operation.when !== undefined && operation.when !== null) {
       if (shapes.has(operation.id))
-        fail5(`duplicate operation id ${operation.id}`);
+        fail6(`duplicate operation id ${operation.id}`);
       if (resolve(operation.when, params, `${operation.id}.when`) === 0) {
         shapes.set(operation.id, SKIPPED);
         continue;
@@ -23369,7 +24911,7 @@ function buildDefinitionGeometry(definition, supplied) {
     if (part.source) {
       const component = resolved.get(part.id);
       if (!component)
-        fail5(`linked part ${part.id} was not resolved by Design Studio`);
+        fail6(`linked part ${part.id} was not resolved by Design Studio`);
       const { child, selected: selectedShape } = buildComponentShape(component, params, `part ${part.id}`);
       const sourcePart = component.source_part_id ? (component.definition.parts || []).find((p) => p.id === component.source_part_id) : null;
       if (sourcePart && !part.manufacturing)
@@ -23402,6 +24944,48 @@ function buildDefinitionGeometry(definition, supplied) {
     physical = matching ? partPhysical.get(matching.id) : { mass: 0, center: exactCenterOfMass(assembly.shape) };
   }
   return { params, shapes, partShapes, partPhysical, partVisuals, assembly, physical, importedVisuals, definition };
+}
+function mouldingChecks(definition, built) {
+  const results = [];
+  for (const [index, c] of (definition.checks || []).entries()) {
+    if (c.type !== "moulding")
+      continue;
+    const result = { id: c.id || `check_${index}`, type: "moulding", status: "indeterminate", message: "Moulding check could not be completed", instances: [], details: {} };
+    results.push(result);
+    try {
+      let shape = built.assembly.shape;
+      if (c.part !== undefined) {
+        const instance = built.assembly.instances.find((item) => item.id === c.part) || built.assembly.instances.find((item) => item.part.id === c.part);
+        shape = instance ? instance.shape : built.partShapes.get(c.part);
+        if (!shape)
+          throw new Error(`unknown part or instance ${c.part}`);
+        result.instances = [c.part];
+      }
+      Object.assign(result, analyzeMoulding(shape, c));
+    } catch (error) {
+      result.message = String(error?.message || error);
+    }
+  }
+  return results;
+}
+function drawingViews(shape) {
+  const views = [];
+  for (const [name, plane] of [["front", "front"], ["top", "top"], ["right", "right"]]) {
+    const projection = drawProjection(shape, plane);
+    const lines = (drawing) => {
+      if (!drawing)
+        return [];
+      let paths;
+      try {
+        paths = drawing.toSVGPaths();
+      } catch {
+        return [];
+      }
+      return paths.flat(Infinity).flatMap((d) => flattenPath(d, 12).map((item) => item.points));
+    };
+    views.push({ name, visible: lines(projection.visible), hidden: lines(projection.hidden) });
+  }
+  return views;
 }
 function jointSweeps(definition, built) {
   const results = [];
@@ -23541,7 +25125,7 @@ function printOrientation(shape, part, params) {
   if (!angles)
     return shape;
   if (angles.length !== 3)
-    fail5("manufacturing.orientation must be Euler X/Y/Z degrees");
+    fail6("manufacturing.orientation must be Euler X/Y/Z degrees");
   let out = shape.clone();
   for (let axis = 0;axis < 3; axis++) {
     const direction = [0, 0, 0];
@@ -23553,7 +25137,7 @@ function printOrientation(shape, part, params) {
 }
 async function run(request) {
   if (request.expected_engine_version && request.expected_engine_version !== ENGINE_VERSION)
-    fail5(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
+    fail6(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
   const built = buildDefinitionGeometry(request.definition, request.parameters || {});
   const { params, partShapes, assembly } = built;
   const shape = assembly.shape;
@@ -23565,14 +25149,14 @@ async function run(request) {
       try {
         visualMesh = item.shape.mesh({ tolerance, angularTolerance });
       } catch (e) {
-        fail5(`Preview failed for ${item.name}: ${String(e)}`);
+        fail6(`Preview failed for ${item.name}: ${String(e)}`);
       }
       const faces = item.shape.faces, faceIndices = new Map(faces.map((f, index) => [f.hashCode, index]));
       visualMesh.faceGroups = visualMesh.faceGroups.map((g) => ({ ...g, faceId: faceIndices.get(g.faceId) }));
       for (const f of faces)
         f.delete();
     }
-    return { id: item.id, part_id: item.part_id, name: item.name, color: item.color, visible: !assembly.instances.some((i) => i.visible === false && (item.id === i.id || item.id.startsWith(i.id + "/"))), instance_id: assembly.instances.find((i) => item.id === i.id || item.id.startsWith(i.id + "/"))?.id || (!request.definition.assembly ? request.definition.parts?.find((p) => p.output === request.definition.output)?.id || "output" : undefined), ...visualMesh };
+    return { id: item.id, part_id: item.part_id, name: item.name, color: item.color, material_id: assembly.parts?.get?.(item.part_id)?.material_id || undefined, visible: !assembly.instances.some((i) => i.visible === false && (item.id === i.id || item.id.startsWith(i.id + "/"))), instance_id: assembly.instances.find((i) => item.id === i.id || item.id.startsWith(i.id + "/"))?.id || (!request.definition.assembly ? request.definition.parts?.find((p) => p.output === request.definition.output)?.id || "output" : undefined), ...visualMesh };
   });
   const mesh = { vertices: [], triangles: [], normals: [] };
   for (const part of partMeshes) {
@@ -23588,17 +25172,17 @@ async function run(request) {
   try {
     report = geometryReport(shape, mesh, assembly.instances);
   } catch (e) {
-    fail5(`Geometry measurements failed: ${String(e)}`);
+    fail6(`Geometry measurements failed: ${String(e)}`);
   }
   const inspection = inspect(request.definition, built, applyAssemblyTransform, exactAssemblyTransform);
   report.topology = inspection.topology;
-  report.exact_checks = [...inspection.exact_checks, ...jointSweeps(request.definition, built)];
+  report.exact_checks = [...inspection.exact_checks, ...jointSweeps(request.definition, built), ...mouldingChecks(request.definition, built)];
   report.body_count = inspection.topology.reduce((s, t) => s + t.solid_count, 0);
   if (!report.valid)
-    fail5("output geometry is empty or invalid", report);
+    fail6("output geometry is empty or invalid", report);
   const outputDir = request.output_dir;
   if (!outputDir || typeof outputDir !== "string")
-    fail5("output_dir is required");
+    fail6("output_dir is required");
   await mkdir(outputDir, { recursive: true });
   const artifacts = [];
   const formats = new Set(request.formats || ["mesh-json"]);
@@ -23613,11 +25197,18 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail5(`part ${part.id} has no export geometry`);
+        fail6(`part ${part.id} has no export geometry`);
       const partMesh = partShape.mesh({ tolerance, angularTolerance });
       await Bun.write(partPath, JSON.stringify({ ...partMesh }));
       artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
     }
+  }
+  if (formats.has("drawing-json")) {
+    const path = join(outputDir, "drawing.json");
+    const target = assembly.instances.length ? makeCompound(assembly.instances.filter((item) => item.visible).map((item) => item.shape.clone())) : shape;
+    const views = drawingViews(target);
+    await Bun.write(path, JSON.stringify({ name: request.name || "Design", units: "mm", bounds: shapeBounds(target), views }));
+    artifacts.push({ format: "drawing-json", path, content_type: "application/json" });
   }
   if (formats.has("step")) {
     const path = join(outputDir, "model.step");
@@ -23631,7 +25222,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail5(`part ${part.id} has no export geometry`);
+        fail6(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, exportSTEP([{ shape: partShape, name: part.name }], { unit: "MM", modelUnit: "MM" }));
       artifacts.push({ format: "step", path: partPath, content_type: "model/step", part_id: part.id, part_name: part.name });
     }
@@ -23651,18 +25242,46 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail5(`part ${part.id} has no export geometry`);
+        fail6(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, partShape.blobSTL({ tolerance, angularTolerance, binary: true }));
       artifacts.push({ format: "stl", path: partPath, content_type: "model/stl", part_id: part.id, part_name: part.name });
     }
   }
   return { parameters: params, report, artifacts };
 }
+async function preload(definition) {
+  const text = JSON.stringify(definition || {});
+  if (text.includes('"text"')) {
+    const files = { sans: "font-sans.ttf", "sans-bold": "font-sans-bold.ttf", mono: "font-mono.ttf" };
+    for (const [key, file] of Object.entries(files)) {
+      if (!text.includes(key === "sans" ? '"text"' : `"${key}"`))
+        continue;
+      const body = await Bun.file(join(import.meta.dir, file)).arrayBuffer();
+      await loadFont(body, FONTS[key]);
+      loadedFonts.add(key);
+    }
+  }
+  const visit = async (def) => {
+    for (const [id, asset] of Object.entries(def?._stl_assets || {})) {
+      if (stlShapes.has(id))
+        continue;
+      const body = await Bun.file(asset.file).arrayBuffer();
+      const shape = await importSTL(new Blob([body]));
+      stlShapes.set(id, shape);
+    }
+    for (const component of def?._resolved_components || [])
+      await visit(component.definition);
+    for (const component of Object.values(def?._resolved_operation_components || {}))
+      await visit(component.definition);
+  };
+  await visit(definition);
+}
 async function main() {
   const wasmPath = join(import.meta.dir, "replicad_single.wasm");
   const oc = await replicad_single_default({ locateFile: () => wasmPath });
   setOC(oc);
   const request = await Bun.stdin.json();
+  await preload(request.definition);
   return run(request);
 }
 try {

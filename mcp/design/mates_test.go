@@ -72,11 +72,11 @@ func TestMatePlacement(t *testing.T) {
 	boundsNear(t, "key turned 90° more", instanceBounds(t, turned.Report, "k"), [3]float64{17, 18, 10}, [3]float64{23, 22, 13})
 
 	for instances, want := range map[string]string{
-		`{"id":"b","part_id":"base"},{"id":"k","part_id":"key","mate":{"interface":"nope","to_instance":"b","to_interface":"base_top"}}`:                                                                                     "not an interface of part",
-		`{"id":"b","part_id":"base"},{"id":"k","part_id":"key","mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}}`:                                                                                "not an interface of part",
+		`{"id":"b","part_id":"base"},{"id":"k","part_id":"key","mate":{"interface":"nope","to_instance":"b","to_interface":"base_top"}}`:                                                                                                               "not an interface of part",
+		`{"id":"b","part_id":"base"},{"id":"k","part_id":"key","mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}}`:                                                                                                          "not an interface of part",
 		`{"id":"b","part_id":"base"},{"id":"l","part_id":"lid","mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}},{"id":"l2","part_id":"lid","mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}}`: "both mate to",
-		`{"id":"l","part_id":"lid","mate":{"interface":"lid_top","to_instance":"k","to_interface":"key_bottom"}},{"id":"k","part_id":"key","mate":{"interface":"key_bottom","to_instance":"l","to_interface":"lid_top"}}`:    "cycle",
-		`{"id":"b","part_id":"base"},{"id":"l","part_id":"lid","transform":{"translate":[1,0,0]},"mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}}`:                                         "both a transform and a mate",
+		`{"id":"l","part_id":"lid","mate":{"interface":"lid_top","to_instance":"k","to_interface":"key_bottom"}},{"id":"k","part_id":"key","mate":{"interface":"key_bottom","to_instance":"l","to_interface":"lid_top"}}`:                              "cycle",
+		`{"id":"b","part_id":"base"},{"id":"l","part_id":"lid","transform":{"translate":[1,0,0]},"mate":{"interface":"lid_under","to_instance":"b","to_interface":"base_top"}}`:                                                                        "both a transform and a mate",
 	} {
 		if _, _, err := normalizeDefinition([]byte(mateDefinition(instances, "", "")), 256); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("want %q, got %v", want, err)

@@ -281,6 +281,13 @@ func (s *Service) materializeAssets(canonical []byte) ([]byte, error) {
 	if len(assets) > 0 {
 		obj["_assets"], _ = json.Marshal(assets)
 	}
+	stl, err := s.stlAssetFiles(d.Operations)
+	if err != nil {
+		return nil, err
+	}
+	if len(stl) > 0 {
+		obj["_stl_assets"], _ = json.Marshal(stl)
+	}
 	return json.Marshal(obj)
 }
 func (a *App) toolSTEPImport(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

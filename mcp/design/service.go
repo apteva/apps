@@ -61,6 +61,9 @@ func (s *Service) Build(ctx context.Context, designID, revisionID int64, request
 		if format == "step" || format == "stl" {
 			runnerFormats = append(runnerFormats, format)
 		}
+		if format == "dxf" || format == "pdf" {
+			runnerFormats = append(runnerFormats, "drawing-json")
+		}
 	}
 	runnerFormats = uniqueStrings(runnerFormats)
 	runID, err := s.store.StartBuild(design.ID, revision.ID)
@@ -122,7 +125,7 @@ func (s *Service) Build(ctx context.Context, designID, revisionID int64, request
 }
 
 func normalizeFormats(input []string) ([]string, error) {
-	allowed := map[string]bool{"mesh-json": true, "step": true, "stl": true, "3mf": true, "glb": true}
+	allowed := map[string]bool{"mesh-json": true, "step": true, "stl": true, "3mf": true, "glb": true, "dxf": true, "pdf": true}
 	if len(input) == 0 {
 		return []string{"mesh-json"}, nil
 	}
@@ -199,7 +202,8 @@ func (s *Service) persistEngineArtifacts(design *Design, revision *Revision, run
 			return nil, err
 		}
 		if hasPrint && definition.Assembly == nil {
-			body, err := meshTo3MF(printMesh)
+			name, color, material := partAppearance(definition, definition.Output)
+			body, err := meshTo3MF(printMesh, name, color, material)
 			if err != nil {
 				return nil, err
 			}
@@ -214,11 +218,40 @@ func (s *Service) persistEngineArtifacts(design *Design, revision *Revision, run
 			if err != nil {
 				return nil, err
 			}
-			body, err := meshTo3MF(partBody)
+			_, color, material := partAppearance(definition, part.Output)
+			body, err := meshTo3MF(partBody, part.Name, color, material)
 			if err != nil {
 				return nil, fmt.Errorf("create 3MF for part %s: %w", part.ID, err)
 			}
 			generated = append(generated, generatedArtifact{Format: "3mf", ContentType: "model/3mf", Body: body, PartID: part.ID, PartName: part.Name})
+		}
+	}
+	if wanted["dxf"] || wanted["pdf"] {
+		var drawing []byte
+		for _, artifact := range result.Artifacts {
+			if artifact.Format == "drawing-json" {
+				if drawing, err = os.ReadFile(artifact.Path); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if drawing == nil {
+			return nil, errors.New("geometry runner produced no drawing views")
+		}
+		title := fmt.Sprintf("%s rev %d", design.Name, revision.RevisionNumber)
+		if wanted["dxf"] {
+			body, err := drawingToDXF(drawing, title)
+			if err != nil {
+				return nil, fmt.Errorf("create DXF drawing: %w", err)
+			}
+			generated = append(generated, generatedArtifact{Format: "dxf", ContentType: "image/vnd.dxf", Body: body})
+		}
+		if wanted["pdf"] {
+			body, err := drawingToPDF(drawing, title)
+			if err != nil {
+				return nil, fmt.Errorf("create PDF drawing: %w", err)
+			}
+			generated = append(generated, generatedArtifact{Format: "pdf", ContentType: "application/pdf", Body: body})
 		}
 	}
 	if wanted["glb"] {
@@ -615,4 +648,25 @@ func manufacturingBOMCSV(definition *DesignDefinition) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+// partAppearance returns the display name, colour and material name for the
+// part producing `output` (part colour first, then its material's colour).
+func partAppearance(definition *DesignDefinition, output string) (string, string, string) {
+	for _, part := range definition.Parts {
+		if part.Output != output || output == "" {
+			continue
+		}
+		color, material := part.Color, ""
+		for _, item := range definition.Materials {
+			if item.ID == part.MaterialID {
+				material = item.Name
+				if color == "" {
+					color = item.Color
+				}
+			}
+		}
+		return part.Name, color, material
+	}
+	return "", "", ""
 }

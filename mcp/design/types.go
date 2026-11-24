@@ -9,7 +9,7 @@ import (
 const (
 	designSchema  = "apteva-design/v1"
 	engineName    = "replicad-opencascade"
-	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.9"
+	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.10"
 )
 
 type ParameterSpec struct {

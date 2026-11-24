@@ -1,7 +1,9 @@
 import {geometryFor,rememberGeometry,inheritCache,meshFor} from "./geometry-cache.mjs";
 import { ExpressionParser } from "./expressions.mjs";
 import { IDENTITY, applyPose, applyR, compose, interfaceFrame, matePose, poseFromTransform, rotationAbout, transformFromPose, unit } from "./kinematics.mjs";
-import { edgeFeature, shellFeature, extrudeProfile, loftFeature, holeFeature } from "./features.mjs";
+import { edgeFeature, shellFeature, extrudeProfile, loftFeature, holeFeature, FONTS, loadedFonts } from "./features.mjs";
+import { flattenPath } from "./svgpath.mjs";
+import { analyzeMoulding } from "./moulding.mjs";
 import { exactPair, boxDistance, loadAsset, inspect, topology, count } from "./inspection.mjs";
 import initOpenCascade from "replicad-opencascadejs/src/replicad_single.js";
 import {
@@ -20,14 +22,13 @@ import {
   measureArea,
   measureShapeVolumeProperties,
   measureVolume,
-  setOC,
-} from "replicad";
+  setOC, loadFont, importSTL, drawProjection } from "replicad";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
 const importedGeometry=new WeakSet();
-const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.9";
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.10";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -81,6 +82,7 @@ function parameterValues(definition, supplied) {
 }
 
 const SKIPPED = Symbol("skipped");
+const stlShapes = new Map();
 
 function shapeFor(id, shapes) {
   const shape = shapes.get(id);
@@ -146,6 +148,16 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       const component = components?.[operation.id];
       if (!component) fail(`component operation ${operation.id} was not resolved by Design Studio`);
       shape = applyAssemblyTransform(buildComponentShape(component, params, operation.id).selected, operation.transform || {}, params);
+      break;
+    }
+    case "import_stl": {
+      const loaded = stlShapes.get(operation.asset_id);
+      if (!loaded) fail(`STL asset ${operation.asset_id} was not resolved by Design Studio`);
+      const units = { mm: 1, cm: 10, m: 1000, in: 25.4, inch: 25.4 }[operation.units || "mm"];
+      if (!units) fail(`${operation.id}.units must be mm, cm, m or in`);
+      let mesh = loaded.clone();
+      if (units !== 1) mesh = mesh.scale(units, [0, 0, 0]);
+      shape = applyAssemblyTransform(mesh, operation.transform || {}, params);
       break;
     }
     case "import_step": {
@@ -597,6 +609,45 @@ function buildDefinitionGeometry(definition, supplied) {
   return { params, shapes, partShapes, partPhysical, partVisuals, assembly, physical, importedVisuals, definition };
 }
 
+function mouldingChecks(definition, built) {
+  const results = [];
+  for (const [index, c] of (definition.checks || []).entries()) {
+    if (c.type !== "moulding") continue;
+    const result = { id: c.id || `check_${index}`, type: "moulding", status: "indeterminate", message: "Moulding check could not be completed", instances: [], details: {} };
+    results.push(result);
+    try {
+      let shape = built.assembly.shape;
+      if (c.part !== undefined) {
+        const instance = built.assembly.instances.find((item) => item.id === c.part) || built.assembly.instances.find((item) => item.part.id === c.part);
+        shape = instance ? instance.shape : built.partShapes.get(c.part);
+        if (!shape) throw new Error(`unknown part or instance ${c.part}`);
+        result.instances = [c.part];
+      }
+      Object.assign(result, analyzeMoulding(shape, c));
+    } catch (error) {
+      result.message = String(error?.message || error);
+    }
+  }
+  return results;
+}
+
+// Orthographic drawing views as flattened polylines (mm, y up). Design
+// Studio turns these into DXF and PDF sheets.
+function drawingViews(shape) {
+  const views = [];
+  for (const [name, plane] of [["front", "front"], ["top", "top"], ["right", "right"]]) {
+    const projection = drawProjection(shape, plane);
+    const lines = (drawing) => {
+      if (!drawing) return [];
+      let paths;
+      try { paths = drawing.toSVGPaths(); } catch { return []; }
+      return paths.flat(Infinity).flatMap((d) => flattenPath(d, 12).map((item) => item.points));
+    };
+    views.push({ name, visible: lines(projection.visible), hidden: lines(projection.hidden) });
+  }
+  return views;
+}
+
 // joint_sweep: move one joint through its range and check every instance it
 // moves against every instance it does not, at each sampled state.
 function jointSweeps(definition, built) {
@@ -737,14 +788,14 @@ async function run(request) {
       const faces=item.shape.faces,faceIndices=new Map(faces.map((f,index)=>[f.hashCode,index]));
       visualMesh.faceGroups=visualMesh.faceGroups.map(g=>({...g,faceId:faceIndices.get(g.faceId)}));for(const f of faces)f.delete();
     }
-    return {id:item.id,part_id:item.part_id,name:item.name,color:item.color,visible:!assembly.instances.some(i=>i.visible===false&&(item.id===i.id||item.id.startsWith(i.id+'/'))),instance_id:assembly.instances.find(i=>item.id===i.id||item.id.startsWith(i.id+'/'))?.id||(!request.definition.assembly?(request.definition.parts?.find(p=>p.output===request.definition.output)?.id||'output'):undefined),...visualMesh};
+    return {id:item.id,part_id:item.part_id,name:item.name,color:item.color,material_id:assembly.parts?.get?.(item.part_id)?.material_id||undefined,visible:!assembly.instances.some(i=>i.visible===false&&(item.id===i.id||item.id.startsWith(i.id+'/'))),instance_id:assembly.instances.find(i=>item.id===i.id||item.id.startsWith(i.id+'/'))?.id||(!request.definition.assembly?(request.definition.parts?.find(p=>p.output===request.definition.output)?.id||'output'):undefined),...visualMesh};
   });
   const mesh={vertices:[],triangles:[],normals:[]};
   for(const part of partMeshes){const offset=mesh.vertices.length/3;for(const v of part.vertices)mesh.vertices.push(v);for(const n of part.normals||[])mesh.normals.push(n);for(const i of part.triangles)mesh.triangles.push(i+offset);}
 
   let report;try{report=geometryReport(shape, mesh, assembly.instances);}catch(e){fail(`Geometry measurements failed: ${String(e)}`);}
   const inspection=inspect(request.definition,built,applyAssemblyTransform,exactAssemblyTransform);
-  report.topology=inspection.topology; report.exact_checks=[...inspection.exact_checks, ...jointSweeps(request.definition, built)];
+  report.topology=inspection.topology; report.exact_checks=[...inspection.exact_checks, ...jointSweeps(request.definition, built), ...mouldingChecks(request.definition, built)];
   report.body_count=inspection.topology.reduce((s,t)=>s+t.solid_count,0);
 
   if (!report.valid) fail("output geometry is empty or invalid", report);
@@ -769,6 +820,13 @@ async function run(request) {
       await Bun.write(partPath, JSON.stringify({ ...partMesh }));
       artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
     }
+  }
+  if (formats.has("drawing-json")) {
+    const path = join(outputDir, "drawing.json");
+    const target = assembly.instances.length ? makeCompound(assembly.instances.filter((item) => item.visible).map((item) => item.shape.clone())) : shape;
+    const views = drawingViews(target);
+    await Bun.write(path, JSON.stringify({ name: request.name || "Design", units: "mm", bounds: shapeBounds(target), views }));
+    artifacts.push({ format: "drawing-json", path, content_type: "application/json" });
   }
   if (formats.has("step")) {
     const path = join(outputDir, "model.step");
@@ -805,11 +863,38 @@ async function run(request) {
   return { parameters: params, report, artifacts };
 }
 
+// Async resources (fonts, STL meshes) are loaded before the synchronous
+// build, for the definition and every resolved component inside it.
+async function preload(definition) {
+  const text = JSON.stringify(definition || {});
+  if (text.includes('"text"')) {
+    const files = { sans: "font-sans.ttf", "sans-bold": "font-sans-bold.ttf", mono: "font-mono.ttf" };
+    for (const [key, file] of Object.entries(files)) {
+      if (!text.includes(key === "sans" ? '"text"' : `"${key}"`)) continue;
+      const body = await Bun.file(join(import.meta.dir, file)).arrayBuffer();
+      await loadFont(body, FONTS[key]);
+      loadedFonts.add(key);
+    }
+  }
+  const visit = async (def) => {
+    for (const [id, asset] of Object.entries(def?._stl_assets || {})) {
+      if (stlShapes.has(id)) continue;
+      const body = await Bun.file(asset.file).arrayBuffer();
+      const shape = await importSTL(new Blob([body]));
+      stlShapes.set(id, shape);
+    }
+    for (const component of def?._resolved_components || []) await visit(component.definition);
+    for (const component of Object.values(def?._resolved_operation_components || {})) await visit(component.definition);
+  };
+  await visit(definition);
+}
+
 async function main() {
   const wasmPath = join(import.meta.dir, "replicad_single.wasm");
   const oc = await initOpenCascade({ locateFile: () => wasmPath });
   setOC(oc);
   const request = await Bun.stdin.json();
+  await preload(request.definition);
   return run(request);
 }
 

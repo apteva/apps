@@ -27,7 +27,7 @@ func designExamples() map[string]any {
 			"box", "cylinder", "sphere", "extrude_rectangle", "extrude_circle", "extrude_polygon",
 			"revolve_profile", "sweep_circle", "fuse", "cut", "intersect", "compound", "translate", "rotate", "scale", "mirror",
 			"linear_pattern", "circular_pattern", "fillet", "chamfer", "component",
-			"shell", "hole", "extrude_profile", "loft",
+			"shell", "hole", "extrude_profile", "loft", "import_stl",
 		},
 		"edge_and_face_selectors": map[string]any{
 			"keys":      []string{"side: top|bottom|+x|-x|+y|-y", "direction: X|Y|Z|[x,y,z] (edges)", "curve: line|circle (edges)", "surface: plane|cylinder|cone (faces)", "parallel_to: XY|XZ|YZ", "in_plane: {plane, offset}", "in_box: [[x,y,z],[x,y,z]]", "near: {point, distance}", "contains_point", "length (edges)", "not: selector", "any: [selectors]"},
@@ -48,7 +48,15 @@ func designExamples() map[string]any {
 			"shape":   map[string]any{"id": "mount", "type": "hole", "input": "plate", "positions": []any{[]any{5, 5, 3}, []any{25, 5, 3}}, "direction": []any{0, 0, -1}, "thread": map[string]any{"size": "M3", "mode": "clearance"}, "counterbore": map[string]any{"diameter": 6, "depth": 3}},
 			"options": "diameter or thread {size M2-M8, mode clearance|tap|insert}; depth (omit = through); counterbore {diameter, depth} or countersink {diameter, angle=90}. position is on the surface; direction points into the material.",
 		},
-		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "manufacturing-package.zip"},
+		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "dxf", "pdf", "manufacturing-package.zip"},
+		"text_and_svg": map[string]any{
+			"text":    map[string]any{"id": "label", "type": "extrude_profile", "origin": []any{30, 20, 9.4}, "profile": map[string]any{"kind": "text", "text": "POCKET", "size": 6, "font": "sans-bold", "align": "center", "valign": "middle"}, "height": 1},
+			"fonts":   []string{"sans", "sans-bold", "mono"},
+			"svg":     map[string]any{"id": "logo", "type": "extrude_profile", "profile": map[string]any{"kind": "svg_path", "d": "M0 0H20V20H0Z M5 5H15V15H5Z", "scale": 0.5, "center_on_origin": true}, "height": 1},
+			"engrave": "cut the extruded text or logo from a body; emboss by fusing it",
+		},
+		"reference_meshes": map[string]any{"tool": "design_stl_import", "operation": map[string]any{"id": "scan", "type": "import_stl", "asset_id": "<from the tool>", "units": "mm"}, "notes": "Reference only: placed, measured and clearance-checked, never printed."},
+		"moulding_check":   map[string]any{"id": "mouldable", "type": "moulding", "part": "body", "pull": []any{0, 0, 1}, "min_draft_deg": 1},
 		"mates": map[string]any{
 			"interface": map[string]any{"id": "dovetail_out", "kind": "dovetail", "part_id": "base", "position": []any{20, 20, 10}, "direction": []any{0, 0, 1}, "up": []any{1, 0, 0}},
 			"instance":  map[string]any{"id": "cap", "part_id": "cap", "mate": map[string]any{"interface": "dovetail_in", "to_instance": "base_1", "to_interface": "dovetail_out", "gap": 0.2, "angle": 0}},
