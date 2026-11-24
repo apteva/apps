@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.29.0
+version: 0.30.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -148,6 +148,8 @@ provides:
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_send_dtmf,    description: "Press keypad keys (DTMF) on a connected call. Args: call_id, digits, idempotency_key?." }
+    - { name: telephony_transfer_call, description: "Transfer the current AI call to an adviser destination or ring group: browsers ring while the caller hears hold music. Waits for the outcome; on no answer the call returns to the AI or is ended. Args: call_id, target_id, note?, timeout_seconds?, if_no_answer? (return|hangup)." }
+    - { name: telephony_transfer_targets, description: "List the adviser destinations and ring groups the calling AI may transfer to." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
@@ -263,6 +265,7 @@ provides:
         termination: object
         answered_by: string
         synthesized: boolean
+        transfer: object
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -272,6 +275,12 @@ provides:
     - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
     - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
     - { name: call.machine_detected, description: "Answering machine detection finished; answered_by reports human, machine, fax, silence, or unknown.", payload: *call_event_payload }
+    - { name: call.transfer_started, description: "A transfer of a connected call started ringing advisers; transfer reports its source, target and deadline.", payload: *call_event_payload }
+    - { name: call.transfer_answered, description: "An adviser answered a transfer and now has the call.", payload: *call_event_payload }
+    - { name: call.transfer_no_answer, description: "Nobody answered a transfer; the call returned to whoever transferred it, or was ended when the AI asked for that.", payload: *call_event_payload }
+    - { name: call.transfer_canceled, description: "The adviser or an operator canceled a ringing transfer; the call returned to them.", payload: *call_event_payload }
+    - { name: call.transfer_failed, description: "A transfer ended without an answer for another reason, such as a Telephony restart; the call returned to whoever transferred it.", payload: *call_event_payload }
+    - { name: call.transfer_abandoned, description: "The call ended while a transfer rang.", payload: *call_event_payload }
     - name: recording.ready
       description: A provider recording is ready.
       payload: &recording_event_payload
@@ -429,7 +438,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.29.0
+    ref: telephony/v0.30.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -486,6 +495,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: ai_transfer_targets, type: text, label: "AI transfer targets", description: "Comma-separated browser destination and ring group IDs an AI may transfer calls to with telephony_transfer_call. Empty allows every enabled browser destination and ring group in the project." }
   - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }

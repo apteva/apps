@@ -335,31 +335,41 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 			return
 		}
 		dest := args.DestinationID
-		if p != nil {
-			dest = a.phoneOfferDestination(p, row, dest)
-			if dest == "" {
+		var offers []ringOffer
+		if t := a.transfers.get(row.ID); t != nil && !isTerminalStatus(row.Status) {
+			// A ringing transfer is picked up like an inbound call.
+			if dest = a.transferDestinationFor(p, t, dest); dest == "" {
 				writePhoneOfferExpired(w)
 				return
 			}
-		}
-		if row.Status != "pending" || row.Direction != "inbound" {
-			http.Error(w, "call no longer offered", 409)
-			return
-		}
-		offers, err := a.db().activeRingOffers(row.ID, project)
-		if err != nil {
-			http.Error(w, "offers unavailable", 503)
-			return
-		}
-		if row.PeerKind != peerKindHuman && !ringHasBrowser(offers) {
-			http.Error(w, "browser offer required", 409)
-			return
-		}
-		if dest == "" {
-			for _, o := range offers {
-				if o.Kind == "browser" {
-					dest = o.DestinationID
-					break
+			offers = t.offers()
+		} else {
+			if p != nil {
+				dest = a.phoneOfferDestination(p, row, dest)
+				if dest == "" {
+					writePhoneOfferExpired(w)
+					return
+				}
+			}
+			if row.Status != "pending" || row.Direction != "inbound" {
+				http.Error(w, "call no longer offered", 409)
+				return
+			}
+			offers, err = a.db().activeRingOffers(row.ID, project)
+			if err != nil {
+				http.Error(w, "offers unavailable", 503)
+				return
+			}
+			if row.PeerKind != peerKindHuman && !ringHasBrowser(offers) {
+				http.Error(w, "browser offer required", 409)
+				return
+			}
+			if dest == "" {
+				for _, o := range offers {
+					if o.Kind == "browser" {
+						dest = o.DestinationID
+						break
+					}
 				}
 			}
 		}

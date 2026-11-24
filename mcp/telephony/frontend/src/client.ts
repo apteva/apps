@@ -20,6 +20,26 @@ export function callTerminationLabel(termination: CallTermination | undefined, l
 }
 
 export interface CallTermination { reason?: string; cause?: string; code?: string; initiator?: string }
+/** A transfer of a connected call to advisers' browsers. */
+export interface CallTransfer {
+  id: string;
+  call_id: string;
+  status: "ringing" | "answered" | "no_answer" | "canceled" | "failed" | "abandoned";
+  /** ai: the call's AI transferred it; adviser or operator: from the softphone. */
+  source: "ai" | "adviser" | "operator";
+  target: { kind: "destination" | "ring_group"; id: string; name: string };
+  from: { kind: string; agent_id?: number; subject_id?: string };
+  note?: string;
+  /** What happens when nobody answers: return to whoever transferred, or hang up (AI only). */
+  no_answer?: "return" | "hangup";
+  started_at: string;
+  expires_at: string;
+  ended_at?: string;
+  reason?: string;
+  answered_destination_id?: string;
+}
+/** A browser destination or ring group the caller may transfer calls to. */
+export interface TransferTarget { id: string; kind: "destination" | "ring_group"; name: string }
 export interface Call {
   id: string;
   status: string;
@@ -52,6 +72,8 @@ export interface Call {
   recording_state?: "off" | "active" | "pause_requested" | "paused" | "resume_requested" | "unknown" | "ended";
   control_error?: string;
   capabilities?: { hold_music: boolean; recording_pause: boolean };
+  /** Present while a transfer of this connected call rings. */
+  transfer?: CallTransfer;
 }
 export interface CallControlResult {
   call_id: string;
@@ -142,7 +164,9 @@ export class TelephonyOfferExpiredError extends Error {
     this.name = "TelephonyOfferExpiredError";
   }
 }
-export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | "peer_kind" | "answerable" | "routing_waiting" | "ring_offers">): boolean {
+export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | "peer_kind" | "answerable" | "routing_waiting" | "ring_offers"> & { transfer?: Pick<CallTransfer, "status"> }): boolean {
+  // A ringing transfer offers a connected call, inbound or outbound.
+  if (call.transfer?.status === "ringing") return call.answerable === true && Boolean(call.ring_offers?.some(offer => offer.kind === "browser"));
   return call.direction === "inbound" && call.status === "pending" && call.answerable !== false && !call.routing_waiting &&
     (call.peer_kind === "human" || Boolean(call.ring_offers?.some(offer => offer.kind === "browser")));
 }
@@ -465,6 +489,23 @@ export class TelephonyClient {
 
   resume(id: string): Promise<CallControlResult> {
     return this.post(this.path(`/calls/${callID(id)}/resume`), {});
+  }
+
+  /** Destinations and ring groups this user may transfer calls to (call.transfer). */
+  async transferTargets(signal?: AbortSignal): Promise<TransferTarget[]> {
+    const value = await this.get<{ targets?: TransferTarget[] }>(this.path("/softphone/transfer-targets"), signal ? { signal } : undefined);
+    return Array.isArray(value?.targets) ? value.targets : [];
+  }
+
+  /** Rings the target's browsers while the caller is on hold. The call stays
+   * yours until someone answers; when nobody does, it comes back to you. */
+  async transfer(id: string, request: { target_id: string; note?: string; timeout_seconds?: number }): Promise<CallTransfer> {
+    return (await this.post<{ transfer: CallTransfer }>(this.path(`/softphone/transfer/${callID(id)}`), request)).transfer;
+  }
+
+  /** Stops a transfer you started that is still ringing; the call returns to you. */
+  async cancelTransfer(id: string): Promise<CallTransfer> {
+    return (await this.post<{ transfer: CallTransfer }>(this.path(`/softphone/transfer-cancel/${callID(id)}`), {})).transfer;
   }
 
   /** Resolves only after Telephony receives Telnyx's successful pause result. */

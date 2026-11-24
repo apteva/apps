@@ -24,7 +24,7 @@ import CallStatistics from "./CallStatistics";
 import SIPMediaDialog from "./SIPMediaDialog";
 import OutboundTransportDialog from "./OutboundTransportDialog";
 import { usePanelSoftphone } from "./use-panel-softphone";
-import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
+import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall, type CallTransfer, type TransferTarget } from "../frontend/src/client";
 
 import type { HeadlessCallListener, ListenerSnapshot } from "../frontend/src/listener";
 
@@ -165,6 +165,9 @@ interface Call {
   coachable: boolean;
   listenable: boolean;
   ringOffers: RingOffer[];
+  /** Set while a transfer of this connected call rings. */
+  transfer?: CallTransfer;
+  answerable?: boolean;
   id: string;
   threadId: string;
   carrierSid: string;
@@ -304,6 +307,8 @@ function normalizeCall(row: RawCall): Call {
     direction: row.direction ?? row.Direction ?? "outbound",
     routingWaiting: Boolean((row as RawCall & {routing_waiting?:boolean}).routing_waiting),
     ringOffers: (row as RawCall & {ring_offers?:RingOffer[]}).ring_offers || [],
+    transfer: (row as RawCall & {transfer?:CallTransfer}).transfer ?? undefined,
+    answerable: (row as RawCall & {answerable?:boolean}).answerable,
     peerKind: row.peer_kind ?? row.PeerKind ?? "realtime",
     terminationCause: row.termination_cause ?? row.TerminationCause ?? "",
     terminationCode: row.termination_code ?? row.TerminationCode ?? "",
@@ -1046,6 +1051,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const recordingsRequest = useRef<AbortController | null>(null);
   const recordingsCall = useRef("");
   const [keypadOpen, setKeypadOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferTargets, setTransferTargets] = useState<TransferTarget[] | null>(null);
+  const [transferTarget, setTransferTarget] = useState("");
+  const [transferNote, setTransferNote] = useState("");
+  const [transferPending, setTransferPending] = useState(false);
+  const ringingTransfer = phoneState.transfer;
   const [answerDestinations,setAnswerDestinations] = useState<Record<string,string>>({});
   useEffect(() => { if (!softphoneCallId) setDiagnostics(null); }, [softphoneCallId]);
   useEffect(() => { persistAudioOptions(audioOptions); }, [audioOptions]);
@@ -1230,11 +1241,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   // Inbound softphone calls waiting for a person to pick up.
   const ringing = useMemo(
-    () => calls.filter(call => isIncomingBrowserCall({
+    () => calls.filter(call => call.id !== softphoneCallId && isIncomingBrowserCall({
       direction: call.direction, status: call.status, peer_kind: call.peerKind,
       routing_waiting: call.routingWaiting, ring_offers: call.ringOffers,
+      transfer: call.transfer, answerable: call.transfer ? call.answerable : undefined,
     })),
-    [calls],
+    [calls, softphoneCallId],
   );
   const incomingEvidence=useRef<Array<{call_id:string;offer_id:string}>>([]);
   incomingEvidence.current=ringing.flatMap(call=>call.ringOffers.filter(o=>o.kind==="browser").map(o=>({call_id:call.id,offer_id:o.id})));
@@ -1272,7 +1284,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const terminalCount = calls.length - activeCount;
 
   // The same controller consumes authoritative call state in both hosts.
-  useEffect(() => { phone?.observeCalls(calls.map(call=>({...call,peer_kind:call.peerKind,from_number:call.fromNumber,to_number:call.toNumber,ring_offers:call.ringOffers,routing_waiting:call.routingWaiting})) as TelephonyCall[]); }, [calls, phone]);
+  useEffect(() => { phone?.observeCalls(calls.map(call=>({...call,peer_kind:call.peerKind,from_number:call.fromNumber,to_number:call.toNumber,ring_offers:call.ringOffers,routing_waiting:call.routingWaiting,answerable:call.transfer?call.answerable:undefined})) as TelephonyCall[]); }, [calls, phone]);
 
   const hangup = async (call: Pick<Call, "id" | "status">) => {
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
@@ -1307,7 +1319,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     try {
       await phone.answer(call.id, {
         destination_id: answerDestinations[call.id] || call.ringOffers.find(o => o.kind === "browser")?.destination_id,
-        rejoin: call.status !== "pending",
+        rejoin: call.status !== "pending" && !call.transfer,
       });
       setSelectedId(call.id);
       setStatus(`connected to ${call.fromNumber || call.id}`);
@@ -1319,6 +1331,37 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     catch (e) { setStatus((e as Error).message || "Reconnect failed"); }
   };
   const toggleMute = () => { phone?.setMuted(!muted); };
+  const toggleTransfer = async () => {
+    if (transferOpen) { setTransferOpen(false); return; }
+    setTransferOpen(true);
+    setTransferTargets(null);
+    try {
+      const targets = await telephony.transferTargets();
+      setTransferTargets(targets);
+      setTransferTarget(current => targets.some(t => t.id === current) ? current : targets[0]?.id ?? "");
+    } catch (e) {
+      setTransferTargets([]);
+      setStatus((e as Error).message || "Transfer targets unavailable");
+    }
+  };
+  const startTransfer = async () => {
+    if (!phone || !transferTarget) return;
+    setTransferPending(true);
+    try {
+      await phone.transfer(transferTarget, { note: transferNote.trim() || undefined });
+      setTransferOpen(false);
+      setTransferNote("");
+      setStatus("");
+    } catch (e) { setStatus((e as Error).message || "Transfer failed"); }
+    finally { setTransferPending(false); void loadCalls(); }
+  };
+  const cancelTransfer = async () => {
+    if (!phone) return;
+    setTransferPending(true);
+    try { await phone.cancelTransfer(); setStatus("Transfer canceled"); }
+    catch (e) { setStatus((e as Error).message || "Cancel failed"); }
+    finally { setTransferPending(false); void loadCalls(); }
+  };
   const sendDTMF = (digit: string) => {
     try { phone?.sendDTMF(digit); }
     catch (e) { setStatus((e as Error).message); }
@@ -1396,8 +1439,27 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
           <button aria-pressed={muted} disabled={!hasAudio} className="min-h-11 px-3 border border-border rounded" onClick={toggleMute}>{muted ? "Unmute" : "Mute"}</button>
           {softphoneState !== "live" ? <button className="min-h-11 px-3 border border-border rounded" onClick={() => void reconnectAudio()}>Reconnect audio</button> : null}
           <button className="min-h-11 px-3 border border-border rounded" aria-expanded={keypadOpen} onClick={()=>setKeypadOpen(v=>!v)}>Keypad</button>
+          {ringingTransfer ? null : <button className="min-h-11 px-3 border border-border rounded" aria-expanded={transferOpen} disabled={softphoneState!=="live"} onClick={()=>void toggleTransfer()}>Transfer</button>}
           <button disabled={ending===softphoneCallId} className="min-h-11 px-3 bg-error text-bg rounded" onClick={()=>void hangup({id:softphoneCallId,status:"answered"})}>Hang up</button>
         </div>
+        {ringingTransfer ? <div className="flex flex-wrap items-center gap-2 mt-2 rounded border border-info/30 bg-info/10 px-3 py-2" role="status">
+          <span className="text-sm flex-1 min-w-0">Transferring to <strong>{ringingTransfer.target.name || ringingTransfer.target.id}</strong>. The caller is on hold until someone answers.</span>
+          <button className="min-h-11 px-3 border border-border rounded" disabled={transferPending} onClick={()=>void cancelTransfer()}>Cancel transfer</button>
+        </div> : transferOpen ? <div className="flex flex-wrap items-end gap-2 mt-2" aria-label="Transfer call">
+          {transferTargets === null ? <span className="text-xs text-text-muted">Loading transfer targets…</span>
+            : transferTargets.length === 0 ? <span className="text-xs text-text-muted">No transfer targets are available to you.</span>
+            : <>
+              <label className="text-xs flex flex-col gap-1">Transfer to
+                <select className="min-h-11 border border-border bg-bg rounded p-2" value={transferTarget} onChange={e=>setTransferTarget(e.target.value)}>
+                  {transferTargets.map(t=><option key={t.id} value={t.id}>{t.name || t.id}{t.kind === "ring_group" ? " (group)" : ""}</option>)}
+                </select>
+              </label>
+              <label className="text-xs flex flex-col gap-1 flex-1" style={{ minWidth: "10rem" }}>Note for your colleague
+                <input className="min-h-11 border border-border bg-bg rounded p-2" maxLength={500} value={transferNote} onChange={e=>setTransferNote(e.target.value)} placeholder="Optional"/>
+              </label>
+              <button className="min-h-11 px-3 bg-accent text-bg rounded disabled:opacity-40" disabled={!transferTarget || transferPending} onClick={()=>void startTransfer()}>Ring</button>
+            </>}
+        </div> : null}
         {keypadOpen ? <div className="grid grid-cols-3 gap-1 mt-2" aria-label="In-call keypad">{"123456789*0#".split("").map(digit=><button key={digit} className="min-h-11 border border-border rounded" disabled={softphoneState!=="live"} onClick={() => sendDTMF(digit)}>{digit}</button>)}</div> : null}
         {status ? <p role="status" className="text-xs mt-2">{status}</p> : null}
       </div> : null}
@@ -1473,10 +1535,11 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
             <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2" id={`telephony-call-offer-${call.id}`}>
               <span className="text-success flex items-center gap-2 text-sm font-medium">
                 <PhoneIcon size={15} />
-                Incoming call
+                {call.transfer ? (call.transfer.source === "ai" ? "Transfer from the AI" : "Transfer from a colleague") : "Incoming call"}
               </span>
               <span className="text-sm tabular-nums font-semibold">{call.fromNumber || "unknown"}</span>
               <span className="text-xs text-text-muted min-w-0 truncate">→ {call.toNumber}</span>
+              {call.transfer?.note ? <span className="text-xs min-w-0 truncate" title={call.transfer.note}>“{call.transfer.note}”</span> : null}
               <span className="flex-1" />
               {call.ringOffers.filter(o=>o.kind==="browser").length>1 ? <label className="text-xs">Answer for <select className="min-h-11 border border-border bg-bg rounded p-2" value={answerDestinations[call.id] || call.ringOffers.find(o=>o.kind==="browser")?.destination_id} onChange={e=>setAnswerDestinations(v=>({...v,[call.id]:e.target.value}))}>{call.ringOffers.filter(o=>o.kind==="browser").map(o=><option key={o.id} value={o.destination_id}>{o.name}</option>)}</select></label>:null}
               <button
@@ -1487,14 +1550,14 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
               >
                 Answer
               </button>
-              <button
+              {call.transfer ? null : <button
                 type="button"
                 disabled={ending === call.id}
                 onClick={() => void hangup(call)}
                 className="h-8 px-3 rounded border border-error/40 text-error text-xs disabled:opacity-40"
               >
                 Decline
-              </button>
+              </button>}
             </div>
           ))}
         </div>

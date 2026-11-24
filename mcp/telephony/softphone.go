@@ -1234,6 +1234,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.Path == "/softphone/transfer-targets" || strings.HasPrefix(r.URL.Path, "/softphone/transfer/") || strings.HasPrefix(r.URL.Path, "/softphone/transfer-cancel/") {
+		a.handleSoftphoneTransfer(w, r)
+		return
+	}
 	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1260,7 +1264,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		if p == nil {
 			writeJSON(w, map[string]any{"operator": true})
 		} else {
-			writeJSON(w, map[string]any{"identity": p.Identity, "destinations": p.Destinations, "outbound_numbers": p.Numbers, "supervisor": p.Supervisor})
+			writeJSON(w, map[string]any{"identity": p.Identity, "destinations": p.Destinations, "outbound_numbers": p.Numbers, "supervisor": p.Supervisor, "transfer_targets": p.TransferTargets})
 		}
 		return
 	}
@@ -1481,6 +1485,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	p := phoneUserFrom(r)
+	if !request.Rejoin && !isTerminalStatus(row.Status) {
+		if t := a.transfers.get(callID); t != nil && !t.isFinished() {
+			a.softphoneAnswerTransfer(w, r, row, p, t, request.DestinationID, request.AutoAnswerSession, request.AutoAnswerWarningCompleted, recordDecision)
+			return
+		}
+	}
 	if p != nil {
 		if row.Status == "pending" {
 			dest := a.phoneOfferDestination(p, row, request.DestinationID)

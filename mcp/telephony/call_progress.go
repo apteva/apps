@@ -468,6 +468,10 @@ func (a *App) handleCallRead(w http.ResponseWriter, r *http.Request, callID stri
 		http.Error(w, "load ring offers", http.StatusInternalServerError)
 		return
 	}
+	if err := a.attachTransfers(project, detail); err != nil {
+		http.Error(w, "load transfers", http.StatusInternalServerError)
+		return
+	}
 	if err := a.db().attachRecordingSummaries(project, detail); err != nil {
 		http.Error(w, "load recording summaries", http.StatusInternalServerError)
 		return

@@ -822,6 +822,33 @@ type sipBridgeSession struct {
 	finish         func(string, error)
 	hangup         func() error
 	takePrepared   func() net.Conn
+	// handover lets a transfer end this bridge without hanging up, so the
+	// caller can bridge again with the call's new peer. Direct inbound SIP only.
+	handover bool
+}
+
+// sipBridgeHandover is a running direct SIP bridge that a transfer can stop
+// without ending the call. The RTP socket, recording and dialog stay.
+type sipBridgeHandover struct {
+	requested atomic.Bool
+	cancel    context.CancelFunc
+	media     *sipRTPMedia
+}
+
+// requestSIPBridgeHandover stops the call's direct SIP bridge so that
+// bridgeDirectSIPMedia bridges the same RTP socket again with the call's
+// current peer. It returns false when no such bridge is running.
+func (a *App) requestSIPBridgeHandover(callID string) bool {
+	v, ok := a.sipBridgeHandovers.Load(callID)
+	if !ok {
+		return false
+	}
+	h := v.(*sipBridgeHandover)
+	h.requested.Store(true)
+	h.cancel()
+	// Wake the RTP reader now instead of at its next one-second deadline.
+	_ = h.media.conn.SetReadDeadline(time.Now())
+	return true
 }
 
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
@@ -834,15 +861,22 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 		policy = *session.local.config.RTPPlayback
 	}
 	session.local.mu.Unlock()
-	a.bridgeSIPMedia(sipBridgeSession{
+	bridge := sipBridgeSession{
 		playbackPolicy: policy,
 		takePrepared:   session.takePreparedBridge,
 		callID:         session.call.ID, ctx: session.ctx, media: media,
-		finish: session.finish, hangup: session.hangup,
-	})
+		finish: session.finish, hangup: session.hangup, handover: true,
+	}
+	// A transfer to an adviser ends the AI bridge without hanging up. Bridge
+	// the same RTP socket again; the call now names the softphone peer.
+	for a.bridgeSIPMedia(bridge) {
+		bridge.takePrepared = nil
+	}
 }
 
-func (a *App) bridgeSIPMedia(session sipBridgeSession) {
+// bridgeSIPMedia carries one bridge between the RTP socket and the call's
+// peer. handedOver is true when a transfer stopped it and the call goes on.
+func (a *App) bridgeSIPMedia(session sipBridgeSession) (handedOver bool) {
 	row, err := a.db().findCall(session.callID)
 	if err != nil {
 		session.finish("local_error", err)
@@ -890,6 +924,12 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	_ = a.db().clearStateExpiry(row.ID)
 	ctx, cancel := context.WithCancel(session.ctx)
 	defer cancel()
+	var handover *sipBridgeHandover
+	if session.handover {
+		handover = &sipBridgeHandover{cancel: cancel, media: media}
+		a.sipBridgeHandovers.Store(row.ID, handover)
+		defer a.sipBridgeHandovers.CompareAndDelete(row.ID, handover)
+	}
 	closeState := &websocketCloseState{}
 	tap := a.listeners.openBridge(row.ID)
 	defer a.listeners.closeBridge(row.ID, tap)
@@ -915,12 +955,22 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
-	recorder, recordErr := a.newLocalRecording(row, false)
-	if recordErr != nil {
-		globalCtx.Logger().Warn("local SIP recording unavailable", "call", row.ID, "err", recordErr)
+	// A bridge after a transfer handover keeps writing the call's recording.
+	recorder := media.recorder.Load()
+	if recorder == nil {
+		var recordErr error
+		recorder, recordErr = a.newLocalRecording(row, false)
+		if recordErr != nil {
+			globalCtx.Logger().Warn("local SIP recording unavailable", "call", row.ID, "err", recordErr)
+		}
+		media.recorder.Store(recorder)
 	}
-	media.recorder.Store(recorder)
-	defer func() { media.recorder.CompareAndSwap(recorder, nil); recorder.Close() }()
+	defer func() {
+		if !handedOver {
+			media.recorder.CompareAndSwap(recorder, nil)
+			recorder.Close()
+		}
+	}()
 	recordOutput := newPCMResampler(media.sampleRate(), 24000)
 	policyGeneration := newSecret()
 	pacerPolicy.onSent = func(silent bool) {
@@ -949,6 +999,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	media.pacer.Store(pacer)
 	defer media.pacer.CompareAndSwap(pacer, nil)
 	a.bindAIPlayback(row, policyGeneration, playback.hasPendingSpeech)
+	agentSession.setSpeechPending(playback.hasPendingSpeech)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -957,7 +1008,9 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	defer jitter.releaseTrace()
 	defer func() {
 		cancel()
-		media.Close()
+		if !handedOver {
+			media.Close()
+		}
 		coreCloser.Close(ws.StatusGoingAway, "SIP media drained")
 		workers.Wait()
 		<-pacer.done
@@ -1056,10 +1109,12 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 					continue
 				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
+				// While a transfer rings the AI hears silence and cannot be barged in on.
+				parked := agentSession.isParked()
 				observedAt := time.Now()
-				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				agentSession.observeCaller(processed.SpeechActive && !parked, observedAt)
 				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), policyGeneration)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
+				localSpeechStarted := !parked && processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -1074,6 +1129,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
 					queueSIPHumanAudio(coreWriter, pcm24, framer.frameArrival, uint32(jitter.generation.Load()))
+				} else if parked {
+					coreWriter.queueAudioAt(agentInput.inputWithPCM24(make([]int16, len(processed.PCM)), make([]int16, len(pcm24)), nil, ""), 0, framer.frameArrival)
 				} else {
 					coreWriter.queueAudioAt(agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""), 0, framer.frameArrival)
 				}
@@ -1090,8 +1147,14 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	}()
 
 	defer func() {
+		// Runs first among the deferred calls, so the others see the decision.
+		handedOver = handover != nil && handover.requested.Load() && session.ctx.Err() == nil
 		leg, code, reason := closeState.Cause()
-		a.finishMediaBridge(row.ID, leg, code, reason)
+		if handedOver {
+			globalCtx.Logger().Info("direct SIP bridge handed over", "call", row.ID)
+		} else {
+			a.finishMediaBridge(row.ID, leg, code, reason)
+		}
 		droppedStaleMS := pacer.droppedMS()
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "sip_direct", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
 		jitter.mu.Lock()
@@ -1110,6 +1173,9 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			DropEvents:                   pacer.dropEvents(),
 			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/int64(coreWriter.mediaRate())), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
 		})
+		if handedOver {
+			return
+		}
 		if session.ctx.Err() == nil {
 			_ = session.hangup()
 		}

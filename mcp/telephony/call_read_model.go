@@ -397,9 +397,15 @@ func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint
 		for id, v := range metadata.destinations {
 			model.permissions.destinations[id] = v
 		}
+		if err = a.attachTransfers(project, batch); err != nil {
+			return model, err
+		}
 		for i := range batch {
 			if batch[i].Status == "pending" {
 				batch[i].RingOffers = metadata.offers[batch[i].ID]
+			}
+			if t := batch[i].Transfer; t != nil && t.ExpiresAt.Before(model.until) {
+				model.until = t.ExpiresAt
 			}
 			if requested, e := time.Parse(time.RFC3339Nano, batch[i].RecordingRequestedAt); e == nil {
 				boundary := requested.Add(30 * time.Second)
@@ -450,6 +456,12 @@ func (a *App) upgradePhoneCallRead(r *http.Request, project string, base callRea
 	model.hint = false
 	model.rows = []callRow{}
 	ids, args := callReadIDs(project, base.rows)
+	transfers := map[string]callRow{}
+	for _, row := range base.rows {
+		if row.Transfer != nil {
+			transfers[row.ID] = row
+		}
+	}
 	if len(ids) > 0 {
 		rows, err := a.db().db.Query(`SELECT `+callListColumns+` FROM calls WHERE project_id=? AND id IN (`+phonePlaceholders(len(ids))+`) ORDER BY placed_at DESC,id DESC`, args...)
 		if err != nil {
@@ -462,6 +474,9 @@ func (a *App) upgradePhoneCallRead(r *http.Request, project string, base callRea
 				return model, err
 			}
 			row.RingOffers = base.permissions.offers[row.ID]
+			if hinted, ok := transfers[row.ID]; ok {
+				row.Transfer, row.RingOffers = hinted.Transfer, hinted.RingOffers
+			}
 			model.rows = append(model.rows, row)
 		}
 		err = rows.Err()

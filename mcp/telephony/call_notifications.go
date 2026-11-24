@@ -75,13 +75,17 @@ func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byt
 func (a *App) callReadFingerprint(checked *http.Request, model callReadModel) ([32]byte, error) {
 	type offer struct{ ID, Destination, Kind, Expires string }
 	type entry struct {
-		ID, Status, Peer, Destination, Media, Hold, Recording string
-		Offers                                                []offer
+		ID, Status, Peer, Destination, Media, Hold, Recording, Transfer string
+		Offers                                                          []offer
 	}
 	entries := make([]entry, 0, len(model.rows))
 	for _, row := range model.rows {
 		e := entry{ID: row.ID, Status: row.Status, Peer: row.PeerKind, Destination: row.RoutingDestinationID, Media: row.MediaStatus, Hold: row.HoldState, Recording: effectiveRecordingControlState(row)}
 		offers := model.permissions.offers[row.ID]
+		if row.Transfer != nil {
+			e.Transfer = row.Transfer.ID
+			offers = row.RingOffers
+		}
 		p := phoneUserFrom(checked)
 		for _, o := range offers {
 			if p != nil && (!p.Destinations[o.DestinationID] || !a.phoneReadDestination(p, row.ProjectID, o.DestinationID)) {

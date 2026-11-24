@@ -83,6 +83,8 @@ export interface SoftphoneCallStatus {
   hold_state?: "active" | "starting" | "held" | "stopping" | "unknown" | "ended";
   recording_state?: "off" | "active" | "pause_requested" | "paused" | "resume_requested" | "unknown" | "ended";
   control_error?: string;
+  /** Present on call.status pushes: the ringing transfer, or null once none rings. */
+  transfer?: import("../frontend/src/client").CallTransfer | null;
 }
 
 export interface SoftphoneAudioHealth {
@@ -763,7 +765,7 @@ export class SoftphoneSession {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
         if (typeof parsed.nonce === "number" && parsed.nonce >= 0) this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
-      } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
+      } else if (parsed.type === "call.ended" || parsed.type === "session.replaced" || parsed.type === "call.transferred") {
         this.setPlaybackObservation(false, parsed.type === "call.ended" ? "call_ended" : "observation_ended");
         this.shutdownIntent=parsed.type === "call.ended" ? "call_ended" : "session_replaced";
         this.closed = true;

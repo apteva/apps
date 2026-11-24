@@ -381,10 +381,12 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
+				// While a transfer rings the AI hears silence and cannot be barged in on.
+				parked := agentSession.isParked()
 				observedAt := time.Now()
-				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				agentSession.observeCaller(processed.SpeechActive && !parked, observedAt)
 				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), bridge.generation)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
+				localSpeechStarted := !parked && processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -399,6 +401,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, fmt.Sprint(f.Media.Timestamp), fmt.Sprint(f.Media.Chunk), bridge.generation)
 					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
+				} else if parked {
+					err = coreWriter.Write(ws.OpBinary, agentInput.inputWithPCM24(make([]int16, len(processed.PCM)), make([]int16, len(pcm24)), nil, ""))
 				} else {
 					err = coreWriter.Write(ws.OpBinary, agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""))
 				}
@@ -506,7 +510,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			cancel()
 		},
 	)
-	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSpeechSamples.Load() > 0 || playback.hasPendingSpeech() })
+	speechPending := func() bool { return pacer.pendingSpeechSamples.Load() > 0 || playback.hasPendingSpeech() }
+	a.bindAIPlayback(row, bridge.generation, speechPending)
+	agentSession.setSpeechPending(speechPending)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}

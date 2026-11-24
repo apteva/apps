@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.29.0
+version: 0.30.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -195,6 +195,8 @@ provides:
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_send_dtmf,    description: "Press keypad keys (DTMF) on a connected call. Args: call_id, digits, idempotency_key?." }
+    - { name: telephony_transfer_call, description: "Transfer the current AI call to an adviser destination or ring group: browsers ring while the caller hears hold music. Waits for the outcome; on no answer the call returns to the AI or is ended. Args: call_id, target_id, note?, timeout_seconds?, if_no_answer? (return|hangup)." }
+    - { name: telephony_transfer_targets, description: "List the adviser destinations and ring groups the calling AI may transfer to." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
@@ -310,6 +312,7 @@ provides:
         termination: object
         answered_by: string
         synthesized: boolean
+        transfer: object
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -319,6 +322,12 @@ provides:
     - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
     - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
     - { name: call.machine_detected, description: "Answering machine detection finished; answered_by reports human, machine, fax, silence, or unknown.", payload: *call_event_payload }
+    - { name: call.transfer_started, description: "A transfer of a connected call started ringing advisers; transfer reports its source, target and deadline.", payload: *call_event_payload }
+    - { name: call.transfer_answered, description: "An adviser answered a transfer and now has the call.", payload: *call_event_payload }
+    - { name: call.transfer_no_answer, description: "Nobody answered a transfer; the call returned to whoever transferred it, or was ended when the AI asked for that.", payload: *call_event_payload }
+    - { name: call.transfer_canceled, description: "The adviser or an operator canceled a ringing transfer; the call returned to them.", payload: *call_event_payload }
+    - { name: call.transfer_failed, description: "A transfer ended without an answer for another reason, such as a Telephony restart; the call returned to whoever transferred it.", payload: *call_event_payload }
+    - { name: call.transfer_abandoned, description: "The call ended while a transfer rang.", payload: *call_event_payload }
     - name: recording.ready
       description: A provider recording is ready.
       payload: &recording_event_payload
@@ -476,7 +485,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.29.0
+    ref: telephony/v0.30.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -533,6 +542,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: ai_transfer_targets, type: text, label: "AI transfer targets", description: "Comma-separated browser destination and ring group IDs an AI may transfer calls to with telephony_transfer_call. Empty allows every enabled browser destination and ring group in the project." }
   - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
@@ -557,6 +567,11 @@ type App struct {
 	mediaDiagnostics   mediaDiagnosticRegistry
 	aiPolicies         aiPolicyRegistry
 	agentAudioSessions sync.Map
+	// Call transfers that are ringing, the calls whose caller audio to the AI
+	// is parked, and direct SIP bridges that may hand over to a new peer.
+	transfers          transferRegistry
+	parkedCalls        sync.Map // call ID → struct{}
+	sipBridgeHandovers sync.Map // call ID → *sipBridgeHandover
 	// Call id → lifecycleFacts of a hang-up or reject in flight.
 	terminationRequests sync.Map
 	mediaBridges        carrierBridgeRegistry
@@ -722,6 +737,9 @@ func (a *App) initializeActiveRuntime(ctx *sdk.AppCtx) error {
 	if err := a.restoreAIPolicyRuntimes(); err != nil {
 		return fmt.Errorf("restore AI call policies: %w", err)
 	}
+	if err := a.restoreCallTransfers(); err != nil {
+		return fmt.Errorf("restore call transfers: %w", err)
+	}
 	if a.runtime == nil {
 		if err := a.startSIPGateway(ctx); err != nil {
 			return fmt.Errorf("start direct SIP gateway: %w", err)
@@ -766,6 +784,7 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "carrier-telemetry", Schedule: "@every 1s", Run: a.runCarrierTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
+		{Name: "call-transfers", Schedule: "@every 1s", Run: a.runCallTransfers},
 		{Name: "routing-reconciliation", Schedule: "@every 30s", Run: a.runRoutingReconciliation},
 		{Workload: "maintenance", Name: "historical-housekeeping", Schedule: "@every 1m", Run: a.runHousekeeping},
 		{
@@ -1065,6 +1084,27 @@ func (a *App) MCPTools() []sdk.Tool {
 				"idempotency_key": map[string]any{"type": "string", "description": "Optional key identifying this press, e.g. call_id:menu-step:1. Reusing it returns the first outcome."},
 			}, []string{"call_id", "digits"}),
 			HandlerCtx: a.toolSendDTMF,
+		},
+		{
+			Name: "telephony_transfer_call",
+			Description: "Transfer the current call to a human adviser: their browsers ring while the caller hears hold music, and you hear nothing. " +
+				"Tell the caller you are transferring them before you call this. It waits until the transfer ends: when an adviser answers they have the call and your part is over; " +
+				"when nobody answers you are back with the caller, or the call is ended if if_no_answer is hangup. " +
+				"Args: call_id (required), target_id (required; from telephony_transfer_targets), note (optional, shown to the adviser), timeout_seconds (optional, 10-90, default 30), if_no_answer (optional: return or hangup, default return).",
+			InputSchema: schemaObject(map[string]any{
+				"call_id":         map[string]any{"type": "string", "description": "The current call's id."},
+				"target_id":       map[string]any{"type": "string", "description": "Adviser destination or ring group id from telephony_transfer_targets."},
+				"note":            map[string]any{"type": "string", "description": "Short context for the adviser, e.g. the caller's name and what they need. At most 500 characters."},
+				"timeout_seconds": map[string]any{"type": "integer", "description": "How long the advisers' browsers ring, 10-90 seconds. Default 30."},
+				"if_no_answer":    map[string]any{"type": "string", "enum": []string{"return", "hangup"}, "description": "return (default): you get the caller back. hangup: the call is ended."},
+			}, []string{"call_id", "target_id"}),
+			HandlerCtx: a.toolTransferCall,
+		},
+		{
+			Name:        "telephony_transfer_targets",
+			Description: "List the advisers and ring groups you may transfer a call to with telephony_transfer_call.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolTransferTargets,
 		},
 		{
 			Name:        "telephony_active_calls",
@@ -1946,6 +1986,9 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectI
 	}
 	if agentID != 0 && row.AgentID != agentID {
 		return hangupResult{}, "call belongs to another agent"
+	}
+	if agentID != 0 && row.PeerKind == peerKindHuman && !isTerminalStatus(row.Status) && a.transferredFromAI(row.ID) {
+		return hangupResult{}, "the call was transferred to an adviser"
 	}
 	previous := row.Status
 	if isTerminalStatus(row.Status) {
@@ -3916,6 +3959,10 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load ring offers", 500)
 			return
 		}
+		if err := a.attachTransfers(project, detail); err != nil {
+			http.Error(w, "load transfers", 500)
+			return
+		}
 		if err := a.db().attachRecordingSummaries(project, detail); err != nil {
 			http.Error(w, "load recording summaries", 500)
 			return
@@ -4359,6 +4406,12 @@ func (a *App) callsPanelForRequest(r *http.Request, rows []callRow, diagnostics 
 			out[i]["answerable"] = a.phoneOfferDestination(principal, &rows[i], "") != ""
 		}
 	}
+	for i := range rows {
+		if t := rows[i].Transfer; t != nil {
+			out[i]["transfer"] = t.public()
+			out[i]["answerable"] = a.transferDestinationFor(phoneUserFrom(r), t, "") != ""
+		}
+	}
 	return out
 }
 
@@ -4632,6 +4685,7 @@ type callRow struct {
 	ApplicationUser    *phonePrincipal // transient placement context, persisted separately before dialing
 
 	RingOffers               []ringOffer
+	Transfer                 *callTransfer // transient: the ringing transfer, on call reads
 	ID                       string
 	ThreadID                 string
 	Direction                string

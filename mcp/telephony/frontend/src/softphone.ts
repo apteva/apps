@@ -11,7 +11,7 @@ import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./a
 import { RecoveryRecorder, runRecoveryChecks, type MediaRecoveryRecord, type RecoveryEvidence } from "./media-recovery-record";
 import { rtcRecoveryLimits } from "./webrtc-audio";
 import { measureAudioSetup } from "../../ui/audio-setup";
-import { isIncomingBrowserCall, isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
+import { isIncomingBrowserCall, isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type CallTransfer, type DialRequest, type TelephonyClient } from "./client";
 
 /** Carrier progress; connected is exposed only after browser media is live. */
 export type SoftphonePhase = "idle" | "placing" | "ringing" | "connected" | "ended";
@@ -44,6 +44,10 @@ export interface SoftphoneSnapshot {
   readonly recordingState?: Call["recording_state"];
   readonly controlError?: string;
   readonly capabilities?: Call["capabilities"];
+  /** The transfer of this call that is ringing, if any. */
+  readonly transfer?: CallTransfer;
+  /** Set when this browser's call was answered by the colleague it was transferred to. */
+  readonly transferred?: boolean;
 }
 export interface SoftphoneOptions {
  /** Idle-only network readiness checks. Enabled by the bundled panel, opt-in for existing hosts. */
@@ -310,7 +314,8 @@ export class HeadlessSoftphone {
     if(this.standby||!this.idleForStandby()||Date.now()<this.standbyPausedUntil)return;
     const transport=this.audioOptions.mediaTransport;
     if(this.options.ringStandby===false||(transport!=="webrtc"&&transport!=="auto")||typeof RTCPeerConnection!=="function")return;
-    for(const call of this.observedOffers.values())if(isIncomingBrowserCall(call)&&!this.standbyTried.has(call.id)){this.openStandby(call);return;}
+    // A transfer offers a connected call; ring-time connections are for pending calls only.
+    for(const call of this.observedOffers.values())if(isIncomingBrowserCall(call)&&!call.transfer&&!this.standbyTried.has(call.id)){this.openStandby(call);return;}
   }
   private idleForStandby(){return !this.disposed&&!this.session&&!this.snapshot.busy&&!this.hangingUp;}
   private openStandby(call:Call){
@@ -546,6 +551,26 @@ export class HeadlessSoftphone {
   pauseRecording(): Promise<CallControlResult> { return this.runCallControl("pauseRecording"); }
   resumeRecording(): Promise<CallControlResult> { return this.runCallControl("resumeRecording"); }
 
+  /** Rings a colleague's destination or ring group while the caller is on hold.
+   * The call stays here until they answer; if nobody does, it comes back. */
+  async transfer(targetId: string, options: { note?: string; timeout_seconds?: number } = {}): Promise<CallTransfer> {
+    this.assertOpen();
+    const session = this.session;
+    if (!session) throw new Error("No active call to transfer");
+    const transfer = await this.client.transfer(session.call_id, { target_id: targetId, ...options });
+    if (this.session === session) this.update({ transfer, holdState: "held", detail: undefined });
+    return transfer;
+  }
+
+  /** Stops this call's ringing transfer; the caller comes back to this browser. */
+  async cancelTransfer(): Promise<void> {
+    this.assertOpen();
+    const session = this.session;
+    if (!session) throw new Error("No active call");
+    await this.client.cancelTransfer(session.call_id);
+    if (this.session === session) this.update({ transfer: undefined });
+  }
+
   private async runCallControl(action: "hold" | "resume" | "pauseRecording" | "resumeRecording"): Promise<CallControlResult> {
     this.assertOpen();
     const session = this.session;
@@ -608,7 +633,7 @@ export class HeadlessSoftphone {
   }
 
   /** Call completion is authoritative; transient media errors keep the call controls. */
-  observeCall(call: Pick<Call, "id" | "status"> & Partial<Pick<Call, "direction" | "answered_at" | "ended_at" | "answered_by" | "termination" | "hold_state" | "recording_state" | "control_error" | "capabilities">>): void {
+  observeCall(call: Pick<Call, "id" | "status"> & Partial<Pick<Call, "direction" | "answered_at" | "ended_at" | "answered_by" | "termination" | "hold_state" | "recording_state" | "control_error" | "capabilities">> & { transfer?: CallTransfer | null }): void {
     if (this.disposed || call.id !== this.session?.call_id) return;
     // Ringback depends on the call's direction, not on which method opened
     // it: a call placed by a backend and attached here is still outbound.
@@ -621,7 +646,8 @@ export class HeadlessSoftphone {
     }
     this.update({ carrierStatus: call.status, phase: phaseForStatus(call.status), answeredBy: call.answered_by ?? this.snapshot.answeredBy,
       holdState: call.hold_state ?? this.snapshot.holdState, recordingState: call.recording_state ?? this.snapshot.recordingState,
-      controlError: call.control_error ?? this.snapshot.controlError, capabilities: call.capabilities ?? this.snapshot.capabilities });
+      controlError: call.control_error ?? this.snapshot.controlError, capabilities: call.capabilities ?? this.snapshot.capabilities,
+      transfer: call.transfer?.status === "ringing" ? call.transfer : undefined });
     this.syncRingback();
   }
 
@@ -648,7 +674,7 @@ export class HeadlessSoftphone {
     this.stopAudio();
     this.session = session;
     this.update({ callId: session.call_id, carrierStatus: undefined, audioState: "connecting", phase: "placing", termination: undefined, answeredBy: undefined, endedAt: undefined,
-      holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
+      holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined, transfer: undefined, transferred: undefined });
     // The server moved this call onto the ring-time connection; anything else
     // about that connection is no longer needed.
     const standby=this.standby;this.standby=undefined;
@@ -742,6 +768,13 @@ export class HeadlessSoftphone {
             this.observeCall({ id: ref.session.call_id, status: "completed" });
             return;
           }
+          if (audioState === "ended" && detail === "call.transferred") {
+            // The colleague answered: the call continues in their browser.
+            this.invalidate();
+            this.clearCall();
+            this.update({ busy: false, transferred: true, detail: "Call transferred" });
+            return;
+          }
           if(audioState==="live"){
             this.hasLiveAudio=true;
             void this.flushRecoveryRecords();
@@ -764,7 +797,7 @@ export class HeadlessSoftphone {
         onCallStatus: status => notify(() => {this.hasStatusPush=true;this.observeCall({
           id: status.call_id, status: status.status, direction: status.direction, answered_at: status.answered_at, ended_at: status.ended_at,
           answered_by: status.answered_by, termination: status.termination, hold_state: status.hold_state,
-          recording_state: status.recording_state, control_error: status.control_error,
+          recording_state: status.recording_state, control_error: status.control_error, transfer: status.transfer,
         });this.scheduleStatusPoll?.();}),
     };
   }
@@ -1018,7 +1051,7 @@ export class HeadlessSoftphone {
     this.session = undefined;this.hasLiveAudio=false;this.ownGenerations.clear();this.scheduleNetworkCheck();
     this.outbound = false;
     this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined, phase: carrierStatus ? "ended" : "idle",
-      holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
+      holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined, transfer: undefined });
   }
 
   /** Releases local devices and monitoring. An established carrier call stays up. */

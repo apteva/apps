@@ -100,6 +100,21 @@ type agentAudioSession struct {
 	frameKey       agentPlaybackKey
 	frameEndMS     int
 	frameMS        int
+	// parked is set while a transfer rings: the AI hears silence instead of
+	// the caller. One atomic load per caller frame; normal calls never set it.
+	parked atomic.Bool
+	// speechPending reports agent speech still queued for the caller.
+	speechPending atomic.Pointer[func() bool]
+}
+
+func (s *agentAudioSession) isParked() bool { return s != nil && s.parked.Load() }
+
+// setSpeechPending records how the bridge tells that agent speech is still
+// queued, so a transfer can let the AI finish its sentence before hold music.
+func (s *agentAudioSession) setSpeechPending(pending func() bool) {
+	if s != nil && pending != nil {
+		s.speechPending.Store(&pending)
+	}
 }
 
 func agentBridgeURL(raw string, row *callRow) string {
@@ -498,6 +513,10 @@ func (a *App) trackAgentAudio(call string, s *agentAudioSession) func() {
 		return func() {}
 	}
 	a.agentAudioSessions.Store(call, s)
+	// A replacement bridge for a call whose transfer is ringing stays parked.
+	if _, parked := a.parkedCalls.Load(call); parked {
+		s.parked.Store(true)
+	}
 	return func() { a.agentAudioSessions.CompareAndDelete(call, s) }
 }
 func (a *App) liveAgentAudio(call string) *agentAudioSnapshot {

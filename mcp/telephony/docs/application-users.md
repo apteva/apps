@@ -155,6 +155,14 @@ carriers return an explicit error. Telnyx's successful recording-control API
 response confirms pause/resume; Telnyx does not publish a corresponding state
 webhook. A failed or uncertain response is reported as `unknown`, not paused.
 
+## Call transfers
+
+An adviser can transfer their connected call to a colleague's destination or a
+ring group. The policy's user or group grant lists the allowed targets in
+`transfer_targets`, and the provider must grant `call.transfer`. The caller is
+on hold while the colleague's browsers ring. If nobody answers, the call comes
+back to the adviser. See [call-transfers.md](call-transfers.md).
+
 ## Numbers, IVR, groups, and ringing
 
 Create browser destinations and routing flows with the existing Telephony panel

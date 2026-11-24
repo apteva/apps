@@ -38,6 +38,9 @@ type phoneGrant struct {
 	Role            string   `json:"role"`             // user or supervisor; supervisors still have resource bounds
 	Destinations    []string `json:"destinations"`
 	OutboundNumbers []string `json:"outbound_numbers"`
+	// TransferTargets are the browser destinations and ring groups the user
+	// may transfer a call to (call.transfer).
+	TransferTargets []string `json:"transfer_targets,omitempty"`
 }
 type phoneUser struct {
 	Identity phoneIdentity `json:"identity"`
@@ -75,6 +78,7 @@ type phonePrincipal struct {
 	Supervisor      bool
 	Destinations    map[string]bool
 	Numbers         map[string]bool
+	TransferTargets map[string]bool
 }
 type phonePrincipalKey struct{}
 
@@ -108,7 +112,7 @@ func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrin
 	return phonePrincipalFromPolicy(project, identity, *policy)
 }
 func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy phonePolicy) (*phonePrincipal, error) {
-	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
+	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}, TransferTargets: map[string]bool{}}
 	add := func(g phoneGrant) {
 		p.Supervisor = p.Supervisor || g.Role == "supervisor"
 		p.Listen = p.Listen || g.Listen
@@ -118,6 +122,9 @@ func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy pho
 		}
 		for _, v := range g.OutboundNumbers {
 			p.Numbers[v] = true
+		}
+		for _, v := range g.TransferTargets {
+			p.TransferTargets[v] = true
 		}
 	}
 	legacy := false
@@ -192,6 +199,9 @@ func phoneAction(r *http.Request) string {
 	if r.Method == "GET" && (path == "/softphone/access" || path == "/softphone/numbers") {
 		return "call.read"
 	}
+	if r.Method == "GET" && path == "/softphone/transfer-targets" {
+		return "call.transfer"
+	}
 	if r.Method == "GET" && strings.HasPrefix(path, "/calls/") && strings.Count(strings.Trim(path, "/"), "/") == 1 && path != "/calls/events" {
 		return "call.read"
 	}
@@ -215,6 +225,8 @@ func phoneAction(r *http.Request) string {
 		return "call.attach"
 	case strings.HasPrefix(path, "/softphone/takeover/"):
 		return "call.takeover"
+	case strings.HasPrefix(path, "/softphone/transfer/"), strings.HasPrefix(path, "/softphone/transfer-cancel/"):
+		return "call.transfer"
 	case strings.HasPrefix(path, "/softphone/release/"):
 		return "call.answer"
 	case strings.HasPrefix(path, "/calls/") && strings.HasSuffix(path, "/hangup"):
@@ -494,12 +506,16 @@ func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 	}
 	out := make([]callRow, 0, len(rows))
 	for _, row := range rows {
-		if !a.phoneCallAllowed(p, &row, true) && a.phoneOfferDestination(p, &row, "") == "" {
+		if !a.phoneCallAllowed(p, &row, true) && a.phoneOfferDestination(p, &row, "") == "" && a.transferDestinationFor(p, row.Transfer, "") == "" {
 			continue
 		}
 		offers := make([]ringOffer, 0)
 		for _, offer := range row.RingOffers {
 			if offer.Kind == "browser" && p.Destinations[offer.DestinationID] {
+				// A transfer is offered only where this user can answer it.
+				if row.Transfer != nil && offer.ID == row.Transfer.ID && a.transferDestinationFor(p, row.Transfer, offer.DestinationID) == "" {
+					continue
+				}
 				offers = append(offers, offer)
 			}
 		}
@@ -849,6 +865,14 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 				return errors.New("outbound number must be E.164")
 			}
 		}
+		if len(g.TransferTargets) > 200 {
+			return errors.New("too many transfer targets")
+		}
+		for _, id := range g.TransferTargets {
+			if e := a.validTransferTargetID(project, id); e != nil {
+				return e
+			}
+		}
 		return nil
 	}
 	// Provider IDs are unique. Several IDs may share one issuer only as aliases
@@ -1020,6 +1044,13 @@ func phoneCallCandidates(p *phonePrincipal, project string) (string, []any) {
 			args = append(args, destination)
 		}
 		args = append(args, ringTime(time.Now()))
+		// A ringing transfer offers a connected call to its destinations.
+		sources = append(sources, `SELECT t.call_id FROM call_transfers t WHERE t.status='ringing' AND t.project_id=?
+			AND EXISTS (SELECT 1 FROM json_each(t.destinations_json) d WHERE d.value IN (`+placeholders+`))`)
+		args = append(args, project)
+		for _, destination := range destinations {
+			args = append(args, destination)
+		}
 		// A direct browser destination can be answerable without a ring run.
 		// Pending calls are the only such calls not covered by ownership.
 		sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='inbound'

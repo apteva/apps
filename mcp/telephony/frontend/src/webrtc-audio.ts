@@ -460,7 +460,7 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(value.type==="peer.disconnected"){this.peer=false;this.gate();this.updateLiveState();safe(()=>this.callbacks.onNotice?.("Carrier audio interrupted; the call remains connected."));}
         if(value.type==="call.status"){this.answered=["answered","in-progress"].includes(value.status);maybeReady();safe(()=>this.callbacks.onCallStatus?.(value));}
         if(value.type==="call.error"){if(!finished)finish(new Error(value.detail??"Carrier activation failed"));else if(!this.lost(new Error(value.detail??"Carrier activation failed"))){this.stop();safe(()=>this.callbacks.onState?.("error",value.detail));}}
-        if(value.type==="call.ended" || value.type==="session.replaced"){
+        if(value.type==="call.ended" || value.type==="session.replaced" || value.type==="call.transferred"){
           if(!finished)finish(new Error(value.type));else if(!this.lost(new Error(value.type))){this.stop();safe(()=>this.callbacks.onState?.("ended",value.type));}
         }
         if(value.type==="audio.health"){
