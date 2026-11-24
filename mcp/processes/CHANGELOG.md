@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Active assignments by default (0.23.5)
+
+Assignments tab defaults to active, with per-status counts; process rows
+show title, tags, description. See `docs-release-0.23.5.md`.
+
 ## Compact process list (0.23.4)
 
 Two lines per process on desktop: name with tags, then a one-line

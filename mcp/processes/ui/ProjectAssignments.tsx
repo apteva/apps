@@ -31,7 +31,7 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
   const [items, setItems] = useState<ProjectAssignment[] | null>(null);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState("active");
   const revision = useScopedRevision((e) => /^(process|assignment|run)\./.test(e.topic), live);
   useEffect(() => {
     let alive = true;
@@ -44,12 +44,13 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
   if (!items) return <p className="muted">Loading assignments…</p>;
   const needle = search.trim().toLowerCase();
   const visible = items.filter((x) =>
-    (!status || (status === "ongoing" ? x.ongoing_count > 0 : x.status === status)) &&
+    (!status || (status === "ongoing" ? x.ongoing_count > 0 : status === "active" ? x.status === "active" || x.ongoing_count > 0 : x.status === status)) &&
     (!needle || [x.name, x.process_name, ownerName(x.owner_agent_id)].some((v) => v?.toLowerCase().includes(needle)) || assignmentAgentIDs(x).some((id) => ownerName(id).toLowerCase().includes(needle))),
   );
   const active = items.filter((x) => x.status === "active").length;
   const scheduled = items.filter((x) => x.status === "active" && x.schedule).length;
   const ongoing = items.reduce((n, x) => n + x.ongoing_count, 0);
+  const count = (v: string) => items.filter((x) => x.status === v).length;
   return (
     <>
       <div className="stats">
@@ -60,11 +61,11 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
       <div className="row filters">
         <input aria-label="Search assignments" placeholder="Search assignments, processes or agents…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <select aria-label="Filter assignment status" value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">All assignments</option>
-          <option value="active">Active</option>
-          <option value="paused">Paused</option>
+          <option value="active">Active ({active})</option>
           <option value="ongoing">With runs in progress</option>
-          <option value="archived">Archived</option>
+          <option value="paused">Paused ({count("paused")})</option>
+          <option value="archived">Archived ({count("archived")})</option>
+          <option value="">All assignments ({items.length})</option>
         </select>
       </div>
       {error && <div role="alert" className="notice">{error}</div>}
@@ -126,8 +127,9 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
         </div>
       ) : (
         <div className="empty">
-          <h2>{items.length ? "No matching assignments" : "No assignments yet"}</h2>
-          <p>{items.length ? "Change the search or status filter." : "Assign a process to an agent from the process page to see it here."}</p>
+          <h2>{!items.length ? "No assignments yet" : status === "active" && !needle ? "No active assignments" : "No matching assignments"}</h2>
+          <p>{!items.length ? "Assign a process to an agent from the process page to see it here." : status === "active" && !needle ? `${items.length} paused or archived ${items.length === 1 ? "assignment is" : "assignments are"} hidden.` : "Change the search or status filter."}</p>
+          {items.length > 0 && status && <button onClick={() => setStatus("")}>Show all assignments</button>}
         </div>
       )}
     </>
