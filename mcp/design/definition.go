@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ var allowedOperations = map[string]bool{
 	"translate": true, "rotate": true, "scale": true, "mirror": true,
 	"linear_pattern": true, "circular_pattern": true,
 	"fillet": true, "chamfer": true,
+	"component": true,
 }
 
 func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefinition, error) {
@@ -70,9 +72,19 @@ func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefiniti
 			definition.Parameters[name] = spec
 		}
 		switch spec.Type {
-		case "number", "length", "angle":
+		case "number", "length", "angle", "integer":
+		case "boolean":
+			if spec.Min != nil || spec.Max != nil || len(spec.Options) != 0 {
+				return nil, nil, fmt.Errorf("boolean parameter %s cannot have min, max, or options", name)
+			}
 		default:
-			return nil, nil, fmt.Errorf("parameter %s type must be number, length, or angle", name)
+			return nil, nil, fmt.Errorf("parameter %s type must be number, length, angle, integer, or boolean", name)
+		}
+		if len(spec.Options) > 64 {
+			return nil, nil, fmt.Errorf("parameter %s has more than 64 options", name)
+		}
+		if err := checkParameterValue(name, spec, spec.Default); err != nil {
+			return nil, nil, fmt.Errorf("default: %w", err)
 		}
 		if spec.Min != nil && spec.Max != nil && *spec.Min > *spec.Max {
 			return nil, nil, fmt.Errorf("parameter %s min exceeds max", name)
@@ -97,6 +109,22 @@ func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefiniti
 		ids[id] = true
 		if !allowedOperations[kind] {
 			return nil, nil, fmt.Errorf("operation %q has unsupported type %q", id, kind)
+		}
+		if when, present := operation["when"]; present && when != nil {
+			switch value := when.(type) {
+			case bool, float64, json.Number:
+			case string:
+				if strings.TrimSpace(value) == "" {
+					return nil, nil, fmt.Errorf("operation %q when must not be empty", id)
+				}
+			default:
+				return nil, nil, fmt.Errorf("operation %q when must be a boolean, number, or expression string", id)
+			}
+		}
+		if kind == "component" {
+			if err := validateComponentOperation(id, operation); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	if definition.Output != "" && !ids[definition.Output] {
@@ -277,25 +305,100 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 }
 
 func normalizeParameters(raw []byte, definition *DesignDefinition) ([]byte, error) {
-	values := map[string]float64{}
+	decoded := map[string]any{}
 	if len(bytes.TrimSpace(raw)) != 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		if err := json.Unmarshal(raw, &values); err != nil {
+		if err := json.Unmarshal(raw, &decoded); err != nil {
 			return nil, fmt.Errorf("invalid parameters JSON: %w", err)
 		}
 	}
-	for name, value := range values {
+	values := make(map[string]float64, len(decoded))
+	for name, rawValue := range decoded {
 		spec, exists := definition.Parameters[name]
 		if !exists {
 			return nil, fmt.Errorf("unknown parameter %q", name)
 		}
-		if spec.Min != nil && value < *spec.Min {
-			return nil, fmt.Errorf("parameter %s is below min", name)
+		value, err := parameterNumber(rawValue)
+		if err != nil {
+			return nil, fmt.Errorf("parameter %s: %w", name, err)
 		}
-		if spec.Max != nil && value > *spec.Max {
-			return nil, fmt.Errorf("parameter %s is above max", name)
+		if err := checkParameterValue(name, spec, value); err != nil {
+			return nil, err
 		}
+		values[name] = value
 	}
 	return json.Marshal(values)
+}
+
+// parameterNumber converts a JSON parameter value (number or boolean) to the
+// float the runner uses; booleans are 1/0.
+func parameterNumber(value any) (float64, error) {
+	switch typed := value.(type) {
+	case nil:
+		return 0, nil
+	case float64:
+		return typed, nil
+	case bool:
+		if typed {
+			return 1, nil
+		}
+		return 0, nil
+	case json.Number:
+		return typed.Float64()
+	default:
+		return 0, fmt.Errorf("must be a number or boolean, got %T", value)
+	}
+}
+
+func checkParameterValue(name string, spec ParameterSpec, value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("parameter %s must be finite", name)
+	}
+	switch spec.Type {
+	case "boolean":
+		if value != 0 && value != 1 {
+			return fmt.Errorf("parameter %s must be true/false (1/0)", name)
+		}
+	case "integer":
+		if value != math.Trunc(value) {
+			return fmt.Errorf("parameter %s must be an integer", name)
+		}
+	}
+	if spec.Min != nil && value < *spec.Min {
+		return fmt.Errorf("parameter %s is below min", name)
+	}
+	if spec.Max != nil && value > *spec.Max {
+		return fmt.Errorf("parameter %s is above max", name)
+	}
+	if len(spec.Options) != 0 {
+		for _, option := range spec.Options {
+			if math.Abs(option-value) <= 1e-9 {
+				return nil
+			}
+		}
+		return fmt.Errorf("parameter %s must be one of %v", name, spec.Options)
+	}
+	return nil
+}
+
+// validateComponentOperation checks the static shape of a component
+// operation; the source itself is resolved by materializeDefinition.
+func validateComponentOperation(id string, operation map[string]any) error {
+	source, ok := operation["source"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("component operation %q requires source {design_id, revision_id, source_sha256}", id)
+	}
+	designID := anyNumber(source["design_id"])
+	revisionID := anyNumber(source["revision_id"])
+	sha, _ := source["source_sha256"].(string)
+	if designID <= 0 || revisionID <= 0 || strings.TrimSpace(sha) == "" {
+		return fmt.Errorf("component operation %q source requires design_id, revision_id, and source_sha256", id)
+	}
+	if params, present := operation["parameters"]; present && params != nil {
+		if _, ok := params.(map[string]any); !ok {
+			return fmt.Errorf("component operation %q parameters must be an object", id)
+		}
+	}
+	return nil
 }
 
 func sourceHash(definition, parameters []byte) string {
@@ -332,4 +435,19 @@ func normalizeTags(tags []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func anyNumber(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case json.Number:
+		number, _ := typed.Float64()
+		return number
+	case int64:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	}
+	return 0
 }

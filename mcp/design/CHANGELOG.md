@@ -1,5 +1,14 @@
 # Design Studio changes
 
+## 0.7.0
+
+- Richer formulas. Expressions gain `%`, comparisons, `and`/`or`/`not` (`&& || !`), `cond ? a : b`, `true`/`false`/`pi`, and the functions `min`, `max`, `abs`, `round(x[, step])`, `floor`, `ceil`, `sqrt`, `pow`, `clamp`, `hypot` and degree-based trigonometry. The parser lives in `runner/src/expressions.mjs` with shared cases in `testdata/expressions.json`.
+- Parameter types `integer` and `boolean` (`true`/`false` stored as 1/0), and `options` (allowed values) on any numeric parameter. Validated both when saving and when building.
+- Optional features: any operation can carry `when`. Skipped operations drop out of fuse, cut tools, intersect and compound; using one any other way is an error.
+- New `component` operation brings another design's pinned geometry in as a normal shape, so it can be cut, fused or patterned. Linked parts and component operations accept per-link `parameters` overrides: numbers are range-checked against the source, strings are expressions over the owning design's parameters.
+- New tools `component_dependents` (which designs link to a design, and which pins are stale) and `component_sources_refresh_all` (one new revision per linked design, transitive by default, failures reported per design). `assembly_sources_refresh` also advances component operations.
+- Engine version `ds0.7`; revisions are re-hashed against it. Cached STEP import geometry from earlier ds0.x engines is still reused.
+
 ## 0.6.2
 
 - Wait for Shapeways to finish analysing uploaded models before reading prices. Shapeways returns its material list while processing with every material marked not printable, so quotes came back with no options. The adapter now polls until `printable` is final, and reports "still processing" or "cannot print in any material" instead of an empty quote.

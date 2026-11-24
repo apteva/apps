@@ -2,22 +2,43 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
 const (
 	designSchema  = "apteva-design/v1"
 	engineName    = "replicad-opencascade"
-	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.5"
+	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.7"
 )
 
 type ParameterSpec struct {
-	Fit         string   `json:"fit,omitempty"`
-	Type        string   `json:"type"`
-	Default     float64  `json:"default"`
-	Min         *float64 `json:"min,omitempty"`
-	Max         *float64 `json:"max,omitempty"`
-	Description string   `json:"description,omitempty"`
+	Fit         string    `json:"fit,omitempty"`
+	Type        string    `json:"type"`
+	Default     float64   `json:"default"`
+	Min         *float64  `json:"min,omitempty"`
+	Max         *float64  `json:"max,omitempty"`
+	Options     []float64 `json:"options,omitempty"`
+	Description string    `json:"description,omitempty"`
+}
+
+// UnmarshalJSON accepts true/false as the default of a boolean parameter.
+func (p *ParameterSpec) UnmarshalJSON(raw []byte) error {
+	type plain ParameterSpec
+	var wire struct {
+		plain
+		Default any `json:"default"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	*p = ParameterSpec(wire.plain)
+	value, err := parameterNumber(wire.Default)
+	if err != nil {
+		return fmt.Errorf("default: %w", err)
+	}
+	p.Default = value
+	return nil
 }
 
 type DesignDefinition struct {
@@ -110,13 +131,18 @@ type PartSourceReference struct {
 	RevisionID   int64  `json:"revision_id"`
 	SourceSHA256 string `json:"source_sha256"`
 	PartID       string `json:"part_id,omitempty"`
+	// Parameters overrides the source revision's parameter values for this
+	// link. Numbers are checked against the source's ranges; strings are
+	// expressions over the owning design's parameters, resolved at build.
+	Parameters map[string]any `json:"parameters,omitempty"`
 }
 
 // ComponentDependency describes one resolved edge in an assembly's immutable
 // revision graph. It is returned by builds and included in release packages.
 type ComponentDependency struct {
 	OwnerRevisionID      int64  `json:"owner_revision_id"`
-	OwnerPartID          string `json:"owner_part_id"`
+	OwnerPartID          string `json:"owner_part_id,omitempty"`
+	OwnerOperationID     string `json:"owner_operation_id,omitempty"`
 	SourceDesignID       int64  `json:"source_design_id"`
 	SourceDesignName     string `json:"source_design_name"`
 	SourceRevisionID     int64  `json:"source_revision_id"`

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.6.2
+version: 0.7.0
 description: |
   Optional print-service fabrication: quote printed parts across bound
   Craftcloud, Slant 3D, Shapeways, Treatstock and Sculpteo connections, then
@@ -95,6 +95,8 @@ provides:
     - { name: designs_create, description: "Create a design and immutable first revision from an apteva-design/v1 operation graph.", requires: designs.write }
     - { name: assembly_create, description: "Create an assembly from immutable revision-linked Design Studio components.", requires: designs.write }
     - { name: assembly_sources_refresh, description: "Create a new assembly revision with links advanced to current component revisions.", requires: designs.write, resource_from: "design/{arg.design_id}" }
+    - { name: component_dependents, description: "List designs that link to a component design and whether their pins are stale.", requires: designs.read, resource_from: "design/{arg.design_id}" }
+    - { name: component_sources_refresh_all, description: "Advance every design linking to a component to its current revision, one new revision per design.", requires: designs.write, resource_from: "design/{arg.design_id}" }
     - { name: designs_list, description: "List project designs. Args: q?, kind?, status?, limit?.", requires: designs.read }
     - { name: designs_get, description: "Fetch a design, its current revision, validation, measurements, and artifacts. Args: id.", requires: designs.read, resource_from: "design/{arg.id}" }
     - { name: designs_archive, description: "Archive or restore a design. Args: id, archived? (default true).", requires: designs.write, resource_from: "design/{arg.id}" }
@@ -157,7 +159,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: design/v0.6.2
+    ref: design/v0.7.0
     entry: mcp/design
   port: 8080
   health_check: /health

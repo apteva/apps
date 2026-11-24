@@ -54,6 +54,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "assembly_sources_refresh", Description: "Check all directly linked components against their source designs and, when newer revisions exist, create one new immutable assembly revision with updated pins.", InputSchema: schemaObject(map[string]any{
 			"design_id": id, "expected_parent_id": id, "note": map[string]any{"type": "string"},
 		}, []string{"design_id", "expected_parent_id"}), HandlerCtx: a.toolAssemblySourcesRefresh},
+		{Name: "component_dependents", Description: "List active designs whose current revision links to a design (linked parts or component operations), with the pinned revision of each link and whether it is behind the source's current revision.", InputSchema: schemaObject(map[string]any{"design_id": id}, []string{"design_id"}), HandlerCtx: a.toolComponentDependents},
+		{Name: "component_sources_refresh_all", Description: "After changing a shared component, advance every design that links to it to the component's current revision: one new immutable revision per stale design. transitive (default true) also refreshes designs that link to refreshed designs. Per-design failures (for example a link override now outside the source range) are reported without stopping the others.", InputSchema: schemaObject(map[string]any{
+			"design_id": id, "transitive": map[string]any{"type": "boolean", "default": true}, "note": map[string]any{"type": "string"},
+		}, []string{"design_id"}), HandlerCtx: a.toolComponentSourcesRefreshAll},
 		{Name: "designs_list", Description: "List designs in the current project.", InputSchema: schemaObject(map[string]any{
 			"q": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"},
 			"status": map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}},
@@ -369,6 +373,48 @@ func (a *App) toolAssemblySourcesRefresh(ctx context.Context, app *sdk.AppCtx, a
 		app.Emit("design.assembly.sources_refreshed", map[string]any{"design_id": revision.DesignID, "revision_id": revision.ID, "updates": updates})
 	}
 	return map[string]any{"revision": revision, "updated": len(updates) > 0, "updates": updates}, nil
+}
+
+func (a *App) toolComponentDependents(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	service, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	dependents, err := service.ComponentDependents(int64Arg(args, "design_id"))
+	if err != nil {
+		return nil, err
+	}
+	stale := 0
+	for _, dependent := range dependents {
+		if dependent.Stale {
+			stale++
+		}
+	}
+	return map[string]any{"dependents": dependents, "stale_count": stale}, nil
+}
+
+func (a *App) toolComponentSourcesRefreshAll(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	service, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	transitive := true
+	if value, ok := args["transitive"].(bool); ok {
+		transitive = value
+	}
+	sourceID := int64Arg(args, "design_id")
+	results, err := service.RefreshAllComponentDependents(sourceID, transitive, stringArg(args, "note"), callerName(ctx))
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{"refreshed": 0, "up_to_date": 0, "failed": 0}
+	for _, result := range results {
+		counts[result.Status]++
+		if result.Status == "refreshed" {
+			app.Emit("design.assembly.sources_refreshed", map[string]any{"design_id": result.DesignID, "revision_id": result.RevisionID, "updates": result.Updates})
+		}
+	}
+	return map[string]any{"source_design_id": sourceID, "results": results, "counts": counts}, nil
 }
 
 func (a *App) toolDesignList(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

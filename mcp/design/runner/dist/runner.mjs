@@ -62,6 +62,238 @@ function meshFor(shape, resolveVector, resolveNumber, rotatePoint) {
   return mesh;
 }
 
+// src/expressions.mjs
+function fail(message) {
+  throw new Error(message);
+}
+function finite(value, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number))
+    fail(`${label} must resolve to a finite number`);
+  return number;
+}
+var DEG = Math.PI / 180;
+var FUNCTIONS = {
+  min: { min: 1, fn: (...a) => Math.min(...a) },
+  max: { min: 1, fn: (...a) => Math.max(...a) },
+  abs: { min: 1, max: 1, fn: Math.abs },
+  floor: { min: 1, max: 1, fn: Math.floor },
+  ceil: { min: 1, max: 1, fn: Math.ceil },
+  round: { min: 1, max: 2, fn: (x, step) => step === undefined ? Math.round(x) : step === 0 ? fail("round step must not be 0") : Math.round(x / step) * step },
+  sqrt: { min: 1, max: 1, fn: (x) => x < 0 ? fail("sqrt of a negative number") : Math.sqrt(x) },
+  pow: { min: 2, max: 2, fn: Math.pow },
+  clamp: { min: 3, max: 3, fn: (x, lo, hi) => Math.min(Math.max(x, lo), hi) },
+  sin: { min: 1, max: 1, fn: (x) => Math.sin(x * DEG) },
+  cos: { min: 1, max: 1, fn: (x) => Math.cos(x * DEG) },
+  tan: { min: 1, max: 1, fn: (x) => Math.tan(x * DEG) },
+  asin: { min: 1, max: 1, fn: (x) => Math.asin(x) / DEG },
+  acos: { min: 1, max: 1, fn: (x) => Math.acos(x) / DEG },
+  atan: { min: 1, max: 1, fn: (x) => Math.atan(x) / DEG },
+  atan2: { min: 2, max: 2, fn: (y, x) => Math.atan2(y, x) / DEG },
+  hypot: { min: 1, fn: (...a) => Math.hypot(...a) }
+};
+var KEYWORDS = new Set(["and", "or", "not", "true", "false", "pi"]);
+
+class ExpressionParser {
+  constructor(source, params) {
+    this.source = source;
+    this.params = params;
+    this.index = 0;
+  }
+  parse() {
+    if (this.source.length > 2000)
+      fail("expression is longer than 2000 characters");
+    const result = this.ternary();
+    this.space();
+    if (this.index !== this.source.length) {
+      fail(`unexpected token in expression ${JSON.stringify(this.source)} at ${this.index}`);
+    }
+    return finite(result, `expression ${JSON.stringify(this.source)}`);
+  }
+  ternary() {
+    const condition = this.or();
+    this.space();
+    if (!this.take("?"))
+      return condition;
+    const yes = this.ternary();
+    this.space();
+    if (!this.take(":"))
+      fail(`missing ':' in expression ${JSON.stringify(this.source)}`);
+    const no = this.ternary();
+    return condition !== 0 ? yes : no;
+  }
+  or() {
+    let value = this.and();
+    for (;; ) {
+      this.space();
+      if (this.take("||") || this.word("or")) {
+        const right = this.and();
+        value = value !== 0 || right !== 0 ? 1 : 0;
+      } else
+        return value;
+    }
+  }
+  and() {
+    let value = this.not();
+    for (;; ) {
+      this.space();
+      if (this.take("&&") || this.word("and")) {
+        const right = this.not();
+        value = value !== 0 && right !== 0 ? 1 : 0;
+      } else
+        return value;
+    }
+  }
+  not() {
+    this.space();
+    if (this.word("not") || this.source[this.index] === "!" && this.source[this.index + 1] !== "=" && this.take("!"))
+      return this.not() === 0 ? 1 : 0;
+    return this.comparison();
+  }
+  comparison() {
+    const left = this.expression();
+    this.space();
+    for (const op of ["<=", ">=", "==", "!=", "<", ">"]) {
+      if (this.take(op)) {
+        const right = this.expression();
+        const eps = 0.000000001;
+        switch (op) {
+          case "<=":
+            return left <= right + eps ? 1 : 0;
+          case ">=":
+            return left >= right - eps ? 1 : 0;
+          case "==":
+            return Math.abs(left - right) <= eps ? 1 : 0;
+          case "!=":
+            return Math.abs(left - right) > eps ? 1 : 0;
+          case "<":
+            return left < right - eps ? 1 : 0;
+          case ">":
+            return left > right + eps ? 1 : 0;
+        }
+      }
+    }
+    return left;
+  }
+  expression() {
+    let value = this.term();
+    for (;; ) {
+      this.space();
+      if (this.take("+"))
+        value += this.term();
+      else if (this.take("-"))
+        value -= this.term();
+      else
+        return value;
+    }
+  }
+  term() {
+    let value = this.unary();
+    for (;; ) {
+      this.space();
+      if (this.take("*"))
+        value *= this.unary();
+      else if (this.take("/")) {
+        const divisor = this.unary();
+        if (divisor === 0)
+          fail(`division by zero in expression ${JSON.stringify(this.source)}`);
+        value /= divisor;
+      } else if (this.take("%")) {
+        const divisor = this.unary();
+        if (divisor === 0)
+          fail(`modulo by zero in expression ${JSON.stringify(this.source)}`);
+        value = value - divisor * Math.floor(value / divisor);
+      } else
+        return value;
+    }
+  }
+  unary() {
+    this.space();
+    if (this.take("+"))
+      return this.unary();
+    if (this.take("-"))
+      return -this.unary();
+    return this.primary();
+  }
+  primary() {
+    this.space();
+    if (this.take("(")) {
+      const value = this.ternary();
+      this.space();
+      if (!this.take(")"))
+        fail(`missing ')' in expression ${JSON.stringify(this.source)}`);
+      return value;
+    }
+    const number = this.match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
+    if (number)
+      return Number(number);
+    const identifier = this.match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (identifier) {
+      this.space();
+      if (this.source[this.index] === "(") {
+        const fn = Object.hasOwn(FUNCTIONS, identifier) ? FUNCTIONS[identifier] : null;
+        if (!fn)
+          fail(`unknown function ${identifier} in expression ${JSON.stringify(this.source)}`);
+        this.take("(");
+        const args = [];
+        this.space();
+        if (!this.take(")")) {
+          for (;; ) {
+            args.push(this.ternary());
+            this.space();
+            if (this.take(")"))
+              break;
+            if (!this.take(","))
+              fail(`expected ',' or ')' in call to ${identifier}`);
+          }
+        }
+        if (args.length < fn.min || fn.max !== undefined && args.length > fn.max) {
+          fail(`${identifier} takes ${fn.max === fn.min ? fn.min : `${fn.min}${fn.max ? `-${fn.max}` : "+"}`} argument(s), got ${args.length}`);
+        }
+        return fn.fn(...args);
+      }
+      if (identifier === "true")
+        return 1;
+      if (identifier === "false")
+        return 0;
+      if (identifier === "pi")
+        return Math.PI;
+      if (KEYWORDS.has(identifier))
+        fail(`unexpected keyword ${identifier} in expression ${JSON.stringify(this.source)}`);
+      if (!Object.hasOwn(this.params, identifier))
+        fail(`unknown parameter ${identifier}`);
+      return finite(this.params[identifier], `parameter ${identifier}`);
+    }
+    fail(`expected number, parameter, function, or '(' in expression ${JSON.stringify(this.source)} at ${this.index}`);
+  }
+  word(value) {
+    if (!this.source.startsWith(value, this.index))
+      return false;
+    const next = this.source[this.index + value.length] || "";
+    if (/[A-Za-z0-9_]/.test(next))
+      return false;
+    this.index += value.length;
+    return true;
+  }
+  match(pattern) {
+    const found = this.source.slice(this.index).match(pattern);
+    if (!found)
+      return "";
+    this.index += found[0].length;
+    return found[0];
+  }
+  take(value) {
+    if (!this.source.startsWith(value, this.index))
+      return false;
+    this.index += value.length;
+    return true;
+  }
+  space() {
+    while (/\s/.test(this.source[this.index] || ""))
+      this.index += 1;
+  }
+}
+
 // node_modules/replicad/dist/replicad.js
 var OC = {
   library: null
@@ -5858,15 +6090,15 @@ Path.prototype.toDOMElement = function(decimalPlaces) {
   newPath.setAttribute("d", temporaryPath);
   return newPath;
 };
-function fail(message) {
+function fail2(message) {
   throw new Error(message);
 }
 function argument(predicate, message) {
   if (!predicate) {
-    fail(message);
+    fail2(message);
   }
 }
-var check = { fail, argument, assert: argument };
+var check = { fail: fail2, argument, assert: argument };
 var LIMIT16 = 32768;
 var LIMIT32 = 2147483648;
 var decode = {};
@@ -16462,7 +16694,7 @@ function loadAsset(asset, componentID) {
   if (!shapes.length)
     throw new Error("Imported component ID not found");
   const combined = makeCompound(shapes.map((c) => c.shape.clone()));
-  if (!componentID && asset.metadata.engine_version === "replicad-0.23.1-ocjs-0.23.0-ds0.5")
+  if (!componentID && String(asset.metadata.engine_version || "").startsWith("replicad-0.23.1-ocjs-0.23.0-"))
     rememberGeometry(combined, asset.metadata.geometry);
   return { shape: combined, visuals: shapes };
 }
@@ -16861,7 +17093,7 @@ function analyzePrint(instance, c) {
 }
 
 // node_modules/replicad-opencascadejs/src/replicad_single.js
-var __dirname = "/Users/marcoschwartz/Documents/code/.codex-worktrees/design-v050/mcp/design/runner/node_modules/replicad-opencascadejs/src", __filename = "/Users/marcoschwartz/Documents/code/.codex-worktrees/design-v050/mcp/design/runner/node_modules/replicad-opencascadejs/src/replicad_single.js";
+var __dirname = "/Users/marcoschwartz/Documents/code/.worktrees/design-fabrication/mcp/design/runner/node_modules/replicad-opencascadejs/src", __filename = "/Users/marcoschwartz/Documents/code/.worktrees/design-fabrication/mcp/design/runner/node_modules/replicad-opencascadejs/src/replicad_single.js";
 var Module = (() => {
   var _scriptDir = typeof document !== "undefined" && document.currentScript ? document.currentScript.src : undefined;
   if (typeof __filename !== "undefined")
@@ -19331,9 +19563,9 @@ var Module = (() => {
         var db = openRequest.result;
         var transaction = db.transaction([FS.DB_STORE_NAME], "readwrite");
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail2 = 0, total = paths.length;
+        var ok = 0, fail3 = 0, total = paths.length;
         function finish() {
-          if (fail2 == 0)
+          if (fail3 == 0)
             onload();
           else
             onerror();
@@ -19342,12 +19574,12 @@ var Module = (() => {
           var putRequest = files.put(FS.analyzePath(path).object.contents, path);
           putRequest.onsuccess = () => {
             ok++;
-            if (ok + fail2 == total)
+            if (ok + fail3 == total)
               finish();
           };
           putRequest.onerror = () => {
-            fail2++;
-            if (ok + fail2 == total)
+            fail3++;
+            if (ok + fail3 == total)
               finish();
           };
         });
@@ -19373,9 +19605,9 @@ var Module = (() => {
           return;
         }
         var files = transaction.objectStore(FS.DB_STORE_NAME);
-        var ok = 0, fail2 = 0, total = paths.length;
+        var ok = 0, fail3 = 0, total = paths.length;
         function finish() {
-          if (fail2 == 0)
+          if (fail3 == 0)
             onload();
           else
             onerror();
@@ -19388,12 +19620,12 @@ var Module = (() => {
             }
             FS.createDataFile(PATH.dirname(path), PATH.basename(path), getRequest.result, true, true, true);
             ok++;
-            if (ok + fail2 == total)
+            if (ok + fail3 == total)
               finish();
           };
           getRequest.onerror = () => {
-            fail2++;
-            if (ok + fail2 == total)
+            fail3++;
+            if (ok + fail3 == total)
               finish();
           };
         });
@@ -22073,118 +22305,32 @@ import { mkdir } from "fs/promises";
 import { dirname, join } from "path";
 var SCHEMA = "apteva-design/v1";
 var importedGeometry = new WeakSet;
-var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.5";
-function fail2(message, details = undefined) {
+var ENGINE_VERSION = "replicad-0.23.1-ocjs-0.23.0-ds0.7";
+function fail3(message, details = undefined) {
   const err = new Error(message);
   if (details !== undefined)
     err.details = details;
   throw err;
 }
-function finite(value, label) {
+function finite2(value, label) {
   const number = Number(value);
   if (!Number.isFinite(number))
-    fail2(`${label} must resolve to a finite number`);
+    fail3(`${label} must resolve to a finite number`);
   return number;
-}
-
-class ExpressionParser {
-  constructor(source, params) {
-    this.source = source;
-    this.params = params;
-    this.index = 0;
-  }
-  parse() {
-    const result = this.expression();
-    this.space();
-    if (this.index !== this.source.length) {
-      fail2(`unexpected token in expression ${JSON.stringify(this.source)} at ${this.index}`);
-    }
-    return finite(result, `expression ${JSON.stringify(this.source)}`);
-  }
-  expression() {
-    let value = this.term();
-    for (;; ) {
-      this.space();
-      if (this.take("+"))
-        value += this.term();
-      else if (this.take("-"))
-        value -= this.term();
-      else
-        return value;
-    }
-  }
-  term() {
-    let value = this.unary();
-    for (;; ) {
-      this.space();
-      if (this.take("*"))
-        value *= this.unary();
-      else if (this.take("/")) {
-        const divisor = this.unary();
-        if (divisor === 0)
-          fail2(`division by zero in expression ${JSON.stringify(this.source)}`);
-        value /= divisor;
-      } else
-        return value;
-    }
-  }
-  unary() {
-    this.space();
-    if (this.take("+"))
-      return this.unary();
-    if (this.take("-"))
-      return -this.unary();
-    return this.primary();
-  }
-  primary() {
-    this.space();
-    if (this.take("(")) {
-      const value = this.expression();
-      this.space();
-      if (!this.take(")"))
-        fail2(`missing ')' in expression ${JSON.stringify(this.source)}`);
-      return value;
-    }
-    const number = this.match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
-    if (number)
-      return Number(number);
-    const identifier = this.match(/^[A-Za-z_][A-Za-z0-9_]*/);
-    if (identifier) {
-      if (!Object.hasOwn(this.params, identifier))
-        fail2(`unknown parameter ${identifier}`);
-      return finite(this.params[identifier], `parameter ${identifier}`);
-    }
-    fail2(`expected number, parameter, or '(' in expression ${JSON.stringify(this.source)} at ${this.index}`);
-  }
-  match(pattern) {
-    const found = this.source.slice(this.index).match(pattern);
-    if (!found)
-      return "";
-    this.index += found[0].length;
-    return found[0];
-  }
-  take(value) {
-    if (!this.source.startsWith(value, this.index))
-      return false;
-    this.index += value.length;
-    return true;
-  }
-  space() {
-    while (/\s/.test(this.source[this.index] || ""))
-      this.index += 1;
-  }
 }
 function resolve(value, params, label = "value") {
   if (typeof value === "number")
-    return finite(value, label);
+    return finite2(value, label);
+  if (typeof value === "boolean")
+    return value ? 1 : 0;
   if (typeof value === "string")
     return new ExpressionParser(value, params).parse();
-  fail2(`${label} must be a number or arithmetic parameter expression`);
+  fail3(`${label} must be a number or parameter expression`);
 }
 function vector(value, params, label, fallback = [0, 0, 0]) {
   const source = value ?? fallback;
   if (!Array.isArray(source) || source.length !== 3)
-    fail2(`${label} must contain three values`);
+    fail3(`${label} must contain three values`);
   return source.map((part, index) => resolve(part, params, `${label}[${index}]`));
 }
 function parameterValues(definition, supplied) {
@@ -22193,33 +22339,43 @@ function parameterValues(definition, supplied) {
     const profile = (definition.print_profiles || []).find((p) => p.id === definition.fit_profile_id);
     const fitValue = spec.fit ? profile?.fits_mm?.[spec.fit] : undefined;
     const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : fitValue ?? spec.default;
-    const value = finite(candidate, `parameter ${name}`);
-    if (spec.min !== undefined && value < finite(spec.min, `${name}.min`)) {
-      fail2(`parameter ${name} is below its minimum`);
+    const value = typeof candidate === "boolean" ? candidate ? 1 : 0 : finite2(candidate, `parameter ${name}`);
+    if (spec.type === "boolean" && value !== 0 && value !== 1)
+      fail3(`parameter ${name} must be true/false (1/0)`);
+    if (spec.type === "integer" && !Number.isInteger(value))
+      fail3(`parameter ${name} must be an integer`);
+    if (Array.isArray(spec.options) && spec.options.length && !spec.options.some((option) => Math.abs(Number(option) - value) <= 0.000000001)) {
+      fail3(`parameter ${name} must be one of ${spec.options.join(", ")}`);
     }
-    if (spec.max !== undefined && value > finite(spec.max, `${name}.max`)) {
-      fail2(`parameter ${name} is above its maximum`);
+    if (spec.min !== undefined && value < finite2(spec.min, `${name}.min`)) {
+      fail3(`parameter ${name} is below its minimum`);
+    }
+    if (spec.max !== undefined && value > finite2(spec.max, `${name}.max`)) {
+      fail3(`parameter ${name} is above its maximum`);
     }
     output[name] = value;
   }
   for (const name of Object.keys(supplied || {})) {
     if (!Object.hasOwn(output, name))
-      fail2(`unknown parameter ${name}`);
+      fail3(`unknown parameter ${name}`);
   }
   return output;
 }
+var SKIPPED = Symbol("skipped");
 function shapeFor(id, shapes) {
   const shape = shapes.get(id);
+  if (shape === SKIPPED)
+    fail3(`operation references ${id}, which is skipped because its when condition is false`);
   if (!shape)
-    fail2(`operation references unknown shape ${id}`);
+    fail3(`operation references unknown shape ${id}`);
   return shape;
 }
 function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) {
   if (!Array.isArray(points) || points.length < 3)
-    fail2(`${label} needs at least three [x,y] points`);
+    fail3(`${label} needs at least three [x,y] points`);
   const resolved = points.map((point, index) => {
     if (!Array.isArray(point) || point.length !== 2)
-      fail2(`${label}[${index}] must be [x,y]`);
+      fail3(`${label}[${index}] must be [x,y]`);
     return [resolve(point[0], params), resolve(point[1], params)];
   });
   let pen = draw(resolved[0]);
@@ -22227,15 +22383,43 @@ function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) 
     pen = pen.lineTo(point);
   return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
 }
-function buildOperation(operation, shapes, params, assets, importedVisuals) {
+function activeIds(ids, shapes) {
+  return ids.filter((id) => shapes.get(id) !== SKIPPED);
+}
+function componentParameters(component, params, label) {
+  const merged = { ...component.parameters || {} };
+  for (const [name, expression] of Object.entries(component.parameter_expressions || {})) {
+    merged[name] = resolve(expression, params, `${label}.parameters.${name}`);
+  }
+  return merged;
+}
+function buildComponentShape(component, params, label) {
+  const child = buildDefinitionGeometry(component.definition, componentParameters(component, params, label));
+  const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
+  if (!selected)
+    fail3(`${label} source part ${component.source_part_id} has no geometry`);
+  const shape = selected.clone();
+  if (importedGeometry.has(selected))
+    importedGeometry.add(shape);
+  inheritCache(selected, shape);
+  return { child, selected: shape };
+}
+function buildOperation(operation, shapes, params, assets, importedVisuals, components = {}) {
   if (!operation || typeof operation !== "object")
-    fail2("every operation must be an object");
+    fail3("every operation must be an object");
   if (!operation.id || typeof operation.id !== "string")
-    fail2("every operation requires a string id");
+    fail3("every operation requires a string id");
   if (shapes.has(operation.id))
-    fail2(`duplicate operation id ${operation.id}`);
+    fail3(`duplicate operation id ${operation.id}`);
   let shape;
   switch (operation.type) {
+    case "component": {
+      const component = components?.[operation.id];
+      if (!component)
+        fail3(`component operation ${operation.id} was not resolved by Design Studio`);
+      shape = applyAssemblyTransform(buildComponentShape(component, params, operation.id).selected, operation.transform || {}, params);
+      break;
+    }
     case "import_step": {
       const loaded = loadAsset(assets?.[operation.asset_id], operation.component_id);
       importedGeometry.add(loaded.shape);
@@ -22248,7 +22432,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "swept_box": {
       const origin = vector(operation.origin, params, "swept_box.origin"), size = vector(operation.size, params, "swept_box.size"), travel = vector(operation.travel, params, "swept_box.travel");
       if (size.some((x) => x <= 0))
-        fail2("swept_box size must be positive");
+        fail3("swept_box size must be positive");
       const min = origin.map((x, k) => Math.min(x, x + travel[k])), max = origin.map((x, k) => Math.max(x + size[k], x + size[k] + travel[k]));
       shape = makeBox(min, max);
       break;
@@ -22256,7 +22440,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "box": {
       const [width, depth, height] = vector(operation.size, params, `${operation.id}.size`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail2(`${operation.id}.size must be positive`);
+        fail3(`${operation.id}.size must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = makeBox([x, y, z], [x + width, y + depth, z + height]);
       break;
@@ -22265,14 +22449,14 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail2(`${operation.id} radius and height must be positive`);
+        fail3(`${operation.id} radius and height must be positive`);
       shape = makeCylinder(radius, height, vector(operation.origin, params, `${operation.id}.origin`), vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]));
       break;
     }
     case "sphere": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail2(`${operation.id}.radius must be positive`);
+        fail3(`${operation.id}.radius must be positive`);
       shape = makeSphere(radius).translate(vector(operation.center, params, `${operation.id}.center`));
       break;
     }
@@ -22281,7 +22465,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
       const depth = resolve(operation.depth, params, `${operation.id}.depth`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (width <= 0 || depth <= 0 || height <= 0)
-        fail2(`${operation.id} dimensions must be positive`);
+        fail3(`${operation.id} dimensions must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawRectangle(width, depth).translate(x + width / 2, y + depth / 2).sketchOnPlane("XY", z).extrude(height);
       break;
@@ -22290,18 +22474,18 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       const height = resolve(operation.height, params, `${operation.id}.height`);
       if (radius <= 0 || height <= 0)
-        fail2(`${operation.id} radius and height must be positive`);
+        fail3(`${operation.id} radius and height must be positive`);
       const [x, y, z] = vector(operation.origin, params, `${operation.id}.origin`);
       shape = drawCircle(radius).translate(x, y).sketchOnPlane("XY", z).extrude(height);
       break;
     }
     case "extrude_polygon": {
       if (!Array.isArray(operation.points) || operation.points.length < 3) {
-        fail2(`${operation.id}.points needs at least three [x,y] points`);
+        fail3(`${operation.id}.points needs at least three [x,y] points`);
       }
       const points = operation.points.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail2(`${operation.id}.points[${index}] must be [x,y]`);
+          fail3(`${operation.id}.points[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(points[0]);
@@ -22319,10 +22503,10 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     }
     case "sweep_circle": {
       if (!Array.isArray(operation.path) || operation.path.length < 2)
-        fail2(`${operation.id}.path needs at least two [x,y] points`);
+        fail3(`${operation.id}.path needs at least two [x,y] points`);
       const path = operation.path.map((point, index) => {
         if (!Array.isArray(point) || point.length !== 2)
-          fail2(`${operation.id}.path[${index}] must be [x,y]`);
+          fail3(`${operation.id}.path[${index}] must be [x,y]`);
         return [resolve(point[0], params), resolve(point[1], params)];
       });
       let pen = draw(path[0]);
@@ -22331,7 +22515,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
       const spine = pen.done().sketchOnPlane(operation.plane || "XY", vector(operation.origin, params, `${operation.id}.origin`));
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail2(`${operation.id}.radius must be positive`);
+        fail3(`${operation.id}.radius must be positive`);
       shape = spine.sweepSketch((profilePlane, profileOrigin) => drawCircle(radius).sketchOnPlane(profilePlane, profileOrigin));
       break;
     }
@@ -22340,10 +22524,13 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "intersect": {
       const ids = operation.inputs || [operation.base, ...operation.tools || []];
       if (!Array.isArray(ids) || ids.length < 2 || ids.some((id) => typeof id !== "string")) {
-        fail2(`${operation.id}.${operation.type} needs at least two input ids`);
+        fail3(`${operation.id}.${operation.type} needs at least two input ids`);
       }
-      shape = shapeFor(ids[0], shapes).clone();
-      for (const id of ids.slice(1)) {
+      const active = operation.type === "cut" ? [ids[0], ...activeIds(ids.slice(1), shapes)] : activeIds(ids, shapes);
+      if (active.length === 0)
+        fail3(`${operation.id}: every input is skipped by its when condition`);
+      shape = shapeFor(active[0], shapes).clone();
+      for (const id of active.slice(1)) {
         const tool = shapeFor(id, shapes).clone();
         shape = operation.type === "fuse" ? shape.fuse(tool) : operation.type === "cut" ? shape.cut(tool) : shape.intersect(tool);
       }
@@ -22352,8 +22539,11 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "compound": {
       const ids = operation.inputs;
       if (!Array.isArray(ids) || ids.length === 0)
-        fail2(`${operation.id}.inputs is required`);
-      shape = makeCompound(ids.map((id) => shapeFor(id, shapes).clone()));
+        fail3(`${operation.id}.inputs is required`);
+      const active = activeIds(ids, shapes);
+      if (active.length === 0)
+        fail3(`${operation.id}: every input is skipped by its when condition`);
+      shape = makeCompound(active.map((id) => shapeFor(id, shapes).clone()));
       break;
     }
     case "translate": {
@@ -22375,7 +22565,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "linear_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail2(`${operation.id}.count must be between 1 and 128`);
+        fail3(`${operation.id}.count must be between 1 and 128`);
       const step = vector(operation.step, params, `${operation.id}.step`);
       const copies = [];
       for (let index = 0;index < count2; index += 1) {
@@ -22391,7 +22581,7 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "circular_pattern": {
       const count2 = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
       if (count2 < 1 || count2 > 128)
-        fail2(`${operation.id}.count must be between 1 and 128`);
+        fail3(`${operation.id}.count must be between 1 and 128`);
       const totalAngle = resolve(operation.angle ?? 360, params, `${operation.id}.angle`);
       const center = vector(operation.center, params, `${operation.id}.center`);
       const direction = vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]);
@@ -22409,19 +22599,19 @@ function buildOperation(operation, shapes, params, assets, importedVisuals) {
     case "fillet": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
-        fail2(`${operation.id}.radius must be positive`);
+        fail3(`${operation.id}.radius must be positive`);
       shape = shapeFor(operation.input, shapes).clone().fillet(radius);
       break;
     }
     case "chamfer": {
       const distance = resolve(operation.distance, params, `${operation.id}.distance`);
       if (distance <= 0)
-        fail2(`${operation.id}.distance must be positive`);
+        fail3(`${operation.id}.distance must be positive`);
       shape = shapeFor(operation.input, shapes).clone().chamfer(distance);
       break;
     }
     default:
-      fail2(`unsupported operation type ${JSON.stringify(operation.type)}`);
+      fail3(`unsupported operation type ${JSON.stringify(operation.type)}`);
   }
   shapes.set(operation.id, shape);
 }
@@ -22469,7 +22659,7 @@ function rotatePoint(point, angleDegrees, center, axis) {
   const radians = angleDegrees * Math.PI / 180;
   const length = Math.hypot(...axis);
   if (length === 0)
-    fail2("assembly rotation direction must not be zero");
+    fail3("assembly rotation direction must not be zero");
   const [ux, uy, uz] = axis.map((value) => value / length);
   const [x, y, z] = point.map((value, index) => value - center[index]);
   const cosine = Math.cos(radians), sine = Math.sin(radians), dot = ux * x + uy * y + uz * z;
@@ -22515,7 +22705,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
   let attempts = 0;
   while (pending.length) {
     if (++attempts > definition.assembly.instances.length ** 2 + 1)
-      fail2("Datum alignment dependency cycle");
+      fail3("Datum alignment dependency cycle");
     const instance = pending.shift();
     if (instance.alignment && !instances.some((i) => i.id === instance.alignment.target_instance)) {
       pending.push(instance);
@@ -22523,10 +22713,10 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     }
     const part = parts.get(instance.part_id);
     if (!part)
-      fail2(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
+      fail3(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
     const sourceShape = partShapes.get(part.id);
     if (!sourceShape)
-      fail2(`assembly part ${part.id} has no resolved geometry`);
+      fail3(`assembly part ${part.id} has no resolved geometry`);
     let resolvedTransform = instance.transform || {};
     if (instance.alignment) {
       const a = instance.alignment, target = instances.find((i) => i.id === a.target_instance);
@@ -22537,7 +22727,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
       resolvedTransform = { ...resolvedTransform, translate: old.map((v, k) => v + delta[k]) };
     }
     if (part.manufacturing?.classification === "purchased" && resolvedTransform.scale !== undefined && resolve(resolvedTransform.scale, params) !== 1)
-      fail2("Purchased components require rigid placement; normalize import units separately");
+      fail3("Purchased components require rigid placement; normalize import units separately");
     const shape = applyAssemblyTransform(sourceShape, resolvedTransform, params);
     const material = materials.get(part.material_id);
     const visuals = (partVisuals.get(part.id) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || material?.color), shape: sourceShape }]).map((visual) => ({
@@ -22561,7 +22751,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
     });
   }
   if (!instances.length)
-    fail2("assembly has no visible instances");
+    fail3("assembly has no visible instances");
   const assemblyShape = makeCompound(instances.map((item) => item.shape.clone()));
   if (instances.every((i) => importedGeometry.has(i.shape)))
     importedGeometry.add(assemblyShape);
@@ -22574,27 +22764,36 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
 }
 function validateDefinition(definition) {
   if (!definition || typeof definition !== "object")
-    fail2("definition must be an object");
+    fail3("definition must be an object");
   if (definition.schema !== SCHEMA)
-    fail2(`schema must be ${SCHEMA}`);
+    fail3(`schema must be ${SCHEMA}`);
   if ((definition.units || "mm") !== "mm")
-    fail2("v0.1 supports millimetres only");
+    fail3("v0.1 supports millimetres only");
   if (!Array.isArray(definition.operations))
-    fail2("definition.operations must be an array");
+    fail3("definition.operations must be an array");
   if (definition.operations.length === 0 && !definition.assembly?.instances?.length) {
-    fail2("definition requires operations or an assembly with instances");
+    fail3("definition requires operations or an assembly with instances");
   }
   if ((!definition.output || typeof definition.output !== "string") && !definition.assembly)
-    fail2("definition.output is required outside an assembly");
+    fail3("definition.output is required outside an assembly");
   if (definition.operations.length > 256)
-    fail2("definition exceeds the 256-operation limit");
+    fail3("definition exceeds the 256-operation limit");
 }
 function buildDefinitionGeometry(definition, supplied) {
   validateDefinition(definition);
   const params = parameterValues(definition, supplied || {});
   const shapes = new Map, importedVisuals = new Map;
-  for (const operation of definition.operations)
-    buildOperation(operation, shapes, params, definition._assets, importedVisuals);
+  for (const operation of definition.operations) {
+    if (operation && operation.when !== undefined && operation.when !== null) {
+      if (shapes.has(operation.id))
+        fail3(`duplicate operation id ${operation.id}`);
+      if (resolve(operation.when, params, `${operation.id}.when`) === 0) {
+        shapes.set(operation.id, SKIPPED);
+        continue;
+      }
+    }
+    buildOperation(operation, shapes, params, definition._assets, importedVisuals, definition._resolved_operation_components || {});
+  }
   const resolved = new Map((definition._resolved_components || []).map((component) => [component.part_id, component]));
   const partShapes = new Map;
   const partPhysical = new Map;
@@ -22604,20 +22803,13 @@ function buildDefinitionGeometry(definition, supplied) {
     if (part.source) {
       const component = resolved.get(part.id);
       if (!component)
-        fail2(`linked part ${part.id} was not resolved by Design Studio`);
-      const child = buildDefinitionGeometry(component.definition, component.parameters || {});
+        fail3(`linked part ${part.id} was not resolved by Design Studio`);
+      const { child, selected: selectedShape } = buildComponentShape(component, params, `part ${part.id}`);
       const sourcePart = component.source_part_id ? (component.definition.parts || []).find((p) => p.id === component.source_part_id) : null;
       if (sourcePart && !part.manufacturing)
         part.manufacturing = sourcePart.manufacturing;
       if (!component.source_part_id && (component.definition.parts || []).some((p) => ["purchased", "reference"].includes(p.manufacturing?.classification) || p._exclude_print))
         part._exclude_print = true;
-      const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
-      if (!selected)
-        fail2(`linked part ${part.id} source part ${component.source_part_id} has no geometry`);
-      const selectedShape = selected.clone();
-      if (importedGeometry.has(selected))
-        importedGeometry.add(selectedShape);
-      inheritCache(selected, selectedShape);
       partShapes.set(part.id, selectedShape);
       const physical2 = component.source_part_id ? child.partPhysical.get(component.source_part_id) : child.physical;
       if (physical2)
@@ -22715,7 +22907,7 @@ function printOrientation(shape, part, params) {
   if (!angles)
     return shape;
   if (angles.length !== 3)
-    fail2("manufacturing.orientation must be Euler X/Y/Z degrees");
+    fail3("manufacturing.orientation must be Euler X/Y/Z degrees");
   let out = shape.clone();
   for (let axis = 0;axis < 3; axis++) {
     const direction = [0, 0, 0];
@@ -22727,19 +22919,19 @@ function printOrientation(shape, part, params) {
 }
 async function run(request) {
   if (request.expected_engine_version && request.expected_engine_version !== ENGINE_VERSION)
-    fail2(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
+    fail3(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
   const built = buildDefinitionGeometry(request.definition, request.parameters || {});
   const { params, partShapes, assembly } = built;
   const shape = assembly.shape;
-  const tolerance = finite(request.tolerance ?? 0.1, "tolerance");
-  const angularTolerance = finite(request.angular_tolerance ?? 0.1, "angular_tolerance");
+  const tolerance = finite2(request.tolerance ?? 0.1, "tolerance");
+  const angularTolerance = finite2(request.angular_tolerance ?? 0.1, "angular_tolerance");
   const partMeshes = assembly.visuals.map((item) => {
     let visualMesh = meshFor(item.shape, vector, resolve, rotatePoint);
     if (!visualMesh) {
       try {
         visualMesh = item.shape.mesh({ tolerance, angularTolerance });
       } catch (e) {
-        fail2(`Preview failed for ${item.name}: ${String(e)}`);
+        fail3(`Preview failed for ${item.name}: ${String(e)}`);
       }
       const faces = item.shape.faces, faceIndices = new Map(faces.map((f, index) => [f.hashCode, index]));
       visualMesh.faceGroups = visualMesh.faceGroups.map((g) => ({ ...g, faceId: faceIndices.get(g.faceId) }));
@@ -22762,17 +22954,17 @@ async function run(request) {
   try {
     report = geometryReport(shape, mesh, assembly.instances);
   } catch (e) {
-    fail2(`Geometry measurements failed: ${String(e)}`);
+    fail3(`Geometry measurements failed: ${String(e)}`);
   }
   const inspection = inspect(request.definition, built, applyAssemblyTransform, exactAssemblyTransform);
   report.topology = inspection.topology;
   report.exact_checks = inspection.exact_checks;
   report.body_count = inspection.topology.reduce((s, t) => s + t.solid_count, 0);
   if (!report.valid)
-    fail2("output geometry is empty or invalid", report);
+    fail3("output geometry is empty or invalid", report);
   const outputDir = request.output_dir;
   if (!outputDir || typeof outputDir !== "string")
-    fail2("output_dir is required");
+    fail3("output_dir is required");
   await mkdir(outputDir, { recursive: true });
   const artifacts = [];
   const formats = new Set(request.formats || ["mesh-json"]);
@@ -22787,7 +22979,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail2(`part ${part.id} has no export geometry`);
+        fail3(`part ${part.id} has no export geometry`);
       const partMesh = partShape.mesh({ tolerance, angularTolerance });
       await Bun.write(partPath, JSON.stringify({ ...partMesh }));
       artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
@@ -22805,7 +22997,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail2(`part ${part.id} has no export geometry`);
+        fail3(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, exportSTEP([{ shape: partShape, name: part.name }], { unit: "MM", modelUnit: "MM" }));
       artifacts.push({ format: "step", path: partPath, content_type: "model/step", part_id: part.id, part_name: part.name });
     }
@@ -22825,7 +23017,7 @@ async function run(request) {
       const rawPartShape = partShapes.get(part.id);
       const partShape = rawPartShape && printOrientation(rawPartShape, part, params);
       if (!partShape)
-        fail2(`part ${part.id} has no export geometry`);
+        fail3(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, partShape.blobSTL({ tolerance, angularTolerance, binary: true }));
       artifacts.push({ format: "stl", path: partPath, content_type: "model/stl", part_id: part.id, part_name: part.name });
     }

@@ -33,7 +33,7 @@ export function loadAsset(asset, componentID) {
   const combined = makeCompound(shapes.map((c) => c.shape.clone()));
   if (
     !componentID &&
-    asset.metadata.engine_version === "replicad-0.23.1-ocjs-0.23.0-ds0.5"
+    String(asset.metadata.engine_version || "").startsWith("replicad-0.23.1-ocjs-0.23.0-")
   )
     rememberGeometry(combined, asset.metadata.geometry);
   return { shape: combined, visuals: shapes };

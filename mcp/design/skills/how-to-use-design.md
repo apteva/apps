@@ -42,9 +42,19 @@ Start with `design_examples`. Then:
 
 ## Geometry graph
 
-Supported primitives are `box`, `cylinder`, `sphere`, `extrude_rectangle`, `extrude_circle`, and `extrude_polygon`. Create rotational and routed solids with `revolve_profile` and `sweep_circle`. Combine geometry with `fuse`, `cut`, `intersect`, or `compound`; transform with `translate`, `rotate`, `scale`, or `mirror`; repeat with `linear_pattern` or `circular_pattern`; finish with `fillet` or `chamfer`.
+Supported primitives are `box`, `cylinder`, `sphere`, `extrude_rectangle`, `extrude_circle`, and `extrude_polygon`. Create rotational and routed solids with `revolve_profile` and `sweep_circle`. Combine geometry with `fuse`, `cut`, `intersect`, or `compound` (and bring in other designs with `component`); transform with `translate`, `rotate`, `scale`, or `mirror`; repeat with `linear_pattern` or `circular_pattern`; finish with `fillet` or `chamfer`.
 
-Numeric fields accept arithmetic parameter expressions such as `width/2`, `thickness+2`, and `(diameter+clearance)/2`. Expressions have no function calls, property access, loops, file access, or network access.
+Numeric fields accept parameter expressions such as `width/2`, `(diameter+clearance)/2`, `max(wall*2, 3)`, `clamp(width-2*margin, 10, 80)` or `has_vent and width > 40 ? 6 : 0`. Expressions support `+ - * / %`, comparisons, `and`/`or`/`not` (or `&& || !`), `cond ? a : b`, `true`/`false`/`pi`, and the functions `min`, `max`, `abs`, `round(x[, step])`, `floor`, `ceil`, `sqrt`, `pow`, `clamp`, `hypot`, and `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2` in degrees. Booleans are 1/0. There is no property access, assignment, loop, file or network access.
+
+Parameter types are `length` (default), `number`, `angle`, `integer` (whole numbers, for counts) and `boolean` (`true`/`false`). Any numeric type may list `options` (allowed values) alongside `min`/`max`.
+
+Make features optional with `when` on any operation (a boolean, number, or expression such as `"has_vent"` or `"width > 60"`). A skipped operation drops out of `fuse`, `cut` tools, `intersect` and `compound` inputs; using it any other way (as a cut base, a transform input, or an output) is an error, so the mistake is visible.
+
+## Reusable components and variants
+
+To reuse one design's geometry inside another as an ordinary shape (to cut openings into a shared base, fuse a boss onto it, or pattern it), add a `component` operation: `{"id":"body","type":"component","source":{"design_id":12,"revision_id":34,"source_sha256":"…","part_id":"optional"},"parameters":{"width":"size","depth":30},"transform":{…}}`. `parameters` overrides the source revision's values for this link only: numbers are checked against the source's min/max/options, and strings are expressions over this design's parameters. Linked assembly parts (`part.source`) accept the same `parameters`.
+
+Build variants as separate designs that each start from the shared base with a `component` operation and add their own cuts. After changing the base, call `component_dependents` to see which designs link to it and which pins are stale, then `component_sources_refresh_all` to give every linked design a new revision pinned to the base's current revision (transitively by default). Failures, such as an override now outside a changed range, are reported per design and do not stop the others; fix those and refresh again.
 
 Add checks to make requirements executable: `bounding_box`, `volume`, `surface_area`, `body_count`, `triangle_count`, or `face_count` with `min`, `max`, or `equals` as appropriate.
 
