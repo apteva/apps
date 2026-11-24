@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.31
+version: 0.9.32
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -316,7 +316,7 @@ provides:
         reason: string
         list_ids: array<integer>
     - name: conversation.message.received
-      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies. list_ids is the membership snapshot and attributed_list_ids identifies matched inbound-routing lists.
+      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies. list_ids is the membership snapshot and attributed_list_ids identifies matched inbound-routing lists. Email routing fields (lowercase, empty/false for SMS and WhatsApp) — to_address is our mailbox that actually received the message (delivery address, also when we were only in Cc or it was forwarded/aliased); to_addresses is the header To + Cc; receiving_domain is to_address's domain; from_address/from_domain identify the sender; is_reply is true when In-Reply-To/References name one of our sent emails in this conversation, with reply_to_from_address the address we sent it from (empty when not recorded); is_auto_generated marks bounces, auto-replies, DMARC reports and other machine mail, with auto_generated_reason.
       payload:
         event_id: string
         contact_id: integer
@@ -330,6 +330,15 @@ provides:
         messaging_id: integer
         list_ids: array<integer>
         attributed_list_ids: array<integer>
+        to_address: string
+        to_addresses: array<string>
+        receiving_domain: string
+        from_address: string
+        from_domain: string
+        is_reply: boolean
+        reply_to_from_address: string
+        is_auto_generated: boolean
+        auto_generated_reason: string
     - name: list.created
       description: A contact list was created.
       payload:
@@ -509,7 +518,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.31
+    ref: crm/v0.9.32
     entry: mcp/crm
   port: 8080
   health_check: /health
