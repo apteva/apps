@@ -56,6 +56,10 @@ type FunctionURLConfig struct {
 	Token          string   `json:"token,omitempty"`
 	AllowedMethods []string `json:"allowed_methods,omitempty"`
 	CORS           bool     `json:"cors,omitempty"`
+	// Stage, when set, makes the URL run that stage's version and settings
+	// (1.23.0). It is part of the URL's configuration, never chosen by the
+	// public caller.
+	Stage string `json:"stage,omitempty"`
 }
 
 // FunctionVersion is one immutable deploy of a function. Created by
@@ -955,6 +959,19 @@ func normalizeFunctionURLPatch(cur *FunctionURLConfig, raw any) (*FunctionURLCon
 				return nil, errors.New("function_url.token must be URL-safe")
 			}
 		}
+	}
+	if v, has := patch["stage"]; has {
+		s, ok := v.(string)
+		if v != nil && !ok {
+			return nil, errors.New("function_url.stage must be a string")
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			if err := validateStageName(s); err != nil {
+				return nil, fmt.Errorf("function_url.stage: %w", err)
+			}
+		}
+		next.Stage = s
 	}
 	if v, has := patch["rotate_token"]; has {
 		b, ok := v.(bool)

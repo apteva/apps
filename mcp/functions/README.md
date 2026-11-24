@@ -1,6 +1,6 @@
-# Functions 1.22.0
+# Functions 1.23.0
 
-**New in 1.22.0:** named stages. See [Stages (1.22.0)](#stages-1220).
+**New in 1.23.0:** authenticated invocations and Function URLs can run a stage. **1.22.0:** named stages. See [Stages (1.22.0)](#stages-1220).
 
 **New in 1.20.0:** snapshot restore. When an Apteva runtime is restored from a
 snapshot, the app SDK moves every `project_id` to the new runtime before
@@ -115,8 +115,13 @@ Invocation rules:
 - Each stage or pinned version runs in its own worker pool keyed by version
   and effective configuration, so different stage settings never share a
   worker. Changing or promoting a stage retires its workers. Stages are not
-  warmed proactively; their artifacts are prepared on first call. Public
-  Function URLs serve the active version.
+  warmed proactively; their artifacts are prepared on first call.
+- 1.23.0: `functions_invoke_authenticated` accepts the same `stage` /
+  `version`. Admission (invocation policy, principal `function_ids`) is by
+  function id and covers every stage of that function. Function URLs serve
+  the active version unless `function_url.stage` is set; the stage is part
+  of the URL's configuration, never chosen by the public caller. An unknown
+  stage answers 404 and a paused one 409.
 
 ## Build diagnostics in 1.10.1
 

@@ -1,4 +1,4 @@
-// Functions v1.22.0 — Lambda-style serverless functions.
+// Functions v1.23.0 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -162,7 +162,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_memory_mb":     map[string]any{"type": "integer", "description": "Memory cap (MB). Default 256."},
 				"function_url": map[string]any{
 					"type":        "object",
-					"description": "Optional public URL config: enabled, allowed_methods, cors, rotate_token/token.",
+					"description": "Optional public URL config: enabled, allowed_methods, cors, rotate_token/token, stage (run that stage's version and settings).",
 				},
 			}, []string{"name", "runtime"}),
 			HandlerCtx: a.toolCreateContext,
@@ -177,7 +177,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"timeout_ms":        map[string]any{"type": "integer"},
 				"max_memory_mb":     map[string]any{"type": "integer"},
 				"status":            map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
-				"function_url":      map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
+				"function_url":      map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token, stage (run that stage's version and settings; empty clears)."},
 				"limits":            map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, warm_workers (proactive idle target, default 0), idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
 				"invocation_policy": invocationPolicySchema(),
 				"worker_isolation":  workerIsolationSchema(),

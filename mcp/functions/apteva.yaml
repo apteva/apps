@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.22.0
+version: 1.23.0
 description: |
+  v1.23.0 Authenticated invocations (functions_invoke_authenticated) and
+  public Function URLs can run a stage: pass stage (or a pinned version) to
+  the authenticated call, or set function_url.stage. Admission stays by
+  function id and applies to every stage; unknown or paused stages are
+  refused. Without a stage nothing changes.
+
   v1.22.0 Adds named stages: one stable function with immutable versions and
   free-text stages (for example staging, production) that each point at a
   version and carry their own vars, access and limits. Promote several
@@ -154,7 +160,7 @@ provides:
       description: "Find slow completed calls across the project or for id/name. Args: window or since/until, sort (duration_ms|execution_ms|queue_ms), min_ms, status, limit, cursor. Use returned id with functions_logs for timing and downstream details."
     - name: functions_invoke_authenticated
       exposure: app_only
-      description: "Invoke with a separate principal, exact Function scope, and original deadline; restricted to configured platform-verified caller installations."
+      description: "Invoke with a separate principal, exact Function scope, and original deadline; restricted to configured platform-verified caller installations. Optional stage or version."
     - name: functions_capacity
       description: "Live per-call memory, function worker reservations, queues, settings and rejection reasons."
     - name: functions_prepare
@@ -229,7 +235,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.22.0
+    ref: functions/v1.23.0
     entry: mcp/functions
   port: 8080
   health_check: /health

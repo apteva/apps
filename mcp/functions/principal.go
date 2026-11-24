@@ -305,8 +305,10 @@ func invocationPolicySchema() map[string]any {
 	return map[string]any{"type": "object", "description": "Invocation admission policy. require_authenticated defaults false. authenticated_callers is a list of {installation_id, issuers:[exact issuer strings]}. No configured caller can supply a principal by default."}
 }
 func authenticatedInvocationTool(a *App) sdk.Tool {
-	return sdk.Tool{Name: "functions_invoke_authenticated", Exposure: sdk.ToolExposureAppOnly, Description: "Invoke with a bounded principal from a configured platform-verified installation. No session credentials. event must be an object. deadline is the original request deadline in RFC3339 format.", InputSchema: schemaObject(map[string]any{
+	return sdk.Tool{Name: "functions_invoke_authenticated", Exposure: sdk.ToolExposureAppOnly, Description: "Invoke with a bounded principal from a configured platform-verified installation. No session credentials. event must be an object. deadline is the original request deadline in RFC3339 format. Optional stage (run that stage's version with its settings; unknown or paused stages are refused) or version (pin a ready version number); admission is by function id and applies to every stage.", InputSchema: schemaObject(map[string]any{
 		"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
+		"stage":   map[string]any{"type": "string", "description": "Optional stage name; mutually exclusive with version."},
+		"version": map[string]any{"type": "integer", "description": "Optional ready version number to pin; mutually exclusive with stage."},
 		"principal": map[string]any{"type": "object", "description": "subject, issuer, project_id, function_ids (exact IDs, including nested targets), optional opaque claims"},
 		"event":     map[string]any{"type": "object"}, "deadline": map[string]any{"type": "string"}, "request_id": map[string]any{"type": "string"},
 	}, []string{"principal", "event", "deadline"}), HandlerCtx: a.toolInvokeAuthenticated}

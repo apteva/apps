@@ -526,6 +526,14 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 		httpErr(w, requestErrorStatus(readErr), readErr.Error())
 		return
 	}
+	if cfg.Stage != "" {
+		staged, err := resolveInvocationTarget(globalCtx.AppDB(), fn, cfg.Stage, 0)
+		if err != nil {
+			httpErr(w, stageHTTPStatus(err), err.Error())
+			return
+		}
+		fn = staged
+	}
 	event := buildFunctionURLEvent(r, raw, false)
 	a.runAndWriteFunctionURLResponse(globalCtx.WithProject(pid), w, r, fn, event, cfg)
 }

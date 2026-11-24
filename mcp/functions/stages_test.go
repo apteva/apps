@@ -615,3 +615,95 @@ func TestStageHTTPRoutes(t *testing.T) {
 		t.Fatalf("delete: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// 1.23.0: an authenticated invocation can name a stage or pin a version;
+// admission stays by function id; without either the active version runs.
+func TestAuthenticatedInvokeRunsStage(t *testing.T) {
+	ctx, app := stageTestApp(t)
+	fn := createFn(t, app, ctx, map[string]any{"name": "authstage", "source": envHandler("v1"), "env": map[string]any{"A": "base"}, "invocation_policy": principalPolicy()})
+	deployCode(t, app, ctx, "authstage", envHandler("v2"), false)
+	mustStageSet(t, app, ctx, map[string]any{"function": "authstage", "stage": "staging", "version": 2, "vars": map[string]any{"B": "stg"}})
+	mustStageSet(t, app, ctx, map[string]any{"function": "authstage", "stage": "production", "version": 1, "status": "paused"})
+
+	call := func(extra map[string]any) (map[string]any, error) {
+		args := principalArgs(fn)
+		for k, v := range extra {
+			args[k] = v
+		}
+		out, err := app.toolInvokeAuthenticated(trustedCaller(), ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		return out.(map[string]any), nil
+	}
+	if out, err := call(nil); err != nil || out["response"] != `"v1:base:-"` {
+		t.Fatalf("default = %v %v", out, err)
+	}
+	if out, err := call(map[string]any{"stage": "staging"}); err != nil || out["response"] != `"v2:base:stg"` {
+		t.Fatalf("staging = %v %v", out, err)
+	}
+	if out, err := call(map[string]any{"version": 2}); err != nil || out["response"] != `"v2:base:-"` {
+		t.Fatalf("version pin = %v %v", out, err)
+	}
+	if _, err := call(map[string]any{"stage": "production"}); !errors.Is(err, errStagePaused) {
+		t.Fatalf("paused stage: %v", err)
+	}
+	if _, err := call(map[string]any{"stage": "missing"}); !errors.Is(err, errStageNotFound) {
+		t.Fatalf("unknown stage: %v", err)
+	}
+	if _, err := call(map[string]any{"stage": "staging", "version": 2}); err == nil {
+		t.Fatal("stage and version accepted together")
+	}
+	// Admission is by function id: a principal scoped to another function is
+	// denied on every stage.
+	other := principalArgs(fn, fn.ID+1000)
+	other["stage"] = "staging"
+	if _, err := app.toolInvokeAuthenticated(trustedCaller(), ctx, other); !errors.Is(err, errInvocationDenied) {
+		t.Fatalf("out-of-scope principal on a stage: %v", err)
+	}
+	if got := authenticatedInvocationTool(app).InputSchema["properties"].(map[string]any); got["stage"] == nil || got["version"] == nil {
+		t.Fatalf("schema lacks stage/version: %v", got)
+	}
+}
+
+// 1.23.0: a Function URL runs its configured stage; the public caller
+// cannot pick one.
+func TestFunctionURLStage(t *testing.T) {
+	ctx, app := stageTestApp(t)
+	fn := createFn(t, app, ctx, map[string]any{"name": "urlstage", "source": envHandler("v1"), "function_url": map[string]any{"enabled": true}})
+	deployCode(t, app, ctx, "urlstage", envHandler("v2"), false)
+	mustStageSet(t, app, ctx, map[string]any{"function": "urlstage", "stage": "staging", "version": 2, "vars": map[string]any{"B": "stg"}})
+	cur, err := dbGetFunction(ctx.AppDB(), testProj, fn.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := cur.FunctionURL.Token
+	hit := func(query string) (int, string) {
+		req := httptest.NewRequest("POST", "/url/urlstage/"+token+"?project_id="+testProj+query, strings.NewReader(`{}`))
+		w := httptest.NewRecorder()
+		app.handleHTTPInvokeByFunctionURL(w, req)
+		return w.Code, strings.TrimSpace(w.Body.String())
+	}
+	if code, body := hit("&stage=staging"); code != 200 || !strings.Contains(body, "v1:-:-") {
+		t.Fatalf("query must not pick a stage: %d %s", code, body)
+	}
+	if _, err := app.toolUpdate(ctx, map[string]any{"id": fn.ID, "function_url": map[string]any{"stage": "staging"}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := hit(""); code != 200 || !strings.Contains(body, "v2:-:stg") {
+		t.Fatalf("configured stage: %d %s", code, body)
+	}
+	mustStageSet(t, app, ctx, map[string]any{"function": "urlstage", "stage": "staging", "status": "paused"})
+	if code, _ := hit(""); code != http.StatusConflict {
+		t.Fatalf("paused stage over URL: %d", code)
+	}
+	if _, err := app.toolUpdate(ctx, map[string]any{"id": fn.ID, "function_url": map[string]any{"stage": "Bad_Name"}}); err == nil {
+		t.Fatal("invalid url stage accepted")
+	}
+	if _, err := app.toolUpdate(ctx, map[string]any{"id": fn.ID, "function_url": map[string]any{"stage": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := hit(""); code != 200 || !strings.Contains(body, "v1:-:-") {
+		t.Fatalf("cleared stage: %d %s", code, body)
+	}
+}
