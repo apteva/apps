@@ -24,6 +24,8 @@ type overviewStep struct {
 	Progress    int      `json:"progress"`
 	UpdatedAt   string   `json:"updated_at"`
 	Warning     string   `json:"warning,omitempty"`
+	ThreadID    string   `json:"thread_id,omitempty"`
+	ExecutionID string   `json:"execution_id,omitempty"`
 }
 type overviewItem struct {
 	ID             string         `json:"id"`
@@ -47,6 +49,9 @@ type overviewItem struct {
 	Steps          []overviewStep `json:"steps"`
 	StepsTotal     int            `json:"steps_total"`
 	StepsCompleted int            `json:"steps_completed"`
+	ThreadID       string         `json:"thread_id,omitempty"`
+	ExecutionID    string         `json:"execution_id,omitempty"`
+	Summary        string         `json:"summary,omitempty"`
 }
 type overviewCounts struct {
 	Active    int `json:"active"`
@@ -343,7 +348,12 @@ func (a *App) overviewSteps(x *overviewItem) error {
 	if e := a.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN state='completed' THEN 1 ELSE 0 END),0) FROM process_step_runs WHERE run_id=?`, x.ID).Scan(&x.StepsTotal, &x.StepsCompleted); e != nil {
 		return e
 	}
-	rows, e := a.db.Query(`SELECT id,COALESCE(json_extract(definition_json,'$.name'),''),state,origin,executor_json,progress,updated_at,substr(delivery_warning,1,500),start_at,due_at,completed_at FROM process_step_runs WHERE run_id=? ORDER BY position,id LIMIT 60`, x.ID)
+	// The worker thread and execution let the widget follow live activity;
+	// the latest agent-written summary (up to 600 characters) is its outcome.
+	if e := a.db.QueryRow(`SELECT target_thread_id,execution_id,COALESCE((SELECT CASE WHEN length(t)>600 THEN substr(t,1,600)||'…' ELSE t END FROM (SELECT COALESCE(NULLIF(json_extract(body_json,'$.outcome'),''),json_extract(body_json,'$.blocker'),'') t FROM process_run_summaries WHERE run_id=r.id ORDER BY revision DESC LIMIT 1)),'') FROM process_runs r WHERE id=?`, x.ID).Scan(&x.ThreadID, &x.ExecutionID, &x.Summary); e != nil {
+		return e
+	}
+	rows, e := a.db.Query(`SELECT id,COALESCE(json_extract(definition_json,'$.name'),''),state,origin,executor_json,progress,updated_at,substr(delivery_warning,1,500),start_at,due_at,completed_at,target_thread_id,execution_id FROM process_step_runs WHERE run_id=? ORDER BY position,id LIMIT 60`, x.ID)
 	if e != nil {
 		return e
 	}
@@ -351,7 +361,7 @@ func (a *App) overviewSteps(x *overviewItem) error {
 	for rows.Next() {
 		var s overviewStep
 		var executor string
-		if e = rows.Scan(&s.ID, &s.Name, &s.State, &s.Origin, &executor, &s.Progress, &s.UpdatedAt, &s.Warning, &s.StartAt, &s.DueAt, &s.CompletedAt); e != nil {
+		if e = rows.Scan(&s.ID, &s.Name, &s.State, &s.Origin, &executor, &s.Progress, &s.UpdatedAt, &s.Warning, &s.StartAt, &s.DueAt, &s.CompletedAt, &s.ThreadID, &s.ExecutionID); e != nil {
 			return e
 		}
 		if e = json.Unmarshal([]byte(executor), &s.Executor); e != nil {

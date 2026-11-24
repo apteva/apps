@@ -2,6 +2,13 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Dashboard widget redesign (0.22.0)
+
+Run details open in a modal above the dashboard with the run summary,
+progress, steps and each step's live thoughts and tool calls; running rows
+show a live line and progress bar. The overview API adds worker thread IDs and
+the run summary. See `docs-release-0.22.0.md`.
+
 ## Trigger ranking without a query (0.21.1)
 
 Procedure text only counts words that name an app or event subject, so

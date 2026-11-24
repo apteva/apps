@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	"net/http"
@@ -282,5 +283,29 @@ func TestOverviewDoesNotLetBlockedRunsHideRunningWork(t *testing.T) {
 	}
 	if len(out.Active) != 12 || out.Active[0].ID != r.ID {
 		t.Fatalf("live work hidden by blocked history: %+v", out.Active)
+	}
+}
+
+func TestOverviewCarriesWorkerThreadAndRunSummary(t *testing.T) {
+	a, _, p, r := workflowSetup(t)
+	research := stepBy(t, a, r, "research")
+	if _, e := a.db.Exec(`UPDATE process_step_runs SET execution_id='exe-research' WHERE id=?`, research.ID); e != nil {
+		t.Fatal(e)
+	}
+	args := map[string]any{"process_id": p.ID, "run_id": r.ID, "step_id": research.ID, "expected_revision": float64(0), "idempotency_key": "s1", "summary": map[string]any{"outcome": strings.Repeat("o", 700)}}
+	if _, e := a.executeMCP(p.ProjectID, fmt.Sprintf("agent:%d:%s", research.Executor.AgentID, research.ThreadID), "summary_update", args); e != nil {
+		t.Fatal(e)
+	}
+	out, e := a.overview("project-a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	run := out.Active[0]
+	if run.Summary != strings.Repeat("o", 600)+"…" {
+		t.Fatalf("summary not clipped to 600 with an ellipsis: %d", len(run.Summary))
+	}
+	s := run.Steps[0]
+	if s.ThreadID != research.ThreadID || s.ThreadID == "" || s.ExecutionID != "exe-research" {
+		t.Fatalf("step worker identity missing: %+v", s)
 	}
 }

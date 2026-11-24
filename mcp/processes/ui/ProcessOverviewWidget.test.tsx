@@ -58,23 +58,23 @@ test("overview shows simultaneous steps, names, schedules and scoped links; refr
     ),
   ).toBe(true);
   expect(el.querySelectorAll(".po-row").length).toBe(3);
-  expect(el.querySelector(".po-detail")).toBeNull();
+  expect(document.querySelector(".po-detail")).toBeNull();
   expect(el.querySelector("progress")).toBeNull();
   expect(el.querySelector(".po-stats")).toBeNull();
   await act(async () =>
     el.querySelector<HTMLButtonElement>(".po-row")!.click(),
   );
-  expect(el.querySelector(".po-detail")!.textContent).toContain(
+  expect(document.querySelector(".po-detail")!.textContent).toContain(
     "Weather agent",
   );
-  expect(el.querySelector(".po-detail")!.textContent).toContain(
+  expect(document.querySelector(".po-detail")!.textContent).toContain(
     "Send notification",
   );
-  expect(el.querySelector(".po-detail")!.textContent).toContain(
+  expect(document.querySelector(".po-detail")!.textContent).toContain(
     "1/3 steps complete",
   );
   expect(
-    el.querySelector('a[href*="run_id=weather-run"]')?.getAttribute("href"),
+    document.querySelector('a[href*="run_id=weather-run"]')?.getAttribute("href"),
   ).toContain(
     "/apps/processes/page?project_id=project-a&install_id=77&process_id=weather&run_id=weather-run",
   );
@@ -87,7 +87,7 @@ test("overview shows simultaneous steps, names, schedules and scoped links; refr
   data.active[0].steps_completed = 2;
   await render(2);
   expect(el.querySelector('[role="alert"]')).toBeNull();
-  expect(el.querySelector(".po-detail")!.textContent).toContain(
+  expect(document.querySelector(".po-detail")!.textContent).toContain(
     "2/3 steps complete",
   );
   await act(async () =>
@@ -97,7 +97,7 @@ test("overview shows simultaneous steps, names, schedules and scoped links; refr
   );
   expect(el.querySelectorAll(".po-row").length).toBe(1);
   expect(el.querySelector(".po-row")!.textContent).toContain("Hourly forecast");
-  expect(el.querySelector(".po-detail")).toBeNull();
+  expect(document.querySelector(".po-detail")).toBeNull();
   expect(reads.filter((u) => u.startsWith("/api/agents")).length).toBe(1);
 });
 test("run links stay in Processes and assignment links target assignments", () => {
@@ -249,4 +249,45 @@ test("timed executions appear with schedules and retain a run link", () => {
   expect(entry.assignment).toBe(false);
   expect(executionStatus(entry).label).toContain("Starts in 10 min");
   expect(overviewLink({ projectId: "project-a" }, entry.item)).toContain("run_id=");
+});
+test("running rows show live activity; details open in a modal with the step's activity; finished rows show the summary", async () => {
+  const data = structuredClone(overviewFixture) as any;
+  const step = data.active[0].steps[1];
+  Object.assign(step, { thread_id: "worker-2", execution_id: "exe-2" });
+  data.recent[0].summary = "Sent the forecast to 3 subscribers.";
+  const telemetry = [
+    { id: "t1", thread_id: "worker-2", type: "llm.thinking", time: "2026-09-13T17:00:01Z", data: { execution_id: "exe-2", iteration: 1, text: "Checking the conversation first." } },
+    { id: "t2", thread_id: "worker-2", type: "llm.done", time: "2026-09-13T17:00:02Z", data: { execution_id: "exe-2", iteration: 1 } },
+    { id: "t3", thread_id: "worker-2", type: "tool.call", time: "2026-09-13T17:00:03Z", data: { execution_id: "exe-2", id: "c1", name: "conversations_post", reason: "Post the forecast" } },
+  ];
+  const reads: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    reads.push(url);
+    if (url.startsWith("/api/agents")) return Response.json([{ id: 7, name: "Weather agent" }]);
+    if (url.startsWith("/api/telemetry")) return Response.json(telemetry);
+    return Response.json(data);
+  }) as typeof fetch;
+  const el = document.createElement("div");
+  document.body.append(el);
+  root = createRoot(el);
+  await act(async () => root.render(<Widget projectId="project-a" installId={77} />));
+  await act(async () => new Promise((r) => setTimeout(r, 20)));
+  expect(reads.some((u) => u.includes("/api/telemetry?") && u.includes("thread_id=worker-2"))).toBe(true);
+  const row = el.querySelector<HTMLButtonElement>('.po-row[data-state="running"]')!;
+  expect(row.querySelector(".po-live")!.textContent).toContain("Running conversations post · Post the forecast");
+  expect(row.querySelector('[role="progressbar"]')!.getAttribute("aria-valuenow")).toBe("1");
+  expect(el.querySelector('.po-row[data-state="completed"]')!.textContent).toContain("Sent the forecast to 3 subscribers.");
+  await act(async () => row.click());
+  await act(async () => new Promise((r) => setTimeout(r, 20)));
+  const dialog = document.querySelector('[role="dialog"]')!;
+  expect(el.contains(dialog)).toBe(false);
+  expect(dialog.querySelector('[aria-pressed="true"]')!.textContent).toContain("Post conversation");
+  const feed = dialog.querySelector(".po-feed")!.textContent!;
+  expect(feed).toContain("Thought");
+  expect(feed).toContain("Checking the conversation first.");
+  expect(feed).toContain("conversations post");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Close details");
+  await act(async () => document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }) as any));
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
 });
