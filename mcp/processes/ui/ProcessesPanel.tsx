@@ -980,6 +980,7 @@ function Panel(props: Props) {
             </div>
           </div>
           <ProjectAssignments
+            sources={toolSources}
             api={(path) => api(path)}
             live={liveEvents}
             ownerName={ownerName}

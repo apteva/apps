@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { assignmentAgentIDs, type Assignment } from "./Assignments";
 import type { LiveSnapshot } from "./live-events";
 import { useScopedRevision } from "./live-events";
+import { SourceIcon, type ToolSource } from "./ExecutionTools";
 
 export type ProjectAssignment = Assignment & {
   process_name: string;
@@ -38,11 +39,19 @@ type Props = {
   onRuns: (assignment: ProjectAssignment) => void;
   onRun: (assignment: ProjectAssignment, runID: string) => void;
   onProcess: (assignment: ProjectAssignment) => void;
+  sources?: ToolSource[];
+};
+
+/** "conversation.message.received" → "Conversation message received". */
+export const eventTitle = (topic: string) => {
+  const words = topic.replace(/\.\*$/, "").split(/[._-]+/).filter(Boolean).join(" ");
+  const title = words.charAt(0).toUpperCase() + words.slice(1);
+  return topic.endsWith(".*") ? `Any ${title.toLowerCase()} event` : title;
 };
 
 // Every assignment in the project, with its run activity. Assignment and run
 // events from the app bus refresh the list in place.
-export default function ProjectAssignments({ api, live, ownerName, cadence, date, onRuns, onRun, onProcess }: Props) {
+export default function ProjectAssignments({ api, live, ownerName, cadence, date, onRuns, onRun, onProcess, sources = [] }: Props) {
   const [items, setItems] = useState<ProjectAssignment[] | null>(null);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -128,10 +137,16 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
                     )}
                     {liveTriggers(x).map((t) => {
                       const issue = t.sync_error ? "Sync error" : t.status !== "active" ? t.status : !t.subscription_enabled ? "Not listening" : "";
+                      const source = sources.find((s) => s.key === `app:${t.source_install_id}`);
+                      const app = source?.label || `App #${t.source_install_id}`;
                       return (
-                        <div className="start-line" key={t.id} title={`${t.topic}${t.sync_error ? `\n${t.sync_error}` : ""}`}>
-                          <span className="start-kind">On event</span> {t.name || t.topic}
-                          <div className="sub">{t.topic}{issue && <> · <span className="start-issue">{issue}</span></>}</div>
+                        <div className="start-line start-event" key={t.id} title={[`${app} · ${t.topic}`, t.name, t.sync_error].filter(Boolean).join("\n")}>
+                          <SourceIcon source={source} />
+                          <div className="start-copy">
+                            <div className="start-head"><span className="start-app">{app}</span><span className="start-event-title">{eventTitle(t.topic)}</span></div>
+                            {t.name && <div className="sub">{t.name}</div>}
+                            {issue && <div className="sub start-issue">{issue}</div>}
+                          </div>
                         </div>
                       );
                     })}
@@ -177,4 +192,12 @@ export const projectAssignmentStyles = `
 .ap-processes .start-kind{display:inline-block;font-size:10.5px;padding:1px 6px;border:1px solid var(--pc-line);border-radius:5px;color:var(--pc-muted);margin-right:4px}
 .ap-processes .start-line .sub{margin-top:3px;overflow-wrap:anywhere}
 .ap-processes .start-issue{color:#e3b86d}
+.ap-processes .start-event{display:flex;gap:10px;align-items:flex-start}
+.ap-processes .start-event .tool-icon{flex:none;width:28px;height:28px;padding:4px}
+.ap-processes .start-copy{min-width:0}
+.ap-processes .start-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 6px}
+.ap-processes .start-app{color:var(--pc-muted);font-size:12px}
+.ap-processes .start-app::after{content:"·";margin-left:6px}
+.ap-processes .start-event-title{font-weight:600}
+.ap-processes .start-event .sub{margin-top:2px}
 `;

@@ -93,7 +93,7 @@ export function callsForExecution(
     .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
 }
 
-function SourceIcon({ source }: { source?: ToolSource }) {
+export function SourceIcon({ source }: { source?: ToolSource }) {
   const [failed, setFailed] = useState("");
   if (source?.icon && failed !== source.icon) {
     if (source.iconStyle === "monochrome") return <span className="tool-icon mono" aria-hidden="true">

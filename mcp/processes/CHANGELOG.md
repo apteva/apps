@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Trigger source app and event title (0.24.1)
+
+Starts column shows the source app icon and name with a readable event
+title. See `docs-release-0.24.1.md`.
+
 ## Assignments show how they start (0.24.0)
 
 Project assignments include their event triggers; the Starts column shows
