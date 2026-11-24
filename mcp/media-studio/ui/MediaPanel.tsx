@@ -1930,9 +1930,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           align-self: start;
           display: flex;
           flex-direction: column;
-          border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+          border: 1px solid var(--border);
           background: var(--bg-card);
-          animation: ms-gen-enter 260ms ease-out both;
+          animation: ms-gen-enter 200ms ease-out both;
         }
         .ms-gen-stage {
           position: relative;
@@ -1946,72 +1946,50 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .ms-gen-stage-square { aspect-ratio: 1 / 1; }
         .ms-gen-stage-wide { aspect-ratio: 16 / 10; }
         .ms-gen-stage-short { min-height: 140px; }
-        .ms-gen-glow {
-          position: absolute;
-          inset: -20%;
-          background: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--accent) 26%, transparent) 0%, transparent 55%);
-          animation: ms-gen-pulse 2.4s ease-in-out infinite;
-        }
-        .ms-gen-shimmer {
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(110deg, transparent 30%, color-mix(in srgb, var(--text, #fff) 7%, transparent) 50%, transparent 70%);
-          background-size: 250% 100%;
-          animation: ms-gen-sweep 1.8s linear infinite;
-        }
         .ms-gen-center {
-          position: relative;
           display: flex;
           flex-direction: column;
           align-items: center;
-          gap: 12px;
+          gap: 10px;
         }
-        .ms-gen-dots { display: flex; gap: 7px; }
+        .ms-gen-dots { display: flex; gap: 5px; }
         .ms-gen-dots span {
-          width: 9px;
-          height: 9px;
+          width: 5px;
+          height: 5px;
           border-radius: 999px;
-          background: var(--accent);
-          animation: ms-gen-bounce 1.2s ease-in-out infinite;
+          background: var(--text-muted);
+          animation: ms-gen-bounce 1.4s ease-in-out infinite;
         }
-        .ms-gen-dots span:nth-child(2) { animation-delay: 0.15s; }
-        .ms-gen-dots span:nth-child(3) { animation-delay: 0.3s; }
+        .ms-gen-dots span:nth-child(2) { animation-delay: 0.16s; }
+        .ms-gen-dots span:nth-child(3) { animation-delay: 0.32s; }
         .ms-gen-label {
           display: flex;
           align-items: baseline;
-          gap: 8px;
-          font-size: 13px;
-          color: var(--text);
+          gap: 6px;
+          font-size: 11px;
+          color: var(--text-muted);
         }
-        .ms-gen-time { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .ms-gen-time { color: var(--text-dim); font-variant-numeric: tabular-nums; }
         .ms-gen-progress {
           position: absolute;
           left: 0;
           right: 0;
           bottom: 0;
-          height: 3px;
-          overflow: hidden;
-          background: color-mix(in srgb, var(--accent) 15%, transparent);
+          height: 1px;
+          background: var(--border);
         }
         .ms-gen-progress-fill {
           height: 100%;
-          background: var(--accent);
+          background: var(--text-muted);
           transition: width 1s linear;
-        }
-        .ms-gen-progress-indeterminate {
-          height: 100%;
-          width: 35%;
-          background: var(--accent);
-          animation: ms-gen-slide 1.6s ease-in-out infinite;
         }
         .ms-gen-meta { padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
         .ms-gen-prompt {
           font-size: 12px;
-          color: var(--text);
-          display: -webkit-box;
-          -webkit-line-clamp: 2;
-          -webkit-box-orient: vertical;
+          color: var(--text-muted);
+          white-space: nowrap;
           overflow: hidden;
+          text-overflow: ellipsis;
         }
         .ms-gen-facts {
           display: flex;
@@ -2021,15 +1999,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           color: var(--text-dim);
           min-width: 0;
         }
-        .ms-gen-cost { color: var(--accent); flex-shrink: 0; }
-        @keyframes ms-gen-enter { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
-        @keyframes ms-gen-pulse { 0%, 100% { opacity: 0.45; transform: scale(0.92); } 50% { opacity: 1; transform: scale(1.05); } }
-        @keyframes ms-gen-sweep { from { background-position: 150% 0; } to { background-position: -100% 0; } }
-        @keyframes ms-gen-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-7px); opacity: 1; } }
-        @keyframes ms-gen-slide { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
+        .ms-gen-cost { flex-shrink: 0; }
+        @keyframes ms-gen-enter { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes ms-gen-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.35; } 40% { transform: translateY(-3px); opacity: 1; } }
         @media (prefers-reduced-motion: reduce) {
-          .ms-gen-card, .ms-gen-glow, .ms-gen-shimmer, .ms-gen-dots span, .ms-gen-progress-indeterminate { animation: none; }
-          .ms-gen-dots span { opacity: 0.8; }
+          .ms-gen-card, .ms-gen-dots span { animation: none; }
+          .ms-gen-dots span { opacity: 0.7; }
         }
         .ms-option-check { min-height: 34px; }
         .ms-tts-settings {
@@ -5500,8 +5475,6 @@ function GeneratingCard({
   return (
     <div className="ms-gen-card rounded overflow-hidden" role="status" aria-live="polite" aria-label={`${label}: ${prompt}`}>
       <div className={`ms-gen-stage ${stageClass}`}>
-        <div className="ms-gen-glow" aria-hidden="true" />
-        <div className="ms-gen-shimmer" aria-hidden="true" />
         <div className="ms-gen-center">
           <div className="ms-gen-dots" aria-hidden="true">
             <span />
@@ -5513,13 +5486,11 @@ function GeneratingCard({
             <span className="ms-gen-time">{formatElapsed(elapsed)}</span>
           </div>
         </div>
-        <div className="ms-gen-progress" aria-hidden="true">
-          {progress > 0 ? (
+        {progress > 0 && (
+          <div className="ms-gen-progress" aria-hidden="true">
             <div className="ms-gen-progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
-          ) : (
-            <div className="ms-gen-progress-indeterminate" />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <div className="ms-gen-meta">
         {prompt && (
