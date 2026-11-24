@@ -2,8 +2,15 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.12.0
+version: 0.12.1
 description: |
+  v0.12.1 replaces the browser alert on Delete with a red Delete button and
+  a confirmation dialog that previews the item, lists the linked Storage
+  files, and keeps errors inside the dialog. Generation details close when
+  switching media tabs, queued video and avatar jobs appear only on their
+  own tab, and the gallery uses even tiles with a clear failed state. The
+  details panel shows the full prompt with request details collapsed, and
+  opens full screen on phones.
   v0.12.0 adds HeyGen Avatar 6 and Avatar 6 Turbo. Avatar engine choices
   now follow each look's supported engines, so new HeyGen engines appear
   automatically; Avatar 6 adds 2K output, a motion prompt and calmer
@@ -282,7 +289,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.12.0
+    ref: media-studio/v0.12.1
     entry: mcp/media-studio
   port: 8080
   health_check: /health
