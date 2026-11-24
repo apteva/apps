@@ -125,6 +125,10 @@ interface StatusResp {
   ngrok_domain?: string;
   named_configured?: boolean;
   desired_live?: boolean;
+  // v0.6.6 — public URL probe while running. Absent until the first probe.
+  reachable?: boolean;
+  reachability_error?: string;
+  reachability_checked_at?: string;
 }
 
 interface CFZone {
@@ -380,6 +384,8 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   };
 
   const isRunning = status.status === "running";
+  const isUnreachable = isRunning && status.reachable === false;
+  const isChecking = isRunning && status.reachable === undefined;
   const isStarting = isRunning && !status.public_url;
   // Active-provider classification. Prefer the v0.4+ provider field
   // when present; fall back to the legacy mode field so this panel
@@ -694,9 +700,11 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           </label>
         )}
         <div className="flex items-center gap-3">
-          <span aria-hidden="true" className={`inline-block w-2 h-2 rounded-full ${statusColor(status.status === "idle" ? "stopped" : status.status)}`} />
+          <span aria-hidden="true" className={`inline-block w-2 h-2 rounded-full ${statusColor(isUnreachable || isChecking ? "orphaned" : status.status === "idle" ? "stopped" : status.status)}`} />
           <strong className="text-text" role="status" aria-live="polite">
             {isStarting ? "Starting tunnel…" :
+             isUnreachable ? "Not reachable" :
+             isChecking ? "Checking public URL…" :
              isRunning  ? "Live" :
              status.status === "failed"   ? "Failed" :
              status.status === "orphaned" ? "Orphaned" :
@@ -776,6 +784,13 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         {isStarting && (
           <div className="text-text-dim text-xs">
             {isNgrok ? "ngrok" : isZrok ? "zrok" : "Cloudflared"} usually assigns a URL within a few seconds.
+          </div>
+        )}
+
+        {isUnreachable && (
+          <div className="text-warn text-xs" role="alert">
+            The tunnel process is running, but the public URL does not reach the target.{" "}
+            {status.reachability_error}
           </div>
         )}
 

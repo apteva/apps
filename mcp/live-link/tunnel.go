@@ -108,6 +108,12 @@ type Manager struct {
 	status    Status
 	lastError string
 
+	// Public URL reachability for the current run, set by the
+	// reachability loop. nil until the first probe of this run.
+	reachable      *bool
+	reachDetail    string
+	reachCheckedAt time.Time
+
 	// recentOutput is a ring-buffer of the last recentOutputCap lines
 	// the URL scanner saw. Pre-v0.4.3 we silently discarded everything
 	// that wasn't a URL match; that meant when the agent failed (bad
@@ -283,6 +289,9 @@ func (m *Manager) Start(p StartParams) error {
 	m.status = StatusRunning
 	m.lastError = ""
 	m.publicURL = ""
+	m.reachable = nil
+	m.reachDetail = ""
+	m.reachCheckedAt = time.Time{}
 	// Fresh buffer per run — previous run's tail (success or failure)
 	// has no bearing on this one.
 	m.recentOutput = m.recentOutput[:0]
@@ -487,6 +496,7 @@ func (m *Manager) waitForExit(runID int64) {
 		}
 		reason = fmt.Sprintf("%s: %s", reason, tail)
 	}
+	reason = explainExitReason(reason)
 
 	m.cmd = nil
 	if m.cancel != nil {
@@ -494,6 +504,9 @@ func (m *Manager) waitForExit(runID int64) {
 		m.cancel = nil
 	}
 	m.status = finalStatus
+	m.reachable = nil
+	m.reachDetail = ""
+	m.reachCheckedAt = time.Time{}
 	m.redactions = nil
 	if finalStatus == StatusFailed {
 		m.lastError = reason
@@ -565,6 +578,10 @@ type Snapshot struct {
 	StartedAt time.Time
 	RunID     int64
 	LastError string
+
+	Reachable      *bool
+	ReachDetail    string
+	ReachCheckedAt time.Time
 }
 
 func (m *Manager) Snapshot() Snapshot {
@@ -577,7 +594,28 @@ func (m *Manager) Snapshot() Snapshot {
 		StartedAt: m.startedAt,
 		RunID:     m.runID,
 		LastError: m.lastError,
+
+		Reachable:      m.reachable,
+		ReachDetail:    m.reachDetail,
+		ReachCheckedAt: m.reachCheckedAt,
 	}
+}
+
+// SetReachability records a probe result for runID. It is ignored when the
+// run is no longer the active running one. Reports whether the reachable
+// state changed.
+func (m *Manager) SetReachability(runID int64, ok bool, detail string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runID != runID || m.status != StatusRunning {
+		return false
+	}
+	changed := m.reachable == nil || *m.reachable != ok || m.reachDetail != detail
+	value := ok
+	m.reachable = &value
+	m.reachDetail = detail
+	m.reachCheckedAt = time.Now()
+	return changed
 }
 
 // ErrAlreadyRunning — Start was called while a tunnel is up.

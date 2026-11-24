@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.6.5
+version: 0.6.6
 description: |
   Publish a locally-installed Apteva instance through one of four HTTPS
   tunnel providers selected explicitly in the Live Link panel:
@@ -28,6 +28,11 @@ description: |
     reserve a name in the panel, then go live. The token is never placed
     in process arguments or the app database; zrok's private native
     environment files are isolated inside this app install.
+
+  While a tunnel runs, Live Link probes its public URL and reports
+  "Not reachable" (with the reason) instead of "Live" when the provider
+  is up but not routing traffic, for example a zrok account over its plan
+  limits. zrok's 401 shareUnauthorized is explained in plain language.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link

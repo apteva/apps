@@ -170,6 +170,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		},
 	)
 
+	go a.runReachabilityLoop(a.lifecycleCtx)
+
 	ctx.Logger().Info("live-link mounted",
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
 		"orphaned_runs", orphanedCount)
@@ -282,6 +284,11 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if !snap.StartedAt.IsZero() {
 		out["started_at"] = snap.StartedAt.UTC().Format(time.RFC3339)
+	}
+	if snap.Reachable != nil {
+		out["reachable"] = *snap.Reachable
+		out["reachability_error"] = snap.ReachDetail
+		out["reachability_checked_at"] = snap.ReachCheckedAt.UTC().Format(time.RFC3339)
 	}
 	// Surface the resolved target + mode so the UI can show the
 	// pre-flight state before the user clicks start.
@@ -551,7 +558,7 @@ func (a *App) toolStop(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	snap := a.mgr.Snapshot()
-	return map[string]any{
+	out := map[string]any{
 		"status":     snap.Status,
 		"public_url": snap.PublicURL,
 		"target_url": snap.TargetURL,
@@ -559,7 +566,12 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		"last_error": snap.LastError,
 		"mode":       string(a.currentMode(ctx)),
 		"provider":   a.activeProviderName(ctx),
-	}, nil
+	}
+	if snap.Reachable != nil {
+		out["reachable"] = *snap.Reachable
+		out["reachability_error"] = snap.ReachDetail
+	}
+	return out, nil
 }
 
 func (a *App) toolDestroy(ctx *sdk.AppCtx, input map[string]any) (any, error) {
