@@ -52,7 +52,9 @@ func boardOutline(board Board) []Point {
 	if len(board.Outline) >= 3 {
 		return append([]Point(nil), board.Outline...)
 	}
-	return []Point{{XNM: 0, YNM: 0}, {XNM: board.WidthNM, YNM: 0}, {XNM: board.WidthNM, YNM: board.HeightNM}, {XNM: 0, YNM: board.HeightNM}}
+	// Rounded corners are flattened at 11.25 degree steps for DRC, rendering
+	// and solids; Edge_Cuts emits the same corners as true G02/G03 arcs.
+	return boardEdgeContour(board).polygon()
 }
 
 func validateMechanical(def *Definition) MechanicalValidation {

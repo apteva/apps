@@ -9,7 +9,7 @@ const (
 	mechanicalEnvelopeSchema = "apteva-mechanical-envelope/v1"
 	productionSchema         = "apteva-pcb-production-readiness/v1"
 	kicadExchangeSchema      = "apteva-pcb-kicad-exchange/v1"
-	engineVersion            = "pcb-native/0.10.0"
+	engineVersion            = "pcb-native/0.11.0"
 	defaultClearance         = int64(200_000)
 	defaultTraceWidth        = int64(200_000)
 	defaultEdgeClearance     = int64(250_000)
@@ -53,6 +53,9 @@ type BoardCutout struct {
 	DiameterNM   int64   `json:"diameter_nm,omitempty"`
 	RotationUdeg int64   `json:"rotation_udeg,omitempty"`
 	Polygon      []Point `json:"polygon,omitempty"`
+	// Plated circle/slot cutouts are drilled or routed by the PTH program
+	// (G85 slots) instead of being milled from Edge_Cuts.
+	Plated bool `json:"plated,omitempty"`
 }
 
 type Rules struct {
@@ -64,6 +67,11 @@ type Rules struct {
 	MinSolderMaskSliverNM   int64 `json:"min_solder_mask_sliver_nm,omitempty"`
 	MinCopperToHoleNM       int64 `json:"min_copper_to_hole_nm,omitempty"`
 	MinCourtyardClearanceNM int64 `json:"min_courtyard_clearance_nm,omitempty"`
+	// SolderMaskExpansionNM is the board-wide mask opening growth used when a
+	// pad has no own expansion (default 0.05 mm). Vias are tented unless
+	// UntentedVias is set.
+	SolderMaskExpansionNM int64 `json:"solder_mask_expansion_nm,omitempty"`
+	UntentedVias          bool  `json:"untented_vias,omitempty"`
 }
 
 type Position struct {
@@ -93,20 +101,33 @@ type Body struct {
 // the electrical graph; Layers normally contains F.Cu or B.Cu and may contain
 // both for through-hole pads.
 type Pad struct {
-	ID                    string   `json:"id"`
-	PinID                 string   `json:"pin_id"`
-	Shape                 string   `json:"shape"` // rect | roundrect | circle | oval
-	XNM                   int64    `json:"x_nm"`
-	YNM                   int64    `json:"y_nm"`
-	WidthNM               int64    `json:"width_nm"`
-	HeightNM              int64    `json:"height_nm"`
-	DrillNM               int64    `json:"drill_nm,omitempty"`
-	DrillWidthNM          int64    `json:"drill_width_nm,omitempty"`
-	DrillHeightNM         int64    `json:"drill_height_nm,omitempty"`
+	ID            string `json:"id"`
+	PinID         string `json:"pin_id"`
+	Shape         string `json:"shape"` // rect | roundrect | circle | oval
+	XNM           int64  `json:"x_nm"`
+	YNM           int64  `json:"y_nm"`
+	WidthNM       int64  `json:"width_nm"`
+	HeightNM      int64  `json:"height_nm"`
+	DrillNM       int64  `json:"drill_nm,omitempty"`
+	DrillWidthNM  int64  `json:"drill_width_nm,omitempty"`
+	DrillHeightNM int64  `json:"drill_height_nm,omitempty"`
+	// Plated is set by the footprint contract for drilled pads (true unless
+	// NonPlated). Slots use DrillWidthNM and DrillHeightNM; DrillNM then
+	// carries the slot's minor dimension.
 	Plated                bool     `json:"plated,omitempty"`
 	SolderMaskExpansionNM int64    `json:"solder_mask_expansion_nm,omitempty"`
 	PasteExpansionNM      int64    `json:"paste_expansion_nm,omitempty"`
 	Layers                []string `json:"layers"`
+	// RoundrectRatio is the roundrect corner radius as a fraction of the short
+	// side (KiCad roundrect_rratio; 0 means the 0.25 default).
+	RoundrectRatio float64 `json:"roundrect_ratio,omitempty"`
+	// PasteRatio adds ratio × pad size to the paste margin per axis (KiCad
+	// solder_paste_margin_ratio, normally negative).
+	PasteRatio float64 `json:"paste_ratio,omitempty"`
+	// NonPlated marks a drilled pad as NPTH (KiCad np_thru_hole).
+	NonPlated bool `json:"non_plated,omitempty"`
+	// NoPaste keeps an SMD pad (fiducial, test pad) out of the stencil.
+	NoPaste bool `json:"no_paste,omitempty"`
 }
 
 // FootprintSpec makes the land pattern an auditable contract rather than a
@@ -123,6 +144,10 @@ type FootprintSpec struct {
 	Courtyard        []Point  `json:"courtyard,omitempty"`
 	AssemblyHeightNM int64    `json:"assembly_height_nm,omitempty"`
 	CompatibleMPNs   []string `json:"compatible_mpns,omitempty"`
+	// LibraryPartID and Model3DRef record the library part a component was
+	// instantiated from and the upstream 3D model path, when known.
+	LibraryPartID string `json:"library_part_id,omitempty"`
+	Model3DRef    string `json:"model_3d_ref,omitempty"`
 }
 
 // Model3DSpec identifies the exact native mechanical model revision associated
@@ -138,11 +163,13 @@ type Model3DSpec struct {
 }
 
 type Component struct {
-	ID            string           `json:"id"`
-	Designator    string           `json:"designator"`
-	Name          string           `json:"name"`
-	Value         string           `json:"value,omitempty"`
-	MPN           string           `json:"mpn,omitempty"`
+	ID         string `json:"id"`
+	Designator string `json:"designator"`
+	Name       string `json:"name"`
+	Value      string `json:"value,omitempty"`
+	MPN        string `json:"mpn,omitempty"`
+	// LCSC is the JLCPCB/LCSC part number (e.g. "C2040") when known.
+	LCSC          string           `json:"lcsc,omitempty"`
 	Footprint     string           `json:"footprint,omitempty"`
 	FootprintSpec *FootprintSpec   `json:"footprint_spec,omitempty"`
 	Model3D       *Model3DSpec     `json:"model_3d,omitempty"`
@@ -157,6 +184,8 @@ type Component struct {
 	DatasheetRef string `json:"datasheet_ref,omitempty"`
 	// Fixed components are never moved by the automatic placer.
 	Fixed bool `json:"fixed,omitempty"`
+	// AssemblyRotationOffsetDeg overrides the assembler rotation correction.
+	AssemblyRotationOffsetDeg *float64 `json:"assembly_rotation_offset_deg,omitempty"`
 }
 
 // MechanicalSpec is PCB Studio's engine-independent 3D handoff model. All
@@ -475,10 +504,15 @@ type Definition struct {
 	ActiveFabProfileID string             `json:"active_fab_profile_id,omitempty"`
 	Firmware           *FirmwareSpec      `json:"firmware,omitempty"`
 	Schematic          *SchematicSpec     `json:"schematic,omitempty"`
+	// Template marks a design other designs start from (pcb_designs_copy,
+	// pcb_template_apply); DerivedFrom records where this one came from.
+	Template    bool         `json:"template,omitempty"`
+	DerivedFrom *DerivedFrom `json:"derived_from,omitempty"`
 }
 
 type Operation struct {
 	Type               string            `json:"type"`
+	Template           *bool             `json:"template,omitempty"`
 	Board              *Board            `json:"board,omitempty"`
 	Rules              *Rules            `json:"rules,omitempty"`
 	Component          *Component        `json:"component,omitempty"`
@@ -516,6 +550,13 @@ type Operation struct {
 	SchematicWireID    string            `json:"schematic_wire_id,omitempty"`
 	SchematicLabel     *SchematicLabel   `json:"schematic_label,omitempty"`
 	SchematicLabelID   string            `json:"schematic_label_id,omitempty"`
+	// component.add_from_library: LibraryPartID names a built-in part, or
+	// LibraryPart carries the resolved part snapshot (project parts are
+	// resolved by the tool so the operation log stays reproducible).
+	// Position and optional Component overrides (id, designator, value...)
+	// are taken from Position and Component.
+	LibraryPartID string       `json:"library_part_id,omitempty"`
+	LibraryPart   *LibraryPart `json:"library_part,omitempty"`
 }
 
 // Annotation sets design rationale on one component or net.

@@ -18,13 +18,14 @@ Every edit creates an immutable revision. Start with `pcb_examples`, then:
 8. For physical tutorials, inspect `pcb_wiring_library`, create the Arduino starter with `pcb_wiring_example_create`, or use revisioned `wiring.*` operations. Run `pcb_wiring_validate`, then `pcb_wiring_simulate` to map GPIO state to parts. Export SVG, PNG, tutorial JSON, or tutorial ZIP with `pcb_wiring_export`.
 9. For enclosure handoff, create the Raspberry Pi 4 reference with `pcb_mechanical_example_create`, or add a revisioned `mechanical` block with `mechanical.set`. Run `pcb_mechanical_validate`, inspect it in the Mechanical workspace or create an SVG with `pcb_mechanical_preview`, then export an immutable `apteva-mechanical-envelope/v1` artifact with `pcb_mechanical_export`. Use `pcb_mechanical_solid_export` for a named AP242 STEP assembly, STL/3MF reference mesh, or authoritative DXF profile.
 10. Use the Layout workspace for snapped component placement, 90-degree rotation, nudging, manual trace/via authoring, selection/deletion, and undo/redo. Save the staged board as a new immutable revision before running server actions.
-11. Use `pcb_render` for the footprint-aware SVG and `pcb_bom_generate` for the grouped BOM. Run `pcb_manufacturing_verify` to independently parse and reconcile the generated Gerber X2, Excellon, and Gerber-job data; `pcb_manufacturing_generate` creates the gated manufacturing ZIP.
+11. Use `pcb_render` for the footprint-aware SVG and `pcb_bom_generate` for the grouped BOM. Run `pcb_manufacturing_verify` to independently parse and reconcile the generated Gerber X2, Excellon, and Gerber-job data; `pcb_manufacturing_generate` creates the gated manufacturing ZIP. The set contains one Gerber per copper layer (`gerbers/F_Cu.gbr`, `In1_Cu.gbr`…, `B_Cu.gbr`, labelled `Copper,L1,Top` … `Copper,LN,Bot`), `F_Mask`/`B_Mask` (pad openings grown by the pad's `solder_mask_expansion_nm`, else `rules.solder_mask_expansion_nm`, default 0.05 mm; vias stay tented unless `rules.untented_vias`), `F_Paste`/`B_Paste` (SMD pads only, pad size plus `paste_expansion_nm` and optional `paste_ratio`; `no_paste` pads are skipped), silkscreen, `Edge_Cuts.gbr` (true G02/G03 arcs for `corner_radius_nm`, circle and slot cutouts), `drill/board-PTH.drl` (pad drills, vias, plated mounting holes, plated cutouts) and `drill/board-NPTH.drl` (`plated: false` mounting holes and `non_plated` pads), and `board.gbrjob`. Pad shapes are exact: circles and axis-aligned rect/oval pads are C/R/O flashes, roundrect (`roundrect_ratio`, default 0.25) and rotated pads are arc regions. Oval drills (`drill_width_nm` + `drill_height_nm`, e.g. USB-C shell tabs) and plated `slot` cutouts become Excellon G85 routed slots rotated with the part.
 12. Use `pcb_kicad_export` and `pcb_kicad_verify` for KiCad board compatibility, or `pcb_kicad_import` to create a native design from `.kicad_pcb` content. The native revision remains authoritative.
 13. Run `pcb_production_readiness` before a prototype order. It combines DRC, Gerber/Excellon parsing, KiCad reconciliation, footprint/MPN/model coverage, mechanical validation, test-point coverage, the firmware gate (stored firmware runs cleanly and prints `expect_serial`), the sourcing gate (latest `pcb_bom_source` stock check), and physical validation. `pcb_release_overview` returns all gates, package contents, sourcing, bring-up and orders in one call.
 14. Record why parts and nets were chosen with `annotation.set` (`component_id` or `net_id`, `annotation: {reason, datasheet_ref}`); the BOM carries both columns.
 15. After boards arrive, get the measurable plan with `pcb_bringup_plan`, then record results per board with `pcb_bringup_record` (`value` for resistance and voltage checks, `passed` for inspection and firmware). Physical validation passes when one board passes every required check, and readiness becomes `ready_for_production`.
 16. Use `pcb_release_create` to make a traceable ZIP with native source, validation, Gerber/Excellon, KiCad exchange, STEP when available, verification reports, readiness report, bring-up plan, SVG, BOM, and hashes. Failed DRC or parser verification blocks release creation. Releases include the pick-and-place CSV, assembly BOM, structured bring-up plan, and firmware with its pin header; `pcb_assembly_generate` creates the assembly files on their own.
-17. To order boards, run `pcb_order_prepare` (fabricator, quantity, assembly) to build the verified upload package, upload it at the fab, then record the fab's quote, order number, status and tracking with `pcb_order_update`. `pcb_orders_list` shows the history.
+17. Small boards are built in panels: `pcb_panelize` (`rows`, `columns` 1–20, `spacing_nm`, `rail_width_nm` default 5 mm, `rail_sides` `top_bottom`|`left_right`|`all`, `separation` `vscore`|`tabs`, `tab_width_nm`) stores a verified `panel` ZIP artifact: every Gerber layer for the whole panel, PTH/NPTH drills, `board.gbrjob` and `panel.json`. Rails carry 3 asymmetric 1 mm fiducials (2 mm mask opening, no paste) and 4 × 2 mm NPTH tooling holes. `vscore` abuts boards (spacing 0 by default) and draws full-length score lines on a separate `gerbers/V_Score.gbr` (`Other,V-Score`); the panel outline stays on Edge_Cuts — tell the fab it is a V-cut panel. V-scoring cannot reproduce rounded corners, so use `tabs` for shaped boards: boards are routed out (default 2 mm gap) on Edge_Cuts with the board's corner profile, held by tabs with 0.5 mm NPTH mouse-bite perforations along each board edge. The design revision is never changed.
+18. To order boards, run `pcb_order_prepare` (fabricator, quantity, assembly) to build the verified upload package, upload it at the fab, then record the fab's quote, order number, status and tracking with `pcb_order_update`. `pcb_orders_list` shows the history.
 
 ## Schematic
 
@@ -45,11 +46,72 @@ Place parts before routing. `pcb_placement_analyze` reports courtyard/body overl
 - Keepouts owned by a part (`owner_id`) and its mechanical envelopes, panel openings, and clearance volumes move rigidly with it (`keepout.remove`/`keepout.add` and one `mechanical.set` in the plan).
 - Moving parts strands their existing copper: the plan lists `stale_routing_nets`. Pass `clear_routing: true` to remove that copper in the same revision, then route with `pcb_route_all`.
 
+## Automatic routing
+
+`pcb_route_suggest` (and `pcb_route_analyze`) returns a deterministic plan of `trace.add`/`via.add` operations without changing the design; `pcb_route_apply`, `pcb_route_selected`, `pcb_route_all`, and `pcb_route_optimize` commit a plan as a revision. The same input always yields byte-identical operations.
+
+- The router is a grid A* search with 45° routing: 8-direction moves, at most 45° per bend where geometry allows (a 90° corner is used only where two 45° bends do not fit), and collinear points merged so each trace is a minimal polyline. Every step is clearance-checked as a real segment of the trace width against pad polygons, other traces, vias, keepouts, zones, and the board edge; vias are checked with their own diameter and never placed on a terminal pad. Multi-pad nets route as a spanning tree, starting and ending on a layer the pad has.
+- Nets route in net-class priority order (differential-pair nets first within a priority). When a net fails, rip-up and retry runs: a relaxed search finds the cheapest path that crosses copper placed by this run, the nets it crosses are ripped up, the failed net is routed, the ripped nets are re-routed, and congested cells gain history cost so later searches spread out (PathFinder-style negotiation). The best result seen is kept, so rip-up never routes fewer nets than the greedy pass. Copper already in the design is never ripped up unless `replace_existing` hands the selected nets' copper to the router.
+- Differential pairs are not routed as coupled pairs. If independently routed pair nets miss the gap/skew rule, the router tries copying one net's copper onto the other at the pads' common offset, re-routing the pair in another order or orthogonally, and re-laying the board pair-first; if none satisfies the rule the pair is listed as a failure.
+- Options: `net_ids`, `layers` (default `F.Cu`, `B.Cu`), `grid_nm` (default 0.5 mm; 0.1–5 mm), `trace_width_nm`, `clearance_nm`, `via_diameter_nm`, `via_drill_nm` (defaults from net classes and rules), `replace_existing`, `max_visited` (search budget per connection, default 250000), `allow_diagonal` (default true; false keeps orthogonal-only routing), `max_ripup_iterations` (default 8; a negative value disables rip-up).
+- Plan metrics: `routed_nets`, `skipped_nets` (already connected or fewer than two pads), `trace_count`, `via_count`, `total_length_nm`, `visited_nodes`, `diagonal_segments`, `ripups` (nets ripped up and re-routed), and `iterations` (rip-up rounds). Each failed net or pair is listed in `failures` with the reason. Run `pcb_validate` after applying.
+
+## Parts library
+
+Prefer library parts over hand-typed pads. The library combines about 26 built-in parts, which need no database rows, with this project's imported KiCad footprints. Each built-in part cites the datasheet or KiCad footprint its pads come from.
+
+- Built-in parts:
+  - Passives and LEDs: 0402/0603/0805 resistors and capacitors, and a 0603 LED.
+  - Small packages and power parts: SOT-23, AP2112K-3.3, AMS1117-3.3 (SOT-223), the MCP73831 LiPo charger and the USBLC6-2SC6.
+  - Sensors and modules: SHTC3, DHT22, ESP32-C3-MINI-1, ESP32-S3-WROOM-1, an SSD1306 I2C OLED (0x3C), an HC-SR501 PIR, an EC11 encoder and an SRD-05VDC relay.
+  - Connectors and test points: GCT USB4105 USB-C (plated shell slots and NPTH pegs), a JST-SH Qwiic port, pogo target pads, a pogo header and a test-point pad.
+- `pcb_library_list` searches by `query` (name, MPN, LCSC, keyword) and `category`. `pcb_library_get` returns one part with its pads, courtyard, body, pins, pin functions, MPN/LCSC, datasheet and provenance.
+- `pcb_footprint_import_kicad` parses a KiCad 6–10 `.kicad_mod` (`content`) and stores it as `kicad:<footprint name>`. It accepts overrides for `name`, `category`, `mpn`, `manufacturer`, `lcsc`, `datasheet_url` and `designator_prefix`. The importer handles:
+  - pad types smd, thru_hole and np_thru_hole
+  - pad shapes rect, roundrect (`corner_ratio`), circle and oval; custom pads become their bounding rectangle
+  - round and oval drills (`drill_width_nm`/`drill_height_nm`)
+  - pad rotation
+  - the F.CrtYd courtyard (stored as a bounding box), the F.Fab body size and the `(model ...)` path
+
+  It skips paste-only apertures. Pin numbers come from pad numbers, so give imported parts a real MPN before sourcing.
+- `pcb_component_place_from_library` (`design_id`, `part_id`, `x_nm`, `y_nm`, optional `rotation_udeg`, `side`, `designator`, `component_id`, `value`, `mpn`) commits a `component.add_from_library` revision.
+  - The designator and ID are auto-assigned from the part's prefix.
+  - Placing on `back` mirrors X and swaps F.Cu and B.Cu.
+  - The component gets the part's MPN, LCSC number and datasheet, and a frozen `footprint_spec` with `library_part_id` that later normalisation keeps.
+  - Then add the new pins to nets with `net.connect`.
+- Pads carry `plated` (omitted means plated, `false` means NPTH). Manufacturing validation skips the annular-ring check for non-plated holes and checks copper clearance for netless pads too.
+- HTTP routes:
+  - `GET /api/library?q=&category=&limit=`
+  - `GET /api/library/{part_id}`
+  - `POST /api/library/import-kicad` with body `{content, name?, ...}`
+  - `POST /api/designs/{id}/library-place`
+- Known limits:
+  - The native router models pads as circles. It cannot fan out 0.5 mm pitch USB-C pins, so route those by hand or with `trace.add`.
+  - The router also ignores netless pads, so tie mounting pads to a net before auto-routing.
+
 ## Component data and sourcing
 
 Local component, footprint, pin, and MPN fields remain authoritative. If the optional `component_data` provider (Nexar/Octopart) is bound, `pcb_components_search` searches parts and `pcb_bom_source` checks stock and price for every revision MPN (pass `build_quantity` for the number of boards). It stores a sourcing summary that feeds the sourcing readiness gate and a priced BOM CSV. Provider results enrich a design but never mutate it automatically.
 
 All dependencies are native install bindings. The required `storage` role selects a project or global Storage app install (`kind: app`); the optional `firmware_executor` role selects Functions (`kind: app`); `component_data` and `pcb_fabricator` select external connections (`kind: integration`). Do not bypass these roles with connection IDs or assumed app installations.
+
+## JLCPCB assembly and the LCSC catalog
+
+Every release and `pcb_assembly_generate` include JLCPCB-format files next to the generic ones: `assembly/jlcpcb-cpl.csv` (Designator, Mid X, Mid Y, Layer, Rotation) and `assembly/jlcpcb-bom.csv` (Comment, Designator, Footprint, LCSC Part #). CPL rotations are corrected to JLCPCB's library zero: a component's `assembly_rotation_offset_deg` wins, then the active fab profile's `rotation_offsets` (`[{pattern, degrees}]`, regex on the footprint), then reference defaults (SOT-23/SOT-223 +180, QFN/QFP/SOIC/SOP/TSSOP/DFN +270). Always check JLCPCB's placement preview before paying.
+
+Set `lcsc` (e.g. `C25900`) on each component. `pcb_lcsc_search` searches the LCSC assembly catalog; `pcb_lcsc_match` looks up every placed BOM line by MPN, and for chip resistors and capacitors without an MPN hit, by value and size (basis `parametric`, basic parts first). `apply: true` with `expected_parent_id` writes exact MPN matches (plus parametric ones with `accept_parametric`) as a new revision; `keyword` hits are never applied. The catalog is a keyless mirror (config `lcsc_catalog_url`, default jlcsearch.tscircuit.com; `off` disables it) whose stock figures can be missing (`stock_unknown`). With a JLCPCB fab profile active, the readiness gate warns about placed parts without `lcsc`.
+
+## Copies, templates and blocks
+
+`pcb_designs_copy` creates a design from another design's revision. `include` picks sections: board (outline, layers, cutouts, rules, net classes, fab profiles), mechanical, fixed_components (parts with `fixed: true`, their owned keepouts and the nets between them), components, keepouts, zones, routing, schematic, firmware, simulation, wiring, or all (default). For a family of blocks sharing one outline and connector positions: mark the shared connectors `fixed`, mark the design a template (`template.set` operation or `template: true` on copy), and start each block with `include: ["board","mechanical","fixed_components"]`. `pcb_template_apply` links an existing design to a template. After changing the template, `pcb_template_sync` (try `dry_run` first) pushes board, mechanical, fixed components and keepouts to every derived design as new revisions; each design records `derived_from`.
+
+## I2C addresses
+
+Give addressed parts `electrical_model.i2c_address`. Validation reports `I2C_ADDRESS_CONFLICT` when two parts on the same SDA net (found through a pin named SDA) share an address. Blocks chained on one bus (Qwiic) are separate designs: `pcb_i2c_bus_check` with all their `design_ids` reports shared-bus conflicts across blocks, conflicts within each block, and how many 7-bit addresses are free.
+
+## Firmware runtime (ESP32)
+
+Besides GPIO, Serial, I2C writes and sensor reads, the behavioral runtime models: I2C reads (`Wire.requestFrom`/`read`/`available`, data from `i2c_read_data` by address, absent devices NACK), WiFi (`WiFi.begin`/`status`/`RSSI`, `wifi: "unavailable"` to test the offline path), LEDC PWM (v2 `ledcSetup`/`ledcAttachPin` and v3 `ledcAttach`), `analogReadMilliVolts`, `analogReadResolution` (12-bit default on ESP32), `touchRead`, deep sleep (`esp_sleep_enable_timer_wakeup` + `esp_deep_sleep_start` stop the run like the chip) and `ESP.restart`. It is behavioral, not cycle-accurate: no FreeRTOS tasks, interrupts or real networking.
 
 ## Compatibility
 

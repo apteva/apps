@@ -57,11 +57,13 @@ func TestMechanicalEnvelopeAndPreviewAreDeterministic(t *testing.T) {
 
 func TestMechanicalMountingHolesReachFabricationOutputs(t *testing.T) {
 	def := raspberryPi4MechanicalExample()
-	edge := string(renderEdgeGerber(&def))
+	files := manufacturingFiles(&def)
+	edge := string(files["gerbers/Edge_Cuts.gbr"])
 	if !strings.Contains(edge, "X3000000Y0") {
 		t.Fatal("custom board outline missing from Edge.Cuts")
 	}
-	drill := string(renderExcellon(&def))
+	// The Raspberry Pi holes are not plated, so they belong to the NPTH program.
+	drill := string(files["drill/board-NPTH.drl"])
 	if !strings.Contains(drill, "C2.700000") {
 		t.Fatal("2.7 mm mounting drill missing from Excellon")
 	}

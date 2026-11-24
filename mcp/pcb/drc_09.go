@@ -79,7 +79,7 @@ func validateProductionGeometry(def *Definition) []Check {
 			if polygonEdgeDistance(placed.Polygon, board) < float64(def.Rules.MinEdgeClearanceNM) {
 				add("PAD_EDGE_CLEARANCE", "error", "Pad violates polygonal board-edge clearance", component.ID, pad.ID)
 			}
-			if pad.DrillNM > 0 && !pad.Plated {
+			if pad.DrillNM > 0 && !pad.Plated && !pad.NonPlated {
 				add("PAD_PLATING_UNDECLARED", "error", "Drilled footprint pad must explicitly declare plating", component.ID, pad.ID)
 			}
 			if (pad.DrillWidthNM > 0) != (pad.DrillHeightNM > 0) {
@@ -143,7 +143,7 @@ func boardPolygon(board Board) []Point {
 	if len(board.Outline) >= 3 {
 		return board.Outline
 	}
-	return []Point{{XNM: 0, YNM: 0}, {XNM: board.WidthNM, YNM: 0}, {XNM: board.WidthNM, YNM: board.HeightNM}, {XNM: 0, YNM: board.HeightNM}}
+	return boardOutline(board)
 }
 
 func polygonDistance(a, b []Point) float64 {

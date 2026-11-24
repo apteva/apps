@@ -45,6 +45,10 @@ func applyOperation(def *Definition, op Operation) error {
 			return fmt.Errorf("component %q already exists", op.Component.ID)
 		}
 		def.Components = append(def.Components, *op.Component)
+	case "component.add_from_library":
+		if err := applyLibraryOperation(def, op); err != nil {
+			return err
+		}
 	case "component.replace":
 		if op.Component == nil {
 			return errors.New("component is required")
@@ -315,6 +319,12 @@ func applyOperation(def *Definition, op Operation) error {
 		return applyAnnotation(def, op)
 	case "fab_profile.add", "fab_profile.remove", "fab_profile.select":
 		return applyFabProfileOperation(def, op)
+	case "template.set":
+		if op.Template == nil {
+			return errors.New("template.set requires template (true or false)")
+		}
+		def.Template = *op.Template
+		return nil
 	case "firmware.set":
 		def.Firmware = op.Firmware
 	case "schematic.set", "schematic.symbol.place", "schematic.symbol.remove", "schematic.wire.add", "schematic.wire.remove", "schematic.label.add", "schematic.label.remove":

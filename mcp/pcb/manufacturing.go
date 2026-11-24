@@ -8,91 +8,439 @@ import (
 	"strings"
 )
 
-// manufacturingFiles writes a deterministic, dependency-free Gerber X2-like
-// fabrication set plus Excellon drills. It intentionally supports the native
-// v1 geometry we own: traces, footprint pads, vias, filled zones, component
-// body silkscreen, and the rectangular board outline.
+const (
+	defaultSolderMaskExpansion = int64(50_000)
+	pthDrillPath               = "drill/board-PTH.drl"
+	npthDrillPath              = "drill/board-NPTH.drl"
+)
+
+// fabExtras lets derived outputs (panels) reuse the native writer: they
+// replace the Edge_Cuts profile and add extra drawing layers (V-score) that
+// must also be listed in the Gerber job.
+type fabExtras struct {
+	EdgeContours []contour
+	Layers       []fabExtraLayer
+}
+
+type fabExtraLayer struct {
+	Path, Function, Polarity string
+	Body                     []byte
+}
+
+// manufacturingFiles writes a deterministic, dependency-free Gerber X2
+// fabrication set plus Excellon drills: every copper layer (numbered in stack
+// order), solder mask and paste per side, silkscreen, an arc-exact Edge_Cuts
+// profile, separate PTH and NPTH drill programs (with G85 slots) and a Gerber
+// job file describing them all.
 func manufacturingFiles(def *Definition) map[string][]byte {
+	return manufacturingFilesWith(def, nil)
+}
+
+func manufacturingFilesWith(def *Definition, extras *fabExtras) map[string][]byte {
 	files := map[string][]byte{}
+	functions := map[string][2]string{}
+	put := func(path, function, polarity string, body []byte) {
+		files[path] = body
+		functions[path] = [2]string{function, polarity}
+	}
+	copper := copperLayers(def)
+	for index, layer := range copper {
+		function := copperFileFunction(index, len(copper))
+		put("gerbers/"+gerberFilename(layer.ID)+".gbr", function, "Positive", renderCopperGerber(def, layer.ID, function))
+	}
 	for _, layer := range def.Board.Layers {
-		switch {
-		case layer.Kind == "copper":
-			files["gerbers/"+gerberFilename(layer.ID)+".gbr"] = renderCopperGerber(def, layer.ID)
-		case layer.Kind == "silkscreen":
-			files["gerbers/"+gerberFilename(layer.ID)+".gbr"] = renderSilkscreenGerber(def, layer.ID)
+		if layer.Kind == "silkscreen" {
+			function := "Legend,Top"
+			if strings.HasPrefix(strings.ToUpper(layer.ID), "B.") {
+				function = "Legend,Bot"
+			}
+			put("gerbers/"+gerberFilename(layer.ID)+".gbr", function, "Positive", renderSilkscreenGerber(def, layer.ID, function))
 		}
 	}
-	files["gerbers/Edge_Cuts.gbr"] = renderEdgeGerber(def)
-	files["drill/board.drl"] = renderExcellon(def)
+	for _, side := range outerSides(def) {
+		put("gerbers/"+side.Prefix+"_Mask.gbr", "Soldermask,"+side.Name, "Negative", renderMaskGerber(def, side))
+		if len(pastePads(def, side)) > 0 {
+			put("gerbers/"+side.Prefix+"_Paste.gbr", "Paste,"+side.Name, "Positive", renderPasteGerber(def, side))
+		}
+	}
+	edges := boardEdgeContours(def.Board)
+	if extras != nil && extras.EdgeContours != nil {
+		edges = extras.EdgeContours
+	}
+	put("gerbers/Edge_Cuts.gbr", "Profile,NP", "Positive", renderEdgeGerber(edges))
+	if extras != nil {
+		for _, layer := range extras.Layers {
+			put(layer.Path, layer.Function, layer.Polarity, layer.Body)
+		}
+	}
+	pth, npth := drillFeatures(def)
+	n := len(copper)
+	if n == 0 {
+		n = 1
+	}
+	pthFunction, npthFunction := fmt.Sprintf("Plated,1,%d,PTH", n), fmt.Sprintf("NonPlated,1,%d,NPTH", n)
+	put(pthDrillPath, pthFunction, "", renderExcellonProgram(pth, pthFunction))
+	put(npthDrillPath, npthFunction, "", renderExcellonProgram(npth, npthFunction))
 	job := map[string]any{
 		"Header":          map[string]any{"GenerationSoftware": map[string]any{"Vendor": "Apteva", "Application": "PCB Studio", "Version": engineVersion}, "CreationDate": "1980-01-01T00:00:00Z"},
-		"GeneralSpecs":    map[string]any{"ProjectId": def.Name, "Size": map[string]any{"X": float64(def.Board.WidthNM) / 1e6, "Y": float64(def.Board.HeightNM) / 1e6}, "LayerNumber": copperLayerCount(def)},
-		"FilesAttributes": gerberJobFiles(files),
+		"GeneralSpecs":    map[string]any{"ProjectId": map[string]any{"Name": def.Name}, "Size": map[string]any{"X": float64(def.Board.WidthNM) / 1e6, "Y": float64(def.Board.HeightNM) / 1e6}, "LayerNumber": copperLayerCount(def), "BoardThickness": float64(def.Board.ThicknessNM) / 1e6},
+		"FilesAttributes": gerberJobFiles(functions),
 	}
 	body, _ := json.MarshalIndent(job, "", "  ")
 	files["board.gbrjob"] = append(body, '\n')
 	return files
 }
 
-func renderCopperGerber(def *Definition, layerID string) []byte {
-	widths := map[int64]bool{}
-	for _, trace := range def.Traces {
-		if trace.Layer == layerID && trace.WidthNM > 0 {
-			widths[trace.WidthNM] = true
-		}
+// ---------------------------------------------------------------- Gerber writer
+
+// gerberWriter collects apertures and body commands so apertures can be
+// declared in deterministic first-use order ahead of the image.
+type gerberWriter struct {
+	apertures map[string]int
+	order     []string
+	body      strings.Builder
+	current   int
+	mode      string
+}
+
+func newGerberWriter() *gerberWriter {
+	w := &gerberWriter{apertures: map[string]int{}}
+	w.aperture("C," + gerberMM(100_000))
+	return w
+}
+
+func (g *gerberWriter) aperture(spec string) int {
+	if code, ok := g.apertures[spec]; ok {
+		return code
 	}
-	ordered := make([]int64, 0, len(widths))
-	for width := range widths {
-		ordered = append(ordered, width)
+	code := 10 + len(g.order)
+	g.apertures[spec] = code
+	g.order = append(g.order, spec)
+	return code
+}
+
+func (g *gerberWriter) use(code int) {
+	if code != g.current {
+		fmt.Fprintf(&g.body, "D%d*\n", code)
+		g.current = code
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-	aperture := map[int64]int{}
-	var b strings.Builder
-	b.WriteString("G04 Apteva PCB Studio native copper*\n%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n%ADD10C,0.100000*%\nD10*\n")
-	for i, width := range ordered {
-		code := 11 + i
-		aperture[width] = code
-		fmt.Fprintf(&b, "%%ADD%dC,%s*%%\n", code, gerberMM(width))
+}
+
+func (g *gerberWriter) setMode(mode string) {
+	if g.mode != mode {
+		g.body.WriteString(mode + "*\n")
+		g.mode = mode
 	}
-	for _, zone := range def.Zones {
-		if zone.Layer == layerID && len(zone.Polygon) >= 3 {
-			writeGerberRegion(&b, zone.Polygon)
-		}
-	}
-	for _, component := range def.Components {
-		for _, pad := range component.Pads {
-			if !containsString(pad.Layers, layerID) {
-				continue
+}
+
+func (g *gerberWriter) path(c contour) {
+	fmt.Fprintf(&g.body, "%sD02*\n", gerberPoint(c.Start))
+	current := c.Start
+	for _, seg := range c.Segs {
+		if seg.Arc {
+			if seg.CW {
+				g.setMode("G02")
+			} else {
+				g.setMode("G03")
 			}
-			placed := placePad(component, pad)
-			writeGerberRegion(&b, padPolygon(placed))
+			fmt.Fprintf(&g.body, "%sI%dJ%dD01*\n", gerberPoint(seg.End), seg.Center.XNM-current.XNM, seg.Center.YNM-current.YNM)
+		} else {
+			g.setMode("G01")
+			fmt.Fprintf(&g.body, "%sD01*\n", gerberPoint(seg.End))
 		}
+		current = seg.End
 	}
-	for _, via := range def.Vias {
-		if layerBetween(def, layerID, via.FromLayer, via.ToLayer) {
-			writeGerberRegion(&b, circlePolygon(Point{XNM: via.XNM, YNM: via.YNM}, via.DiameterNM/2, 24))
-		}
+}
+
+func (g *gerberWriter) region(c contour) {
+	if len(c.Segs) == 0 {
+		return
 	}
-	for _, trace := range def.Traces {
-		if trace.Layer != layerID || len(trace.Points) < 2 {
-			continue
-		}
-		fmt.Fprintf(&b, "D%d*\n", aperture[trace.WidthNM])
-		fmt.Fprintf(&b, "%sD02*\n", gerberPoint(trace.Points[0]))
-		for _, point := range trace.Points[1:] {
-			fmt.Fprintf(&b, "%sD01*\n", gerberPoint(point))
-		}
+	g.body.WriteString("G36*\n")
+	g.path(c)
+	g.body.WriteString("G37*\n")
+}
+
+func (g *gerberWriter) stroke(width int64, c contour) {
+	if len(c.Segs) == 0 {
+		return
 	}
+	g.use(g.aperture("C," + gerberMM(width)))
+	g.path(c)
+}
+
+func (g *gerberWriter) polyline(width int64, points []Point) {
+	if len(points) < 2 {
+		return
+	}
+	g.use(g.aperture("C," + gerberMM(width)))
+	fmt.Fprintf(&g.body, "%sD02*\n", gerberPoint(points[0]))
+	g.setMode("G01")
+	for _, point := range points[1:] {
+		fmt.Fprintf(&g.body, "%sD01*\n", gerberPoint(point))
+	}
+}
+
+func (g *gerberWriter) flash(spec string, at Point) {
+	g.use(g.aperture(spec))
+	fmt.Fprintf(&g.body, "%sD03*\n", gerberPoint(at))
+}
+
+func (g *gerberWriter) render(comment, function, polarity string) []byte {
+	var b strings.Builder
+	fmt.Fprintf(&b, "G04 Apteva PCB Studio %s*\n", comment)
+	fmt.Fprintf(&b, "%%TF.GenerationSoftware,Apteva,PCB Studio,%s*%%\n", engineVersion)
+	fmt.Fprintf(&b, "%%TF.FileFunction,%s*%%\n", function)
+	if polarity != "" {
+		fmt.Fprintf(&b, "%%TF.FilePolarity,%s*%%\n", polarity)
+	}
+	b.WriteString("%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n")
+	for _, spec := range g.order {
+		fmt.Fprintf(&b, "%%ADD%d%s*%%\n", g.apertures[spec], spec)
+	}
+	b.WriteString("G75*\n")
+	b.WriteString(g.body.String())
 	b.WriteString("M02*\n")
 	return []byte(b.String())
 }
 
-func renderSilkscreenGerber(def *Definition, layerID string) []byte {
-	front := strings.HasPrefix(strings.ToUpper(layerID), "F.")
-	var b strings.Builder
-	b.WriteString("G04 Apteva PCB Studio native silkscreen*\n%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n%ADD10C,0.150000*%\nD10*\n")
+// writePad emits one pad as its true shape: circles as C flashes, rect and
+// oval pads at multiples of 90 degrees as R/O flashes, and everything else
+// (rotated pads, roundrect) as an exact region with G02/G03 corner arcs.
+func writePad(g *gerberWriter, component Component, pad Pad, expansion int64) {
+	shape := padShapeName(pad)
+	center := placePad(component, pad).Center
+	if shape == "circle" {
+		if d := min64(pad.WidthNM, pad.HeightNM) + 2*expansion; d > 0 {
+			g.flash("C,"+gerberMM(d), center)
+		}
+		return
+	}
+	w, h := pad.WidthNM+2*expansion, pad.HeightNM+2*expansion
+	if w <= 0 || h <= 0 {
+		return
+	}
+	rotation := ((component.Position.RotationUdeg % 360_000_000) + 360_000_000) % 360_000_000
+	if (shape == "rect" || shape == "oval") && rotation%90_000_000 == 0 {
+		if (rotation/90_000_000)%2 == 1 {
+			w, h = h, w
+		}
+		switch {
+		case shape == "oval" && w == h:
+			g.flash("C,"+gerberMM(w), center)
+		case shape == "oval":
+			g.flash("O,"+gerberMM(w)+"X"+gerberMM(h), center)
+		default:
+			g.flash("R,"+gerberMM(w)+"X"+gerberMM(h), center)
+		}
+		return
+	}
+	g.region(placedPadContour(component, pad, expansion))
+}
+
+// ---------------------------------------------------------------- layers
+
+type boardSide struct {
+	Name, Prefix, CopperID string
+}
+
+func copperLayers(def *Definition) []Layer {
+	out := []Layer{}
+	for _, layer := range def.Board.Layers {
+		if layer.Kind == "copper" {
+			out = append(out, layer)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Order < out[j].Order })
+	return out
+}
+
+// copperFileFunction numbers copper in stack order: L1 Top, Ln Inr, LN Bot.
+func copperFileFunction(index, count int) string {
+	position := "Inr"
+	switch {
+	case index == 0:
+		position = "Top"
+	case index == count-1:
+		position = "Bot"
+	}
+	return fmt.Sprintf("Copper,L%d,%s", index+1, position)
+}
+
+func outerSides(def *Definition) []boardSide {
+	copper := copperLayers(def)
+	if len(copper) == 0 {
+		return nil
+	}
+	sides := []boardSide{{Name: "Top", Prefix: "F", CopperID: copper[0].ID}}
+	if len(copper) > 1 {
+		sides = append(sides, boardSide{Name: "Bot", Prefix: "B", CopperID: copper[len(copper)-1].ID})
+	}
+	return sides
+}
+
+func renderCopperGerber(def *Definition, layerID, function string) []byte {
+	g := newGerberWriter()
+	for _, zone := range def.Zones {
+		if zone.Layer == layerID && len(zone.Polygon) >= 3 {
+			g.region(lineContour(zone.Polygon))
+		}
+	}
 	for _, component := range def.Components {
-		if (component.Position.Side == "front") != front {
+		for _, pad := range component.Pads {
+			if pad.NonPlated && min64(pad.WidthNM, pad.HeightNM) <= max64(pad.DrillNM, min64(pad.DrillWidthNM, pad.DrillHeightNM)) {
+				continue // NPTH with no copper beyond the hole, as KiCad emits it
+			}
+			if containsString(pad.Layers, layerID) {
+				writePad(g, component, pad, 0)
+			}
+		}
+	}
+	for _, via := range def.Vias {
+		if via.DiameterNM > 0 && layerBetween(def, layerID, via.FromLayer, via.ToLayer) {
+			g.flash("C,"+gerberMM(via.DiameterNM), Point{XNM: via.XNM, YNM: via.YNM})
+		}
+	}
+	for _, trace := range def.Traces {
+		if trace.Layer == layerID && len(trace.Points) >= 2 && trace.WidthNM > 0 {
+			g.polyline(trace.WidthNM, trace.Points)
+		}
+	}
+	return g.render("native copper", function, "Positive")
+}
+
+func padMaskExpansion(def *Definition, pad Pad) int64 {
+	if pad.SolderMaskExpansionNM != 0 {
+		return pad.SolderMaskExpansionNM
+	}
+	return boardMaskExpansion(def)
+}
+
+func boardMaskExpansion(def *Definition) int64 {
+	if def.Rules.SolderMaskExpansionNM > 0 {
+		return def.Rules.SolderMaskExpansionNM
+	}
+	return defaultSolderMaskExpansion
+}
+
+// maskOpeningCount is the number of openings renderMaskGerber draws: every
+// pad on the side, mounting holes, and vias only when untented.
+func maskOpeningCount(def *Definition, side boardSide) int {
+	count := 0
+	for _, component := range def.Components {
+		for _, pad := range component.Pads {
+			if containsString(pad.Layers, side.CopperID) {
+				count++
+			}
+		}
+	}
+	if def.Rules.UntentedVias {
+		for _, via := range def.Vias {
+			if layerBetween(def, side.CopperID, via.FromLayer, via.ToLayer) {
+				count++
+			}
+		}
+	}
+	if def.Mechanical != nil {
+		for _, hole := range def.Mechanical.MountingHoles {
+			if hole.DiameterNM > 0 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// renderMaskGerber draws solder-mask openings (negative polarity): pads grown
+// by their mask expansion, mounting holes, and vias only when untented.
+func renderMaskGerber(def *Definition, side boardSide) []byte {
+	g := newGerberWriter()
+	for _, component := range def.Components {
+		for _, pad := range component.Pads {
+			if containsString(pad.Layers, side.CopperID) {
+				writePad(g, component, pad, padMaskExpansion(def, pad))
+			}
+		}
+	}
+	expansion := boardMaskExpansion(def)
+	if def.Rules.UntentedVias {
+		for _, via := range def.Vias {
+			if layerBetween(def, side.CopperID, via.FromLayer, via.ToLayer) {
+				g.flash("C,"+gerberMM(via.DiameterNM+2*expansion), Point{XNM: via.XNM, YNM: via.YNM})
+			}
+		}
+	}
+	if def.Mechanical != nil {
+		for _, hole := range def.Mechanical.MountingHoles {
+			if hole.DiameterNM > 0 {
+				g.flash("C,"+gerberMM(hole.DiameterNM+2*expansion), Point{XNM: hole.XNM, YNM: hole.YNM})
+			}
+		}
+	}
+	return g.render("solder mask openings", "Soldermask,"+side.Name, "Negative")
+}
+
+type pasteAperture struct {
+	Component Component
+	Pad       Pad
+}
+
+// pastePad returns the stencil aperture for an SMD pad: the pad size plus
+// paste_expansion_nm and paste_ratio × size per axis. Through-hole pads and
+// no_paste pads never get paste.
+func pastePad(pad Pad) (Pad, bool) {
+	if pad.DrillNM > 0 || pad.DrillWidthNM > 0 || pad.DrillHeightNM > 0 || pad.NoPaste {
+		return pad, false
+	}
+	dx := pad.PasteExpansionNM + int64(math.Round(pad.PasteRatio*float64(pad.WidthNM)))
+	dy := pad.PasteExpansionNM + int64(math.Round(pad.PasteRatio*float64(pad.HeightNM)))
+	out := pad
+	if padShapeName(pad) == "circle" {
+		d := min64(dx, dy)
+		out.WidthNM, out.HeightNM = min64(pad.WidthNM, pad.HeightNM)+2*d, min64(pad.WidthNM, pad.HeightNM)+2*d
+	} else {
+		out.WidthNM, out.HeightNM = pad.WidthNM+2*dx, pad.HeightNM+2*dy
+		if padShapeName(pad) == "roundrect" && min64(out.WidthNM, out.HeightNM) > 0 {
+			// Keep the absolute corner radius shrinking with the aperture.
+			radius := max64(0, padCornerRadius(pad)+min64(dx, dy))
+			out.RoundrectRatio = float64(radius) / float64(min64(out.WidthNM, out.HeightNM))
+			if out.RoundrectRatio == 0 {
+				out.Shape = "rect"
+			}
+		}
+	}
+	return out, out.WidthNM > 0 && out.HeightNM > 0
+}
+
+func pastePads(def *Definition, side boardSide) []pasteAperture {
+	out := []pasteAperture{}
+	for _, component := range def.Components {
+		for _, pad := range component.Pads {
+			if !containsString(pad.Layers, side.CopperID) {
+				continue
+			}
+			if paste, ok := pastePad(pad); ok {
+				out = append(out, pasteAperture{Component: component, Pad: paste})
+			}
+		}
+	}
+	return out
+}
+
+func renderPasteGerber(def *Definition, side boardSide) []byte {
+	g := newGerberWriter()
+	for _, item := range pastePads(def, side) {
+		writePad(g, item.Component, item.Pad, 0)
+	}
+	return g.render("solder paste", "Paste,"+side.Name, "Positive")
+}
+
+func renderSilkscreenGerber(def *Definition, layerID, function string) []byte {
+	front := strings.HasPrefix(strings.ToUpper(layerID), "F.")
+	g := newGerberWriter()
+	g.use(g.aperture("C," + gerberMM(150_000)))
+	for _, component := range def.Components {
+		if (component.Position.Side == "front") != front || strings.HasPrefix(component.Footprint, "Fiducial") {
 			continue
 		}
 		body := component.Body
@@ -103,141 +451,182 @@ func renderSilkscreenGerber(def *Definition, layerID string) []byte {
 		if len(outline) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%sD02*\n", gerberPoint(outline[0]))
-		for _, point := range append(outline[1:], outline[0]) {
-			fmt.Fprintf(&b, "%sD01*\n", gerberPoint(point))
-		}
+		g.polyline(150_000, append(outline, outline[0]))
 	}
-	b.WriteString("M02*\n")
-	return []byte(b.String())
+	return g.render("native silkscreen", function, "Positive")
 }
 
-func renderEdgeGerber(def *Definition) []byte {
-	var b strings.Builder
-	b.WriteString("G04 Apteva PCB Studio board outline*\n%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n%ADD10C,0.100000*%\nD10*\n")
-	writeContour := func(points []Point) {
-		if len(points) < 2 {
-			return
-		}
-		fmt.Fprintf(&b, "%sD02*\n", gerberPoint(points[0]))
-		for _, point := range append(points[1:], points[0]) {
-			fmt.Fprintf(&b, "%sD01*\n", gerberPoint(point))
-		}
+func renderEdgeGerber(contours []contour) []byte {
+	g := newGerberWriter()
+	for _, c := range contours {
+		g.stroke(100_000, c)
 	}
-	writeContour(boardOutline(def.Board))
-	for _, cutout := range def.Board.Cutouts {
-		writeContour(boardCutoutContour(cutout))
-	}
-	b.WriteString("M02*\n")
-	return []byte(b.String())
+	return g.render("board outline", "Profile,NP", "Positive")
 }
 
-func boardCutoutContour(cutout BoardCutout) []Point {
-	if cutout.Kind == "polygon" {
-		return cutout.Polygon
-	}
-	const segments = 32
-	rx, ry := float64(cutout.DiameterNM)/2, float64(cutout.DiameterNM)/2
-	if cutout.Kind == "slot" {
-		rx, ry = float64(cutout.WidthNM)/2, float64(cutout.HeightNM)/2
-	}
-	angle := float64(cutout.RotationUdeg) / 1e6 * math.Pi / 180
-	points := make([]Point, 0, segments)
-	for i := 0; i < segments; i++ {
-		t := 2 * math.Pi * float64(i) / segments
-		x, y := rx*math.Cos(t), ry*math.Sin(t)
-		points = append(points, Point{XNM: cutout.XNM + int64(math.Round(x*math.Cos(angle)-y*math.Sin(angle))), YNM: cutout.YNM + int64(math.Round(x*math.Sin(angle)+y*math.Cos(angle)))})
-	}
-	return points
+// ---------------------------------------------------------------- drills
+
+// drillFeature is one Excellon hit: a round hole (Start only) or a G85 routed
+// slot from Start to End with the tool diameter as slot width.
+type drillFeature struct {
+	Start, End Point
+	Diameter   int64
+	Slot       bool
 }
 
-func renderExcellon(def *Definition) []byte {
-	type hole struct {
-		Point Point
-		Drill int64
+func slotFeature(center Point, length, width int64, angle float64) drillFeature {
+	if length <= width {
+		return drillFeature{Start: center, End: center, Diameter: width}
 	}
-	holes := []hole{}
+	half := float64(length-width) / 2
+	dx, dy := int64(math.Round(half*math.Cos(angle))), int64(math.Round(half*math.Sin(angle)))
+	start, end := Point{XNM: center.XNM - dx, YNM: center.YNM - dy}, Point{XNM: center.XNM + dx, YNM: center.YNM + dy}
+	if end.XNM < start.XNM || end.XNM == start.XNM && end.YNM < start.YNM {
+		start, end = end, start
+	}
+	return drillFeature{Start: start, End: end, Diameter: width, Slot: true}
+}
+
+// padDrillFeature converts a pad's round or oval drill into board space. Oval
+// drills follow the pad's long drill axis, rotated with the component.
+func padDrillFeature(component Component, pad Pad) (drillFeature, bool) {
+	center := placePad(component, pad).Center
+	if pad.DrillWidthNM > 0 && pad.DrillHeightNM > 0 {
+		angle := componentAngle(component)
+		length, width := pad.DrillWidthNM, pad.DrillHeightNM
+		if pad.DrillHeightNM > pad.DrillWidthNM {
+			length, width = pad.DrillHeightNM, pad.DrillWidthNM
+			angle += math.Pi / 2
+		}
+		return slotFeature(center, length, width, angle), true
+	}
+	if pad.DrillNM > 0 {
+		return drillFeature{Start: center, End: center, Diameter: pad.DrillNM}, true
+	}
+	return drillFeature{}, false
+}
+
+// drillFeatures splits every hole into plated (pads, vias, plated mounting
+// holes and cutouts) and non-plated programs.
+func drillFeatures(def *Definition) (pth, npth []drillFeature) {
 	for _, component := range def.Components {
 		for _, pad := range component.Pads {
-			if pad.DrillNM > 0 {
-				holes = append(holes, hole{Point: placePad(component, pad).Center, Drill: pad.DrillNM})
+			feature, ok := padDrillFeature(component, pad)
+			if !ok {
+				continue
+			}
+			if pad.NonPlated {
+				npth = append(npth, feature)
+			} else {
+				pth = append(pth, feature)
 			}
 		}
 	}
 	for _, via := range def.Vias {
 		if via.DrillNM > 0 {
-			holes = append(holes, hole{Point: Point{XNM: via.XNM, YNM: via.YNM}, Drill: via.DrillNM})
+			at := Point{XNM: via.XNM, YNM: via.YNM}
+			pth = append(pth, drillFeature{Start: at, End: at, Diameter: via.DrillNM})
 		}
 	}
 	if def.Mechanical != nil {
-		for _, mounting := range def.Mechanical.MountingHoles {
-			if mounting.DiameterNM > 0 {
-				holes = append(holes, hole{Point: Point{XNM: mounting.XNM, YNM: mounting.YNM}, Drill: mounting.DiameterNM})
+		for _, hole := range def.Mechanical.MountingHoles {
+			if hole.DiameterNM <= 0 {
+				continue
+			}
+			at := Point{XNM: hole.XNM, YNM: hole.YNM}
+			feature := drillFeature{Start: at, End: at, Diameter: hole.DiameterNM}
+			if hole.Plated {
+				pth = append(pth, feature)
+			} else {
+				npth = append(npth, feature)
 			}
 		}
 	}
-	drills := map[int64]bool{}
-	for _, hole := range holes {
-		drills[hole.Drill] = true
-	}
-	ordered := make([]int64, 0, len(drills))
-	for drill := range drills {
-		ordered = append(ordered, drill)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-	tools := map[int64]int{}
-	var b strings.Builder
-	b.WriteString("M48\n; Apteva PCB Studio native Excellon\nMETRIC,TZ\n")
-	for i, drill := range ordered {
-		tool := i + 1
-		tools[drill] = tool
-		fmt.Fprintf(&b, "T%02dC%s\n", tool, gerberMM(drill))
-	}
-	b.WriteString("%\nG90\n")
-	sort.Slice(holes, func(i, j int) bool {
-		if holes[i].Drill != holes[j].Drill {
-			return holes[i].Drill < holes[j].Drill
+	for _, cutout := range def.Board.Cutouts {
+		if !cutout.Plated {
+			continue
 		}
-		if holes[i].Point.XNM != holes[j].Point.XNM {
-			return holes[i].Point.XNM < holes[j].Point.XNM
+		center := Point{XNM: cutout.XNM, YNM: cutout.YNM}
+		switch cutout.Kind {
+		case "circle":
+			if cutout.DiameterNM > 0 {
+				pth = append(pth, drillFeature{Start: center, End: center, Diameter: cutout.DiameterNM})
+			}
+		case "slot":
+			angle := float64(cutout.RotationUdeg) / 1e6 * math.Pi / 180
+			length, width := cutout.WidthNM, cutout.HeightNM
+			if cutout.HeightNM > cutout.WidthNM {
+				length, width = cutout.HeightNM, cutout.WidthNM
+				angle += math.Pi / 2
+			}
+			if width > 0 {
+				pth = append(pth, slotFeature(center, length, width, angle))
+			}
 		}
-		return holes[i].Point.YNM < holes[j].Point.YNM
+	}
+	return pth, npth
+}
+
+func excellonMM(nm int64) string { return fmt.Sprintf("%.6f", float64(nm)/1e6) }
+
+func excellonPoint(p Point) string { return "X" + excellonMM(p.XNM) + "Y" + excellonMM(p.YNM) }
+
+func renderExcellonProgram(features []drillFeature, function string) []byte {
+	features = append([]drillFeature(nil), features...)
+	sort.Slice(features, func(i, j int) bool {
+		a, b := features[i], features[j]
+		if a.Diameter != b.Diameter {
+			return a.Diameter < b.Diameter
+		}
+		if a.Slot != b.Slot {
+			return !a.Slot
+		}
+		if a.Start != b.Start {
+			if a.Start.XNM != b.Start.XNM {
+				return a.Start.XNM < b.Start.XNM
+			}
+			return a.Start.YNM < b.Start.YNM
+		}
+		if a.End.XNM != b.End.XNM {
+			return a.End.XNM < b.End.XNM
+		}
+		return a.End.YNM < b.End.YNM
 	})
+	tools := map[int64]int{}
+	ordered := []int64{}
+	for _, feature := range features {
+		if _, ok := tools[feature.Diameter]; !ok {
+			tools[feature.Diameter] = len(ordered) + 1
+			ordered = append(ordered, feature.Diameter)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("M48\n; Apteva PCB Studio native Excellon\n")
+	fmt.Fprintf(&b, "; #@! TF.GenerationSoftware,Apteva,PCB Studio,%s\n", engineVersion)
+	fmt.Fprintf(&b, "; #@! TF.FileFunction,%s\n", function)
+	b.WriteString("FMAT,2\nMETRIC,TZ\n")
+	for i, diameter := range ordered {
+		fmt.Fprintf(&b, "T%02dC%s\n", i+1, excellonMM(diameter))
+	}
+	b.WriteString("%\nG90\nG05\n")
 	current := 0
-	for _, hole := range holes {
-		tool := tools[hole.Drill]
+	for _, feature := range features {
+		tool := tools[feature.Diameter]
 		if tool != current {
 			fmt.Fprintf(&b, "T%02d\n", tool)
 			current = tool
 		}
-		fmt.Fprintf(&b, "X%.6fY%.6f\n", float64(hole.Point.XNM)/1e6, float64(hole.Point.YNM)/1e6)
+		if feature.Slot {
+			fmt.Fprintf(&b, "%sG85%s\n", excellonPoint(feature.Start), excellonPoint(feature.End))
+		} else {
+			fmt.Fprintf(&b, "%s\n", excellonPoint(feature.Start))
+		}
 	}
-	b.WriteString("M30\n")
+	b.WriteString("T0\nM30\n")
 	return []byte(b.String())
 }
 
-func writeGerberRegion(b *strings.Builder, polygon []Point) {
-	if len(polygon) < 3 {
-		return
-	}
-	b.WriteString("G36*\n")
-	fmt.Fprintf(b, "%sD02*\n", gerberPoint(polygon[0]))
-	for _, point := range append(polygon[1:], polygon[0]) {
-		fmt.Fprintf(b, "%sD01*\n", gerberPoint(point))
-	}
-	b.WriteString("G37*\n")
-}
-
-func padPolygon(pad *placedPad) []Point {
-	shape := strings.ToLower(pad.Pad.Shape)
-	if shape == "circle" {
-		return circlePolygon(pad.Center, min64(pad.Pad.WidthNM, pad.Pad.HeightNM)/2, 24)
-	}
-	// Rectangular regions preserve exact rotation and outer copper dimensions.
-	// roundrect/oval corner radii remain a visualization hint in v0.2; the
-	// manufacturing writer deliberately emits the conservative outer envelope.
-	return pad.Corners
-}
+// ---------------------------------------------------------------- helpers
 
 func circlePolygon(center Point, radius int64, segments int) []Point {
 	out := make([]Point, segments)
@@ -246,6 +635,11 @@ func circlePolygon(center Point, radius int64, segments int) []Point {
 		out[i] = Point{XNM: center.XNM + int64(math.Round(math.Cos(angle)*float64(radius))), YNM: center.YNM + int64(math.Round(math.Sin(angle)*float64(radius)))}
 	}
 	return out
+}
+
+// boardCutoutContour is the flattened outline of a cutout, used by placement.
+func boardCutoutContour(cutout BoardCutout) []Point {
+	return cutoutEdgeContour(cutout).polygon()
 }
 
 func bodyPolygon(component Component, body Body) []Point {
@@ -260,13 +654,7 @@ func gerberFilename(layer string) string {
 	return replacer.Replace(layer)
 }
 func copperLayerCount(def *Definition) int {
-	count := 0
-	for _, layer := range def.Board.Layers {
-		if layer.Kind == "copper" {
-			count++
-		}
-	}
-	return count
+	return len(copperLayers(def))
 }
 func layerBetween(def *Definition, target, from, to string) bool {
 	orders := map[string]int{}
@@ -284,36 +672,22 @@ func layerBetween(def *Definition, target, from, to string) bool {
 	}
 	return t >= f && t <= end
 }
-func gerberJobFiles(files map[string][]byte) []map[string]any {
-	names := make([]string, 0, len(files))
-	for name := range files {
+
+func gerberJobFiles(functions map[string][2]string) []map[string]any {
+	names := make([]string, 0, len(functions))
+	for name := range functions {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	out := []map[string]any{}
 	for _, name := range names {
-		if name == "board.gbrjob" {
-			continue
+		entry := map[string]any{"Path": name, "FileFunction": functions[name][0]}
+		if polarity := functions[name][1]; polarity != "" {
+			entry["FilePolarity"] = polarity
 		}
-		out = append(out, map[string]any{"Path": name, "FileFunction": gerberFileFunction(name)})
+		out = append(out, entry)
 	}
 	return out
-}
-func gerberFileFunction(name string) string {
-	switch {
-	case strings.Contains(name, "F_Cu"):
-		return "Copper,L1,Top"
-	case strings.Contains(name, "B_Cu"):
-		return "Copper,L2,Bot"
-	case strings.Contains(name, "Silk"):
-		return "Legend,Top"
-	case strings.Contains(name, "Edge_Cuts"):
-		return "Profile,NP"
-	case strings.HasSuffix(name, ".drl"):
-		return "Plated,1,2,PTH"
-	default:
-		return "Other"
-	}
 }
 
 // zipManufacturingSet is separate from deterministicZip to make tests and

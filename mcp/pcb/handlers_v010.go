@@ -44,6 +44,7 @@ func (a *App) handleDesignV010(w http.ResponseWriter, r *http.Request, app *sdk.
 		"assembly":        func() (any, error) { return a.toolAssemblyGenerate(r.Context(), app, args) },
 		"firmware-header": func() (any, error) { return a.toolFirmwareHeader(r.Context(), app, args) },
 		"bom-source":      func() (any, error) { return a.toolBOMSource(r.Context(), app, args) },
+		"panelize":        func() (any, error) { return a.toolPanelize(r.Context(), app, args) },
 	}
 	table := get
 	if r.Method == http.MethodPost {

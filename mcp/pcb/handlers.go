@@ -370,7 +370,11 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 201, map[string]any{"artifact": artifact})
-	case "release-overview", "bringup", "orders", "assembly", "firmware-header", "fab-profiles", "bom-source":
+	case "copy", "template-apply", "lcsc-match":
+		a.handleDesignV011(w, r, app, id, action)
+	case "library-place":
+		a.handleDesignLibraryPlace(w, r, app, id)
+	case "release-overview", "bringup", "orders", "assembly", "firmware-header", "fab-profiles", "bom-source", "panelize":
 		a.handleDesignV010(w, r, app, id, action)
 	case "artifacts":
 		if r.Method != http.MethodGet {

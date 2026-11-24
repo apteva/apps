@@ -68,6 +68,11 @@ func productionReadinessWith(def *Definition, inputs ReadinessInputs) *Productio
 			add("STEP_ASSEMBLY", "error", err.Error())
 		}
 	}
+	if p, ok := activeFabProfile(def); ok && strings.EqualFold(p.Fabricator, "jlcpcb") {
+		for _, c := range jlcAssemblyChecks(def) {
+			add(c.Code, c.Severity, c.Message, c.ObjectIDs...)
+		}
+	}
 	verifiedFootprints, modelContracts, mpns, testPoints := 0, 0, 0, map[string]bool{}
 	netByNode := map[string]string{}
 	for _, net := range def.Nets {

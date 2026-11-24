@@ -35,12 +35,12 @@ func TestNativeManufacturingSetIsDeterministic(t *testing.T) {
 		t.Fatal("manufacturing ZIP is not deterministic")
 	}
 	files := manufacturingFiles(&def)
-	for _, name := range []string{"gerbers/F_Cu.gbr", "gerbers/B_Cu.gbr", "gerbers/Edge_Cuts.gbr", "drill/board.drl", "board.gbrjob"} {
+	for _, name := range []string{"gerbers/F_Cu.gbr", "gerbers/B_Cu.gbr", "gerbers/Edge_Cuts.gbr", "drill/board-PTH.drl", "board.gbrjob"} {
 		if len(files[name]) == 0 {
 			t.Errorf("missing manufacturing file %s", name)
 		}
 	}
-	if !bytes.Contains(files["gerbers/F_Cu.gbr"], []byte("G36*")) || !bytes.Contains(files["drill/board.drl"], []byte("M48")) {
+	if !bytes.Contains(files["gerbers/F_Cu.gbr"], []byte("D03*")) || !bytes.Contains(files["drill/board-PTH.drl"], []byte("M48")) {
 		t.Fatal("manufacturing files do not contain native Gerber/Excellon commands")
 	}
 }
@@ -86,7 +86,7 @@ func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 		names = append(names, f.Name)
 	}
 	sort.Strings(names)
-	want := []string{"assembly/bom.csv", "assembly/pick-and-place.csv", "exchange/board.kicad_pcb", "manifest.json", "manufacturing/board.gbrjob", "manufacturing/drill/board.drl", "manufacturing/gerbers/B_Cu.gbr", "manufacturing/gerbers/Edge_Cuts.gbr", "manufacturing/gerbers/F_Cu.gbr", "outputs/board.svg", "outputs/bom.csv", "production/bring-up-plan.json", "production/bring-up-plan.txt", "production/readiness.json", "source/pcb.json", "validation/report.json", "verification/fabrication.json", "verification/kicad.json"}
+	want := []string{"assembly/bom.csv", "assembly/jlcpcb-bom.csv", "assembly/jlcpcb-cpl.csv", "assembly/pick-and-place.csv", "exchange/board.kicad_pcb", "manifest.json", "manufacturing/board.gbrjob", "manufacturing/drill/board-NPTH.drl", "manufacturing/drill/board-PTH.drl", "manufacturing/gerbers/B_Cu.gbr", "manufacturing/gerbers/B_Mask.gbr", "manufacturing/gerbers/Edge_Cuts.gbr", "manufacturing/gerbers/F_Cu.gbr", "manufacturing/gerbers/F_Mask.gbr", "manufacturing/gerbers/F_Paste.gbr", "outputs/board.svg", "outputs/bom.csv", "production/bring-up-plan.json", "production/bring-up-plan.txt", "production/readiness.json", "source/pcb.json", "validation/report.json", "verification/fabrication.json", "verification/kicad.json"}
 	if len(names) != len(want) {
 		t.Fatalf("release files: %v", names)
 	}

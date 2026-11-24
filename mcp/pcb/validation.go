@@ -328,6 +328,9 @@ func validateDefinition(def *Definition) ValidationReport {
 	for _, check := range fabProfileChecks(def) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
+	for _, check := range i2cChecks(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
 	for _, check := range schematicChecks(def) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}

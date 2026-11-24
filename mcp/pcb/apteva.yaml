@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.10.0
+version: 0.11.0
 description: |
-  Native, agent-first electronics design for Apteva. Version 0.10 adds
-  automatic placement, schematic capture with ERC and KiCad schematic import,
-  fab rule profiles, pick-and-place output, stock-checked sourcing, load-step
-  simulation, a behavioral firmware runtime with board pin headers, bring-up
-  capture, fab order tracking and a Release workspace. PCB Studio owns its
+  Native, agent-first electronics design for Apteva. Version 0.11 adds
+  JLCPCB assembly files with LCSC part matching, a parts library with KiCad
+  footprint import, solder mask and paste layers, PTH/NPTH drill split with
+  slots, true pad shapes, inner layers, panelization, 45-degree routing with
+  rip-up, I2C address conflict checks, design copies and templates, and ESP32
+  firmware functions. PCB Studio owns its
   canonical circuit and board model, revision engine, interactive layout editor,
   validation, rendering, pad/footprint geometry, manufacturing validation,
   independent Gerber/Excellon verification, Gerber/Excellon writers,
@@ -34,6 +35,7 @@ min_apteva_version: "0.11.0"
 requires:
   permissions:
     - db.write.app
+    - net.egress
     - platform.apps.call
     - platform.connections.execute
   integrations:
@@ -125,11 +127,11 @@ provides:
     - { name: pcb_revisions_get, description: "Fetch one immutable revision. Args: id.", requires: pcb.read }
     - { name: pcb_revisions_diff, description: "Compare two native PCB revisions. Args: from_revision_id, to_revision_id.", requires: pcb.read }
     - { name: pcb_operations_apply, description: "Atomically apply typed native operations and create a revision. Args: design_id, expected_parent_id, operations, note?.", requires: pcb.write, resource_from: "pcb_design/{arg.design_id}" }
-    - { name: pcb_route_analyze, description: "Analyze routability and return a deterministic reviewable route plan. Args: design_id, revision_id?, options?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
-    - { name: pcb_route_suggest, description: "Suggest clearance-safe native traces and vias without changing the design. Args: design_id, revision_id?, options?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
-    - { name: pcb_route_apply, description: "Apply a native route plan as an immutable revision. Args: design_id, revision_id?, options?, allow_partial?, note?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_analyze, description: "Analyze routability and return a deterministic reviewable route plan (45-degree grid routing with rip-up and retry). Args: design_id, revision_id?, options?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_suggest, description: "Suggest clearance-safe native traces and vias with 45-degree bends and rip-up and retry, without changing the design. Args: design_id, revision_id?, options? (allow_diagonal, max_ripup_iterations, ...).", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_apply, description: "Apply a native route plan (45-degree routing with rip-up and retry) as an immutable revision. Args: design_id, revision_id?, options?, allow_partial?, note?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_route_selected, description: "Route selected net_ids in options and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
-    - { name: pcb_route_all, description: "Route every incomplete net and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_all, description: "Route every incomplete net with 45-degree routing and rip-up and retry, and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_route_optimize, description: "Replace selected existing routing with a deterministic optimized route revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_route_remove, description: "Remove PCB Studio-generated autoroutes and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_placement_analyze, description: "Report placement overlaps, keepout/edge/hole violations, panel-opening edge alignment, and ratsnest length. Args: design_id, revision_id?, options?.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
@@ -161,7 +163,19 @@ provides:
     - { name: pcb_order_prepare, description: "Validate and package a fabrication order and track it. Args: design_id, revision_id?, fabricator, quantity, assembly?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_order_update, description: "Record a fab quote, order number, status or tracking. Args: order_id, status?, external_order_id?, quote_amount?, quote_currency?, tracking?, note?.", requires: pcb.write }
     - { name: pcb_orders_list, description: "List fabrication orders for a design. Args: design_id.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_panelize, description: "Panelize a revision (rows x columns, rails with fiducials and tooling holes, V-score or mouse-bite tabs) into a verified panel manufacturing ZIP artifact. Args: design_id, revision_id?, rows, columns, spacing_nm?, rail_width_nm?, rail_sides?, separation?, tab_width_nm?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_release_overview, description: "Return readiness gates, package contents, sourcing, bring-up, fab profile and orders. Args: design_id, revision_id?.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_designs_copy, description: "Create a design from another design's revision; include picks sections (board, mechanical, fixed_components, components, keepouts, zones, routing, schematic, firmware, simulation, wiring, all). Args: source_design_id, revision_id?, name, include?, template?, note?.", requires: pcb.write }
+    - { name: pcb_templates_list, description: "List designs marked as templates.", requires: pcb.read }
+    - { name: pcb_template_apply, description: "Replace a design's board, mechanical and fixed components (or chosen sections) with a template's as a new revision. Args: design_id, expected_parent_id, template_design_id, template_revision_id?, include?, note?.", requires: pcb.write, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_template_sync, description: "Push a template's current revision to every design derived from it. Args: template_design_id, dry_run?.", requires: pcb.write }
+    - { name: pcb_i2c_bus_check, description: "Check I2C address conflicts across blocks sharing one bus and within each block. Args: design_ids.", requires: pcb.read }
+    - { name: pcb_lcsc_search, description: "Search the LCSC/JLCPCB assembly parts catalog. Args: query, package?, limit?.", requires: pcb.read }
+    - { name: pcb_lcsc_match, description: "Match every placed BOM line to an LCSC part with stock and price; apply writes exact MPN matches as a new revision. Args: design_id, revision_id?, expected_parent_id?, build_quantity?, apply?, overwrite?, accept_parametric?.", requires: pcb.write, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_library_list, description: "List built-in and project library parts (real land patterns, MPN, LCSC). Args: query?, category?, limit?.", requires: pcb.read }
+    - { name: pcb_library_get, description: "Return one library part with pads, courtyard, pins, sourcing, datasheet and provenance. Args: part_id.", requires: pcb.read }
+    - { name: pcb_footprint_import_kicad, description: "Import a KiCad .kicad_mod footprint into the project library. Args: content, name?, category?, mpn?, manufacturer?, lcsc?, datasheet_url?.", requires: pcb.write }
+    - { name: pcb_component_place_from_library, description: "Place a library part into a design (component.add_from_library revision). Args: design_id, part_id, x_nm, y_nm, rotation_udeg?, side?, designator?, expected_parent_id?.", requires: pcb.write, resource_from: "pcb_design/{arg.design_id}" }
   ui_panels:
     - { slot: project.page, label: PCB, icon: cpu, entry: /ui/PCBPanel.mjs }
   ui_components:
@@ -198,7 +212,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: pcb/v0.10.0, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.11.0, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }
@@ -219,5 +233,6 @@ config_schema:
   - { name: artifact_dir, type: text, default: "/data/artifacts", label: Local artifact cache }
   - { name: default_country, type: text, default: "US", label: Sourcing country }
   - { name: default_currency, type: text, default: "USD", label: Sourcing currency }
+  - { name: lcsc_catalog_url, type: text, default: "https://jlcsearch.tscircuit.com", label: LCSC parts catalog URL (off to disable) }
 
 upgrade_policy: auto-patch

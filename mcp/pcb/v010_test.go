@@ -404,7 +404,7 @@ func TestOrderPackageAndStatusFlow(t *testing.T) {
 	for _, f := range zr.File {
 		names[f.Name] = true
 	}
-	for _, want := range []string{"order.json", "fabrication/drill/board.drl", "fabrication/gerbers/Edge_Cuts.gbr", "assembly/pick-and-place.csv", "assembly/bom.csv"} {
+	for _, want := range []string{"order.json", "fabrication/drill/board-PTH.drl", "fabrication/gerbers/Edge_Cuts.gbr", "assembly/pick-and-place.csv", "assembly/bom.csv"} {
 		if !names[want] {
 			t.Fatalf("package lacks %s: %v", want, names)
 		}

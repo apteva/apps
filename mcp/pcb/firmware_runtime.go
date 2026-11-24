@@ -33,6 +33,10 @@ var firmwareConstants = map[string]float64{
 	"HIGH": 1, "LOW": 0, "true": 1, "false": 0, "INPUT": 0, "OUTPUT": 1, "INPUT_PULLUP": 2,
 	"LED_BUILTIN": 13, "A0": 14, "A1": 15, "A2": 16, "A3": 17, "A4": 18, "A5": 19,
 	"DHT22": 22, "DHT11": 11, "PI": math.Pi,
+	// ESP32 Arduino core: WiFi status codes, WiFi modes, ADC attenuation.
+	"WL_IDLE_STATUS": 0, "WL_NO_SSID_AVAIL": 1, "WL_CONNECTED": 3, "WL_CONNECT_FAILED": 4, "WL_DISCONNECTED": 6,
+	"WIFI_OFF": 0, "WIFI_STA": 1, "WIFI_AP": 2, "WIFI_AP_STA": 3,
+	"ADC_0db": 0, "ADC_2_5db": 1, "ADC_6db": 2, "ADC_11db": 3,
 }
 
 type fwStmt struct {
@@ -70,6 +74,13 @@ type firmwareRuntimeState struct {
 	i2cBytes   []int
 	returned   float64
 	depth      int
+	// I2C read side: bytes queued by Wire.requestFrom, served by Wire.read.
+	i2cRead   []int
+	i2cCursor map[int]int
+	wifiBegun bool
+	ledcPins  map[int]string
+	adcBits   int
+	halted    bool
 }
 
 func runFirmwareLab(def *Definition, options FirmwareOptions) (*FirmwareRunResult, error) {
@@ -102,7 +113,7 @@ func runFirmwareLab(def *Definition, options FirmwareOptions) (*FirmwareRunResul
 	result := &FirmwareRunResult{Schema: firmwareSchema, Engine: engineVersion, Status: "passed", Language: "arduino", Board: options.Board, Runtime: firmwareRuntimeName, Iterations: options.Iterations, SerialOutput: []string{}, PinModes: map[string]string{}, PinStates: map[string]string{}, I2CTransactions: []I2CTransaction{}, Variables: map[string]float64{}, Warnings: []string{}}
 	_, _, _, devices := compileSimulationModel(def, nil)
 	result.VirtualDevices = devices
-	state := &firmwareRuntimeState{result: result, options: options, variables: map[string]float64{}, functions: map[string]fwFunction{}, i2cAddress: -1, i2cBytes: []int{}}
+	state := &firmwareRuntimeState{result: result, options: options, variables: map[string]float64{}, functions: map[string]fwFunction{}, i2cAddress: -1, i2cBytes: []int{}, i2cCursor: map[int]int{}, ledcPins: map[int]string{}, adcBits: firmwareDefaultADCBits(options.Board)}
 	for name, value := range firmwareBoardPins(def) {
 		state.variables[name] = float64(value)
 	}
@@ -422,6 +433,9 @@ func splitFirmwareTopLevel(body string, sep byte) []string {
 }
 
 func (s *firmwareRuntimeState) budget() bool {
+	if s.halted {
+		return false
+	}
 	s.result.Statements++
 	if s.result.Statements > firmwareMaxStatements {
 		s.result.Status = "failed"
@@ -654,6 +668,54 @@ func (s *firmwareRuntimeState) callStatement(name string, args []string) {
 		s.result.DurationUS += int64(s.arg(args, 0) * 1_000)
 	case "delayMicroseconds":
 		s.result.DurationUS += int64(s.arg(args, 0))
+	case "WiFi.begin":
+		s.wifiBegun = true
+		s.result.DurationUS += 1_500_000 // association + DHCP on a typical AP
+	case "WiFi.mode", "WiFi.setHostname", "WiFi.setSleep", "WiFi.setAutoReconnect", "WiFi.persistent":
+	case "WiFi.disconnect":
+		s.wifiBegun = false
+	case "analogReadResolution":
+		if bits := int(s.arg(args, 0)); bits >= 9 && bits <= 16 {
+			s.adcBits = bits
+		}
+	case "analogSetAttenuation", "analogSetPinAttenuation", "analogSetWidth":
+	case "ledcSetup":
+		// v2 API: channel setup; the pin binding comes from ledcAttachPin.
+	case "ledcAttachPin":
+		if len(args) >= 2 {
+			s.ledcPins[int(s.eval(args[1]))] = s.pinKey(args[0])
+		}
+	case "ledcAttach", "ledcAttachChannel":
+		// v3 API: ledcAttach(pin, freq, resolution) binds by pin.
+		if len(args) >= 1 {
+			pin := s.pinKey(args[0])
+			s.ledcPins[-1-int(s.eval(args[0]))] = pin
+		}
+	case "ledcWrite":
+		if len(args) >= 2 {
+			key := int(s.eval(args[0]))
+			pin, ok := s.ledcPins[key]
+			if !ok {
+				pin, ok = s.ledcPins[-1-key]
+			}
+			if !ok {
+				pin = s.pinKey(args[0])
+			}
+			s.result.PinStates[pin] = "pwm:" + strconv.Itoa(int(s.eval(args[1])))
+		}
+	case "esp_sleep_enable_timer_wakeup", "esp_sleep_enable_ext0_wakeup", "esp_sleep_enable_ext1_wakeup", "gpio_wakeup_enable", "esp_sleep_enable_gpio_wakeup":
+		if name == "esp_sleep_enable_timer_wakeup" {
+			s.result.SleepWakeUS = int64(s.arg(args, 0))
+		}
+	case "esp_deep_sleep_start", "esp_deep_sleep", "ESP.deepSleep":
+		if name != "esp_deep_sleep_start" {
+			s.result.SleepWakeUS = int64(s.arg(args, 0))
+		}
+		s.result.DeepSleep = true
+		s.halted = true
+	case "ESP.restart", "esp_restart":
+		s.result.Restarted = true
+		s.halted = true
 	case "Wire.begin", "Wire.setClock":
 	case "Wire.beginTransmission":
 		s.i2cAddress = int(s.arg(args, 0))
@@ -756,7 +818,7 @@ func (s *firmwareRuntimeState) builtinValue(name string, args []string) (float64
 		if value, ok := s.options.AnalogInputs[pin]; ok {
 			return value, true
 		}
-		return 512, true
+		return float64(int(1) << (s.adcBits - 1)), true
 	case name == "millis":
 		return float64(s.result.DurationUS / 1_000), true
 	case name == "micros":
@@ -768,11 +830,60 @@ func (s *firmwareRuntimeState) builtinValue(name string, args []string) (float64
 		s.result.SensorReads++
 		return firstFirmwareValue(s.options.SensorValues, "humidity_percent", "humidity"), true
 	case name == "Wire.read":
-		return 0, true
+		if len(s.i2cRead) == 0 {
+			return -1, true
+		}
+		b := s.i2cRead[0]
+		s.i2cRead = s.i2cRead[1:]
+		return float64(b), true
 	case name == "Wire.available":
-		return 0, true
+		return float64(len(s.i2cRead)), true
 	case name == "Wire.requestFrom":
-		return s.arg(args, 1), true
+		return float64(s.i2cRequest(int(s.arg(args, 0)), int(s.arg(args, 1)))), true
+	case name == "WiFi.status":
+		if s.wifiBegun && s.options.WiFiAvailable() {
+			return firmwareConstants["WL_CONNECTED"], true
+		}
+		if s.wifiBegun {
+			return firmwareConstants["WL_NO_SSID_AVAIL"], true
+		}
+		return firmwareConstants["WL_DISCONNECTED"], true
+	case name == "WiFi.RSSI":
+		if s.wifiBegun && s.options.WiFiAvailable() {
+			return -58, true
+		}
+		return 0, true
+	case name == "analogReadMilliVolts":
+		s.result.InputReads++
+		pin := s.pinKey(s.argText(args, 0))
+		if value, ok := s.options.AnalogInputs[pin]; ok {
+			return math.Round(value * 3300 / float64(int(1)<<s.adcBits-1)), true
+		}
+		return 1650, true
+	case name == "touchRead":
+		s.result.InputReads++
+		pin := s.pinKey(s.argText(args, 0))
+		if value, ok := s.options.AnalogInputs[pin]; ok {
+			return value, true
+		}
+		return 60, true
+	case name == "temperatureRead":
+		return firstFirmwareValue(s.options.SensorValues, "chip_temperature_c", "temperature_c") + 10, true
+	case name == "ESP.getFreeHeap" || name == "esp_get_free_heap_size":
+		return 250_000, true
+	case name == "ESP.getChipCores":
+		if s.options.Board == "esp32c3" {
+			return 1, true
+		}
+		return 2, true
+	case name == "ESP.getCpuFreqMHz" || name == "getCpuFrequencyMhz":
+		if s.options.Board == "esp32c3" {
+			return 160, true
+		}
+		return 240, true
+	case name == "esp_random" || name == "random":
+		// Deterministic: runs must be reproducible.
+		return 4, true
 	case name == "Serial.available":
 		return 0, true
 	case name == "map" && len(args) == 5:
@@ -1276,7 +1387,7 @@ func firmwareGate(def *Definition) (*FirmwareRunResult, []Check) {
 	if spec == nil || strings.TrimSpace(spec.Source) == "" {
 		return nil, []Check{{Code: "FIRMWARE_MISSING", Severity: "warning", Message: "No firmware is stored on the revision; set it with firmware.set to gate on a simulated run"}}
 	}
-	result, err := runFirmwareLab(def, FirmwareOptions{Source: spec.Source, Board: spec.Board, Iterations: spec.Iterations, SensorValues: spec.SensorValues, DigitalInputs: spec.DigitalInputs, AnalogInputs: spec.AnalogInputs})
+	result, err := runFirmwareLab(def, FirmwareOptions{Source: spec.Source, Board: spec.Board, Iterations: spec.Iterations, SensorValues: spec.SensorValues, DigitalInputs: spec.DigitalInputs, AnalogInputs: spec.AnalogInputs, I2CReadData: spec.I2CReadData, WiFi: spec.WiFi})
 	if err != nil {
 		return nil, []Check{{Code: "FIRMWARE_SIMULATION", Severity: "error", Message: "Firmware did not run: " + err.Error()}}
 	}
@@ -1299,4 +1410,41 @@ func firmwareGate(def *Definition) (*FirmwareRunResult, []Check) {
 		}
 	}
 	return result, checks
+}
+
+// firmwareDefaultADCBits is the analogRead resolution after reset: 10-bit on
+// AVR-style boards, 12-bit on ESP32 parts.
+func firmwareDefaultADCBits(board string) int {
+	if strings.HasPrefix(strings.ToLower(board), "esp32") {
+		return 12
+	}
+	return 10
+}
+
+// i2cRequest models Wire.requestFrom: a present virtual device answers with
+// the next count bytes of its register stream (options.I2CReadData, cycled);
+// an absent address NACKs and returns 0 bytes.
+func (s *firmwareRuntimeState) i2cRequest(address, count int) int {
+	if count < 0 {
+		count = 0
+	}
+	if count > 64 {
+		count = 64
+	}
+	s.i2cRead = s.i2cRead[:0]
+	status := "ack"
+	if !virtualI2CAddressPresent(s.result.VirtualDevices, address) && !s.options.hasI2CData(address) {
+		status, count = "nack", 0
+	}
+	data := s.options.i2cData(address)
+	for i := 0; i < count; i++ {
+		b := 0
+		if len(data) > 0 {
+			b = data[(s.i2cCursor[address]+i)%len(data)] & 0xFF
+		}
+		s.i2cRead = append(s.i2cRead, b)
+	}
+	s.i2cCursor[address] += count
+	s.result.I2CTransactions = append(s.result.I2CTransactions, I2CTransaction{TimeUS: s.result.DurationUS, Address: address, Bytes: append([]int{}, s.i2cRead...), Status: status, Direction: "read"})
+	return count
 }

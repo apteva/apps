@@ -238,6 +238,9 @@ func structuralLimits(def *Definition) error {
 	if err := fabProfileLimits(def); err != nil {
 		return err
 	}
+	if err := rotationOffsetLimits(def); err != nil {
+		return err
+	}
 	if err := schematicLimits(def); err != nil {
 		return err
 	}

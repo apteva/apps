@@ -76,7 +76,7 @@ func TestSensorNodeAcceptanceDesignIsManufacturable(t *testing.T) {
 		t.Fatalf("sensor acceptance design is not a meaningful manufacturing fixture: %#v", report.Metrics)
 	}
 	files := manufacturingFiles(&def)
-	if len(files["gerbers/F_Cu.gbr"]) < 1_000 || len(files["drill/board.drl"]) < 100 {
+	if len(files["gerbers/F_Cu.gbr"]) < 1_000 || len(files["drill/board-PTH.drl"]) < 100 {
 		t.Fatalf("sensor manufacturing output is unexpectedly small")
 	}
 }

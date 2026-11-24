@@ -20,6 +20,7 @@ func (a *App) v010Tools() []sdk.Tool {
 		{Name: "pcb_order_prepare", Description: "Validate and package a fabrication order (Gerbers, drills, optional assembly files, order.json) and track it as prepared. Placing the order happens at the fab; record the result with pcb_order_update.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "fabricator": str, "quantity": map[string]any{"type": "integer", "minimum": 1, "maximum": 100000}, "assembly": map[string]any{"type": "boolean"}, "surface_finish": str, "solder_mask": str, "copper_weight_oz": map[string]any{"type": "integer", "minimum": 0, "maximum": 6}, "note": str}, []string{"design_id", "fabricator", "quantity"}), HandlerCtx: a.toolOrderPrepare},
 		{Name: "pcb_order_update", Description: "Record a fab quote, order number, status change (quoted, placed, in_production, shipped, delivered, cancelled) or tracking for an order.", InputSchema: schemaObject(map[string]any{"order_id": id, "status": map[string]any{"type": "string", "enum": []string{"quoted", "placed", "in_production", "shipped", "delivered", "cancelled"}}, "external_order_id": str, "quote_amount": map[string]any{"type": "number", "minimum": 0}, "quote_currency": str, "tracking": str, "note": str}, []string{"order_id"}), HandlerCtx: a.toolOrderUpdate},
 		{Name: "pcb_orders_list", Description: "List fabrication orders for a design, newest first.", InputSchema: schemaObject(map[string]any{"design_id": id}, []string{"design_id"}), HandlerCtx: a.toolOrdersList},
+		{Name: "pcb_panelize", Description: "Panelize a revision for production: rows x columns copies with spacing, rails (default 5 mm top/bottom) carrying 3 fiducials and 4 NPTH tooling holes, separated by V-score lines (gerbers/V_Score.gbr) or routed tabs with mouse-bite NPTH perforations. Stores a verified panel ZIP (all Gerbers, PTH/NPTH drills, gbrjob, panel.json) as an artifact; the design revision is not changed.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "rows": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}, "columns": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}, "spacing_nm": map[string]any{"type": "integer", "minimum": 0, "maximum": 20_000_000}, "rail_width_nm": map[string]any{"type": "integer", "minimum": 0, "maximum": 30_000_000}, "rail_sides": map[string]any{"type": "string", "enum": []string{"top_bottom", "left_right", "all"}}, "separation": map[string]any{"type": "string", "enum": []string{"vscore", "tabs"}}, "tab_width_nm": map[string]any{"type": "integer", "minimum": 0, "maximum": 20_000_000}}, []string{"design_id", "rows", "columns"}), HandlerCtx: a.toolPanelize},
 		{Name: "pcb_release_overview", Description: "Return everything the Release workspace shows: readiness gates, package contents, sourcing, bring-up, fab profile and orders.", InputSchema: designActionSchema(id), HandlerCtx: a.toolReleaseOverview},
 	}
 }
@@ -124,4 +125,14 @@ func (a *App) toolReleaseOverview(_ context.Context, app *sdk.AppCtx, args map[s
 		return nil, err
 	}
 	return s.ReleaseOverview(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+}
+
+func (a *App) toolPanelize(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	options := PanelOptions{Rows: intArg(args, "rows"), Columns: intArg(args, "columns"), SpacingNM: int64Arg(args, "spacing_nm"), RailWidthNM: int64Arg(args, "rail_width_nm"), RailSides: stringArg(args, "rail_sides"), Separation: stringArg(args, "separation"), TabWidthNM: int64Arg(args, "tab_width_nm")}
+	artifact, report, err := s.Panelize(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), options)
+	return map[string]any{"artifact": artifact, "panel": report}, err
 }

@@ -114,7 +114,7 @@ func (s *Service) AssemblyGenerate(designID, revisionID int64) (*Artifact, []Che
 	if err != nil {
 		return nil, nil, err
 	}
-	artifact, err := s.persistArtifact(design, revision, "assembly", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "placements": len(placementRows(def)), "files": []string{"assembly/bom.csv", "assembly/pick-and-place.csv"}})
+	artifact, err := s.persistArtifact(design, revision, "assembly", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "placements": len(placementRows(def)), "files": []string{"assembly/bom.csv", "assembly/jlcpcb-bom.csv", "assembly/jlcpcb-cpl.csv", "assembly/pick-and-place.csv"}})
 	return artifact, []Check{}, err
 }
 
@@ -166,7 +166,7 @@ func (s *Service) ReleaseOverview(designID, revisionID int64) (map[string]any, e
 			break
 		}
 	}
-	contents := []string{"manifest.json", "source/pcb.json", "validation/report.json", "verification/fabrication.json", "verification/kicad.json", "exchange/board.kicad_pcb", "production/readiness.json", "production/bring-up-plan.txt", "production/bring-up-plan.json", "outputs/board.svg", "outputs/bom.csv", "assembly/pick-and-place.csv", "assembly/bom.csv"}
+	contents := []string{"manifest.json", "source/pcb.json", "validation/report.json", "verification/fabrication.json", "verification/kicad.json", "exchange/board.kicad_pcb", "production/readiness.json", "production/bring-up-plan.txt", "production/bring-up-plan.json", "outputs/board.svg", "outputs/bom.csv", "assembly/pick-and-place.csv", "assembly/bom.csv", "assembly/jlcpcb-cpl.csv", "assembly/jlcpcb-bom.csv"}
 	for _, name := range manufacturingFileSummary(def) {
 		contents = append(contents, "manufacturing/"+name)
 	}

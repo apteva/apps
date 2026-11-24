@@ -1,5 +1,9 @@
 # PCB Studio App Proposal
 
+## Version 0.11 implementation status
+
+PCB Studio 0.11 adds JLCPCB CPL/BOM output with rotation offsets and LCSC matching (MPN and parametric passives), a built-in parts library and KiCad `.kicad_mod` import, solder mask and paste Gerbers, PTH/NPTH drill split with G85 slots, true pad shapes, corner radius, N-layer copper with KiCad inner layers, panelization, 45-degree routing with rip-up and retry, I2C address conflict checks within a board and across a shared bus, design copies and templates with sync, and ESP32 runtime functions (I2C reads, WiFi, LEDC, deep sleep). Not done: output checked by a third-party Gerber viewer, live stock from LCSC itself (the jlcsearch mirror has gaps).
+
 ## Version 0.10 implementation status
 
 PCB Studio 0.10 adds automatic placement, schematic capture/ERC/KiCad schematic import, fab rule profiles, pick-and-place and assembly BOM output, stock-checked sourcing with a readiness gate, regulator load-step simulation, a behavioral Arduino firmware runtime with generated board pin headers and a firmware gate, per-board bring-up capture feeding physical validation, fab order packaging and status tracking, per-part reason and datasheet annotations, and the Release and Schematic panel workspaces. Not done: placing orders through a fab API (none is available), and live validation of the Nexar sourcing parser against a real account.

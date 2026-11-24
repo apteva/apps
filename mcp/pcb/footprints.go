@@ -30,7 +30,7 @@ func attachNativeContracts(def *Definition) {
 			pad := &component.Pads[padIndex]
 			if pad.DrillNM > 0 || pad.DrillWidthNM > 0 || pad.DrillHeightNM > 0 {
 				throughHole = true
-				pad.Plated = true
+				pad.Plated = !pad.NonPlated
 				if pad.SolderMaskExpansionNM == 0 {
 					pad.SolderMaskExpansionNM = 75_000
 				}
@@ -42,6 +42,10 @@ func attachNativeContracts(def *Definition) {
 					pad.PasteExpansionNM = -25_000
 				}
 			}
+		}
+		if libraryContractFrozen(component) {
+			attachLibraryModel3D(component, models)
+			continue
 		}
 		body := inferredBody(*component)
 		gap := int64(250_000)

@@ -76,7 +76,7 @@ func validateManufacturing(def *Definition) []Check {
 				if pad.DrillNM < def.Rules.MinDrillNM {
 					add("PAD_DRILL_TOO_SMALL", "error", "Pad drill is below the minimum drill rule", component.ID, pad.ID)
 				}
-				if (min64(pad.WidthNM, pad.HeightNM)-pad.DrillNM)/2 < def.Rules.MinAnnularRingNM {
+				if padIsPlated(pad) && (min64(pad.WidthNM, pad.HeightNM)-pad.DrillNM)/2 < def.Rules.MinAnnularRingNM {
 					add("PAD_ANNULAR_RING", "error", "Pad annular ring is below the minimum rule", component.ID, pad.ID)
 				}
 			}
@@ -129,7 +129,9 @@ func validateManufacturing(def *Definition) []Check {
 	for i := 0; i < len(allPads); i++ {
 		for j := i + 1; j < len(allPads); j++ {
 			a, b := allPads[i], allPads[j]
-			if a.NetID == "" || b.NetID == "" || a.NetID == b.NetID || !shareLayer(a.Pad.Layers, b.Pad.Layers) {
+			// A netless pad (unconnected pin) still shorts a different-net pad
+			// it touches; pads of one pin on one part are never checked.
+			if a.NetID == b.NetID || !shareLayer(a.Pad.Layers, b.Pad.Layers) || a.ComponentID == b.ComponentID && a.PinID == b.PinID {
 				continue
 			}
 			if polygonDistance(a.Polygon, b.Polygon) < float64(def.Rules.MinClearanceNM) {
@@ -138,9 +140,6 @@ func validateManufacturing(def *Definition) []Check {
 		}
 	}
 	for _, pad := range allPads {
-		if pad.NetID == "" {
-			continue
-		}
 		for _, trace := range def.Traces {
 			if trace.NetID == pad.NetID || !containsString(pad.Pad.Layers, trace.Layer) {
 				continue
@@ -171,7 +170,7 @@ func validateManufacturing(def *Definition) []Check {
 			}
 		}
 		for _, pad := range allPads {
-			if pad.NetID != "" && pad.NetID != zone.NetID && containsString(pad.Pad.Layers, zone.Layer) && pointInPolygon(pad.Center, zone.Polygon) {
+			if pad.NetID != zone.NetID && containsString(pad.Pad.Layers, zone.Layer) && pointInPolygon(pad.Center, zone.Polygon) {
 				add("ZONE_PAD_CLEARANCE", "error", "Copper zone overlaps a different-net pad", zone.ID, pad.ComponentID+":"+pad.Pad.ID)
 			}
 		}
@@ -219,19 +218,16 @@ func placePad(component Component, pad Pad) *placedPad {
 	}
 }
 
+// padLocalPolygon is the true pad outline (circle, obround, rounded rect or
+// rect) in the component frame, flattened at the same resolution as the
+// Gerber arcs so DRC sees the shape the fab receives.
 func padLocalPolygon(pad Pad) []Point {
-	shape := strings.ToLower(strings.TrimSpace(pad.Shape))
-	if shape == "circle" || shape == "oval" || shape == "roundrect" {
-		points := make([]Point, 0, 32)
-		rx, ry := float64(pad.WidthNM)/2, float64(pad.HeightNM)/2
-		for index := 0; index < 32; index++ {
-			angle := float64(index) * 2 * math.Pi / 32
-			points = append(points, Point{XNM: int64(math.Round(rx * math.Cos(angle))), YNM: int64(math.Round(ry * math.Sin(angle)))})
-		}
-		return points
+	if padShapeName(pad) == "circle" {
+		return circlePolygon(Point{}, min64(pad.WidthNM, pad.HeightNM)/2, 32)
 	}
-	hw, hh := pad.WidthNM/2, pad.HeightNM/2
-	return []Point{{XNM: -hw, YNM: -hh}, {XNM: hw, YNM: -hh}, {XNM: hw, YNM: hh}, {XNM: -hw, YNM: hh}}
+	local := pad
+	local.XNM, local.YNM = 0, 0
+	return padLocalContour(local, 0).polygon()
 }
 
 func padConnected(def *Definition, netID string, pad *placedPad) bool {

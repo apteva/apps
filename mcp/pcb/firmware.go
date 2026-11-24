@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -19,6 +20,39 @@ type FirmwareOptions struct {
 	// (number or name such as A0). Analog values are raw ADC counts.
 	DigitalInputs map[string]int     `json:"digital_inputs,omitempty"`
 	AnalogInputs  map[string]float64 `json:"analog_inputs,omitempty"`
+	// I2CReadData is what each I2C address returns to Wire.requestFrom, by
+	// address ("0x44" or "68"); the stream is consumed in order and cycles.
+	I2CReadData map[string][]int `json:"i2c_read_data,omitempty"`
+	// WiFi is "connected" (default) or "unavailable" for WiFi.status().
+	WiFi string `json:"wifi,omitempty"`
+}
+
+func (o FirmwareOptions) WiFiAvailable() bool {
+	return !strings.EqualFold(strings.TrimSpace(o.WiFi), "unavailable")
+}
+
+func (o FirmwareOptions) i2cData(address int) []int {
+	for key, data := range o.I2CReadData {
+		if parseI2CAddressKey(key) == address {
+			return data
+		}
+	}
+	return nil
+}
+
+func (o FirmwareOptions) hasI2CData(address int) bool { return o.i2cData(address) != nil }
+
+func parseI2CAddressKey(key string) int {
+	key = strings.TrimSpace(strings.ToLower(key))
+	base := 10
+	if strings.HasPrefix(key, "0x") {
+		key, base = key[2:], 16
+	}
+	v, err := strconv.ParseInt(key, base, 32)
+	if err != nil {
+		return -1
+	}
+	return int(v)
 }
 
 // FirmwareSpec stores a board's firmware in the revision so the readiness
@@ -31,16 +65,19 @@ type FirmwareSpec struct {
 	SensorValues  map[string]float64 `json:"sensor_values,omitempty"`
 	DigitalInputs map[string]int     `json:"digital_inputs,omitempty"`
 	AnalogInputs  map[string]float64 `json:"analog_inputs,omitempty"`
+	I2CReadData   map[string][]int   `json:"i2c_read_data,omitempty"`
+	WiFi          string             `json:"wifi,omitempty"`
 	ExpectSerial  []string           `json:"expect_serial,omitempty"`
 }
 
 const maxFirmwareSourceBytes = 256 * 1024
 
 type I2CTransaction struct {
-	TimeUS  int64  `json:"time_us"`
-	Address int    `json:"address"`
-	Bytes   []int  `json:"bytes"`
-	Status  string `json:"status"`
+	TimeUS    int64  `json:"time_us"`
+	Address   int    `json:"address"`
+	Bytes     []int  `json:"bytes"`
+	Status    string `json:"status"`
+	Direction string `json:"direction,omitempty"` // write (default) | read
 }
 
 type FirmwareRunResult struct {
@@ -68,6 +105,11 @@ type FirmwareRunResult struct {
 	Statements  int `json:"statements"`
 	SensorReads int `json:"sensor_reads"`
 	InputReads  int `json:"input_reads"`
+	// DeepSleep is set when the sketch entered ESP32 deep sleep; the run
+	// stops there, like the chip. SleepWakeUS is the armed timer wakeup.
+	DeepSleep   bool  `json:"deep_sleep,omitempty"`
+	SleepWakeUS int64 `json:"sleep_wake_us,omitempty"`
+	Restarted   bool  `json:"restarted,omitempty"`
 }
 
 func extractFirmwareFunction(source, name string) (string, bool) {
@@ -187,6 +229,10 @@ func inferFirmwareBoard(def *Definition) string {
 		switch {
 		case strings.Contains(value, "esp32-c3"):
 			return "esp32c3"
+		case strings.Contains(value, "esp32-s3"):
+			return "esp32s3"
+		case strings.Contains(value, "esp32-c6"):
+			return "esp32c6"
 		case strings.Contains(value, "esp32"):
 			return "esp32"
 		case strings.Contains(value, "rp2040"):

@@ -20,11 +20,14 @@ func dht22SensorNodeExample() Definition {
 		def.Components[i].Pads = append(def.Components[i].Pads, Pad{ID: "dht", PinID: "dht", Shape: "roundrect", XNM: 8_000_000, YNM: 4_000_000, WidthNM: 600_000, HeightNM: 300_000, Layers: []string{"F.Cu"}})
 	}
 
-	dht := Component{ID: "u4", Designator: "U4", Name: "DHT22 temperature and humidity sensor", Value: "DHT22", MPN: "AM2302", Footprint: "DHT22_4PIN_THT", Position: Position{XNM: 64_000_000, YNM: 30_000_000, Side: "front"}, Body: &Body{WidthNM: 12_000_000, HeightNM: 18_000_000}, Model: &ElectricalModel{Kind: "sensor", PinRoles: map[string]string{"vdd": "vcc", "data": "data", "ground": "gnd"}}}
-	for i, pin := range []struct{ id, name string }{{"vcc", "VCC"}, {"data", "DATA"}, {"nc", "NC"}, {"gnd", "GND"}} {
-		x := int64(i-1)*2_540_000 - 1_270_000
-		dht.Pins = append(dht.Pins, Pin{ID: pin.id, Number: string(rune('1' + i)), Name: pin.name, ElectricalType: "passive", Pad: pin.id})
-		dht.Pads = append(dht.Pads, Pad{ID: pin.id, PinID: pin.id, Shape: "circle", XNM: x, YNM: -7_000_000, WidthNM: 1_500_000, HeightNM: 1_500_000, DrillNM: 800_000, Layers: []string{"F.Cu", "B.Cu"}})
+	// The DHT22 is instantiated from the parts library (KiCad Aosong 2.54 mm
+	// lead row, AM2302 body and pin-out 1 VDD / 2 DATA / 3 NC / 4 GND). Rotated
+	// 270 degrees its lead row runs along +X: pin 1 at x=60.19 mm, pin 4 at
+	// x=67.81 mm, y=23 mm, the same copper the hand-made pads used.
+	dhtPart, _ := builtinLibraryPart("dht22")
+	dht, err := instantiateLibraryPart(&def, dhtPart, LibraryPlacement{ComponentID: "u4", Designator: "U4", Name: "DHT22 temperature and humidity sensor", Position: Position{XNM: 60_190_000, YNM: 23_000_000, RotationUdeg: 270_000_000, Side: "front"}})
+	if err != nil {
+		panic("dht22 example: " + err.Error())
 	}
 
 	jst := Component{ID: "j2", Designator: "J2", Name: "JST-XH service connector", Value: "3V3 / DATA / AUX / GND", MPN: "B4B-XH-A", Footprint: "JST_XH_B4B-XH-A_1x04_P2.50mm", Position: Position{XNM: 64_000_000, YNM: 7_000_000, Side: "front"}, Body: &Body{WidthNM: 12_000_000, HeightNM: 8_000_000}}
@@ -56,10 +59,10 @@ func dht22SensorNodeExample() Definition {
 			}
 		}
 	}
-	appendNode("v3v3", Node{ComponentID: "u4", PinID: "vcc"}, Node{ComponentID: "j2", PinID: "vcc"})
-	appendNode("gnd", Node{ComponentID: "u4", PinID: "gnd"}, Node{ComponentID: "j2", PinID: "gnd"})
+	appendNode("v3v3", Node{ComponentID: "u4", PinID: "1"}, Node{ComponentID: "j2", PinID: "vcc"})
+	appendNode("gnd", Node{ComponentID: "u4", PinID: "4"}, Node{ComponentID: "j2", PinID: "gnd"})
 	appendNode("i2c_sda", Node{ComponentID: "j2", PinID: "aux"})
-	def.Nets = append(def.Nets, Net{ID: "dht_data", Name: "DHT_DATA", Nodes: []Node{{ComponentID: "u1", PinID: "dht"}, {ComponentID: "u4", PinID: "data"}, {ComponentID: "j2", PinID: "data"}}})
+	def.Nets = append(def.Nets, Net{ID: "dht_data", Name: "DHT_DATA", Nodes: []Node{{ComponentID: "u1", PinID: "dht"}, {ComponentID: "u4", PinID: "2"}, {ComponentID: "j2", PinID: "data"}}})
 	appendNode("usb5v", Node{ComponentID: "tp1", PinID: "1"})
 	appendNode("v3v3", Node{ComponentID: "tp2", PinID: "1"})
 	appendNode("gnd", Node{ComponentID: "tp3", PinID: "1"})

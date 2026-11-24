@@ -20,7 +20,7 @@ func TestFabricationVerificationRejectsCorruptedIndependentParse(t *testing.T) {
 	def := sensorNodeExample()
 	files := manufacturingFiles(&def)
 	files["gerbers/F_Cu.gbr"] = bytes.Replace(files["gerbers/F_Cu.gbr"], []byte("M02*"), []byte("G04 missing end*"), 1)
-	files["drill/board.drl"] = bytes.Replace(files["drill/board.drl"], []byte("M30"), []byte("X999.000000Y999.000000"), 1)
+	files["drill/board-PTH.drl"] = bytes.Replace(files["drill/board-PTH.drl"], []byte("M30"), []byte("X999.000000Y999.000000"), 1)
 	report := verifyManufacturingFiles(&def, files)
 	if report.Status != "failed" || report.Errors < 2 {
 		t.Fatalf("corruption was accepted: %#v", report)

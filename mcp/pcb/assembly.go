@@ -237,6 +237,8 @@ func assemblyFiles(def *Definition) map[string][]byte {
 	return map[string][]byte{
 		"assembly/pick-and-place.csv": renderPlacementCSV(def),
 		"assembly/bom.csv":            renderAssemblyBOM(def),
+		"assembly/jlcpcb-cpl.csv":     renderJLCPlacementCSV(def),
+		"assembly/jlcpcb-bom.csv":     renderJLCBOM(def),
 	}
 }
 

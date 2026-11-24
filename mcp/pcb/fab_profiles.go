@@ -22,6 +22,8 @@ type FabProfile struct {
 	Source      string `json:"source,omitempty"`
 	Reference   bool   `json:"reference,omitempty"`
 	Description string `json:"description,omitempty"`
+	// RotationOffsets correct footprint orientation for this assembler.
+	RotationOffsets []RotationOffset `json:"rotation_offsets,omitempty"`
 }
 
 const maxFabProfiles = 32
