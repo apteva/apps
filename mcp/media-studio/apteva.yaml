@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.12.4
+version: 0.12.5
 description: |
+  v0.12.5 rebuilds the full-size preview: media fills the space above a
+  caption card that clamps long prompts to three lines, with Show full
+  prompt (scrolls in place), Copy prompt and a close button.
   v0.12.4 makes the generating placeholder quieter: small muted dots, a
   plain border and a hairline progress line only when the job has an
   estimate.
@@ -300,7 +303,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.12.4
+    ref: media-studio/v0.12.5
     entry: mcp/media-studio
   port: 8080
   health_check: /health
