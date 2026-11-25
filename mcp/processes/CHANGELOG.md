@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## One-line SOP in assignments (0.24.4)
+
+The SOP line under each assignment no longer wraps. See
+`docs-release-0.24.4.md`.
+
 ## Simpler project map (0.24.3)
 
 Map opens on SOPs with active assignments, as compact cards with steps on

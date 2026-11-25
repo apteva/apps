@@ -155,12 +155,13 @@ export default function ProjectAssignments({ api, live, ownerName, cadence, date
                       <button onClick={(e) => { e.stopPropagation(); onRuns(x); }}>{x.name || "Untitled assignment"}</button>
                       <span className={`pill ${x.status}`}>{x.status}</span>
                     </span>
-                    <div className="sub">
-                      <button className="link" onClick={(e) => { e.stopPropagation(); onProcess(x); }}>{x.process_name || "Process"}</button>
-                      {" · "}
+                    <div className="sub assignment-sop">
+                      <button className="link" title={x.process_name} onClick={(e) => { e.stopPropagation(); onProcess(x); }}>{x.process_name || "Process"}</button>
                       <span className="version-tag">v{x.follow_latest ? x.process_version : x.procedure_version}</span>
-                      {x.follow_latest ? " latest" : x.procedure_version < x.process_version ? ` pinned (latest v${x.process_version})` : " pinned"}
-                      {x.process_status !== "active" && <> · process {x.process_status}</>}
+                      <span className="assignment-sop-meta">
+                        {x.follow_latest ? " latest" : x.procedure_version < x.process_version ? ` pinned (latest v${x.process_version})` : " pinned"}
+                        {x.process_status !== "active" && <> · process {x.process_status}</>}
+                      </span>
                     </div>
                     {x.sync_error && <div className="sub">{x.sync_error}</div>}
                   </td>
@@ -233,6 +234,9 @@ export const projectAssignmentStyles = `
 .ap-processes .assignment-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ap-processes td button.link{font-weight:400;color:var(--pc-muted);text-decoration:underline;text-underline-offset:3px}
 .ap-processes td button.link:hover{color:var(--pc-text)}
+.ap-processes .assignment-sop{display:flex;align-items:center;gap:7px;max-width:none;white-space:nowrap;min-width:0}
+.ap-processes .assignment-sop button.link{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ap-processes .assignment-sop .version-tag,.ap-processes .assignment-sop-meta{flex:none}
 .ap-processes td button.last-run{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-weight:400}
 .ap-processes td button.last-run .sub{margin-top:2px}
 .ap-processes td.starts{min-width:180px}
