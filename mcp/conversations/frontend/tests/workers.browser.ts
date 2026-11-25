@@ -216,3 +216,34 @@ test("worker card uses the steps for the model and result, and hides send/done",
   await expect(card.getByText("Result", { exact: true })).toBeVisible();
   await expect(card.getByText("Find the three cheapest suppliers.")).toHaveCount(1);
 });
+
+// demo-helper on dev (2026-11-25): the turn that calls done ends with the
+// helper, so its model step is "ended" and showed as stray thinking after the
+// report; pace returns in 13 ms but the helper waited 60 s.
+test("finished helper: no thinking row after its report, and pace shows the real wait", async ({ page, request }) => {
+  await request.post("/reset");
+  await page.goto("/?host=dashboard");
+  await expect(page.getByTitle("Live")).toBeVisible();
+  await emit(request, { tool_activity: spawnRow() });
+  await emit(request, { worker: worker({ state: "done", current: undefined, ended_at: ago(1000), outcome: "completed" }) });
+  const at = (s: number) => ago(70_000 - s * 1000);
+  await request.post("/seed-worker-steps", { data: { thread_id: "researcher", steps: [
+    { kind: "model", started_at: at(0), ended_at: at(2.081), duration_ms: 2081, status: "done" },
+    { kind: "tool", tool: "pace", reason: "Waiting 60 seconds", started_at: at(2.06), ended_at: at(2.073), duration_ms: 13, status: "done" },
+    { kind: "model", started_at: at(62.088), ended_at: at(63.624), duration_ms: 1536, status: "done" },
+    { kind: "tool", tool: "send", reason: "Sending DONE to parent", started_at: at(63.607), ended_at: at(63.607), status: "done" },
+    { kind: "message", to: "main", text: "DONE", started_at: at(63.607), status: "done" },
+    { kind: "model", started_at: at(63.625), ended_at: at(64.649), duration_ms: 1024, status: "ended" },
+    { kind: "tool", tool: "done", reason: "Finishing assignment", started_at: at(64.612), ended_at: at(64.612), status: "done" },
+    { kind: "end", text: "DONE", outcome: "completed", started_at: at(64.649), status: "done" },
+  ] } });
+  const card = page.locator('[data-worker-thread="researcher"]');
+  await card.locator("button[aria-expanded]").first().click();
+  const steps = card.locator("ol > li");
+  await expect(steps).toHaveCount(4);
+  await expect(steps.last()).toHaveText("Reported to main: DONE");
+  await expect(card.getByText("Ended with the helper")).toHaveCount(0);
+  await expect(steps.nth(1)).toContainText("Waiting 60 seconds");
+  await expect(steps.nth(1)).toContainText("60.0s");
+  await expect(card.getByText("Result", { exact: true })).toBeVisible();
+});

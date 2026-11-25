@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.2 — 2026-11-25
+
+- A finished helper's steps no longer end with a stray "Thinking · 1.0s · Ended with the helper" after its report. That row was the model turn that called `done`: the `done` call is hidden and the helper ended with it, so it is now left out. Seen on dev with demo-helper.
+- "Waiting 60 seconds" shows how long the helper actually waited. `pace` and `wait` return at once (13 ms), so their time is now measured to the helper's next step, or counts up while it is still waiting.
+
 ## 0.34.1 — 2026-11-25
 
 - Keep one helper card per helper. Core can list a new helper a moment before it reports which spawn call started it. 0.34.0 stored that first sighting under its start time, then stored the helper again once the spawn was known and marked the first copy "Stopped without finishing" (seen live on dev). The first row is now kept and updated.

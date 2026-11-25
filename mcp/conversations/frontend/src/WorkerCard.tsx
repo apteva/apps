@@ -16,6 +16,8 @@ const RESULT_PREVIEW_CHARS = 600;
 // Core plumbing that other rows already show: send is the report row, done
 // the end of the helper.
 const HIDDEN_STEP_TOOLS = new Set(["send", "done", "search_tools"]);
+// Pace and wait return at once; the wait is the gap until the next step.
+const WAIT_TOOLS = new Set(["pace", "wait"]);
 const HELPER_VISUAL: ToolVisual = { key: "native:spawn", label: "Apteva", glyph: "agent" };
 
 export function workerUnfinished(worker: ConversationWorker): boolean {
@@ -256,7 +258,20 @@ function WorkerSteps({ worker, chatId, registry, t, onInfo }: {
   }, [steps, onInfo]);
   if (steps === null) return <p className="text-[11px] text-text-muted" role="status">{error ? t("worker.stepsUnavailable") : t("worker.loadingSteps")}</p>;
   // Spawn steps show as nested cards, and the end step as the result.
-  const shown = steps.filter(step => step.kind !== "end" && !(step.kind === "tool" && HIDDEN_STEP_TOOLS.has((step.tool || "").toLowerCase())));
+  let shown = steps.filter(step => step.kind !== "end" && !(step.kind === "tool" && HIDDEN_STEP_TOOLS.has((step.tool || "").toLowerCase())));
+  // The last turn of a finished helper is the one that called done. Its done
+  // call is hidden and the helper ended with it, so it reads as stray
+  // thinking after the report: leave it out.
+  if (!unfinished || steps.some(step => step.kind === "end")) {
+    while (shown.length && shown[shown.length - 1]!.kind === "model") shown = shown.slice(0, -1);
+  }
+  const waitedMs = (step: WorkerStep): number | undefined => {
+    if (step.kind !== "tool" || !WAIT_TOOLS.has((step.tool || "").toLowerCase())) return undefined;
+    const start = Date.parse(step.started_at);
+    const next = steps.find(other => Date.parse(other.started_at) > start && other !== step);
+    if (next) return Math.max(0, Date.parse(next.started_at) - start);
+    return unfinished ? Math.max(0, now - start) : undefined;
+  };
   if (!shown.length) return <p className="text-[11px] text-text-muted">{t("worker.noSteps")}</p>;
   const visible = showAll ? shown : shown.slice(-VISIBLE_STEPS);
   const hidden = shown.length - visible.length;
@@ -266,7 +281,7 @@ function WorkerSteps({ worker, chatId, registry, t, onInfo }: {
         <button type="button" className="justify-self-start py-1 text-[11px] text-accent" onClick={() => void loadEarlier()}>{t("worker.showEarlier")}</button>
       )}
       <ol className="m-0 grid min-w-0 list-none p-0">
-        {visible.map((step, index) => <WorkerStepRow key={`${step.started_at}:${step.kind}:${step.tool ?? ""}:${index}`} step={step} registry={registry} t={t} now={now} />)}
+        {visible.map((step, index) => <WorkerStepRow key={`${step.started_at}:${step.kind}:${step.tool ?? ""}:${index}`} step={step} registry={registry} t={t} now={now} waitedMs={waitedMs(step)} />)}
       </ol>
     </div>
   );
@@ -284,9 +299,9 @@ function mergeSteps(newer: WorkerStep[], older: WorkerStep[]): WorkerStep[] {
   return [...map.values()].sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at));
 }
 
-function WorkerStepRow({ step, registry, t, now }: { step: WorkerStep; registry: ToolVisualRegistry; t: T; now: number }) {
+function WorkerStepRow({ step, registry, t, now, waitedMs }: { step: WorkerStep; registry: ToolVisualRegistry; t: T; now: number; waitedMs?: number }) {
   const open = !step.ended_at && step.status !== "ended" && step.status !== "unknown";
-  const duration = step.duration_ms ?? (open ? Math.max(0, now - Date.parse(step.started_at)) : undefined);
+  const duration = waitedMs ?? step.duration_ms ?? (open ? Math.max(0, now - Date.parse(step.started_at)) : undefined);
   const statusNote = step.status === "ended" ? t("worker.stepEnded") : step.status === "unknown" ? t("worker.stepUnknown") : "";
   const failed = step.status === "failed" || step.status === "error" || Boolean(step.error);
   if (step.kind === "model") {
