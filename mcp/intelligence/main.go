@@ -26,7 +26,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: intelligence
 display_name: Intelligence
-version: 0.6.0
+version: 0.6.1
 description: |
   A continuously updated, source-attributed model of a part of the world,
   used for recorded and scored probabilistic forecasts and hypothetical
@@ -245,7 +245,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: intelligence/v0.6.0
+    ref: intelligence/v0.6.1
     entry: mcp/intelligence
   port: 8080
   health_check: /health
