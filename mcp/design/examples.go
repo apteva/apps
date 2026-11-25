@@ -62,6 +62,9 @@ func designExamples() map[string]any {
 			"instance":  map[string]any{"id": "cap", "part_id": "cap", "mate": map[string]any{"interface": "dovetail_in", "to_instance": "base_1", "to_interface": "dovetail_out", "gap": 0.2, "angle": 0}},
 			"joint":     map[string]any{"id": "lid_hinge", "type": "revolute", "parent_instance": "base_1", "child_instance": "lid_1", "origin": []any{0, 40, 10}, "axis": []any{-1, 0, 0}, "limits": []any{0, 110}, "state": "lid_open"},
 			"check":     map[string]any{"id": "lid_swing", "type": "joint_sweep", "joint": "lid_hinge", "steps": 12, "min": 0.5},
+			"magnet":    map[string]any{"id": "east_mag", "kind": "magnet", "part_id": "block", "position": []any{40, 20, 6}, "direction": []any{1, 0, 0}, "up": []any{0, 0, 1}, "parameters": map[string]any{"polarity": "S", "diameter_mm": 6, "mates_with": []any{"magnet"}}},
+			"inherited": map[string]any{"id": "block_2", "part_id": "right", "mate": map[string]any{"interface": "right/west_mag", "to_instance": "block_1", "to_interface": "left/east_mag"}},
+			"automatic": "mate_compatibility: facing magnets must have opposite poles; linked parts expose their source's interfaces as <part>/<interface>",
 		},
 		"linked_components": map[string]any{
 			"source_contract": map[string]any{"design_id": 12, "revision_id": 34, "source_sha256": "64 lowercase hex characters", "part_id": "optional_named_part"},
@@ -74,6 +77,12 @@ func designExamples() map[string]any {
 			"binding_role":  "pcb_source",
 			"create_tool":   "design_enclosure_from_pcb",
 			"refresh_tool":  "design_enclosure_refresh_from_pcb",
+			"parts":         "base, lid (outside face down, ready to print), pcb (reference); lid mated seat->rim",
+			"side_wall_options": map[string]any{
+				"magnets":           []any{map[string]any{"id": "west_mag", "face": "west", "along_mm": 28, "z_mm": 4, "diameter_mm": 6, "depth_mm": 2, "polarity": "N"}, map[string]any{"id": "east_mag", "face": "east", "along_mm": 28, "z_mm": 4, "diameter_mm": 6, "depth_mm": 2, "polarity": "S"}},
+				"pogo_windows":      []any{map[string]any{"id": "prog", "face": "east", "along_mm": 12, "z_mm": 3, "width_mm": 8, "height_mm": 3, "corner_radius_mm": 1}},
+				"wall_thickness_mm": 3,
+			},
 		},
 		"featured": map[string]any{
 			"open_rover": map[string]any{

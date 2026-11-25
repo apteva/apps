@@ -30,15 +30,22 @@ func (a *App) MCPTools() []sdk.Tool {
 		"corner_radius_mm": numberSchema(0, 50),
 		"lid":              map[string]any{"type": "string", "enum": []string{"lip", "snap"}, "description": "lip (locating lip) or snap (lip with snap bumps clicking into wall grooves; box/rounded only)"},
 		"snap_mm":          numberSchema(.2, 2),
-		"magnets": map[string]any{"type": "array", "description": "Blind magnet pockets opened on the inside of the floor (part base) or lid (part lid), in PCB board coordinates", "items": map[string]any{"type": "object", "properties": map[string]any{
-			"x_mm": map[string]any{"type": "number"}, "y_mm": map[string]any{"type": "number"}, "diameter_mm": numberSchema(.5, 50), "depth_mm": numberSchema(.2, 20),
-			"part": map[string]any{"type": "string", "enum": []string{"base", "lid"}}, "fit_mm": numberSchema(0, 1),
-		}, "required": []string{"x_mm", "y_mm", "diameter_mm", "depth_mm"}}},
-		"pogo_windows": map[string]any{"type": "array", "description": "Through windows in the floor (bottom) or lid (top) for pogo pins or test pads, in PCB board coordinates", "items": map[string]any{"type": "object", "properties": map[string]any{
+		"magnets": map[string]any{"type": "array", "description": "Magnet pockets. face floor/lid use x_mm/y_mm in PCB board coordinates; face north/south/east/west put the pocket in that side wall of the base at along_mm (board x for north/south, board y for east/west) and z_mm (above the PCB's bottom face). from: outside (default on walls; magnet flush with the outer face) or inside (default on floor/lid; leaves a skin outside). Each magnet becomes a mechanical interface (kind magnet) with its polarity, so mated blocks are checked for attracting poles.", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"id":   map[string]any{"type": "string", "description": "Interface id (default magnet_<n>)"},
+			"face": map[string]any{"type": "string", "enum": []string{"floor", "lid", "north", "south", "east", "west"}},
+			"x_mm": map[string]any{"type": "number"}, "y_mm": map[string]any{"type": "number"},
+			"along_mm": map[string]any{"type": "number"}, "z_mm": map[string]any{"type": "number"},
+			"diameter_mm": numberSchema(.5, 50), "depth_mm": numberSchema(.2, 20),
+			"from":     map[string]any{"type": "string", "enum": []string{"inside", "outside"}},
+			"polarity": map[string]any{"type": "string", "enum": []string{"N", "S"}, "description": "Pole facing out of the enclosure"},
+			"part":     map[string]any{"type": "string", "enum": []string{"base", "lid"}, "description": "Legacy: lid is the same as face lid"}, "fit_mm": numberSchema(0, 1),
+		}, "required": []string{"diameter_mm", "depth_mm"}}},
+		"pogo_windows": map[string]any{"type": "array", "description": "Through windows for pogo pins, test pads or headers: bottom (floor) or top (lid) at x_mm/y_mm, or a side wall (north/south/east/west) at along_mm/z_mm with width_mm along the wall and height_mm vertical. Each window becomes a mechanical interface (kind pogo_window).", "items": map[string]any{"type": "object", "properties": map[string]any{
 			"id": map[string]any{"type": "string"}, "x_mm": map[string]any{"type": "number"}, "y_mm": map[string]any{"type": "number"},
+			"along_mm": map[string]any{"type": "number"}, "z_mm": map[string]any{"type": "number"},
 			"width_mm": numberSchema(.5, 200), "height_mm": numberSchema(.5, 200), "corner_radius_mm": numberSchema(0, 50),
-			"face": map[string]any{"type": "string", "enum": []string{"bottom", "top"}},
-		}, "required": []string{"x_mm", "y_mm", "width_mm", "height_mm"}}},
+			"face": map[string]any{"type": "string", "enum": []string{"bottom", "top", "north", "south", "east", "west"}},
+		}, "required": []string{"width_mm", "height_mm"}}},
 	}}
 	tools := []sdk.Tool{
 		{Name: "design_verification_record", Description: "Attach a physical fit or enclosed thermal test result to the exact tested revision and source hash, without mutating CAD source. Requires evidence URL and notes describing actual results.", InputSchema: schemaObject(map[string]any{"revision_id": id, "source_sha256": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"physical_fit", "enclosed_thermal"}}, "status": map[string]any{"type": "string", "enum": []string{"pass", "fail"}}, "evidence_url": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}}, []string{"revision_id", "source_sha256", "kind", "status", "evidence_url"}), HandlerCtx: a.toolVerificationRecord},
@@ -48,7 +55,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "design_enclosure_from_assembly", Description: "Create a pinned enclosure from any purchased component assembly without PCB Studio. Options: wall_mm, component_gap_mm, front_mm, rear_mm, lid_fit_mm; display opening, supports, brackets, battery_cradle and cutout boxes in assembly coordinates.", InputSchema: schemaObject(map[string]any{"assembly_design_id": id, "assembly_revision_id": id, "name": map[string]any{"type": "string"}, "options": map[string]any{"type": "object"}}, []string{"assembly_design_id"}), HandlerCtx: a.toolEnclosureFromAssembly},
 		{Name: "design_examples", Description: "Return the operation vocabulary, open-hardware assembly contract, output formats, and complete canonical examples including Open Rover.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolExamples},
 		{Name: "design_pcb_source_status", Description: "Report whether the optional PCB Studio mechanical source is bound and ready for enclosure handoff.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolPCBSourceStatus},
-		{Name: "design_enclosure_from_pcb", Description: "Read a validated apteva-mechanical-envelope/v1 payload from bound PCB Studio and create a linked parametric enclosure with a base, lid, standoffs, fastener bores, panel openings, and source provenance.", InputSchema: schemaObject(map[string]any{
+		{Name: "design_enclosure_from_pcb", Description: "Read a validated apteva-mechanical-envelope/v1 payload from bound PCB Studio and create a linked parametric enclosure: separate Base and Lid parts (the lid stored outside face down, ready to print) plus the PCB as a reference part, placed by a lid-on-rim mate, with standoffs, fastener bores, panel openings, optional magnets and pogo windows on the floor, lid or side walls, and source provenance. Magnets and windows become mechanical interfaces other designs can mate to.", InputSchema: schemaObject(map[string]any{
 			"pcb_design_id": id, "pcb_revision_id": id, "name": map[string]any{"type": "string"},
 			"description": map[string]any{"type": "string"}, "options": enclosureOptions,
 		}, []string{"pcb_design_id"}), HandlerCtx: a.toolEnclosureFromPCB},

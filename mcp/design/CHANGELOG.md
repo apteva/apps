@@ -1,5 +1,18 @@
 # Design Studio changes
 
+## 0.11.0
+
+- PCB enclosures (generator version 3) are separate parts: `base`, `lid` and the PCB as a `reference` part. The lid is stored outside face down, ready to print, and the assembly places it with a `seat`-on-`rim` mate. Existing enclosure revisions are unchanged; refreshing one creates a revision in the new layout.
+- Enclosure magnets and pogo windows can go on the side walls (`face: north|south|east|west`, `along_mm`, `z_mm`); wall magnets open from the outside by default (`from: inside|outside`), keep 0.4 mm of material and must sit on the flat part of a box or rounded wall. Magnets take a `polarity` and an `id`.
+- Every enclosure magnet and window becomes a mechanical interface on its part (`magnet` with polarity and diameter, `pogo_window`).
+- Linked parts carry their source's interfaces as `<part>/<interface>`, resolved with the link's parameters; whole-design links carry interfaces of parts placed once, moved by that placement.
+- New automatic `mate_compatibility` check: facing magnets must have opposite poles (fail), matching diameters (warning), and a magnet on a joined face without a partner is a warning; `parameters.mates_with` restricts the kinds an interface mates to.
+- Each linked design is built once per distinct parameter set per build and reused; the report shows `component_builds`.
+- Cutting or joining an imported STL adds a `mesh_derived` warning naming the operations.
+- Moulding checks say when the undercut search was sampled, with `undercut_samples` (16-8192) to search more densely.
+- Fix: binary STLs with zero facet normals (allowed by the format) failed to load for some coordinates; the runner now reads a copy with the normals filled in.
+- Engine version `ds0.11`.
+
 ## 0.10.0
 
 - STL import as reference geometry: `design_stl_import` (binary or ASCII, up to 50000 triangles, unit scaling) creates a reference design with an `import_stl` operation. The mesh becomes B-rep faces, so it can be placed, measured and clearance-checked exactly; it is never exported for printing.

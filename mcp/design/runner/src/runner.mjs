@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
 const importedGeometry=new WeakSet();
-const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.10";
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.11";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -127,14 +127,56 @@ function componentParameters(component, params, label) {
   return merged;
 }
 
+// One build of each linked design per distinct parameter set: a base used by
+// a component operation and by several parts is built once and cloned.
+const componentBuilds = new Map();
+export const componentBuildStats = { built: 0, reused: 0 };
+function stableJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJSON).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJSON(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 function buildComponentShape(component, params, label) {
-  const child = buildDefinitionGeometry(component.definition, componentParameters(component, params, label));
+  const childParams = componentParameters(component, params, label);
+  const key = `${component.revision_id}:${component.source_sha256}:${stableJSON(childParams)}`;
+  let child = componentBuilds.get(key);
+  if (child) componentBuildStats.reused++;
+  else {
+    child = buildDefinitionGeometry(component.definition, childParams);
+    componentBuilds.set(key, child);
+    componentBuildStats.built++;
+  }
   const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
   if (!selected) fail(`${label} source part ${component.source_part_id} has no geometry`);
   const shape = selected.clone();
   if (importedGeometry.has(selected)) importedGeometry.add(shape);
   inheritCache(selected, shape);
   return { child, selected: shape };
+}
+
+// A linked part carries its source's mechanical interfaces as
+// "<part>/<interface>", already resolved against the source's parameters.
+// Linking one source part keeps that part's own frame; linking a whole design
+// carries the interfaces of parts placed exactly once, moved by that placement.
+function inheritedInterfaces(part, component, child) {
+  const out = [];
+  for (const item of child.definition.assembly?.interfaces || []) {
+    let pose;
+    if (component.source_part_id) {
+      if (item.part_id !== component.source_part_id) continue;
+      pose = IDENTITY();
+    } else {
+      const placed = (child.assembly.instances || []).filter((instance) => instance.part.id === item.part_id);
+      if (placed.length !== 1 || !placed[0].pose) continue;
+      pose = placed[0].pose;
+    }
+    const label = `${part.id}/${item.id}`;
+    const local = interfaceFrame(vector(item.position, child.params, `interface ${label}.position`), item.direction ? vector(item.direction, child.params, `interface ${label}.direction`) : undefined, item.up ? vector(item.up, child.params, `interface ${label}.up`) : undefined, `interface ${label}`);
+    const frame = compose(pose, local);
+    const column = (k) => [frame.R[0][k], frame.R[1][k], frame.R[2][k]];
+    out.push({ ...item, id: label, part_id: part.id, position: frame.t, direction: column(2), up: column(0), inherited_from: { design_id: component.design_id, revision_id: component.revision_id, interface: item.id } });
+  }
+  return out;
 }
 
 function buildOperation(operation, shapes, params, assets, importedVisuals, components = {}) {
@@ -368,6 +410,96 @@ function buildOperation(operation, shapes, params, assets, importedVisuals, comp
       fail(`unsupported operation type ${JSON.stringify(operation.type)}`);
   }
   shapes.set(operation.id, shape);
+  // Track geometry that comes from an imported STL. Moving or copying it is
+  // fine; cutting or joining it is allowed (a cradle around a scan) but the
+  // result is faceted, so the build reports it.
+  const refs = [operation.input, operation.base, ...(Array.isArray(operation.inputs) ? operation.inputs : []), ...(Array.isArray(operation.tools) ? operation.tools : [])].filter((id) => typeof id === "string");
+  const meshInputs = refs.filter((id) => meshShapes.has(shapes.get(id)));
+  if (operation.type === "import_stl" || meshInputs.length) meshShapes.add(shape);
+  if (meshInputs.length && !MESH_SAFE_OPS.has(operation.type)) meshDerived.push({ operation: operation.id, type: operation.type, mesh_inputs: meshInputs });
+}
+
+const meshShapes = new WeakSet();
+const meshDerived = [];
+const MESH_SAFE_OPS = new Set(["translate", "rotate", "scale", "mirror", "linear_pattern", "circular_pattern", "compound"]);
+
+function meshDerivedChecks() {
+  if (!meshDerived.length) return [];
+  return [{
+    id: "mesh_derived", type: "mesh_derived", status: "warning",
+    message: `${meshDerived.length} operation(s) cut or join an imported STL mesh (${meshDerived.map((item) => item.operation).join(", ")}); the result is faceted and an STL is meant as a reference`,
+    details: { operations: meshDerived },
+  }];
+}
+
+// Facing magnets after placement: every pair of magnet interfaces on
+// different instances whose faces touch (opposed normals, centres within
+// 0.2 mm across the face and 1 mm apart along it) must attract (opposite
+// polarity) and should match in diameter. A magnet that lies on a face
+// already joined by magnets but has no partner is reported too. Explicit
+// mates also honour parameters.mates_with on either interface.
+function mateCompatibilityChecks(definition, built) {
+  const instances = built.assembly.instances || [];
+  if (!definition.assembly || instances.length < 2) return [];
+  const all = [...(definition.assembly.interfaces || []), ...(definition._inherited_interfaces || [])];
+  const byID = new Map(all.map((item) => [item.id, item]));
+  const magnets = [];
+  for (const instance of instances) {
+    if (!instance.pose) continue;
+    for (const item of all) {
+      if (item.part_id !== instance.part.id || item.kind !== "magnet") continue;
+      const frame = compose(instance.pose, interfaceFrame(vector(item.position, built.params, `interface ${item.id}.position`), item.direction ? vector(item.direction, built.params, `interface ${item.id}.direction`) : undefined, item.up ? vector(item.up, built.params, `interface ${item.id}.up`) : undefined, `interface ${item.id}`));
+      magnets.push({ instance: instance.id, id: item.id, item, at: frame.t, normal: [frame.R[0][2], frame.R[1][2], frame.R[2][2]], paired: false });
+    }
+  }
+  const issues = [], pairs = [];
+  let failed = false, warned = false;
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  for (let i = 0; i < magnets.length; i++) {
+    for (let j = i + 1; j < magnets.length; j++) {
+      const a = magnets[i], b = magnets[j];
+      if (a.instance === b.instance || dot(a.normal, b.normal) > -0.99) continue;
+      const d = [0, 1, 2].map((k) => b.at[k] - a.at[k]);
+      const axial = dot(d, a.normal);
+      const lateral = Math.hypot(...d.map((v, k) => v - axial * a.normal[k]));
+      if (lateral > 0.2 || Math.abs(axial) > 1) continue;
+      a.paired = b.paired = true;
+      const pa = a.item.parameters?.polarity, pb = b.item.parameters?.polarity;
+      const pair = { a: `${a.instance}/${a.id}`, b: `${b.instance}/${b.id}`, polarity: [pa ?? null, pb ?? null], gap_mm: +axial.toFixed(4) };
+      pairs.push(pair);
+      if (pa && pb && pa === pb) { failed = true; issues.push(`${pair.a} and ${pair.b} face each other with the same pole (${pa}) and will repel`); }
+      else if (!pa || !pb) { warned = true; issues.push(`${pair.a} and ${pair.b} face each other but polarity is not declared on both`); }
+      const da = Number(a.item.parameters?.diameter_mm), db = Number(b.item.parameters?.diameter_mm);
+      if (Number.isFinite(da) && Number.isFinite(db) && Math.abs(da - db) > 0.01) { warned = true; issues.push(`${pair.a} (${da} mm) and ${pair.b} (${db} mm) differ in diameter`); }
+    }
+  }
+  // Unpaired magnets on a face that other magnets already join.
+  for (const m of magnets) {
+    if (m.paired) continue;
+    const joined = magnets.some((other) => other.paired && other.instance === m.instance && dot(other.normal, m.normal) > 0.99 && Math.abs(dot([0, 1, 2].map((k) => m.at[k] - other.at[k]), m.normal)) < 0.2);
+    if (joined) { warned = true; issues.push(`${m.instance}/${m.id} is on a mated face but has no magnet opposite it`); }
+  }
+  // Explicit mates: mates_with.
+  let mateCount = 0;
+  for (const instance of definition.assembly.instances || []) {
+    if (!instance.mate) continue;
+    const target = (definition.assembly.instances || []).find((item) => item.id === instance.mate.to_instance);
+    const a = byID.get(instance.mate.interface), b = byID.get(instance.mate.to_interface);
+    if (!a || !b) continue;
+    mateCount++;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      const allowed = x.parameters?.mates_with;
+      if (Array.isArray(allowed) && !allowed.includes(y.kind)) { failed = true; issues.push(`${instance.id}.mate joins ${x.id} (mates_with ${allowed.join(", ")}) to ${y.id} of kind ${y.kind || "unset"}${target ? ` on ${target.id}` : ""}`); }
+    }
+  }
+  const declared = all.some((item) => Array.isArray(item.parameters?.mates_with));
+  if (!pairs.length && !issues.length && !(declared && mateCount)) return [];
+  const status = failed ? "fail" : warned ? "warning" : "pass";
+  return [{
+    id: "mate_compatibility", type: "mate_compatibility", status,
+    message: issues.length ? issues.slice(0, 8).join("; ") + (issues.length > 8 ? `; and ${issues.length - 8} more` : "") : `${pairs.length} facing magnet pair(s) attract${mateCount ? `; ${mateCount} mate(s) compatible` : ""}`,
+    details: { pairs, issues, magnets: magnets.length },
+  }];
 }
 
 function exactAssemblyTransform(shape,transform,params){
@@ -445,7 +577,7 @@ function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisu
   }
   const instances = [];
   const pending=[...definition.assembly.instances];
-  const interfaces = new Map((definition.assembly.interfaces || []).map((item) => [item.id, item]));
+  const interfaces = new Map([...(definition.assembly.interfaces || []), ...(definition._inherited_interfaces || [])].map((item) => [item.id, item]));
   const jointByChild = new Map((definition.assembly.joints || []).map((joint) => [joint.child_instance, joint]));
   const placed = (id) => instances.find((item) => item.id === id);
   const frameOf = (id, partID, label) => {
@@ -574,6 +706,7 @@ function buildDefinitionGeometry(definition, supplied) {
   const partPhysical = new Map();
   const partVisuals = new Map();
   const materials = new Map((definition.materials || []).map((material) => [material.id, material]));
+  const inherited = [];
   for (const part of definition.parts || []) {
     if (part.source) {
       const component = resolved.get(part.id);
@@ -584,6 +717,7 @@ function buildDefinitionGeometry(definition, supplied) {
       if(!component.source_part_id && (component.definition.parts||[]).some(p=>['purchased','reference'].includes(p.manufacturing?.classification)||p._exclude_print))part._exclude_print=true;
 
       partShapes.set(part.id, selectedShape);
+      inherited.push(...inheritedInterfaces(part, component, child));
       const physical = component.source_part_id ? child.partPhysical.get(component.source_part_id) : child.physical;
       if (physical) partPhysical.set(part.id, physical);
       const visuals = component.source_part_id ? child.partVisuals.get(component.source_part_id) : child.assembly.visuals;
@@ -596,6 +730,7 @@ function buildDefinitionGeometry(definition, supplied) {
       partVisuals.set(part.id, importedVisuals.get(part.output)?.map(v=>({...v,part_id:part.id,color:hexColor(part.color)})) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || materials.get(part.material_id)?.color), shape: partShape }]);
     }
   }
+  definition._inherited_interfaces = inherited;
   const assembly = assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params, importedVisuals);
   let physical;
   if (assembly.instances.length) {
@@ -795,7 +930,8 @@ async function run(request) {
 
   let report;try{report=geometryReport(shape, mesh, assembly.instances);}catch(e){fail(`Geometry measurements failed: ${String(e)}`);}
   const inspection=inspect(request.definition,built,applyAssemblyTransform,exactAssemblyTransform);
-  report.topology=inspection.topology; report.exact_checks=[...inspection.exact_checks, ...jointSweeps(request.definition, built), ...mouldingChecks(request.definition, built)];
+  report.topology=inspection.topology; report.exact_checks=[...inspection.exact_checks, ...jointSweeps(request.definition, built), ...mouldingChecks(request.definition, built), ...mateCompatibilityChecks(request.definition, built), ...meshDerivedChecks()];
+  if (componentBuildStats.built) report.component_builds = { ...componentBuildStats };
   report.body_count=inspection.topology.reduce((s,t)=>s+t.solid_count,0);
 
   if (!report.valid) fail("output geometry is empty or invalid", report);

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.10.0
+version: 0.11.0
 description: |
   Optional print-service fabrication: quote printed parts across bound
   Craftcloud, Slant 3D, Shapeways, Treatstock and Sculpteo connections, then
@@ -160,7 +160,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: design/v0.10.0
+    ref: design/v0.11.0
     entry: mcp/design
   port: 8080
   health_check: /health

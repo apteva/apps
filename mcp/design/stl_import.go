@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,53 @@ func stlTriangleCount(body []byte) (int, error) {
 		return 0, errors.New("ASCII STL has no facets")
 	}
 	return count, nil
+}
+
+// repairSTLNormals returns a binary STL with every zero or non-finite facet
+// normal replaced by the triangle's right-hand normal. ASCII files and files
+// whose normals are all set come back unchanged.
+func repairSTLNormals(body []byte) ([]byte, bool) {
+	if len(body) < 84 {
+		return body, false
+	}
+	count := int(binary.LittleEndian.Uint32(body[80:84]))
+	if 84+count*50 != len(body) {
+		return body, false
+	}
+	var out []byte
+	read := func(offset int) [3]float64 {
+		var v [3]float64
+		for k := 0; k < 3; k++ {
+			v[k] = float64(math.Float32frombits(binary.LittleEndian.Uint32(body[offset+k*4:])))
+		}
+		return v
+	}
+	for i := 0; i < count; i++ {
+		offset := 84 + i*50
+		n := read(offset)
+		length := math.Sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])
+		if length > 1e-12 && !math.IsNaN(length) && !math.IsInf(length, 0) {
+			continue
+		}
+		a, b, c := read(offset+12), read(offset+24), read(offset+36)
+		u := [3]float64{b[0] - a[0], b[1] - a[1], b[2] - a[2]}
+		w := [3]float64{c[0] - a[0], c[1] - a[1], c[2] - a[2]}
+		n = [3]float64{u[1]*w[2] - u[2]*w[1], u[2]*w[0] - u[0]*w[2], u[0]*w[1] - u[1]*w[0]}
+		length = math.Sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])
+		if length < 1e-30 {
+			continue // degenerate triangle; the reader drops it
+		}
+		if out == nil {
+			out = append([]byte(nil), body...)
+		}
+		for k := 0; k < 3; k++ {
+			binary.LittleEndian.PutUint32(out[offset+k*4:], math.Float32bits(float32(n[k]/length)))
+		}
+	}
+	if out == nil {
+		return body, false
+	}
+	return out, true
 }
 
 // importSTLAsset stores a mesh as reference geometry. Meshes are kept as
@@ -98,6 +146,15 @@ func (s *Service) stlAssetFiles(operations []map[string]any) (map[string]any, er
 		raw, err := os.ReadFile(path)
 		if err != nil || digest(raw) != asset.SHA256 {
 			return nil, errors.New("source STL missing or hash mismatch")
+		}
+		// OpenCascade's binary STL reader rejects some files whose facet
+		// normals are zero (allowed by the format, and common from scanners),
+		// so the runner reads a copy with the normals filled in.
+		if repaired, changed := repairSTLNormals(raw); changed {
+			path = filepath.Join(s.assetDir(id), "mesh.stl")
+			if err := os.WriteFile(path, repaired, 0o600); err != nil {
+				return nil, err
+			}
 		}
 		out[id] = map[string]any{"file": path, "sha256": asset.SHA256}
 	}

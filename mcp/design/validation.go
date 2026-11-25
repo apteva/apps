@@ -61,7 +61,7 @@ func evaluateChecks(definition *DesignDefinition, report GeometryReport) []Check
 		results = append(results, result)
 	}
 	for _, exact := range report.ExactChecks {
-		if strings.HasPrefix(exact.ID, "keepout_") || (exact.Type == "component_evidence" || exact.Type == "export_scope") {
+		if strings.HasPrefix(exact.ID, "keepout_") || (exact.Type == "component_evidence" || exact.Type == "export_scope" || exact.Type == "mate_compatibility" || exact.Type == "mesh_derived") {
 			results = append(results, exact)
 		}
 	}

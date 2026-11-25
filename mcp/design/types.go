@@ -9,7 +9,7 @@ import (
 const (
 	designSchema  = "apteva-design/v1"
 	engineName    = "replicad-opencascade"
-	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.10"
+	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.11"
 )
 
 type ParameterSpec struct {
@@ -327,6 +327,14 @@ type GeometryReport struct {
 	ExactChecks    []CheckResult        `json:"exact_checks,omitempty"`
 	Topology       []TopologyReport     `json:"topology,omitempty"`
 	Parts          []PartGeometryReport `json:"parts,omitempty"`
+	// ComponentBuilds counts linked-design builds: each linked design is
+	// built once per distinct parameter set and reused.
+	ComponentBuilds *ComponentBuildStats `json:"component_builds,omitempty"`
+}
+
+type ComponentBuildStats struct {
+	Built  int `json:"built"`
+	Reused int `json:"reused"`
 }
 
 type PartGeometryReport struct {
