@@ -29,8 +29,8 @@ for (const [severity, rank, color] of [["info", 1, "text-info"], ["warn", 3, "te
     await row.click();
     await expect(page.getByText("Test alert", { exact: true })).toBeVisible();
     await expect.poll(() => seen).toBe(true);
-    const card = page.getByText("Test alert", { exact: true }).locator("..");
-    expect(await card.locator("svg path").getAttribute("d")).toBe(alertPath);
+    const card = page.locator(`[data-card="alert"]`).filter({ hasText: "Test alert" });
+    expect(await card.locator("svg path").first().getAttribute("d")).toBe(alertPath);
     await page.getByRole("button", { name: "Back to conversations" }).click();
     await expect(row.getByRole("img", { name: "Unread alert" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Inbox 1" })).toBeVisible();

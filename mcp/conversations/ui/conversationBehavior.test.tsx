@@ -435,7 +435,7 @@ test("localization providers and individual surfaces isolate overrides and prese
  expect(element.querySelector("#french")!.textContent).toContain("Compte rendu");
  expect(element.querySelector("#spanish")!.textContent).toContain("Informe propio");
  expect(element.querySelector("#english")!.textContent).toContain("Report");
- expect(element.querySelector("#alert")!.textContent).toContain("avertissement");
+ expect(element.querySelector("#alert")!.textContent).toContain("Avertissement");
  for (const id of ["french","spanish","english"]) expect(element.querySelector(`#${id}`)!.textContent).toContain("Original report content");
 });
 

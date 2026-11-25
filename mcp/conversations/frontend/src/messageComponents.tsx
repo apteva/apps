@@ -2,7 +2,7 @@ import {isReplySuggestion} from "./replySuggestion";
 import { createContext, useContext, useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { useConversationAPI } from "./context";
 import { useConversationLocalization } from "./i18n";
-import { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
+import { ApprovalCard, ReportCard, AlertCard, CardShell, CardMarkdown, GLYPH_QUESTION } from "./legacyCards";
 import type { CardComponent, InteractionField, Message } from "./types";
 
 export interface ConversationComponentProps {
@@ -91,9 +91,11 @@ function InteractionCard({message,component,submit}:ConversationComponentProps) 
  };
  useEffect(()=>{try{if(pending)sessionStorage.setItem(draftKey,JSON.stringify({values,custom}));else sessionStorage.removeItem(draftKey)}catch{}},[draftKey,values,custom,pending]);
  const act=async(action:string, answers=values)=>{if(busy)return;setBusy(true);setError("");try{const m=await submit(action,answers);setSaved(m.components.find(c=>c.id===component.id)??null)}catch(e){setError(String(e))}finally{setBusy(false)}};
- return <section className="min-w-0 rounded-md border border-border bg-bg-card p-3" data-component-id={component.id}>
-  <div className="text-xs font-semibold text-text-muted">{String(component.props.title||t("component.question"))}</div>
-  {component.props.body!=null&&<p className="mt-2 text-sm text-text whitespace-pre-wrap break-words">{String(component.props.body)}</p>}
+ const isForm = component.name === "form-card";
+ const heading = String(component.props.title ?? "").trim();
+ return <CardShell kind={isForm?"form":"question"} componentId={component.id} tone={pending?"accent":"neutral"} edge={pending&&Boolean(x.blocking)}
+  icon={GLYPH_QUESTION} label={t(isForm?"component.form":"component.question")} title={heading||undefined}>
+  {component.props.body!=null&&<CardMarkdown source={String(component.props.body)} />}
   {pending?<>
    <p role="status" className="mt-2 text-xs text-text-muted">{t(x.blocking?"component.waiting":"component.optional")}</p>
    <form className="mt-3 flex flex-col gap-3" onSubmit={event=>{
@@ -120,7 +122,7 @@ function InteractionCard({message,component,submit}:ConversationComponentProps) 
    {Object.entries(x.values??{}).map(([id,value])=>{const f=x.fields?.find(f=>f.id===id);const label=(s:unknown)=>f?.options?.find(o=>o.id===s)?.label??String(s);return <p key={id} className="mt-2 text-sm text-text break-words"><span className="text-text-muted">{f?.label??id}: </span>{Array.isArray(value)?value.map(label).join(", "):label(value)}</p>})}
   </>}
   {error&&<p role="alert" className="mt-2 text-xs text-error">{error}</p>}
- </section>;
+ </CardShell>;
 }
 export function MessageComponents({message,onApprovalAction,onChanged,projectId}:{message:Message;onApprovalAction?:(id:number,action:string,note:string)=>Promise<void>;onChanged?:(message:Message)=>void;projectId?:string}) {
  const renderers=useContext(Registry);const InstalledRenderer=useContext(AppRenderer);const {apiPost,conversationsClient}=useConversationAPI();const {t}=useConversationLocalization();
@@ -132,8 +134,9 @@ export function MessageComponents({message,onApprovalAction,onChanged,projectId}
   const key=component.id??`${component.app}/${component.name}/${index}`;
   if(component.version&&component.version!==1)return <p key={key} role="status">{t("component.unavailable")}</p>;
   if(component.app==="conversations"&&component.name==="approval-card")return <ApprovalCard key={key} message={single} onAction={onApprovalAction??(async(id,action,note)=>{const result=await apiPost<{message:Message}>("/message-action",{message_id:id,action_id:action,note},projectId);onChanged?.(result.message)})}/>;
-  if(component.app==="conversations"&&component.name==="report-card")return <ReportCard key={key} message={single}/>;
-  if(component.app==="conversations"&&component.name==="alert-card")return <AlertCard key={key} message={single}/>;
+  const dismiss=async()=>{const result=await apiPost<{message:Message}>("/message-dismiss",{message_id:message.id},projectId);onChanged?.(result.message)};
+  if(component.app==="conversations"&&component.name==="report-card")return <ReportCard key={key} message={single} onDismiss={dismiss}/>;
+  if(component.app==="conversations"&&component.name==="alert-card")return <AlertCard key={key} message={single} onDismiss={dismiss}/>;
   const Renderer=renderers[`${component.app}/${component.name}`]??(component.interaction?InteractionCard:InstalledRenderer);
   if(Renderer)return <Renderer key={key} message={message} component={component} componentKey={key} submit={submit} projectId={projectId??conversationsClient.projectId}/>;
   return <p key={key} role="status" className="rounded border border-border p-3 text-sm text-text-muted">{t("component.previewUnavailable")}</p>;

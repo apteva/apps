@@ -266,6 +266,8 @@ for (const host of ["dashboard", "external"]) {
   await page.getByRole("combobox",{name:"Example language"}).selectOption("es-ES");
   await page.getByRole("button",{name:"Cerrar",exact:true}).last().click();
   await page.getByRole("button",{name:"Revisar",exact:true}).click();
+  // The note field opens on demand, in the active language.
+  await page.getByRole("button",{name:"Añadir una nota",exact:true}).click();
   await expect(page.getByRole("textbox")).toHaveAttribute("placeholder","Nota opcional para el agente");
   // Action labels belong to the authored card; the app translates its surrounding UI.
   await page.getByRole("button",{name:"Approve",exact:true}).click();

@@ -564,3 +564,12 @@
 .apteva-conversations .chat-composer-ghost-hint { display:block; font-size:11px; line-height:16px; opacity:.8; }
 .apteva-conversations .chat-composer-box[data-layout="single-line"] .chat-composer-ghost {white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-height:24px;padding:0 4px;}
 .apteva-conversations .chat-composer-box[data-layout="single-line"] .chat-composer-ghost-hint {display:none;}
+
+/* Cards sit inside the transcript like messages: the host theme's card
+ * shadow (clean has one, terminal has none) and compact headings, so a
+ * report's sections read as sub-heads, not page titles. */
+.conversation-card { box-shadow: var(--shadow-card, none); }
+.conversation-card .chat-md.conversation-card-body :is(h1, h2, h3, h4) {
+  font-size: 1em;
+  margin: 0.85rem 0 0.3rem 0;
+}

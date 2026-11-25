@@ -6,6 +6,7 @@ import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
 import {useCardConversation} from "./cardWorkspace";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
+import { GLYPH_APPROVAL, GLYPH_INFO } from "./legacyCards";
 import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
 import { splitActivityPaint } from "./toolActivityPaint";
@@ -2569,7 +2570,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                               aria-label={attentionLabel}
                               title={attentionLabel}
                             >
-                              <Glyph d={GLYPH_ALERT} size={14} />
+                              <Glyph d={attentionRank === 2 ? GLYPH_APPROVAL : attentionRank === 1 ? GLYPH_INFO : GLYPH_ALERT} size={14} />
                             </span>
                           )}
                           {showsAgentAvatar(agentAvatars, "threads") && <ConversationIdentity conversation={c} agents={agents || []}/>}

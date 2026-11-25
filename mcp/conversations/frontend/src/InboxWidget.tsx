@@ -1,6 +1,7 @@
 import { MessageComponents } from "./messageComponents";
 import {useCardConversation} from "./cardWorkspace";
 import type { Message } from "./types";
+import { alertParts, plainLine } from "./cardParts";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 // InboxWidget — the conversations app's dashboard.home widget, a
 // faithful recreation of the dashboard's AptevaInbox (the operator's
@@ -143,10 +144,11 @@ function alertText(message: InboxMessage): string {
 
 function itemTitle(message: InboxMessage): string {
   const kind = message.component_kind;
-  if (kind === "interactive") return String(inboxInteraction(message)?.props.title ?? message.content);
-  if (kind === "approval") return String(card(message, "approval-card").title ?? message.content);
-  if (kind === "report") return String(card(message, "report-card").title ?? message.content);
-  return alertText(message).split("\n", 1)[0];
+  if (kind === "interactive") return plainLine(String(inboxInteraction(message)?.props.title ?? message.content));
+  if (kind === "approval") return plainLine(String(card(message, "approval-card").title ?? message.content));
+  if (kind === "report") return plainLine(String(card(message, "report-card").title ?? message.content));
+  const parts = alertParts(alertText(message), String(card(message, "alert-card").title ?? ""));
+  return parts.title ? plainLine(parts.title) : plainLine(parts.body.split("\n", 1)[0] ?? "");
 }
 
 function itemBody(message: InboxMessage): string {
@@ -154,7 +156,8 @@ function itemBody(message: InboxMessage): string {
   if (kind === "interactive") return String(inboxInteraction(message)?.props.body ?? "");
   if (kind === "approval") return String(card(message, "approval-card").body ?? "");
   if (kind === "report") return String(card(message, "report-card").summary ?? "");
-  return alertText(message).split("\n").slice(1).join("\n");
+  const parts = alertParts(alertText(message), String(card(message, "alert-card").title ?? ""));
+  return parts.title ? parts.body : parts.body.split("\n").slice(1).join("\n");
 }
 
 // ─── overlay (lightweight Modal port, same as the panel's) ───────────

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.0 — 2026-11-25
+
+- Alert, approval, report, question and form cards are redesigned to read like messages instead of full-width banners. They are capped at message width on desktop and sit on the host theme's card surface, radius and shadow, so they follow all four dashboard themes (terminal/clean × dark/light). A thin colored edge marks severity or a pending decision.
+- Card text is rendered as markdown. An alert's bold lead-in or heading becomes its title, and a trailing `Source:` line moves to the footer, next to the time and a Dismiss button.
+- Severity labels are sentence case and localized (Info, Warning, Error, Critical).
+- Approvals show "Approval needed" while pending. The optional note sits behind "Add note".
+- Long reports fold behind "Show full report", and report section headings are body-sized.
+- Inbox rows show plain-text titles instead of raw markdown.
+
 ## 0.34.5 — 2026-11-25
 
 - Thinking no longer stays on after a finished reply. When the agent replied and then paced to wait for new messages (`clear_wake`), Core's last model call of that run reopened Thinking, nothing closed it, and the operator's next message was queued behind it (prod Helper chat). A pace now only lets a later model call count as new work once its timer is due; `clear_wake` never does, and a new message always does.
