@@ -58,6 +58,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Public refusal | Reply without escalating during a settle period |
 | Room fan-out | Two runner-owned agents reply; duplicate submission reuses one row |
 | Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
+| Form answer shows live work | Main asks with a blocking form; after the answer, Thinking shows in the conversation and every `todo_todos_complete` call is a tool row before the final reply; Thinking ends with it |
 | Short multi-step cadence | Related list and todo lookups complete with one acknowledgement and one final reply, without an unnecessary progress message |
 | Long multi-step progress | A meaningful stage boundary produces one intermediate progress update before the final outcome |
 | Queue and steer | Three steers sent at different points land in the running todo task; two queued follow-ups (one edited) run afterwards, each in its own turn; a removed destructive one never runs; Todo data and transcript both show all work done |
@@ -411,3 +412,15 @@ is therefore scoped to the accepted input context: an identical invocation
 retried after genuinely new user input is indistinguishable from new work.
 Callers needing retry identity across that boundary should supply an explicit
 `idempotency_key`; its durable duplicate/conflicting-request checks are unchanged.
+
+## Form answer shows live work (0.34.4)
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.2-sol \
+  scenarios/29-form-answer-live-work.yaml
+```
+
+2026-11-25: passed in 111.6 s (9 iterations, 173K tokens) with the fix. With
+0.34.3's `interactions.go` the same run fails as prod did: "no Thinking in the
+conversation between the answer and the final reply" (only text frames, no
+response progress after the answer).

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.4 — 2026-11-25
+
+- Answering a form or question card now shows the agent's work like a typed message does: Thinking while it works and a tool row for every call. The answer opened no live response, so nothing showed until the final reply, and on main every tool call was dropped (prod: 15 of 16 archive calls missing after a form). The response opens before the answer is sent, gated on Core's receipt; a failed or duplicate delivery closes it, and a response already running in the conversation is kept.
+- Tier 3 scenario 29 (form answer → live work) covers it end to end with a real model.
+
 ## 0.34.3 — 2026-11-25
 
 - A helper's finished model turns no longer look busy. They show a still mark and read "Thought for 2.1s"; the moving dots and "Thinking · …" are kept for a turn that is still running.

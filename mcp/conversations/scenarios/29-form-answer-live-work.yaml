@@ -1,0 +1,28 @@
+name: conversations-form-answer-live-work
+description: |
+  Main asks with a blocking form, the operator answers, and main does several
+  writes. Thinking and every tool call must show in the conversation while it
+  works, as they do after a typed message (prod regression 2026-11-25).
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  apps:
+    - path: ../todo
+      spawnable: true
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_FormAnswerShowsLiveWork$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are an operations assistant for a small services business. You manage
+  the team's todo lists and answer the operator in chat. All data here is
+  isolated test data.
+budget:
+  total_tokens: 600000
+trajectory_assert:
+  - tool_called: todo_todos_complete
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: final
+      min_count: 2

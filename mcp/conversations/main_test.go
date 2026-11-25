@@ -40,6 +40,7 @@ type recordingPlatform struct {
 	integrationCalls       []capturedIntegrationCall
 	integrationHandler     func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
 	failSend               bool
+	duplicateSend          bool // tracked events report an earlier delivery
 	failSpawn              bool
 	ensureErr              error
 	duplicateEnsureReceipt bool
@@ -128,6 +129,9 @@ func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {
 func (p *recordingPlatform) SendTrackedAgentEvent(req sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {
 	if p.failSend {
 		return nil, fmt.Errorf("agent offline")
+	}
+	if p.duplicateSend {
+		return &sdk.AgentEventReceipt{SourceEventID: req.SourceEventID, ThreadID: req.ThreadID, Duplicate: true}, nil
 	}
 	p.trackedEvents = append(p.trackedEvents, req)
 	return &sdk.AgentEventReceipt{SourceEventID: req.SourceEventID, ThreadID: req.ThreadID, Accepted: true}, nil

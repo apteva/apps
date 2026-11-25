@@ -500,21 +500,35 @@ func (s *streamer) emitAck(conversationID, threadID string, agentID int64, after
 }
 
 func (s *streamer) emitInboundAck(chat, thread string, agent int64, msg *Message) {
-	// Core's event.received preview contains at most the first 100 bytes.
-	preview := "[chat] " + msg.Content
-	if len(preview) > 100 {
-		preview = preview[:100]
-		for !utf8.ValidString(preview) {
-			preview = preview[:len(preview)-1]
-		}
-	}
+	s.emitEventAck(chat, thread, agent, msg.ID, "[chat] "+msg.Content)
+}
+
+// emitEventAck opens the response to an event the agent answers in chat,
+// gated on Core's receipt of that event. Once received, the thread's
+// telemetry (main's included) belongs to this response, so Thinking and tool
+// rows show while the agent works. Used for chat messages and answered
+// components; text is the event message as sent to Core.
+func (s *streamer) emitEventAck(chat, thread string, agent, afterID int64, text string) {
+	preview := eventReceivedPreview(text)
 	s.mu.Lock()
 	connected := s.feedConnectedLocked(thread)
 	s.mu.Unlock()
 	if !connected {
 		preview = "" // Keep durable-reply settlement without this thread's telemetry.
 	}
-	s.emitResponseAck(chat, thread, agent, msg.ID, preview)
+	s.emitResponseAck(chat, thread, agent, afterID, preview)
+}
+
+// eventReceivedPreview is the start of an event message as Core reports it in
+// event.received: at most the first 100 bytes.
+func eventReceivedPreview(text string) string {
+	if len(text) > 100 {
+		text = text[:100]
+		for !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+	}
+	return text
 }
 
 func (s *streamer) emitResponseAck(conversationID, threadID string, agentID, afterID int64, preview string) {
