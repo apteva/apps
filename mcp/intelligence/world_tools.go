@@ -26,8 +26,8 @@ func (a *App) worldTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"since": prop("string")}, nil), Handler: a.toolOverview},
 		{Name: "sources_list", Description: "Ingestion connectors with permitted use, licence, freshness, cost meter, last error, and recent runs.",
 			InputSchema: schemaObject(nil, nil), Handler: a.toolSourcesList},
-		{Name: "source_configure", Description: "Enable/disable a connector, change its interval, or replace its config (e.g. news watch_topics, BLS/FRED series, market horizon). Args: slug, enabled?, interval_sec?, config?.",
-			InputSchema: schemaObject(map[string]any{"slug": prop("string"), "enabled": prop("boolean"), "interval_sec": prop("integer"), "config": prop("object")}, []string{"slug"}), Handler: a.toolSourceConfigure},
+		{Name: "source_configure", Description: "Enable/disable a connector, change its interval, replace its config (e.g. news watch_topics, BLS/FRED series with optional region, market horizon), set its access class (open|internal|restricted, applied to evidence it records from now on) or its retention_days (content of older evidence is removed; 0 keeps it). Args: slug, enabled?, interval_sec?, config?, access?, retention_days?.",
+			InputSchema: schemaObject(map[string]any{"slug": prop("string"), "enabled": prop("boolean"), "interval_sec": prop("integer"), "config": prop("object"), "access": prop("string"), "retention_days": prop("integer")}, []string{"slug"}), Handler: a.toolSourceConfigure},
 		{Name: "ingest_now", Description: "Run connectors now (all, or one source), then claim extraction and forecast updates. Args: source?, skip_forecasts?.",
 			InputSchema: schemaObject(map[string]any{"source": prop("string"), "skip_forecasts": prop("boolean")}, nil), Handler: a.toolIngestNow},
 		{Name: "entities_search", Description: "Search world-model entities by name/alias and kind. Args: query?, kind?, limit?.",
@@ -162,6 +162,15 @@ func ensureDefaultSources(ctx *sdk.AppCtx, pid string) error {
 	return nil
 }
 
+// forecastAfterIngest revises forecasts with the clock read after this
+// cycle's ingestion. Evidence is stamped with the time it was stored, so
+// a cutoff taken when the cycle started would exclude the very evidence
+// that triggered the revision.
+func forecastAfterIngest(env *ingestEnv, llmBudget int) (map[string]int, error) {
+	env.now = nowUTC()
+	return updateForecasts(env, llmBudget)
+}
+
 // runCycle is one full pass: due connectors → extraction → forecasts.
 func (a *App) runCycle(ctx *sdk.AppCtx, pid string, force bool, only string, skipForecasts bool) (map[string]any, error) {
 	if err := ensureDefaultSources(ctx, pid); err != nil {
@@ -184,8 +193,13 @@ func (a *App) runCycle(ctx *sdk.AppCtx, pid string, force bool, only string, ski
 			}
 		}
 	}
+	if n, err := applyRetention(env.db, pid, env.now); err != nil {
+		out["retention_error"] = err.Error()
+	} else if n > 0 {
+		out["retention_expired"] = n
+	}
 	if !skipForecasts {
-		counts, err := updateForecasts(env, configInt(ctx, "forecast_llm_per_cycle", 20, 0, 1000))
+		counts, err := forecastAfterIngest(env, configInt(ctx, "forecast_llm_per_cycle", 20, 0, 1000))
 		out["forecasts"] = counts
 		if err != nil {
 			return out, err
@@ -320,6 +334,13 @@ func buildOverview(ctx *sdk.AppCtx, pid string, since time.Time) (map[string]any
 	_ = db.QueryRow(`SELECT COUNT(*) FROM intel_claims WHERE project_id = ?`, pid).Scan(&claims)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM intelligence_evidence WHERE project_id = ?`, pid).Scan(&evidence)
 	out["world"] = map[string]any{"entities": entities, "relationships": rels, "claims": claims, "evidence": evidence}
+	if q, err := dataQuality(db, pid, nowUTC()); err == nil {
+		top := q.Issues
+		if len(top) > 12 {
+			top = top[:12]
+		}
+		out["quality"] = map[string]any{"summary": q.Summary, "issues": top, "total": len(q.Issues), "basis": q.Basis, "access": q.Access}
+	}
 	llm := appLLM(ctx)
 	out["llm"] = map[string]any{"enabled": llm != nil, "model": configString(ctx, "llm_model", "anthropic/claude-haiku-5-5"), "calls_today": llmCallsToday(), "daily_limit": configInt(ctx, "llm_daily_calls", 300, 0, 100000)}
 	return out, nil
@@ -359,7 +380,7 @@ func (a *App) toolSourcesList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	rows := []map[string]any{}
 	for _, s := range sources {
 		rows = append(rows, map[string]any{"slug": s.Slug, "connector": s.Connector, "enabled": s.Enabled, "interval_sec": s.IntervalSec,
-			"config": s.Config, "permitted_use": s.PermittedUse, "licence": s.Licence, "retention_days": s.RetentionDays,
+			"config": s.Config, "permitted_use": s.PermittedUse, "licence": s.Licence, "retention_days": s.RetentionDays, "access": s.Access,
 			"last_run_at": timeString(s.LastRunAt), "last_success_at": timeString(s.LastSuccessAt), "freshness_sec": s.FreshnessSec(now),
 			"last_error": s.LastError, "items_total": s.ItemsTotal, "calls_total": s.CallsTotal})
 	}
@@ -400,7 +421,12 @@ func (a *App) toolSourceConfigure(ctx *sdk.AppCtx, args map[string]any) (any, er
 			return nil, errors.New("config must be an object")
 		}
 	}
-	if err := updateSourceSettings(ctx.AppDB(), pid, strArg(args, "slug"), enabled, interval, cfg); err != nil {
+	var retention *int
+	if _, ok := args["retention_days"]; ok {
+		n := int(intArgAny(args, "retention_days"))
+		retention = &n
+	}
+	if err := updateSourceSettings(ctx.AppDB(), pid, strArg(args, "slug"), enabled, interval, cfg, strArg(args, "access"), retention); err != nil {
 		return nil, err
 	}
 	return a.toolSourcesList(ctx, args)
@@ -471,7 +497,34 @@ func (a *App) toolEntityGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"entity": e, "relationships": rels, "claims": claims, "state": state, "open_questions": qs, "recent_evidence": evidence}, nil
+	rd := readerFrom(args)
+	redacted := rd.redactRows(evidence)
+	locs, err := entityLocations(db, pid)
+	if err != nil {
+		return nil, err
+	}
+	mine := locs[id]
+	if mine == nil {
+		mine = []EntityLocation{}
+	}
+	quality, err := dataQuality(db, pid, nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	issues := []QualityIssue{}
+	for _, is := range quality.Issues {
+		if containsID(is.EntityIDs, id) {
+			issues = append(issues, is)
+		}
+	}
+	series := []SeriesFreshness{}
+	for _, s := range quality.Series {
+		if s.EntityID == id {
+			series = append(series, s)
+		}
+	}
+	return map[string]any{"entity": e, "relationships": rels, "claims": claims, "state": state, "open_questions": qs, "recent_evidence": evidence,
+		"redacted": redacted, "locations": mine, "location": bestLocation(mine), "issues": issues, "series": series}, nil
 }
 
 func (a *App) toolEntityUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -728,6 +781,7 @@ func (a *App) toolQuestionGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	readerFrom(args).redactRows(evidence)
 	ents := []WorldEntity{}
 	for _, id := range q.EntityIDs {
 		if e, err := getWorldEntity(db, pid, id); err == nil && e != nil {
@@ -915,6 +969,9 @@ func toolRoute(method string, fn toolFn) http.HandlerFunc {
 				args[k] = r.URL.Query().Get(k)
 			}
 		}
+		// Set last so a body or query value cannot replace it. The panel is
+		// the project's operator surface.
+		args[readerArg] = operatorReader
 		out, err := fn(globalCtx, args)
 		if err != nil {
 			httpErr(w, 400, err.Error())
@@ -939,6 +996,12 @@ func (a *App) worldRoutes() []sdk.Route {
 		{Pattern: "/graph", Handler: toolRoute(http.MethodGet, a.toolGraphNeighbors)},
 		{Pattern: "/scenarios", Handler: toolRoute(http.MethodGet, a.toolScenariosList)},
 		{Pattern: "/scenario-run", Handler: toolRoute(http.MethodPost, a.toolScenarioRun)},
+		{Pattern: "/access-classes", Handler: handleAccessClasses},
+		{Pattern: "/world-map", Handler: toolRoute(http.MethodGet, a.toolWorldMap)},
+		{Pattern: "/quality", Handler: toolRoute(http.MethodGet, a.toolDataQuality)},
+		{Pattern: "/entity-locate", Handler: toolRoute(http.MethodPost, a.toolEntityLocate)},
+		{Pattern: "/synthetic-seed", Handler: toolRoute(http.MethodPost, a.toolSyntheticSeed)},
+		{Pattern: "/synthetic-clear", Handler: toolRoute(http.MethodPost, a.toolSyntheticClear)},
 	}
 }
 

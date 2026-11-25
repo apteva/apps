@@ -113,6 +113,28 @@ func proposeAdjustment(llm llmClient, q *Question, prior float64, briefs []evide
 	return &adj, nil
 }
 
+// evidenceShift turns a proposed adjustment into the capped log-odds shift
+// the model applies. Only citations of evidence the forecast could see
+// count; without one, or with direction none or strength 0, the shift is 0.
+// Live forecasts and backtests both use this rule.
+func evidenceShift(adj *llmAdjustment, allowed []int64) (float64, []int64) {
+	valid := []int64{}
+	for _, id := range adj.Cited {
+		if containsID(allowed, id) {
+			valid = append(valid, id)
+		}
+	}
+	strength := math.Max(0, math.Min(3, math.Round(adj.Strength)))
+	if (adj.Direction != "yes" && adj.Direction != "no") || strength == 0 || len(valid) == 0 {
+		return 0, valid
+	}
+	shift := math.Min(maxShift, strength*shiftPerStrength)
+	if adj.Direction == "no" {
+		shift = -shift
+	}
+	return shift, valid
+}
+
 // forecastQuestion records a new immutable forecast revision. The evidence
 // cutoff is now; only evidence ingested by then is considered.
 func forecastQuestion(env *ingestEnv, q *Question, trigger string) (*Forecast, error) {
@@ -158,20 +180,10 @@ func forecastQuestion(env *ingestEnv, q *Question, trigger string) (*Forecast, e
 			explanation += " Evidence assessment failed (" + err.Error() + "); no adjustment."
 			break
 		}
-		valid := []int64{}
-		for _, id := range adj.Cited {
-			if containsID(ids, id) {
-				valid = append(valid, id)
-			}
-		}
-		strength := math.Max(0, math.Min(3, math.Round(adj.Strength)))
-		if adj.Direction == "none" || strength == 0 || len(valid) == 0 {
+		shift, valid := evidenceShift(adj, ids)
+		if shift == 0 {
 			explanation += fmt.Sprintf(" Reviewed %d evidence items: no material change. %s", len(briefs), strings.TrimSpace(adj.Rationale))
 			break
-		}
-		shift := math.Min(maxShift, strength*shiftPerStrength)
-		if adj.Direction == "no" {
-			shift = -shift
 		}
 		f.Adjustment = round3(shift)
 		f.Model = forecastModel + " (" + env.llm.Model() + ")"
@@ -255,7 +267,8 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 	var cursor int64
 	_ = env.db.QueryRow(`SELECT CAST(cursor AS INTEGER) FROM intel_sources WHERE project_id = ? AND slug = 'extraction'`, env.pid).Scan(&cursor)
 	for b := 0; b < batches; b++ {
-		rows, err := env.db.Query(`SELECT id, title, source FROM intelligence_evidence WHERE project_id = ? AND id > ? AND kind = 'news' ORDER BY id LIMIT 10`, env.pid, cursor)
+		rows, err := env.db.Query(`SELECT id, title, source FROM intelligence_evidence WHERE project_id = ? AND id > ? AND kind = 'news'
+			AND basis <> 'synthetic' AND access <> 'restricted' AND content_expired_at IS NULL ORDER BY id LIMIT 10`, env.pid, cursor)
 		if err != nil {
 			return counts, err
 		}
@@ -310,7 +323,7 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 			counts["evidence"]++
 			names := map[string]int64{}
 			for _, e := range it.Entities {
-				ent, created, err := upsertWorldEntity(env.db, env.pid, WorldEntity{Name: e.Name, Kind: e.Kind})
+				ent, created, err := upsertWorldEntity(env.db, env.pid, WorldEntity{Name: e.Name, Kind: e.Kind, Basis: basisInferred})
 				if err != nil {
 					continue // includes refused person entities
 				}

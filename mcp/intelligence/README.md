@@ -6,7 +6,9 @@ forecasts on concrete questions before their outcomes are known, scores those
 forecasts against prediction markets, and runs explicit "what if" scenarios.
 Market data and trading signals remain inside the app as a domain pack.
 
-Version 0.5.0 renames the app from `market-intel` to `intelligence`.
+Version 0.5.0 renamed the app from `market-intel` to `intelligence`.
+Version 0.6.0 adds evaluation: reproducible backtests on frozen historical
+data, kept apart from prospective results and a follow-up plan.
 
 ## Three layers, kept apart
 
@@ -78,6 +80,75 @@ made before resolution. It reports:
 - calibration;
 - coverage;
 - breakdowns by horizon and by venue.
+
+## Evaluation
+
+Evaluation asks one question: on specific resolvable YES/NO questions, do the
+statistical and AI-assisted methods beat simple baselines? It keeps
+historical backtests and live (prospective) evidence apart and never pools
+them.
+
+**Dataset.** `evaluation_dataset_build` freezes resolved binary questions
+from Manifold and Kalshi, with each question's trade-by-trade price history.
+Questions are filtered for liquidity (traders, trades), lifetime and at most
+two per linked event (five per Kalshi series). Within the window they are a
+seeded random sample, so they spread over the whole period. The dataset gets a content hash; every run checks it
+before scoring. Skip reasons are counted.
+
+**Methods,** at each horizon h (default 24h and 168h before the earlier of
+close and resolution):
+
+- `uniform`: 0.5.
+- `base_rate`: the YES rate (Laplace-smoothed) of questions resolved before
+  the forecast time.
+- `market`: the last trade at or before the forecast time.
+- `market_recal`: the market price recalibrated by a logistic fit on
+  questions resolved before the forecast time, shrunk toward the identity.
+- `ai_shift` (optional): the live forecast model, market prior plus the
+  capped LLM evidence shift, on GDELT news first seen before the forecast
+  time.
+
+Trained methods abstain until 30 outcomes are known.
+
+**Leakage controls.**
+
+- Prices come from trade timestamps, never from final or later prices.
+- Questions created after the forecast time are excluded.
+- Training uses only outcomes known strictly before each forecast time.
+- AI evidence must have a first-seen time before the forecast time; undated
+  articles are dropped.
+- AI forecasts are scored only on questions resolving after the model's
+  stated knowledge cutoff (`ai_knowledge_cutoff`, required). That cutoff is
+  stated by the operator and not verified, and the report says so.
+
+**Report.** `evaluation_run` scores, for each method:
+
+- Brier score and log loss with cluster-bootstrap 95% intervals (linked
+  questions resample together);
+- calibration bins and ECE;
+- paired differences from the market;
+- results by chronological block;
+- failure and abstention counts with reasons;
+- a stated set of limitations.
+
+A verdict needs at least 30 scored questions and an interval that excludes
+zero; otherwise the report says "insufficient sample" or "no detectable
+difference". Runs record their parameters, seed and code version. The
+statistical methods are deterministic.
+
+**Prospective results and follow-up.** `evaluation_report` adds two sections,
+computed when read:
+
+- `prospective_live`: the live ledger's forecasts, each recorded before its
+  outcome, scored model against market with intervals.
+- `follow_up`: every open question with its scoring date (48h after its
+  deadline), and the earliest dates when the prospective sample can reach 30
+  and 100.
+
+Observation periods are not shortened. Unresolved questions stay in the
+plan until they resolve.
+
+Evaluation produces scores, never trades or decisions about individuals.
 
 ## Scenarios
 

@@ -142,6 +142,9 @@ func runScenario(db *sql.DB, pid string, in scenarioInput) (map[string]any, erro
 			if in.SkipAssumed && r.Status == "assumed" {
 				continue
 			}
+			if r.Basis == basisSynthetic {
+				continue // sample data never feeds a scenario
+			}
 			rule, ok := rules[r.Type]
 			if !ok {
 				unruled[r.Type]++

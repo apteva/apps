@@ -18,15 +18,21 @@ import (
 )
 
 func (a *App) MCPTools() []sdk.Tool {
+	tools := append(append(a.mcpTools(), a.geoTools()...), a.evalTools()...)
+	return applyReaderScopes(tools)
+}
+
+func (a *App) mcpTools() []sdk.Tool {
 	return append(a.worldTools(), []sdk.Tool{
-		{Name: "search", Description: "Generic bitemporal intelligence search across recorded evidence. Args: query?, kind?, source?, entity?, event_from?, event_to?, published_from?, published_to?, as_of?, knowledge? (observed|ingested), limit?. Dates accept RFC3339 or YYYY-MM-DD; as_of returns only facts known and valid at that time — knowledge=ingested uses the server's arrival time, which callers cannot backdate.",
+		{Name: "search", Description: "Generic bitemporal intelligence search across recorded evidence. Args: query?, kind?, source?, entity?, basis? (observed|inferred|synthetic), event_from?, event_to?, published_from?, published_to?, as_of?, knowledge? (observed|ingested), limit?. Evidence you may not read comes back redacted. Dates accept RFC3339 or YYYY-MM-DD; as_of returns only facts known and valid at that time — knowledge=ingested uses the server's arrival time, which callers cannot backdate.",
 			InputSchema: schemaObject(map[string]any{
-				"query": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "knowledge": map[string]any{"type": "string"},
+				"query": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "knowledge": map[string]any{"type": "string"}, "basis": map[string]any{"type": "string"},
 				"event_from": map[string]any{"type": "string"}, "event_to": map[string]any{"type": "string"}, "published_from": map[string]any{"type": "string"}, "published_to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
 			}, nil), Handler: a.toolSearch},
-		{Name: "evidence_record", Description: "Record an immutable, source-attributed evidence item for later search, timelines, monitoring, and point-in-time replay. Duplicate content is idempotent.",
+		{Name: "evidence_record", Description: "Record an immutable, source-attributed evidence item for later search, timelines, monitoring, and point-in-time replay. Duplicate content is idempotent. basis: observed (default; a source said it), inferred (your own analysis) or synthetic (made-up sample data, never used by forecasts). access: open, internal or restricted; never looser than the source's class, and internal by default for sources the app does not run.",
 			InputSchema: schemaObject(map[string]any{
 				"kind": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "payload": map[string]any{"type": "object"}, "entity_refs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "source": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "event_time": map[string]any{"type": "string"}, "published_time": map[string]any{"type": "string"}, "observed_at": map[string]any{"type": "string"}, "valid_from": map[string]any{"type": "string"}, "valid_to": map[string]any{"type": "string"}, "supersedes_id": map[string]any{"type": "integer"},
+				"basis": map[string]any{"type": "string"}, "access": map[string]any{"type": "string"},
 			}, []string{"source"}), Handler: a.toolEvidenceRecord},
 		{Name: "timeline", Description: "Return a chronological evidence timeline for a topic or entity, with optional point-in-time cutoff. Alias for search ordered by temporal evidence.",
 			InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolTimeline},
@@ -100,7 +106,10 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 func evidenceQueryFromArgs(args map[string]any, projectID string) (EvidenceQuery, error) {
-	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50, Knowledge: strArg(args, "knowledge")}
+	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50, Knowledge: strArg(args, "knowledge"), Basis: strArg(args, "basis")}
+	if q.Basis != "" && !validBasis(q.Basis) {
+		return q, errors.New("basis must be observed, inferred or synthetic")
+	}
 	if q.Knowledge != "" && q.Knowledge != "observed" && q.Knowledge != "ingested" {
 		return q, errors.New("knowledge must be observed or ingested")
 	}
@@ -143,7 +152,8 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"results": rows, "count": len(rows), "query": q.Text, "as_of": timeString(q.AsOf)}, nil
+	redacted := readerFrom(args).redactRows(rows)
+	return map[string]any{"results": rows, "count": len(rows), "redacted": redacted, "query": q.Text, "as_of": timeString(q.AsOf)}, nil
 }
 
 func (a *App) toolTimeline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -165,7 +175,8 @@ func (a *App) toolTimeline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"timeline": rows, "count": len(rows), "as_of": timeString(q.AsOf)}, nil
+	redacted := readerFrom(args).redactRows(rows)
+	return map[string]any{"timeline": rows, "count": len(rows), "redacted": redacted, "as_of": timeString(q.AsOf)}, nil
 }
 
 func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -174,7 +185,13 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if id := intArgAny(args, "forecast_id"); id > 0 {
-		return replayForecast(ctx.AppDB(), pid, id)
+		out, err := replayForecast(ctx.AppDB(), pid, id)
+		if err == nil {
+			if ev, ok := out["evidence"].([]map[string]any); ok {
+				out["redacted"] = readerFrom(args).redactRows(ev)
+			}
+		}
+		return out, err
 	}
 	q, err := evidenceQueryFromArgs(args, pid)
 	if err != nil {
@@ -189,7 +206,8 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	b, _ := json.Marshal(rows)
 	sum := sha256.Sum256(b)
-	return map[string]any{"snapshot": hex.EncodeToString(sum[:]), "as_of": q.AsOf.UTC().Format(time.RFC3339), "records": rows, "count": len(rows),
+	redacted := readerFrom(args).redactRows(rows)
+	return map[string]any{"snapshot": hex.EncodeToString(sum[:]), "as_of": q.AsOf.UTC().Format(time.RFC3339), "records": rows, "count": len(rows), "redacted": redacted,
 		"knowledge": fallback(q.Knowledge, "observed"), "lookahead_safe": q.Knowledge == "ingested",
 		"note": "observed knowledge trusts source-supplied observation times; use knowledge=ingested for look-ahead-safe replay"}, nil
 }
@@ -229,6 +247,14 @@ func (a *App) toolEvidenceRecord(ctx *sdk.AppCtx, args map[string]any) (any, err
 		id := int64(n)
 		e.SupersedesID = &id
 	}
+	e.Basis = strArg(args, "basis")
+	// Never looser than the source's class; a source the app does not run
+	// is operator data and defaults to internal.
+	floor := sourceAccess(ctx.AppDB(), pid, e.Source)
+	if floor == "" && e.Basis != basisSynthetic {
+		floor = accessInternal
+	}
+	e.Access = stricterAccess(strArg(args, "access"), floor)
 	return recordEvidence(ctx.AppDB(), e, pid)
 }
 

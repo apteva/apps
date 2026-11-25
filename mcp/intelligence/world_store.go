@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-func nowUTC() time.Time { return time.Now().UTC() }
+// nowUTC is a variable so the reproducible ingestion sample can pin the clock.
+var nowUTC = func() time.Time { return time.Now().UTC() }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
@@ -32,6 +33,7 @@ type IntelSource struct {
 	PermittedUse  string         `json:"permitted_use"`
 	Licence       string         `json:"licence"`
 	RetentionDays int            `json:"retention_days"`
+	Access        string         `json:"access"`
 	Cursor        string         `json:"cursor"`
 	LastRunAt     *time.Time     `json:"last_run_at"`
 	LastSuccessAt *time.Time     `json:"last_success_at"`
@@ -55,14 +57,26 @@ func ensureSource(db *sql.DB, pid string, s IntelSource) error {
 	if s.Config == nil {
 		cfg = "{}"
 	}
-	_, err := db.Exec(`INSERT INTO intel_sources (project_id, slug, connector, enabled, interval_sec, config, permitted_use, licence, retention_days)
-		VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id, slug) DO NOTHING`,
-		pid, s.Slug, s.Connector, boolInt(s.Enabled), s.IntervalSec, cfg, s.PermittedUse, s.Licence, s.RetentionDays)
+	_, err := db.Exec(`INSERT INTO intel_sources (project_id, slug, connector, enabled, interval_sec, config, permitted_use, licence, retention_days, access)
+		VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id, slug) DO NOTHING`,
+		pid, s.Slug, s.Connector, boolInt(s.Enabled), s.IntervalSec, cfg, s.PermittedUse, s.Licence, s.RetentionDays, fallback(s.Access, accessOpen))
 	return err
 }
 
-func updateSourceSettings(db *sql.DB, pid, slug string, enabled *bool, interval *int, config map[string]any) error {
+func updateSourceSettings(db *sql.DB, pid, slug string, enabled *bool, interval *int, config map[string]any, access string, retentionDays *int) error {
 	sets, args := []string{}, []any{}
+	if access != "" {
+		if !validAccess(access) {
+			return errors.New("access must be open, internal or restricted")
+		}
+		sets, args = append(sets, "access = ?"), append(args, access)
+	}
+	if retentionDays != nil {
+		if *retentionDays < 0 {
+			return errors.New("retention_days cannot be negative (0 keeps content)")
+		}
+		sets, args = append(sets, "retention_days = ?"), append(args, *retentionDays)
+	}
 	if enabled != nil {
 		sets, args = append(sets, "enabled = ?"), append(args, boolInt(*enabled))
 	}
@@ -90,7 +104,7 @@ func updateSourceSettings(db *sql.DB, pid, slug string, enabled *bool, interval 
 
 func listSources(db *sql.DB, pid string) ([]IntelSource, error) {
 	rows, err := db.Query(`SELECT id, slug, connector, enabled, interval_sec, config, permitted_use, licence, retention_days, cursor,
-		last_run_at, last_success_at, last_error, items_total, calls_total FROM intel_sources WHERE project_id = ? ORDER BY slug`, pid)
+		last_run_at, last_success_at, last_error, items_total, calls_total, access FROM intel_sources WHERE project_id = ? ORDER BY slug`, pid)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +116,7 @@ func listSources(db *sql.DB, pid string) ([]IntelSource, error) {
 		var enabled int
 		var lastRun, lastOK flexibleTime
 		if err := rows.Scan(&s.ID, &s.Slug, &s.Connector, &enabled, &s.IntervalSec, &cfg, &s.PermittedUse, &s.Licence, &s.RetentionDays, &s.Cursor,
-			&lastRun, &lastOK, &s.LastError, &s.ItemsTotal, &s.CallsTotal); err != nil {
+			&lastRun, &lastOK, &s.LastError, &s.ItemsTotal, &s.CallsTotal, &s.Access); err != nil {
 			return nil, err
 		}
 		s.Enabled = enabled != 0
@@ -197,6 +211,7 @@ type WorldEntity struct {
 	Description string            `json:"description"`
 	Aliases     []string          `json:"aliases"`
 	ExternalIDs map[string]string `json:"external_ids"`
+	Basis       string            `json:"basis"`
 }
 
 // upsertWorldEntity finds an entity by external id, exact name, or alias
@@ -211,6 +226,10 @@ func upsertWorldEntity(db *sql.DB, pid string, e WorldEntity) (*WorldEntity, boo
 		return nil, false, err
 	}
 	e.Domain = fallback(e.Domain, "world")
+	e.Basis = fallback(e.Basis, basisObserved)
+	if !validBasis(e.Basis) {
+		return nil, false, fmt.Errorf("invalid basis %q", e.Basis)
+	}
 	existing, err := findWorldEntity(db, pid, e.Name, e.ExternalIDs)
 	if err != nil {
 		return nil, false, err
@@ -237,9 +256,15 @@ func upsertWorldEntity(db *sql.DB, pid string, e WorldEntity) (*WorldEntity, boo
 			existing.Kind = e.Kind
 			changed = true
 		}
+		// A source confirming an inferred or synthetic entity upgrades it to
+		// observed; an inference never downgrades an observed entity.
+		if basisRank(e.Basis) > basisRank(existing.Basis) {
+			existing.Basis = e.Basis
+			changed = true
+		}
 		if changed {
-			_, err = db.Exec(`UPDATE entities SET aliases = ?, external_ids = ?, description = ?, kind = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-				mustJSON(existing.Aliases), mustJSON(existing.ExternalIDs), existing.Description, existing.Kind, existing.ID)
+			_, err = db.Exec(`UPDATE entities SET aliases = ?, external_ids = ?, description = ?, kind = ?, basis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+				mustJSON(existing.Aliases), mustJSON(existing.ExternalIDs), existing.Description, existing.Kind, existing.Basis, existing.ID)
 		}
 		return existing, false, err
 	}
@@ -249,8 +274,8 @@ func upsertWorldEntity(db *sql.DB, pid string, e WorldEntity) (*WorldEntity, boo
 	if e.ExternalIDs == nil {
 		e.ExternalIDs = map[string]string{}
 	}
-	err = db.QueryRow(`INSERT INTO entities (project_id, canonical, domain, external_ids, aliases, kind, description) VALUES (?,?,?,?,?,?,?) RETURNING id`,
-		pid, e.Name, e.Domain, mustJSON(e.ExternalIDs), mustJSON(e.Aliases), e.Kind, e.Description).Scan(&e.ID)
+	err = db.QueryRow(`INSERT INTO entities (project_id, canonical, domain, external_ids, aliases, kind, description, basis) VALUES (?,?,?,?,?,?,?,?) RETURNING id`,
+		pid, e.Name, e.Domain, mustJSON(e.ExternalIDs), mustJSON(e.Aliases), e.Kind, e.Description, e.Basis).Scan(&e.ID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -271,25 +296,25 @@ func findWorldEntity(db *sql.DB, pid, name string, ext map[string]string) (*Worl
 		if v == "" {
 			continue
 		}
-		e, err := scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids FROM entities
+		e, err := scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids, basis FROM entities
 			WHERE project_id = ? AND json_extract(external_ids, '$.' || ?) = ? LIMIT 1`, pid, k, v))
 		if err != nil || e != nil {
 			return e, err
 		}
 	}
-	e, err := scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids FROM entities
+	e, err := scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids, basis FROM entities
 		WHERE project_id = ? AND lower(canonical) = lower(?) LIMIT 1`, pid, name))
 	if err != nil || e != nil {
 		return e, err
 	}
-	return scanWorldEntity(db.QueryRow(`SELECT e.id, e.canonical, e.kind, e.domain, e.description, e.aliases, e.external_ids FROM entities e, json_each(e.aliases) a
+	return scanWorldEntity(db.QueryRow(`SELECT e.id, e.canonical, e.kind, e.domain, e.description, e.aliases, e.external_ids, e.basis FROM entities e, json_each(e.aliases) a
 		WHERE e.project_id = ? AND lower(a.value) = lower(?) LIMIT 1`, pid, name))
 }
 
 func scanWorldEntity(row *sql.Row) (*WorldEntity, error) {
 	var e WorldEntity
 	var aliases, ext string
-	if err := row.Scan(&e.ID, &e.Name, &e.Kind, &e.Domain, &e.Description, &aliases, &ext); err != nil {
+	if err := row.Scan(&e.ID, &e.Name, &e.Kind, &e.Domain, &e.Description, &aliases, &ext, &e.Basis); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -307,7 +332,7 @@ func scanWorldEntity(row *sql.Row) (*WorldEntity, error) {
 }
 
 func getWorldEntity(db *sql.DB, pid string, id int64) (*WorldEntity, error) {
-	return scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids FROM entities WHERE project_id = ? AND id = ?`, pid, id))
+	return scanWorldEntity(db.QueryRow(`SELECT id, canonical, kind, domain, description, aliases, external_ids, basis FROM entities WHERE project_id = ? AND id = ?`, pid, id))
 }
 
 func searchWorldEntities(db *sql.DB, pid, query, kind string, limit int) ([]WorldEntity, error) {
@@ -318,7 +343,7 @@ func searchWorldEntities(db *sql.DB, pid, query, kind string, limit int) ([]Worl
 	if kind != "" {
 		where, args = append(where, "kind = ?"), append(args, kind)
 	}
-	rows, err := db.Query(`SELECT id, canonical, kind, domain, description, aliases, external_ids FROM entities WHERE `+strings.Join(where, " AND ")+` ORDER BY canonical LIMIT ?`, append(args, clampLimit(limit, 50, 500))...)
+	rows, err := db.Query(`SELECT id, canonical, kind, domain, description, aliases, external_ids, basis FROM entities WHERE `+strings.Join(where, " AND ")+` ORDER BY canonical LIMIT ?`, append(args, clampLimit(limit, 50, 500))...)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +352,7 @@ func searchWorldEntities(db *sql.DB, pid, query, kind string, limit int) ([]Worl
 	for rows.Next() {
 		var e WorldEntity
 		var aliases, ext string
-		if err := rows.Scan(&e.ID, &e.Name, &e.Kind, &e.Domain, &e.Description, &aliases, &ext); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.Kind, &e.Domain, &e.Description, &aliases, &ext, &e.Basis); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aliases), &e.Aliases)
@@ -351,6 +376,18 @@ func clampLimit(n, def, max int) int {
 
 var relationshipStatuses = map[string]bool{"observed": true, "reported": true, "inferred": true, "assumed": true}
 
+// relationshipBasis maps a status onto the observed/inferred split; a
+// synthetic relationship stays synthetic whatever its status.
+func relationshipBasis(status, basis string) string {
+	if basis == basisSynthetic {
+		return basisSynthetic
+	}
+	if status == "observed" || status == "reported" {
+		return basisObserved
+	}
+	return basisInferred
+}
+
 type Relationship struct {
 	ID          int64      `json:"id"`
 	From        int64      `json:"from_entity_id"`
@@ -365,6 +402,7 @@ type Relationship struct {
 	EvidenceIDs []int64    `json:"evidence_ids"`
 	ClaimIDs    []int64    `json:"claim_ids"`
 	Note        string     `json:"note,omitempty"`
+	Basis       string     `json:"basis"`
 }
 
 func assertRelationship(db *sql.DB, pid string, r Relationship) (*Relationship, error) {
@@ -389,9 +427,10 @@ func assertRelationship(db *sql.DB, pid string, r Relationship) (*Relationship, 
 	if r.ClaimIDs == nil {
 		r.ClaimIDs = []int64{}
 	}
-	err := db.QueryRow(`INSERT INTO intel_relationships (project_id, from_entity_id, rel_type, to_entity_id, status, confidence, valid_from, valid_to, evidence_ids, claim_ids, note)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, r.From, r.Type, r.To, r.Status, fptr(r.Confidence), timeString(r.ValidFrom), timeString(r.ValidTo),
-		mustJSON(r.EvidenceIDs), mustJSON(r.ClaimIDs), r.Note).Scan(&r.ID)
+	r.Basis = relationshipBasis(r.Status, r.Basis)
+	err := db.QueryRow(`INSERT INTO intel_relationships (project_id, from_entity_id, rel_type, to_entity_id, status, confidence, valid_from, valid_to, evidence_ids, claim_ids, note, basis)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, r.From, r.Type, r.To, r.Status, fptr(r.Confidence), timeString(r.ValidFrom), timeString(r.ValidTo),
+		mustJSON(r.EvidenceIDs), mustJSON(r.ClaimIDs), r.Note, r.Basis).Scan(&r.ID)
 	return &r, err
 }
 
@@ -414,7 +453,7 @@ func relationshipsAt(db *sql.DB, pid string, entityIDs []int64, at *time.Time) (
 		when = ts(*at)
 	}
 	args = append(args, when, when, when)
-	rows, err := db.Query(`SELECT r.id, r.from_entity_id, f.canonical, r.rel_type, r.to_entity_id, t.canonical, r.status, r.confidence, r.valid_from, r.valid_to, r.evidence_ids, r.claim_ids, r.note
+	rows, err := db.Query(`SELECT r.id, r.from_entity_id, f.canonical, r.rel_type, r.to_entity_id, t.canonical, r.status, r.confidence, r.valid_from, r.valid_to, r.evidence_ids, r.claim_ids, r.note, r.basis
 		FROM intel_relationships r JOIN entities f ON f.id = r.from_entity_id JOIN entities t ON t.id = r.to_entity_id
 		WHERE r.project_id = ? AND (r.from_entity_id IN (`+marks+`) OR r.to_entity_id IN (`+marks+`))
 		AND (r.valid_from IS NULL OR r.valid_from <= ?) AND (r.valid_to IS NULL OR r.valid_to > ?)
@@ -429,7 +468,7 @@ func relationshipsAt(db *sql.DB, pid string, entityIDs []int64, at *time.Time) (
 		var conf sql.NullFloat64
 		var from, to flexibleTime
 		var ev, cl string
-		if err := rows.Scan(&r.ID, &r.From, &r.FromName, &r.Type, &r.To, &r.ToName, &r.Status, &conf, &from, &to, &ev, &cl, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.From, &r.FromName, &r.Type, &r.To, &r.ToName, &r.Status, &conf, &from, &to, &ev, &cl, &r.Note, &r.Basis); err != nil {
 			return nil, err
 		}
 		if conf.Valid {
@@ -471,6 +510,7 @@ type Claim struct {
 	Confidence *float64   `json:"confidence,omitempty"`
 	Extractor  string     `json:"extractor"`
 	Status     string     `json:"status"`
+	Basis      string     `json:"basis"`
 }
 
 func insertClaim(db *sql.DB, pid string, c Claim) (int64, error) {
@@ -478,9 +518,9 @@ func insertClaim(db *sql.DB, pid string, c Claim) (int64, error) {
 		return 0, errors.New("claim needs evidence_id, subject and predicate")
 	}
 	var id int64
-	err := db.QueryRow(`INSERT INTO intel_claims (project_id, evidence_id, subject_entity_id, subject, predicate, object_entity_id, object, value, unit, claim_time, confidence, extractor, status)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, c.EvidenceID, ptrInt64(c.SubjectID), c.Subject, c.Predicate, ptrInt64(c.ObjectID), c.Object,
-		fptr(c.Value), c.Unit, timeString(c.ClaimTime), fptr(c.Confidence), c.Extractor, fallback(c.Status, "proposed")).Scan(&id)
+	err := db.QueryRow(`INSERT INTO intel_claims (project_id, evidence_id, subject_entity_id, subject, predicate, object_entity_id, object, value, unit, claim_time, confidence, extractor, status, basis)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, c.EvidenceID, ptrInt64(c.SubjectID), c.Subject, c.Predicate, ptrInt64(c.ObjectID), c.Object,
+		fptr(c.Value), c.Unit, timeString(c.ClaimTime), fptr(c.Confidence), c.Extractor, fallback(c.Status, "proposed"), fallback(c.Basis, basisInferred)).Scan(&id)
 	return id, err
 }
 
@@ -495,7 +535,7 @@ func listClaims(db *sql.DB, pid string, evidenceID, entityID int64, status strin
 	if status != "" {
 		where, args = append(where, "status = ?"), append(args, status)
 	}
-	rows, err := db.Query(`SELECT id, evidence_id, subject_entity_id, subject, predicate, object_entity_id, object, value, unit, claim_time, confidence, extractor, status
+	rows, err := db.Query(`SELECT id, evidence_id, subject_entity_id, subject, predicate, object_entity_id, object, value, unit, claim_time, confidence, extractor, status, basis
 		FROM intel_claims WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, append(args, clampLimit(limit, 100, 500))...)
 	if err != nil {
 		return nil, err
@@ -507,7 +547,7 @@ func listClaims(db *sql.DB, pid string, evidenceID, entityID int64, status strin
 		var subj, obj sql.NullInt64
 		var val, conf sql.NullFloat64
 		var at flexibleTime
-		if err := rows.Scan(&c.ID, &c.EvidenceID, &subj, &c.Subject, &c.Predicate, &obj, &c.Object, &val, &c.Unit, &at, &conf, &c.Extractor, &c.Status); err != nil {
+		if err := rows.Scan(&c.ID, &c.EvidenceID, &subj, &c.Subject, &c.Predicate, &obj, &c.Object, &val, &c.Unit, &at, &conf, &c.Extractor, &c.Status, &c.Basis); err != nil {
 			return nil, err
 		}
 		if subj.Valid {
@@ -556,13 +596,14 @@ type StateValue struct {
 	ValidAt    time.Time `json:"valid_at"`
 	EvidenceID *int64    `json:"evidence_id,omitempty"`
 	Source     string    `json:"source"`
+	Basis      string    `json:"basis"`
 }
 
 // putStateValue is idempotent per (entity, variable, valid_at, source).
 func putStateValue(db *sql.DB, pid string, v StateValue) (bool, error) {
-	res, err := db.Exec(`INSERT INTO intel_state_values (project_id, entity_id, variable, value, unit, valid_at, evidence_id, source, ingested_at)
-		VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id, entity_id, variable, valid_at, source) DO NOTHING`,
-		pid, v.EntityID, v.Variable, v.Value, v.Unit, ts(v.ValidAt), ptrInt64(v.EvidenceID), v.Source, ts(nowUTC()))
+	res, err := db.Exec(`INSERT INTO intel_state_values (project_id, entity_id, variable, value, unit, valid_at, evidence_id, source, ingested_at, basis)
+		VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id, entity_id, variable, valid_at, source) DO NOTHING`,
+		pid, v.EntityID, v.Variable, v.Value, v.Unit, ts(v.ValidAt), ptrInt64(v.EvidenceID), v.Source, ts(nowUTC()), fallback(v.Basis, basisObserved))
 	if err != nil {
 		return false, err
 	}
@@ -575,7 +616,7 @@ func stateSeries(db *sql.DB, pid string, entityID int64, variable string, limit 
 	if variable != "" {
 		where, args = append(where, "variable = ?"), append(args, variable)
 	}
-	rows, err := db.Query(`SELECT variable, value, unit, valid_at, source, evidence_id FROM intel_state_values WHERE `+strings.Join(where, " AND ")+
+	rows, err := db.Query(`SELECT variable, value, unit, valid_at, source, evidence_id, basis FROM intel_state_values WHERE `+strings.Join(where, " AND ")+
 		` ORDER BY valid_at DESC LIMIT ?`, append(args, clampLimit(limit, 60, 1000))...)
 	if err != nil {
 		return nil, err
@@ -583,14 +624,14 @@ func stateSeries(db *sql.DB, pid string, entityID int64, variable string, limit 
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var variable, unit, source string
+		var variable, unit, source, basis string
 		var value float64
 		var at flexibleTime
 		var ev sql.NullInt64
-		if err := rows.Scan(&variable, &value, &unit, &at, &source, &ev); err != nil {
+		if err := rows.Scan(&variable, &value, &unit, &at, &source, &ev, &basis); err != nil {
 			return nil, err
 		}
-		row := map[string]any{"variable": variable, "value": value, "unit": unit, "valid_at": timeString(at.Time()), "source": source}
+		row := map[string]any{"variable": variable, "value": value, "unit": unit, "valid_at": timeString(at.Time()), "source": source, "basis": basis}
 		if ev.Valid {
 			row["evidence_id"] = ev.Int64
 		}
@@ -821,6 +862,7 @@ func linkQuestionEvidence(db *sql.DB, qid, evidenceID int64, relevance float64) 
 func questionEvidenceIDs(db *sql.DB, pid string, qid int64, cutoff time.Time, limit int) ([]int64, error) {
 	rows, err := db.Query(`SELECT e.id FROM intel_question_evidence qe JOIN intelligence_evidence e ON e.id = qe.evidence_id
 		WHERE qe.question_id = ? AND e.project_id = ? AND COALESCE(e.ingested_at, e.observed_at) <= ? AND qe.linked_at <= ?
+		  AND e.basis <> 'synthetic' AND e.access <> 'restricted'
 		ORDER BY qe.relevance DESC, COALESCE(e.published_time, e.event_time, e.ingested_at) DESC LIMIT ?`, qid, pid, ts(cutoff), ts(cutoff), clampLimit(limit, 20, 200))
 	if err != nil {
 		return nil, err

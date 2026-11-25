@@ -32,6 +32,7 @@ var connectors = map[string]connectorFunc{
 	"news":               runNews,
 	"bls":                runBLS,
 	"fred":               runFRED,
+	"geocode":            runGeocode,
 }
 
 // defaultSources are created on first mount. Operators change enablement,
@@ -49,18 +50,23 @@ func defaultSources() []IntelSource {
 			PermittedUse: "Public news metadata (headline, outlet, link, date) for evidence; full text is not stored.",
 			Licence:      "GDELT open data with attribution; bound news APIs under their own terms",
 			Config:       map[string]any{"questions_per_run": 8, "timespan": "3d", "watch_topics": []string{}}},
+		{Slug: "geocode", Connector: "geocode", Enabled: true, IntervalSec: 3600,
+			PermittedUse: "Place entities on the map: country names from the bundled Natural Earth gazetteer, other places from Wikipedia page coordinates.",
+			Licence:      "Natural Earth (public domain); Wikipedia (CC BY-SA, coordinates and page link only)",
+			Config:       map[string]any{"max_lookups_per_run": 10, "retry_days": 30}},
 		{Slug: "bls", Connector: "bls", Enabled: true, IntervalSec: 21600,
 			PermittedUse: "Public statistical series.", Licence: "US Bureau of Labor Statistics, public domain",
 			Config: map[string]any{"series": []map[string]string{
-				{"id": "CUUR0000SA0", "name": "US CPI-U all items", "unit": "index 1982-84=100"},
-				{"id": "LNS14000000", "name": "US unemployment rate", "unit": "percent"},
-				{"id": "CES0000000001", "name": "US nonfarm payrolls", "unit": "thousands"},
+				{"id": "CUUR0000SA0", "name": "US CPI-U all items", "unit": "index 1982-84=100", "region": "United States"},
+				{"id": "LNS14000000", "name": "US unemployment rate", "unit": "percent", "region": "United States"},
+				{"id": "CES0000000001", "name": "US nonfarm payrolls", "unit": "thousands", "region": "United States"},
 			}}},
 		{Slug: "fred", Connector: "fred", Enabled: false, IntervalSec: 21600,
 			PermittedUse: "Public economic series via the operator's bound FRED connection (bind FRED, then enable).", Licence: "FRED terms of use",
+			Access: accessInternal,
 			Config: map[string]any{"series": []map[string]string{
-				{"id": "DFF", "name": "US effective federal funds rate", "unit": "percent"},
-				{"id": "DGS10", "name": "US 10-year Treasury yield", "unit": "percent"},
+				{"id": "DFF", "name": "US effective federal funds rate", "unit": "percent", "region": "United States"},
+				{"id": "DGS10", "name": "US 10-year Treasury yield", "unit": "percent", "region": "United States"},
 			}}},
 	}
 }
@@ -717,7 +723,7 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 		}
 	}
 	var failures []string
-	record := func(it NewsItem, query string, qs []Question) {
+	record := func(it NewsItem, query string, qs []Question, provider string) {
 		matched := []Question{}
 		for _, q := range qs {
 			if topicRelevance(it.Title, q.Topics) > 0.2 {
@@ -732,7 +738,7 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 		for _, q := range matched {
 			refs = append(refs, q.Topics...)
 		}
-		ev, inserted, err := recordNewsItem(env, it, query, refs)
+		ev, inserted, err := recordNewsItem(env, it, query, refs, provider)
 		if err != nil {
 			return
 		}
@@ -765,12 +771,12 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 		}
 		raw, ok := env.sc.call("gdelt", "doc_search", map[string]any{"query": query, "maxrecords": "250", "timespan": timespan})
 		if !ok {
-			reason, _ := lastGDELTError.Load().(string)
+			reason := lastSourceError("gdelt")
 			failures = append(failures, "gdelt: "+orStr(reason, "unavailable"))
 			break // don't hammer a limiting API; the next run retries
 		}
 		for _, it := range parseNews(raw, "gdelt") {
-			record(it, query, chunk)
+			record(it, query, chunk, "gdelt")
 		}
 	}
 
@@ -788,7 +794,7 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 				break
 			}
 			for _, it := range parseNews(raw, spec.slug) {
-				record(it, query, []Question{q})
+				record(it, query, []Question{q}, spec.slug)
 			}
 		}
 	}
@@ -800,7 +806,7 @@ func runNews(env *ingestEnv, src IntelSource) (ingestStats, error) {
 			continue
 		}
 		for _, it := range parseNews(raw, "gdelt") {
-			record(it, topic, nil)
+			record(it, topic, nil, "gdelt")
 		}
 	}
 	if len(batch) > 0 {
@@ -866,12 +872,13 @@ func topicRelevance(title string, topics []string) float64 {
 	return math.Round(float64(hit)/float64(len(topics))*100) / 100
 }
 
-func recordNewsItem(env *ingestEnv, it NewsItem, query string, refs []string) (int64, bool, error) {
+func recordNewsItem(env *ingestEnv, it NewsItem, query string, refs []string, provider string) (int64, bool, error) {
 	if strings.TrimSpace(it.Title) == "" {
 		return 0, false, errors.New("empty headline")
 	}
-	payload, _ := json.Marshal(map[string]any{"connector": "news", "query": query, "outlet": it.Source, "url": it.URL})
-	e := Evidence{Kind: "news", Title: it.Title, Source: fallback(it.Source, "news"), SourceRef: it.URL, Payload: payload, EntityRefs: refs}
+	payload, _ := json.Marshal(map[string]any{"connector": "news", "provider": provider, "query": query, "outlet": it.Source, "url": it.URL})
+	e := Evidence{Kind: "news", Title: it.Title, Source: fallback(it.Source, "news"), SourceRef: it.URL, Payload: payload, EntityRefs: refs,
+		Access: stricterAccess(newsAccess(provider), sourceAccess(env.db, env.pid, "news"))}
 	if it.Date != "" {
 		if t := parseTS(it.Date); t != nil {
 			e.PublishedTime = t
@@ -889,7 +896,7 @@ func recordNewsItem(env *ingestEnv, it NewsItem, query string, refs []string) (i
 
 // ─── Statistical series (BLS public, FRED via binding) ─────────────
 
-type seriesSpec struct{ ID, Name, Unit string }
+type seriesSpec struct{ ID, Name, Unit, Region string }
 
 func cfgSeries(cfg map[string]any) []seriesSpec {
 	out := []seriesSpec{}
@@ -898,7 +905,7 @@ func cfgSeries(cfg map[string]any) []seriesSpec {
 	_ = json.Unmarshal(raw, &rows)
 	for _, r := range rows {
 		if r["id"] != "" {
-			out = append(out, seriesSpec{ID: r["id"], Name: fallback(r["name"], r["id"]), Unit: r["unit"]})
+			out = append(out, seriesSpec{ID: r["id"], Name: fallback(r["name"], r["id"]), Unit: r["unit"], Region: r["region"]})
 		}
 	}
 	return out
@@ -946,16 +953,19 @@ func runSeries(env *ingestEnv, src IntelSource, slug string, fetch func(seriesSp
 		if err != nil {
 			return st, err
 		}
+		var lastEvidence int64
 		for _, p := range points {
 			st.Fetched++
 			payload, _ := json.Marshal(map[string]any{"connector": slug, "series": s.ID, "value": p.Value, "unit": s.Unit, "period": ts(p.At)})
 			at := p.At
 			row, inserted, err := recordEvidenceDetailed(env.db, Evidence{Kind: "measurement", Title: fmt.Sprintf("%s: %g %s", s.Name, p.Value, s.Unit),
-				Source: slug, SourceRef: s.ID + "@" + p.At.Format("2006-01"), Payload: payload, EntityRefs: []string{s.Name}, EventTime: &at, ValidFrom: &at}, env.pid)
+				Source: slug, SourceRef: s.ID + "@" + p.At.Format("2006-01"), Payload: payload, EntityRefs: []string{s.Name}, EventTime: &at, ValidFrom: &at,
+				Access: src.Access}, env.pid)
 			if err != nil {
 				return st, err
 			}
 			evID, _ := row["id"].(int64)
+			lastEvidence = evID
 			if _, err := putStateValue(env.db, env.pid, StateValue{EntityID: ent.ID, Variable: "value", Value: p.Value, Unit: s.Unit, ValidAt: p.At, EvidenceID: &evID, Source: slug}); err != nil {
 				return st, err
 			}
@@ -963,6 +973,24 @@ func runSeries(env *ingestEnv, src IntelSource, slug string, fetch func(seriesSp
 				st.Inserted++
 			} else {
 				st.Duplicates++
+			}
+		}
+		// The series definition names the area it measures; record that as
+		// an observed link so the indicator has a place on the map.
+		area := s.Region
+		if area == "" && slug == "bls" {
+			// Every BLS series is a United States statistic (national or a
+			// part of it), so the country is the safe default area.
+			area = "United States"
+		}
+		if area != "" && lastEvidence > 0 {
+			region, _, err := upsertWorldEntity(env.db, env.pid, WorldEntity{Name: area, Kind: "region"})
+			if err != nil {
+				return st, err
+			}
+			if _, _, err := ensureRelationship(env.db, env.pid, Relationship{From: ent.ID, To: region.ID, Type: "measures", Status: "observed",
+				EvidenceIDs: []int64{lastEvidence}, Note: slug + " series " + s.ID + " covers " + area}); err != nil {
+				return st, err
 			}
 		}
 	}

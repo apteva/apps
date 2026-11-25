@@ -564,3 +564,47 @@ func TestWithEventTitle(t *testing.T) {
 		t.Error("ladder markets should share a template")
 	}
 }
+
+// Evidence stored during a cycle must be inside the cutoff of the forecast
+// it triggers in that same cycle.
+func TestForecastAfterIngestSeesThisCyclesEvidence(t *testing.T) {
+	db := openTestDB(t)
+	start := nowUTC().Truncate(time.Second)
+	clock := start
+	prev := nowUTC
+	nowUTC = func() time.Time { return clock }
+	defer func() { nowUTC = prev }()
+
+	env := &ingestEnv{db: db, pid: "p", now: start}
+	price := 0.3
+	q := seedQuestion(t, nil, env, &price)
+	if counts, err := updateForecasts(env, 0); err != nil || counts["initial"] != 1 {
+		t.Fatalf("initial: %v %v", counts, err)
+	}
+
+	// The cycle starts, then ingestion takes a while before news arrives.
+	env.now = start.Add(time.Minute)
+	clock = env.now.Add(13 * time.Second)
+	row, _, err := recordEvidenceDetailed(db, Evidence{Kind: "news", Title: "Acme announces recall", Source: "news.example", Basis: basisObserved, Access: accessOpen}, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evID := row["id"].(int64)
+	if _, err := linkQuestionEvidence(db, q.ID, evID, 1); err != nil {
+		t.Fatal(err)
+	}
+	env.llm = &fakeLLM{reply: fmt.Sprintf(`{"direction":"yes","strength":1,"cited_evidence_ids":[%d],"rationale":"Recall announced."}`, evID)}
+
+	counts, err := forecastAfterIngest(env, 5)
+	if err != nil || counts["new_evidence"] != 1 {
+		t.Fatalf("new evidence should revise: %v %v", counts, err)
+	}
+	fs, err := forecastsFor(db, q.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := fs[len(fs)-1]
+	if !containsID(last.EvidenceIDs, evID) || last.Adjustment == 0 {
+		t.Fatalf("forecast should use the evidence that triggered it: ids=%v adj=%v cutoff=%s", last.EvidenceIDs, last.Adjustment, last.EvidenceCutoff)
+	}
+}

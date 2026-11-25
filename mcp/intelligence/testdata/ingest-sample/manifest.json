@@ -1,0 +1,143 @@
+{
+  "calls": [
+    {
+      "slug": "polymarket",
+      "tool": "markets_window",
+      "args": {
+        "end_date_max": "2026-11-30T09:36:02Z",
+        "end_date_min": "2026-11-20T21:36:02Z",
+        "limit": "200"
+      },
+      "file": "polymarket__markets_window__42383e1b18a4.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "kalshi",
+      "tool": "list_markets",
+      "args": {
+        "limit": "500",
+        "max_close_ts": "1796031362",
+        "min_close_ts": "1795210562",
+        "mve_filter": "exclude",
+        "status": "open"
+      },
+      "file": "kalshi__list_markets__076a3a5f91d8.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "manifold-markets",
+      "tool": "search_markets",
+      "args": {
+        "contractType": "BINARY",
+        "filter": "open",
+        "limit": "500",
+        "sort": "24-hour-vol",
+        "term": ""
+      },
+      "file": "manifold-markets__search_markets__709f6ef79fbe.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "kalshi",
+      "tool": "get_event",
+      "args": {
+        "event_ticker": "KXAAAGASM-26NOV30"
+      },
+      "file": "kalshi__get_event__ff71f67ef9db.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "bls",
+      "tool": "get_series_single",
+      "args": {
+        "seriesid": "CUUR0000SA0"
+      },
+      "file": "bls__get_series_single__6373f0cff188.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "bls",
+      "tool": "get_series_single",
+      "args": {
+        "seriesid": "LNS14000000"
+      },
+      "file": "bls__get_series_single__a98aa33871ce.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "bls",
+      "tool": "get_series_single",
+      "args": {
+        "seriesid": "CES0000000001"
+      },
+      "file": "bls__get_series_single__00c899319e45.json.gz",
+      "ok": true
+    },
+    {
+      "slug": "gdelt",
+      "tool": "doc_search",
+      "args": {
+        "maxrecords": "250",
+        "query": "(\"Puma Shen\" OR \"Chiang Wan-an\" OR Israel OR \"Pedro Sánchez\" OR \"Alberto Núñez Feijóo\" OR \"Iran Effective Ceasefire\" OR PSOE OR Spanish) sourcelang:english",
+        "timespan": "3d"
+      },
+      "ok": false,
+      "error": "rate limited (HTTP 429)"
+    }
+  ],
+  "clock": "2026-11-20T09:36:02Z",
+  "digest": "c6414d1bff55a57600d3b22ce245cbe5fff37595767091da15c0d738ac8405bd",
+  "layers": {
+    "estimated": {
+      "claims": 0,
+      "entities": 4,
+      "relationships": 3,
+      "state_values": 100
+    },
+    "futures": {
+      "forecast_triggers": {
+        "abstained": 0,
+        "initial": 25,
+        "market_move": 0,
+        "new_evidence": 0
+      },
+      "forecasts": 25,
+      "questions_by_venue": {
+        "kalshi": 2,
+        "polymarket": 23
+      }
+    },
+    "observed": {
+      "evidence": 100,
+      "market_prices": 25,
+      "measurements": 100,
+      "news": 0,
+      "question_links": 0
+    },
+    "synthetic": 0
+  },
+  "runs": [
+    {
+      "calls": 4,
+      "duplicates": 0,
+      "fetched": 215,
+      "inserted": 25,
+      "source": "prediction-markets"
+    },
+    {
+      "calls": 3,
+      "duplicates": 0,
+      "fetched": 100,
+      "inserted": 100,
+      "source": "bls"
+    },
+    {
+      "calls": 1,
+      "duplicates": 0,
+      "error": "gdelt: rate limited (HTTP 429)",
+      "fetched": 0,
+      "inserted": 0,
+      "source": "news"
+    }
+  ]
+}

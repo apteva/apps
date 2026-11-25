@@ -1,0 +1,215 @@
+{
+  "evidence_measurement": [
+    {
+      "access": "open",
+      "basis": "observed",
+      "body": "",
+      "content_expired_at": null,
+      "content_hash": "ea414e8061f4554e144816e14fe22afa0daffd1a5da5d6d724ef6ce8194ed061",
+      "entity_refs": [
+        "US nonfarm payrolls"
+      ],
+      "event_time": "2026-10-01T00:00:00Z",
+      "id": 67,
+      "ingested_at": "2026-11-20T09:36:02Z",
+      "kind": "measurement",
+      "locations": null,
+      "observed_at": "2026-11-20T09:36:02Z",
+      "origin_key": "d52ee1548e7c7898",
+      "payload": {
+        "connector": "bls",
+        "period": "2026-10-01T00:00:00Z",
+        "series": "CES0000000001",
+        "unit": "thousands",
+        "value": 159293
+      },
+      "published_time": null,
+      "source": "bls",
+      "source_ref": "CES0000000001@2026-10",
+      "supersedes_id": null,
+      "title": "US nonfarm payrolls: 159293 thousands",
+      "valid_from": "2026-10-01T00:00:00Z",
+      "valid_to": null
+    },
+    {
+      "access": "open",
+      "basis": "observed",
+      "body": "",
+      "content_expired_at": null,
+      "content_hash": "0565b4a5b13817f5d5ca5c2769fd1ca3eab72a8ee4c6cd0d4f174ced206e04a4",
+      "entity_refs": [
+        "US unemployment rate"
+      ],
+      "event_time": "2026-10-01T00:00:00Z",
+      "id": 34,
+      "ingested_at": "2026-11-20T09:36:02Z",
+      "kind": "measurement",
+      "locations": null,
+      "observed_at": "2026-11-20T09:36:02Z",
+      "origin_key": "851fb9560c774e90",
+      "payload": {
+        "connector": "bls",
+        "period": "2026-10-01T00:00:00Z",
+        "series": "LNS14000000",
+        "unit": "percent",
+        "value": 4.1
+      },
+      "published_time": null,
+      "source": "bls",
+      "source_ref": "LNS14000000@2026-10",
+      "supersedes_id": null,
+      "title": "US unemployment rate: 4.1 percent",
+      "valid_from": "2026-10-01T00:00:00Z",
+      "valid_to": null
+    }
+  ],
+  "evidence_news": [],
+  "questions": [
+    {
+      "question": {
+        "id": 6,
+        "origin": "market",
+        "venue": "polymarket",
+        "external_id": "us-x-iran-effective-ceasefire-by-november-22-20261108",
+        "url": "https://polymarket.com/market/us-x-iran-effective-ceasefire-by-november-22-20261108",
+        "text": "US x Iran Effective Ceasefire by November 22?",
+        "resolution_rule": "This market will resolve to “Yes” if a continuous 14-day period during which the United States does not take a qualifying military action against Iran is completed, where the first day of that period is between market creation and the specified date (Iran Standard Time). Otherwise, this market will resolve to “No.”\n\nThe first day of the 14-day period will be the calendar date (Iran Standard Time) after the most recent qualifying military action. Military actions occurring before market creation are not qualifying military actions. Where no qualifying military action has occurred after market creation, the first day of the 14-day period will be the date of market creation (Iran Standard Time). The period runs through 11:59 PM Iran Standard Time on the 14th calendar day.\n\nA qualifying military action refers to an air strike or a surface-to-surface missile strike, initiated by the United States, that directly impacts Iran. An air strike includes bombs, air-to-surface missiles, and air-launched drones. A surface-to-surface missile strike includes one-way attack drones and surface-to-surface missiles such as cruise or ballistic missiles.\n\nThe following actions do not constitute a qualifying military action:\nMunitions destroyed or intercepted before impact;\nSurface-to-air missile strikes;\nSmall-arms fire;\nGround incursions;\nCyber operations;\nNaval gunfire and artillery fire;\nHowitzers, artillery pieces, mortars, and rocket artillery (e.g. MLRS systems);\nMinor surface-to-surface strikes, including short range loitering munitions, FPV drones, and ATGM strikes;\nAny threat, authorization, or announcement of force that has not been executed.\n\nAny munition that is intercepted or destroyed before impact does not constitute a qualifying military action. Debris, fragments, or any wreckage from intercepted munitions that land on Iran do not constitute a military action regardless of any damage incurred.\n\n“Iran” refers to the terrestrial territory of Iran, including its internal waters. Iran’s maritime territory and airspace are not encompassed. Where territorial borders are disputed, all territory claimed by and under the de facto control of Iran as of market creation will qualify.\n\nThe occurrence, attribution, and timing of a qualifying military action will be primarily determined based on a consensus of information available from the resolution sources. To allow for the reporting of any qualifying military action occurring within a 14-day period, that period will not be considered completed until 11:59 PM Iran Standard Time on the third calendar date following its 14th day; only qualifying military actions occurring within the 14-day period will be considered for that period. If multiple sources conflict regarding the occurrence, attribution, or timing of a potentially-qualifying incident at that time, the incident will be adjudicated based on the totality of information available from the resolution sources at that time. No single statement, denial, or presentation of evidence will govern where it is contradicted by the totality of information.\n\nThe resolution sources for this market will be official information from the governments and militaries of the United States and Iran and a consensus of credible reporting.",
+        "resolution_source": "polymarket market resolution (https://polymarket.com/market/us-x-iran-effective-ceasefire-by-november-22-20261108)",
+        "event_key": "us-x-iran-effective-ceasefire-begins-by-2-week-pause-20261108",
+        "topics": [
+          "Iran Effective Ceasefire"
+        ],
+        "entity_ids": [],
+        "deadline": "2026-11-22T20:29:00Z",
+        "status": "open",
+        "created_at": "2026-11-20T09:36:02Z"
+      },
+      "prices": [
+        {
+          "observed_at": "2026-11-20T09:36:02Z",
+          "price": 0.315,
+          "source": "polymarket"
+        }
+      ],
+      "forecasts": [
+        {
+          "id": 1,
+          "question_id": 6,
+          "revision": 1,
+          "probability": 0.315,
+          "abstained": false,
+          "prior": 0.315,
+          "market_price": 0.315,
+          "adjustment": 0,
+          "evidence_cutoff": "2026-11-20T09:36:02Z",
+          "snapshot_hash": "7770fa2f7b0baedec14acf37c271102b504a8b917b99e1d313f8797c57f22cad",
+          "evidence_ids": [],
+          "model": "market-prior+evidence-shift",
+          "model_version": "v1",
+          "assumptions": [],
+          "explanation": "Prior 31.5% from market price at cutoff. No linked evidence at cutoff; forecast equals prior.",
+          "trigger": "initial",
+          "created_at": "2026-11-20T09:36:02Z"
+        }
+      ]
+    },
+    {
+      "question": {
+        "id": 22,
+        "origin": "market",
+        "venue": "polymarket",
+        "external_id": "will-carlos-alcaraz-win-the-2026-nitto-atp-finals",
+        "url": "https://polymarket.com/market/will-carlos-alcaraz-win-the-2026-nitto-atp-finals",
+        "text": "Will Carlos Alcaraz win the 2026 Nitto ATP Finals?",
+        "resolution_rule": "This market will resolve according to the player that wins the 2026 Nitto ATP Finals singles tournament, currently scheduled for November 15 to November 22, 2026, in Turin, Italy.\n\nIf at any point it becomes impossible for a listed player to win the 2026 Nitto ATP Finals singles tournament per the rules of the tournament (e.g. the player is eliminated in the round-robin stage or loses a knockout match), the corresponding market will resolve to \"No\". A player who enters the tournament as an alternate is eligible to win.\n\nIf the 2026 Nitto ATP Finals is cancelled, postponed after December 6, 2026, 11:59 PM ET, or there is otherwise no winner declared within that timeframe, this market will resolve to \"Other\".\n\nThe resolution source for this market will be official information from the ATP Tour (https://www.atptour.com); however, a consensus of credible reporting may also be used.",
+        "resolution_source": "polymarket market resolution (https://polymarket.com/market/will-carlos-alcaraz-win-the-2026-nitto-atp-finals)",
+        "event_key": "nitto-atp-finals-2026-winner",
+        "topics": [
+          "Carlos Alcaraz",
+          "Nitto ATP Finals"
+        ],
+        "entity_ids": [],
+        "deadline": "2026-11-22T23:59:00Z",
+        "status": "open",
+        "created_at": "2026-11-20T09:36:02Z"
+      },
+      "prices": [
+        {
+          "observed_at": "2026-11-20T09:36:02Z",
+          "price": 0.465,
+          "source": "polymarket"
+        }
+      ],
+      "forecasts": [
+        {
+          "id": 2,
+          "question_id": 22,
+          "revision": 1,
+          "probability": 0.465,
+          "abstained": false,
+          "prior": 0.465,
+          "market_price": 0.465,
+          "adjustment": 0,
+          "evidence_cutoff": "2026-11-20T09:36:02Z",
+          "snapshot_hash": "7250a1122145855ab6b739e6d638ed34900d3044cfb378a50720752ba0206f73",
+          "evidence_ids": [],
+          "model": "market-prior+evidence-shift",
+          "model_version": "v1",
+          "assumptions": [],
+          "explanation": "Prior 46.5% from market price at cutoff. No linked evidence at cutoff; forecast equals prior.",
+          "trigger": "initial",
+          "created_at": "2026-11-20T09:36:02Z"
+        }
+      ]
+    },
+    {
+      "question": {
+        "id": 3,
+        "origin": "market",
+        "venue": "polymarket",
+        "external_id": "israel-x-iran-ceasefire-continues-through-november-22",
+        "url": "https://polymarket.com/market/israel-x-iran-ceasefire-continues-through-november-22",
+        "text": "Israel x Iran ceasefire continues through November 22?",
+        "resolution_rule": "This market will resolve to \"Yes\" if a state of ceasefire remains in effect between Israel and Iran through the listed date, 11:59 PM Iran Standard Time (IRST). Otherwise this market will resolve to “No”. \n\nA state of ceasefire will be considered to no longer be in effect between Israel and Iran if either Israel or Iran takes a qualifying military action against the other country between market creation and the listed date, 11:59 PM IRST.\n\nA qualifying military action refers to an air strike or a surface-to-surface missile strike, initiated by Israel or Iran, that directly impacts the other country. An air strike includes bombs, air-to-surface missiles, and air-launched drones. A surface-to-surface missile strike includes one-way attack drones and surface-to-surface missiles such as cruise or ballistic missiles.\n\nThe following actions do not constitute a qualifying military action:\nMunitions destroyed or intercepted before impact;\nSurface-to-air missile strikes;\nSmall-arms fire;\nGround incursions;\nCyber operations;\nNaval gunfire and artillery fire;\nHowitzers, artillery pieces, mortars, and rocket artillery (e.g. MLRS systems);\nMinor surface-to-surface strikes, including short range loitering munitions, FPV drones, and ATGM strikes;\nAny threat, authorization, or announcement of force that has not been executed.\n\nAny munition that is intercepted or destroyed before impact does not constitute a qualifying military action. Debris, fragments, or any wreckage from intercepted munitions that land on Israel or Iran do not constitute a military action regardless of any damage incurred.\n\nA military action will be considered to impact Israel or Iran if it directly impacts the terrestrial territory of Israel or Iran, including any internal waters. Maritime territory and airspace are not encompassed. Where territorial borders are disputed, all territory claimed by and under the de facto control of the relevant state as of market creation will qualify.\n\nThe occurrence, attribution, and timing of a qualifying military action will be primarily determined based on a consensus of information available from the resolution sources. Where multiple sources conflict regarding the occurrence, attribution, or timing of a relevant military action, this market will remain open until the earlier of: i) the confirmation of the occurrence, attribution, and timing of the action based on a consensus of information available from the resolution sources or ii) 3 full calendar days (IRST) from the date of the first credibly reported evidence of the action. If this period would extend past the end date, this market will remain open to allow for 3 full calendar days to pass. If, at the end of the third calendar day, conflicting reports remain as to the occurrence, attribution, or timing of the action, this market will resolve based on the totality of information available from the resolution sources at that time. No single statement, denial, or presentation of evidence will govern where it is contradicted by the totality of information.\n\nThe resolution sources for this market will be official information from the governments and militaries of Israel and Iran and credible reporting.",
+        "resolution_source": "polymarket market resolution (https://polymarket.com/market/israel-x-iran-ceasefire-continues-through-november-22)",
+        "event_key": "israel-x-iran-ceasefire-continues-throughptptpt-20260716224448963",
+        "topics": [
+          "Israel",
+          "Iran"
+        ],
+        "entity_ids": [],
+        "deadline": "2026-11-23T04:59:00Z",
+        "status": "open",
+        "created_at": "2026-11-20T09:36:02Z"
+      },
+      "prices": [
+        {
+          "observed_at": "2026-11-20T09:36:02Z",
+          "price": 0.955,
+          "source": "polymarket"
+        }
+      ],
+      "forecasts": [
+        {
+          "id": 3,
+          "question_id": 3,
+          "revision": 1,
+          "probability": 0.955,
+          "abstained": false,
+          "prior": 0.955,
+          "market_price": 0.955,
+          "adjustment": 0,
+          "evidence_cutoff": "2026-11-20T09:36:02Z",
+          "snapshot_hash": "5049b8ea6dd20db859adf36fa7c35a3110895fea7702376cb1925a43fa6b2340",
+          "evidence_ids": [],
+          "model": "market-prior+evidence-shift",
+          "model_version": "v1",
+          "assumptions": [],
+          "explanation": "Prior 95.5% from market price at cutoff. No linked evidence at cutoff; forecast equals prior.",
+          "trigger": "initial",
+          "created_at": "2026-11-20T09:36:02Z"
+        }
+      ]
+    }
+  ]
+}

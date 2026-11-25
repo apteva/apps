@@ -26,7 +26,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: intelligence
 display_name: Intelligence
-version: 0.5.0
+version: 0.6.0
 description: |
   A continuously updated, source-attributed model of a part of the world,
   used for recorded and scored probabilistic forecasts and hypothetical
@@ -68,7 +68,7 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.apps.call             # llm app for extraction + assessment
-    - net.egress                     # public sources (markets, GDELT, BLS)
+    - net.egress                     # Binance public prices (signals pack)
     - platform.connections.execute   # bound data integrations
     - platform.connections.read
   integrations:
@@ -130,6 +130,16 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  resources:
+    - name: access
+      label: "Evidence access class"
+      list_endpoint: /access-classes
+      matcher: id_set
+      picker: list
+  permissions:
+    - name: intelligence.evidence.read
+      resource: access
+      description: "Read evidence content of an access class (open, internal, restricted). Restricted needs an explicit allow; without one, agents get the record with its content removed."
   mcp_tools:
     - name: overview
       description: "What changed: new evidence, forecast moves with reasons, questions closing soon, resolutions, source health."
@@ -171,6 +181,26 @@ provides:
       description: "Hypothetical shock propagation through typed relationships, with assumption chains."
     - name: scenarios_list
       description: "Saved scenario runs."
+    - name: world_map
+      description: "Located entities, links, evidence points, per-country totals and unmapped entities with reasons, with basis and quality flags."
+    - name: data_quality
+      description: "Stale, missing and conflicting data, plus row counts by basis and evidence by access class."
+    - name: entity_locate
+      description: "Place an entity on the map with attributed coordinates and precision."
+    - name: synthetic_seed
+      description: "Load a labelled synthetic sample scenario for trying the map and quality checks."
+    - name: synthetic_clear
+      description: "Delete every synthetic row."
+    - name: evaluation_dataset_build
+      description: "Freeze resolved Manifold/Kalshi questions with trade-by-trade price history for backtests."
+    - name: evaluation_datasets
+      description: "Frozen evaluation datasets with size, content hash and skip reasons."
+    - name: evaluation_run
+      description: "Time-ordered backtest of baselines, statistical and AI-assisted methods with calibration and bootstrap intervals."
+    - name: evaluation_runs
+      description: "Evaluation runs with status and progress."
+    - name: evaluation_report
+      description: "Backtest report plus separate prospective results and the follow-up plan for unresolved questions."
     - name: search
       description: "Generic bitemporal search across recorded evidence with event, publication and as-of filters."
     - name: evidence_record
@@ -215,7 +245,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: intelligence/v0.5.0
+    ref: intelligence/v0.6.0
     entry: mcp/intelligence
   port: 8080
   health_check: /health
@@ -364,7 +394,7 @@ func (a *App) Workers() []sdk.Worker {
 // ─── HTTP routes (panel + REST mirror) ─────────────────────────────
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return append(a.worldRoutes(), []sdk.Route{
+	return append(append(a.worldRoutes(), a.evalRoutes()...), []sdk.Route{
 		{Pattern: "/sources", Handler: a.handleHTTPSources},
 		{Pattern: "/markets", Handler: a.handleHTTPMarkets},
 		{Pattern: "/search", Handler: a.handleHTTPSearch},
@@ -381,8 +411,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func intelligenceArgs(r *http.Request) map[string]any {
-	args := map[string]any{"_project_id": r.URL.Query().Get("project_id")}
-	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset", "knowledge", "forecast_id"} {
+	args := map[string]any{"_project_id": r.URL.Query().Get("project_id"), readerArg: operatorReader}
+	for _, key := range []string{"basis", "query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset", "knowledge", "forecast_id"} {
 		if v := r.URL.Query().Get(key); v != "" {
 			args[key] = v
 		}
