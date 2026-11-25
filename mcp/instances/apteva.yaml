@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.19.0
+version: 0.20.0
 description: |
+  v0.20.0 lets registered Linux machines (a Raspberry Pi behind a router, a
+  home server) run Apteva apps through the native backend. The setup option
+  "apps" grants the SSH account passwordless sudo and checks systemd; deploy
+  commands from a non-root account then run through sudo.
   v0.19.0 adds public SSH for reverse-tunnel machines: Instances proxies a
   public port to the tunnel (the tunnel key stays loopback-only), after making
   the machine key-only, with source, connection and rate limits. Removing a
@@ -351,7 +355,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.19.0
+    ref: instances/v0.20.0
     entry: mcp/instances
   port: 8080
   health_check: /health

@@ -18,7 +18,7 @@ interface NativePanelProps {
   projectId: string;
 }
 
-interface SetupOptions { baseline: boolean; docker: boolean; runtimes: boolean; }
+interface SetupOptions { baseline: boolean; docker: boolean; runtimes: boolean; apps?: boolean; }
 interface PublicSSH { enabled: boolean; host?: string; port?: number; allowed_cidrs?: string[]; max_connections?: number; firewall?: string; error?: string; }
 interface Instance {
   enrollment_peer?: string;
@@ -26,7 +26,7 @@ interface Instance {
   connected?: boolean;
   last_seen_at?: string;
   public_ssh?: PublicSSH;
-  setup?: { requested: SetupOptions; status: string; stage: string; completed: string[]; error?: string; facts?: { platform: string; architecture: string; os: string }; verified?: { docker: boolean; runtimes: boolean; metrics: boolean } };
+  setup?: { requested: SetupOptions; status: string; stage: string; completed: string[]; error?: string; facts?: { platform: string; architecture: string; os: string }; verified?: { docker: boolean; runtimes: boolean; metrics: boolean; apps?: boolean } };
   provider_connection_id?: number;
   id: number;
   name: string;
@@ -1322,7 +1322,7 @@ export function InstanceCard({
       </div>
 
       {inst.provider === "ovhcloud" && inst.size?.startsWith("ovh/") && <OVHOrderStatus instance={inst} withParams={withParams}/> }
-      {inst.setup && <div className="px-3 py-2 text-xs text-text-muted border-t border-border">Setup: {inst.setup.stage} · {inst.setup.status}{inst.setup.facts?.os ? ` · ${inst.setup.facts.os} / ${inst.setup.facts.architecture}` : ""}{inst.setup.verified?.docker ? " · Docker ✓" : ""}{inst.setup.verified?.runtimes ? " · Language tools ✓" : ""}</div>}
+      {inst.setup && <div className="px-3 py-2 text-xs text-text-muted border-t border-border">Setup: {inst.setup.stage} · {inst.setup.status}{inst.setup.facts?.os ? ` · ${inst.setup.facts.os} / ${inst.setup.facts.architecture}` : ""}{inst.setup.verified?.docker ? " · Docker ✓" : ""}{inst.setup.verified?.runtimes ? " · Language tools ✓" : ""}{inst.setup.verified?.apps ? " · Apps ✓" : ""}</div>}
       {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
 	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${(!comparison.complete || comparison.differences?.length) ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : comparison.complete ? "matches checked state" : "comparison incomplete"}</div>}
 
@@ -1902,7 +1902,7 @@ export function CreateDialog({
     try {
       const [pricingMode, duration] = (ovhPrice || (ovhOffer?.prices[0] ? `${ovhOffer.prices[0].mode}|${ovhOffer.prices[0].duration}` : "default|P1M")).split("|");
       const payload = {
-        setup: hostSetup.baseline || hostSetup.docker || hostSetup.runtimes ? hostSetup : undefined,
+        setup: hostSetup.baseline || hostSetup.docker || hostSetup.runtimes || hostSetup.apps ? hostSetup : undefined,
         name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
         storage: customBootStorage ? {boot:{size_gb:bootSizeGB,storage_class:bootStorageClass,tier:bootTier,delete_policy:"with_instance"}} : undefined,
         elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? {raid_level:elasticRAID} : undefined,
@@ -2239,14 +2239,14 @@ export function HostSetupOptions({ value, onChange, disabled, platform = "linux"
   const mac = platform === "macos";
   const options = mac
     ? ([['baseline', 'Keep awake, Command Line Tools and metrics'], ['runtimes', 'Node.js, npm, and Go (Homebrew)']] as const)
-    : ([['baseline', 'Common utilities and metrics'], ['docker', 'Docker engine'], ['runtimes', 'Node.js, npm, and Go']] as const);
+    : ([['baseline', 'Common utilities and metrics'], ['docker', 'Docker engine'], ['runtimes', 'Node.js, npm, and Go'], ['apps', 'Run Apteva apps on this machine']] as const);
   return <fieldset className="space-y-2 border border-border rounded p-3" disabled={disabled}>
     <legend className="text-sm font-medium px-1">Configure this server</legend>
     {options.map(([key, label]) =>
-      <label key={key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{label}</label>)}
+      <label key={key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{label}</label>)}
     <p className="text-xs text-text-dim">{mac
       ? "Docker isn't set up on macOS. Language tools come from Homebrew, which needs a non-root administrator account: selecting software makes the SSH account an administrator with passwordless sudo. Existing installations are reused."
-      : "Automatic installation supports Ubuntu/Debian on AMD64 or ARM64 and needs root or passwordless sudo. Instances installs the selected software directly over SSH. Language tools use distribution packages; existing installations are reused."}</p>
+      : "Automatic installation supports Ubuntu/Debian on AMD64 or ARM64 and needs root or passwordless sudo. Instances installs the selected software directly over SSH. Language tools use distribution packages; existing installations are reused. Running Apteva apps needs systemd; apps then deploy to this machine from the app's placement settings."}</p>
   </fieldset>;
 }
 
@@ -2298,7 +2298,7 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
   const register = async () => {
     setBusy(true); setError("");
     try {
-      const requested = platform === "macos" ? { ...setup, docker: false } : setup;
+      const requested = platform === "macos" ? { ...setup, docker: false, apps: false } : setup;
       const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: connect === "direct" ? host : undefined, ssh_user: user, ssh_port: port, connect, platform, setup: requested, ...(connect === "reverse_tunnel" && publicSSH ? { public_ssh: true } : {}) });
       setInstance(result.instance); setCommand(result.authorization.command); setPublicKey(result.authorization.public_key); setCopied(false); onChange();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
@@ -2335,7 +2335,7 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
       </div>}
       <HostSetupOptions value={setup} onChange={setSetup} platform={(instance?.platform === "macos" || (!instance && platform === "macos")) ? "macos" : "linux"} disabled={busy || instance?.status === "provisioning"} />
       {instance && <div className="text-sm space-y-1" aria-live="polite"><p>{instance.setup?.stage || instance.status} · {instance.setup?.status || instance.status}</p>{instance.setup?.completed?.map(stage => <p key={stage} className="text-green">✓ {stage}</p>)}{instance.setup?.error && <p className="text-red">{instance.setup.error}</p>}</div>}
-      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.platform === "macos" && <p className="text-xs text-text-dim">On a Mac, run it in Terminal. If macOS refuses to turn on Remote Login, turn it on once in System Settings, General, Sharing (or give Terminal Full Disk Access), then run the command again.</p>}{(instance?.enrollment_peer || instance?.connect_mode === "reverse_tunnel") && <p className="text-xs text-amber">This command contains a {instance?.connect_mode === "reverse_tunnel" ? "tunnel key" : "VPN peer credential"}. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button><label className="block text-sm">SSH host keys (optional)<input className="block w-full bg-bg-input border border-border rounded p-2 font-mono text-xs" value={hostKeys} onChange={e => setHostKeys(e.target.value)} placeholder="SHA256:…,SHA256:…" /><span className="block text-xs text-text-dim">Paste the "SSH host keys" line the command prints. Instances then accepts only those keys instead of trusting the first one it sees.</span></label></div>}
+      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes || instance.setup.requested.apps) ? "Software setup and app hosting grant this account passwordless sudo." : ""}</p>{instance?.platform === "macos" && <p className="text-xs text-text-dim">On a Mac, run it in Terminal. If macOS refuses to turn on Remote Login, turn it on once in System Settings, General, Sharing (or give Terminal Full Disk Access), then run the command again.</p>}{(instance?.enrollment_peer || instance?.connect_mode === "reverse_tunnel") && <p className="text-xs text-amber">This command contains a {instance?.connect_mode === "reverse_tunnel" ? "tunnel key" : "VPN peer credential"}. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button><label className="block text-sm">SSH host keys (optional)<input className="block w-full bg-bg-input border border-border rounded p-2 font-mono text-xs" value={hostKeys} onChange={e => setHostKeys(e.target.value)} placeholder="SHA256:…,SHA256:…" /><span className="block text-xs text-text-dim">Paste the "SSH host keys" line the command prints. Instances then accepts only those keys instead of trusting the first one it sees.</span></label></div>}
       {instance?.provider === 'external' && publicKey && <details className="text-xs"><summary>Authorize an existing SSH account manually</summary><p className="mt-2">Add this public key to the account’s ~/.ssh/authorized_keys. Configure VPN separately if selected. Package setup needs passwordless sudo; discovery-only registration supports macOS too.</p><pre className="whitespace-pre-wrap break-all mt-2">{publicKey}</pre></details>}
       {error && <p role="alert" className="text-sm text-red">{error}</p>}
       <div className="flex justify-end gap-3">

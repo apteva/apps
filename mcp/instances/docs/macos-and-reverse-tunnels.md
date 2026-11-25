@@ -197,6 +197,30 @@ is always connected. A machine that existed before 0.19.0 and was never
 checked records its first state without an event, so an upgrade does not
 announce every reachable machine at once.
 
+## Running Apteva apps on a registered machine
+
+A registered Linux machine, including a Raspberry Pi behind a router, can host
+Apteva apps through the native backend: place the app with a `backend`
+placement and pick the machine as the target. The main server reaches the app
+through a private port tunnelled over Instances' SSH connection (through the
+reverse tunnel for machines behind a router), so the machine needs no public
+web address.
+
+Deploys run as root. Machines registered with a normal account (`apteva`,
+`pi`) need the `apps` setup option, shown as **Run Apteva apps on this
+machine** when registering:
+
+- The enrollment command grants the account passwordless sudo, as the other
+  software options do.
+- Setup checks that sudo gives root and that systemd is running (step
+  "App hosting"); `setup.verified.apps` reports it.
+- Every deploy command then runs through `sudo -n`. Machines that log in as
+  `root` are unchanged.
+
+Without it, the deploy check stops with a message naming the option. Linux
+only: macOS machines are refused. The app on the machine calls the main server
+back at its gateway URL, which must be HTTPS or a loopback address.
+
 ## Testing
 
 `go test ./...` covers the command builders, registration, port allocation,
@@ -217,6 +241,10 @@ setup and the machine enrollment against real OpenSSH in Docker. It checks:
 - Another install's keys file is not replaced.
 - The cleanup command stops the job and removes the tunnel files and the
   management key.
+- App deploys through the tunnel as the non-root account: without sudo the
+  deploy check gives the "apps" message; with the enrollment's sudo rule the
+  check, a root write fed over stdin, the inspection shell, the state
+  transport and an HTTP request through the private control port all work.
 
 The public SSH proxy itself is tested in-process: in Docker the tunnel's
 loopback port is inside the server container.

@@ -20,6 +20,9 @@ type SetupOptions struct {
 	Baseline            bool `json:"baseline"`
 	Docker              bool `json:"docker"`
 	Runtimes            bool `json:"runtimes"`
+	// Apps lets the native backend deploy Apteva apps here. Deploys run as
+	// root, so the management account gets passwordless sudo (Linux only).
+	Apps bool `json:"apps"`
 }
 type HostFacts struct {
 	Platform     string `json:"platform"`
@@ -33,6 +36,7 @@ type SetupVerified struct {
 	Metrics               bool `json:"metrics"`
 	Docker                bool `json:"docker"`
 	Runtimes              bool `json:"runtimes"`
+	Apps                  bool `json:"apps,omitempty"`
 }
 type InstanceSetup struct {
 	Versions  map[string]string `json:"versions,omitempty"`
@@ -54,9 +58,9 @@ func initialSetupJSON(options *SetupOptions) string {
 	return string(data)
 }
 func setupSchema() map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": false, "description": "Optional host setup. Empty object discovers OS and verifies SSH/files/metrics without installing packages. baseline installs common utilities (macOS: keeps the Mac awake and installs the Command Line Tools); docker installs and verifies Docker (Linux only); runtimes installs Node.js, npm, and Go (Linux: distribution packages; macOS: Homebrew, which needs a non-root administrator account). Installation is owned by Instances and runs through its SSH implementation. Ubuntu/Debian or macOS, AMD64/ARM64.", "properties": map[string]any{
+	return map[string]any{"type": "object", "additionalProperties": false, "description": "Optional host setup. Empty object discovers OS and verifies SSH/files/metrics without installing packages. baseline installs common utilities (macOS: keeps the Mac awake and installs the Command Line Tools); docker installs and verifies Docker (Linux only); runtimes installs Node.js, npm, and Go (Linux: distribution packages; macOS: Homebrew, which needs a non-root administrator account). apps prepares the machine to run Apteva apps through the native backend: it grants the management account passwordless sudo and checks systemd (Linux only). Installation is owned by Instances and runs through its SSH implementation. Ubuntu/Debian or macOS, AMD64/ARM64.", "properties": map[string]any{
 		"suppress_dynamic_motd": map[string]any{"type": "boolean", "description": "Explicit host-wide Ubuntu option: add pam_motd noupdate for SSH sessions, avoiding dynamic login-message generation while retaining PAM authentication and session protections. Default false."},
-		"baseline":              map[string]any{"type": "boolean"}, "docker": map[string]any{"type": "boolean"}, "runtimes": map[string]any{"type": "boolean"}}}
+		"baseline":              map[string]any{"type": "boolean"}, "docker": map[string]any{"type": "boolean"}, "runtimes": map[string]any{"type": "boolean"}, "apps": map[string]any{"type": "boolean"}}}
 }
 func parseSetup(args map[string]any) (*SetupOptions, error) {
 	raw, present := args["setup"]
@@ -185,12 +189,15 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		}
 		inst.Setup.Facts = facts
 		inst.Platform = facts.Platform
-		if options.Baseline || options.Docker || options.Runtimes {
+		if options.Baseline || options.Docker || options.Runtimes || options.Apps {
 			supportedArch := facts.Architecture == "amd64" || facts.Architecture == "arm64"
 			switch {
 			case facts.Platform == "macos" && supportedArch:
 				if options.Docker {
 					return errors.New(macOSDockerUnsupported)
+				}
+				if options.Apps {
+					return errors.New(macOSAppsUnsupported)
 				}
 			case facts.Platform == "linux" && (facts.OS == "ubuntu" || facts.OS == "debian") && supportedArch:
 			default:
@@ -240,6 +247,17 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 			}
 			inst.Setup.Verified.Docker = true
 			inst.Setup.Versions["docker"] = strings.TrimSpace(output)
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	if options.Apps {
+		if err = step("App hosting", func() error {
+			if _, e := setupCommand(ctx, inst, appsSetupScript, time.Minute); e != nil {
+				return e
+			}
+			inst.Setup.Verified.Apps = true
 			return nil
 		}); err != nil {
 			return err
@@ -339,6 +357,13 @@ if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s\n' "$ID"; else pri
 const setupPrivilegeScript = `set -eu
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else sudo -n true || { echo 'Passwordless sudo is required for the selected setup' >&2; exit 1; }; SUDO="sudo -n"; fi
 `
+
+// Native deploys run as root and are managed by systemd.
+const appsSetupScript = setupPrivilegeScript + `[ "$($SUDO id -u)" -eq 0 ] || { echo 'Root access through sudo did not work' >&2; exit 1; }
+[ -d /run/systemd/system ] || { echo 'Apps need systemd, which is not running on this machine' >&2; exit 1; }
+`
+
+const macOSAppsUnsupported = "apps run on Linux machines only; macOS machines cannot host Apteva apps yet"
 const baselineSetupScript = setupPrivilegeScript + `
 missing=0
 for cmd in curl git python3 tar gzip bash base64 ss; do command -v "$cmd" >/dev/null 2>&1 || missing=1; done

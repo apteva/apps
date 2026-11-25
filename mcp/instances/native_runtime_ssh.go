@@ -16,6 +16,18 @@ import (
 
 type nativeSSH struct{ inspections *nativeInspectionPool }
 
+// nativeAsRoot runs a native-backend script as root. Cloud machines log in as
+// root, but registered machines (Pis, Macs-turned-Linux, reverse-tunnel hosts)
+// log in as a normal account with passwordless sudo. Every native script
+// assumes root, so non-root logins go through sudo -n; stdin still streams
+// through (sudo only allocates a pty when it has a terminal).
+func nativeAsRoot(i *Instance, cmd string) string {
+	if i == nil || i.SSHUser == "" || i.SSHUser == "root" {
+		return cmd
+	}
+	return "sudo -n /bin/sh -c " + quoteShellArg(cmd)
+}
+
 func nativeRun(c context.Context, i *Instance, cmd string) (string, error) {
 	clone := *i
 	clone.workContext = c
@@ -23,13 +35,27 @@ func nativeRun(c context.Context, i *Instance, cmd string) (string, error) {
 	if end, ok := c.Deadline(); ok {
 		t = time.Until(end)
 	}
-	out, code, e := runSSH(&clone, cmd, t)
+	out, code, e := runSSH(&clone, nativeAsRoot(i, cmd), t)
 	if e != nil || code != 0 {
 		return "", errors.New("remote operation failed; outcome requires inspection")
 	}
 	return out, nil
 }
+
+// errNativeNoRoot is returned unchanged to the server so the person deploying
+// sees the fix rather than a generic validation failure.
+var errNativeNoRoot = errors.New("the machine's SSH account has no passwordless sudo, which app deploys need; turn on \"Run Apteva apps on this machine\" (setup apps) for this machine and run its enrollment command again")
+
 func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativeProbe, error) {
+	if i != nil && i.SSHUser != "" && i.SSHUser != "root" {
+		out, e := nativeRun(c, i, `printf ok`)
+		if e != nil || strings.TrimSpace(out) != "ok" {
+			if e == nil || !errors.Is(e, context.Canceled) && !errors.Is(e, context.DeadlineExceeded) {
+				return nativeProbe{}, errNativeNoRoot
+			}
+			return nativeProbe{}, e
+		}
+	}
 	statePath := "/var/lib/apteva-native"
 	if path, ok := c.Value(nativeProbePathKey{}).(string); ok {
 		statePath = path
@@ -271,7 +297,7 @@ func (nativeSSH) Prepare(c context.Context, i *Instance, d nativeRecord, dir str
 	if e != nil {
 		return e
 	}
-	if e = session.Start(cmd); e != nil {
+	if e = session.Start(nativeAsRoot(i, cmd)); e != nil {
 		return e
 	}
 	root, e := os.OpenRoot(dir)
@@ -373,7 +399,7 @@ func nativeRunInput(c context.Context, i *Instance, cmd string, input io.Reader)
 	session.Stdout = writer
 	session.Stderr = writer
 	session.Stdin = input
-	if e = session.Run(cmd); e != nil {
+	if e = session.Run(nativeAsRoot(i, cmd)); e != nil {
 		return errors.New("remote start outcome unknown; inspect before retry")
 	}
 	return nil

@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -50,13 +55,14 @@ func TestReverseTunnelEndToEnd(t *testing.T) {
 		_ = exec.Command("docker", "network", "rm", network).Run()
 	})
 	docker("network", "create", network)
-	for _, name := range []string{server, machine} {
-		docker("run", "-d", "--name", name, "--hostname", name, "--network", network, "ubuntu:24.04", "sleep", "infinity")
-	}
+	// The server publishes one port so this test process (playing Instances)
+	// can reach the server's loopback tunnel listener, as Instances would.
+	docker("run", "-d", "--name", server, "--hostname", server, "--network", network, "-p", "127.0.0.1::2400", "ubuntu:24.04", "sleep", "infinity")
+	docker("run", "-d", "--name", machine, "--hostname", machine, "--network", network, "ubuntu:24.04", "sleep", "infinity")
 	prepare := `set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
-apt-get install -y -qq openssh-server openssh-client sudo iproute2 procps netcat-openbsd >/dev/null
+apt-get install -y -qq openssh-server openssh-client sudo iproute2 procps netcat-openbsd socat curl >/dev/null
 mkdir -p /run/sshd
 /usr/sbin/sshd
 `
@@ -188,6 +194,10 @@ Match User apteva-tunnel
 		}
 	}
 
+	// Native backend through the tunnel, logged in as the non-root account the
+	// enrollment created: deploy scripts must run as root via sudo.
+	testNativeBackendOverTunnel(t, docker, execIn, server, machine, stored)
+
 	// Public SSH: the machine's sshd is made key-only even when a later
 	// drop-in (cloud-init style) turns passwords on, and the check repeats
 	// cleanly.
@@ -239,4 +249,119 @@ Match User apteva-tunnel
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
+}
+
+func testNativeBackendOverTunnel(t *testing.T, docker func(...string) string, execIn func(string, string) (string, int), server, machine string, stored *Instance) {
+	t.Helper()
+	// Container stand-ins for what a Pi has: a systemd runtime dir, a machine
+	// id, and the gateway reachable on loopback (an SSH -R forward in practice).
+	health := `cat > /usr/local/bin/apteva-health <<'EOF'
+#!/bin/sh
+while IFS= read -r line; do case "$line" in "$(printf '\r')"|"") break ;; esac; done
+printf 'HTTP/1.0 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
+EOF
+chmod +x /usr/local/bin/apteva-health
+mkdir -p /run/systemd/system
+printf '0123456789abcdef0123456789abcdef\n' > /etc/machine-id
+nohup socat TCP-LISTEN:18080,bind=127.0.0.1,fork,reuseaddr EXEC:/usr/local/bin/apteva-health >/dev/null 2>&1 &
+`
+	if out, code := execIn(machine, health); code != 0 {
+		t.Fatalf("machine fixtures: %s", out)
+	}
+	forward := fmt.Sprintf("nohup socat TCP-LISTEN:2400,fork,reuseaddr TCP:127.0.0.1:%d >/dev/null 2>&1 &\n", stored.SSHPort)
+	if out, code := execIn(server, forward); code != 0 {
+		t.Fatalf("server forward: %s", out)
+	}
+	published := strings.TrimSpace(docker("port", server, "2400/tcp"))
+	_, portText, ok := strings.Cut(strings.Split(published, "\n")[0], ":")
+	if !ok {
+		t.Fatalf("published port: %q", published)
+	}
+	target := *stored
+	target.SSHHost = "127.0.0.1"
+	if _, err := fmt.Sscan(portText, &target.SSHPort); err != nil {
+		t.Fatalf("published port %q: %v", published, err)
+	}
+	if target.SSHUser == "root" || target.SSHUser == "" {
+		t.Fatalf("enrollment must use a non-root account, got %q", target.SSHUser)
+	}
+	c, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// The login itself is not root.
+	var whoami string
+	for i := 0; i < 20; i++ {
+		out, code, err := runSSH(&target, "id -u", 10*time.Second)
+		if err == nil && code == 0 {
+			whoami = strings.TrimSpace(out)
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if whoami == "" || whoami == "0" {
+		t.Fatalf("management login uid = %q, want a non-root account", whoami)
+	}
+
+	// Registered without "apps", the account has no root access: the deploy
+	// check says how to fix it instead of failing generically.
+	if _, err := (nativeSSH{}).Probe(c, &target, "http://127.0.0.1:18080"); !errors.Is(err, errNativeNoRoot) {
+		t.Fatalf("probe without sudo: %v", err)
+	}
+	// Grant it exactly as an "apps" enrollment does.
+	if out, code := execIn(machine, "set -eu\nuser="+quoteShellArg(target.SSHUser)+"\n"+enrollmentSudoers(target.ID)); code != 0 {
+		t.Fatalf("sudoers: %s", out)
+	}
+
+	// The pre-deploy check that used to stop at "must be root".
+	probe, err := nativeSSH{}.Probe(c, &target, "http://127.0.0.1:18080")
+	if err != nil {
+		diag, code, _ := runSSH(&target, nativeAsRoot(&target, `for check in 'test "$(uname -s)" = Linux' 'test "$(id -u)" = 0' 'test -d /run/systemd/system' \
+ 'command -v systemctl ss flock tar sha256sum curl stat' \
+ 'curl -sS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18080/health' \
+ 'cat /etc/machine-id' 'ls /etc/ssh/ssh_host_ed25519_key.pub' 'getconf GNU_LIBC_VERSION' "df -Pm /var/lib" 'stat -f -c "%a %S" /var/lib'; do
+ out=$(sh -c "$check" 2>&1); printf '[%s] rc=%s %s\n' "$check" "$?" "$out"; done`), 30*time.Second)
+		t.Fatalf("native probe as %s: %v\ndiagnostics (exit %d):\n%s", target.SSHUser, err, code, diag)
+	}
+	if probe.Platform != "linux-amd64" && probe.Platform != "linux-arm64" || probe.HostKey == "" || probe.ABI != "gnu" {
+		t.Fatalf("probe = %+v", probe)
+	}
+
+	// Credentials stream over stdin into a root-owned file.
+	if err = nativeRunInput(c, &target, `install -d -m 0700 /var/lib/apteva-native-e2e; umask 077; cat > /var/lib/apteva-native-e2e/env; test "$(id -u)" = 0`, strings.NewReader("SECRET=1\n")); err != nil {
+		t.Fatalf("stdin to root: %v", err)
+	}
+	if out, _ := execIn(machine, "stat -c '%U %a' /var/lib/apteva-native-e2e/env; cat /var/lib/apteva-native-e2e/env"); strings.Join(strings.Fields(out), " ") != "root 600 SECRET=1" {
+		t.Fatalf("streamed file: %q", out)
+	}
+
+	// The long-lived inspection shell and the state transport run as root.
+	pool := newNativeInspectionPool(c)
+	defer pool.close()
+	for i := 0; i < 2; i++ {
+		if out, err := pool.run(c, &target, "id -u"); err != nil || out != "0" {
+			t.Fatalf("inspection shell run %d: %q %v", i, out, err)
+		}
+	}
+	var state bytes.Buffer
+	if err = nativeStateSSH(c, &target, "id -u", nil, &state); err != nil || strings.TrimSpace(state.String()) != "0" {
+		t.Fatalf("state transport: %q %v", state.String(), err)
+	}
+
+	// The private control port: Instances listens on its own loopback and
+	// forwards through the reverse tunnel to the app's port on the machine.
+	tunnels := newTunnelRegistry(dialInstanceLoopback)
+	tunnel, err := tunnels.open(&target, 18080)
+	if err != nil {
+		t.Fatalf("control tunnel: %v", err)
+	}
+	defer tunnel.close()
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", tunnel.localPort))
+	if err != nil {
+		t.Fatalf("control tunnel request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "ok" {
+		t.Fatalf("control tunnel answered %d %q", resp.StatusCode, body)
+	}
 }

@@ -317,6 +317,9 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	c, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	p, e = b.transport.Probe(c, inst, o.GatewayURL)
+	if errors.Is(e, errNativeNoRoot) {
+		return nil, o, a, p, e
+	}
 	if e != nil {
 		return nil, o, a, p, errors.New("target SSH/systemd/gateway validation failed")
 	}

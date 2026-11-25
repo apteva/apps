@@ -288,7 +288,7 @@ func TestEnrollmentHTTPAndMCPReturnSameShape(t *testing.T) {
 	}
 }
 func TestAllSetupScriptsParse(t *testing.T) {
-	for _, script := range []string{hostDiscoveryScript, baselineSetupScript, dockerSetupScript, dockerVerifyScript, runtimesSetupScript, fileCheckScript} {
+	for _, script := range []string{hostDiscoveryScript, baselineSetupScript, dockerSetupScript, dockerVerifyScript, runtimesSetupScript, appsSetupScript, fileCheckScript} {
 		cmd := exec.Command("sh", "-n")
 		cmd.Stdin = strings.NewReader(script)
 		if out, err := cmd.CombinedOutput(); err != nil {

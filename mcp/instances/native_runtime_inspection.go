@@ -124,7 +124,7 @@ func (p *nativeInspectionPool) run(c context.Context, i *Instance, cmd string) (
 			return "", e
 		}
 		session.Stderr = io.Discard
-		e = session.Start("sh")
+		e = session.Start(nativeInspectionShell(i))
 		timer.Stop()
 		stop()
 		if e != nil {
@@ -379,4 +379,13 @@ func nativeInspectionMetadataScript(measure bool) string {
  `
 	}
 	return script
+}
+
+// The inspection worker is a long-lived shell fed over stdin; on a non-root
+// login it must itself be a root shell.
+func nativeInspectionShell(i *Instance) string {
+	if i == nil || i.SSHUser == "" || i.SSHUser == "root" {
+		return "sh"
+	}
+	return "sudo -n sh"
 }

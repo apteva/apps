@@ -52,6 +52,9 @@ func (b *nativeBackend) inspectTarget(r nativeRequest) (nativeTargetInfo, error)
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	p, err := b.transport.Probe(context.WithValue(ctx, nativeProbePathKey{}, fmt.Sprintf("/var/lib/apteva-native/%d", b.installID)), inst, gateway)
+	if errors.Is(err, errNativeNoRoot) {
+		return out, err
+	}
 	if err != nil {
 		return out, errors.New("target SSH/systemd/gateway validation failed")
 	}

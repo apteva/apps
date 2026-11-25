@@ -68,6 +68,9 @@ func registerHost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if options.Docker && platform == "macos" {
 		return nil, errors.New(macOSDockerUnsupported)
 	}
+	if options.Apps && platform == "macos" {
+		return nil, errors.New(macOSAppsUnsupported)
+	}
 	var publicSSH *publicSSHOptions
 	if want, _ := args["public_ssh"].(bool); want {
 		if connect != "reverse_tunnel" {
@@ -345,7 +348,7 @@ func hostEnrollmentCommand(inst *Instance, vpnConfig string, tunnel *tunnelEnrol
 	if !sshUserPattern.MatchString(inst.SSHUser) {
 		return "", errors.New("unsupported SSH account name for enrollment command")
 	}
-	elevated := inst.Setup != nil && (inst.Setup.Requested.Baseline || inst.Setup.Requested.Docker || inst.Setup.Requested.Runtimes)
+	elevated := inst.Setup != nil && (inst.Setup.Requested.Baseline || inst.Setup.Requested.Docker || inst.Setup.Requested.Runtimes || inst.Setup.Requested.Apps)
 	localSSHPort := inst.SSHPort
 	if tunnel != nil {
 		localSSHPort = tunnel.LocalSSHPort

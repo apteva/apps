@@ -99,7 +99,7 @@ func nativeStateSSH(c context.Context, i *Instance, cmd string, input io.Reader,
 	session.Stdout = out
 	session.Stderr = stderr
 	session.Stdin = input
-	if e = session.Run("export LC_ALL=C\n" + cmd); e != nil {
+	if e = session.Run(nativeAsRoot(i, "export LC_ALL=C\n"+cmd)); e != nil {
 		var exit *ssh.ExitError
 		if errors.As(e, &exit) {
 			switch exit.ExitStatus() {
