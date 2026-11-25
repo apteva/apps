@@ -298,15 +298,19 @@ func mechanicalJSON(design *Design, revision *Revision, def *Definition) []byte 
 
 type isoPoint struct{ X, Y float64 }
 
-func isoProject(x, y, z float64) isoPoint {
+// isoProject draws the board frame (+Y up, right-handed) in an oblique view
+// whose screen +Y points down; h is the board's top edge, so y is measured
+// from it to keep the projection right-handed and on canvas.
+func isoProject(h, x, y, z float64) isoPoint {
+	y = h - y
 	yaw, pitch, scale := -34*math.Pi/180, 27*math.Pi/180, 7.2
 	rx, ry := x*math.Cos(yaw)-y*math.Sin(yaw), x*math.Sin(yaw)+y*math.Cos(yaw)
 	return isoPoint{X: 430 + rx*scale, Y: 405 + (ry*math.Sin(pitch)-z*math.Cos(pitch))*scale}
 }
-func isoPolygon(points []Point, z float64) string {
+func isoPolygon(h float64, points []Point, z float64) string {
 	out := make([]string, 0, len(points))
 	for _, p := range points {
-		q := isoProject(float64(p.XNM)/1e6, float64(p.YNM)/1e6, z)
+		q := isoProject(h, float64(p.XNM)/1e6, float64(p.YNM)/1e6, z)
 		out = append(out, fmt.Sprintf("%.1f,%.1f", q.X, q.Y))
 	}
 	return strings.Join(out, " ")
@@ -328,37 +332,38 @@ func renderMechanicalSVG(def *Definition) []byte {
 	b.WriteString(`<text x="42" y="52" fill="#f4efe9" font-family="Inter,Arial" font-size="24" font-weight="700">Mechanical envelope · 3D</text><text x="42" y="78" fill="#9d958c" font-family="Inter,Arial" font-size="11" letter-spacing="2">NATIVE PCB GEOMETRY · NANOMETRE DATUM</text><g filter="url(#mechShadow)">`)
 	outline := boardOutline(def.Board)
 	t := float64(def.Board.ThicknessNM) / 1e6
-	bottom := isoPolygon(outline, 0)
-	top := isoPolygon(outline, t)
+	h := float64(boardTopNM(def)) / 1e6
+	bottom := isoPolygon(h, outline, 0)
+	top := isoPolygon(h, outline, t)
 	fmt.Fprintf(&b, `<polygon points="%s" fill="#073e35" stroke="#5dc0a6" stroke-width="1.4"/><polygon points="%s" fill="url(#board3d)" stroke="#79d7bd" stroke-width="1.8"/>`, bottom, top)
 	for _, hole := range def.Mechanical.MountingHoles {
-		q := isoProject(float64(hole.XNM)/1e6, float64(hole.YNM)/1e6, t+.02)
+		q := isoProject(h, float64(hole.XNM)/1e6, float64(hole.YNM)/1e6, t+.02)
 		r := math.Max(3, float64(hole.DiameterNM)/1e6*3.2)
 		fmt.Fprintf(&b, `<ellipse cx="%.1f" cy="%.1f" rx="%.1f" ry="%.1f" fill="#090807" stroke="#d4c798" stroke-width="2"/>`, q.X, q.Y, r, r*.48)
 	}
 	envelopes := append([]ComponentEnvelope(nil), def.Mechanical.ComponentEnvelopes...)
-	sort.SliceStable(envelopes, func(i, j int) bool { return envelopes[i].YNM < envelopes[j].YNM })
+	sort.SliceStable(envelopes, func(i, j int) bool { return envelopes[i].YNM > envelopes[j].YNM }) // far (top) edge first
 	for _, e := range envelopes {
-		drawIsoBox(&b, e.XNM, e.YNM, e.ZMinNM, e.ZMaxNM, e.WidthNM, e.DepthNM, "#2d3135", "#5e6870", e.Label)
+		drawIsoBox(&b, h, e.XNM, e.YNM, e.ZMinNM, e.ZMaxNM, e.WidthNM, e.DepthNM, "#2d3135", "#5e6870", e.Label)
 	}
 	for _, z := range def.Mechanical.ClearanceZones {
-		drawIsoBox(&b, z.XNM, z.YNM, z.ZMinNM, z.ZMaxNM, z.WidthNM, z.DepthNM, "#e9652c22", "#e99263", strings.ReplaceAll(z.Kind, "_", " "))
+		drawIsoBox(&b, h, z.XNM, z.YNM, z.ZMinNM, z.ZMaxNM, z.WidthNM, z.DepthNM, "#e9652c22", "#e99263", strings.ReplaceAll(z.Kind, "_", " "))
 	}
 	b.WriteString(`</g><g transform="translate(42 600)"><rect width="916" height="48" rx="12" fill="#12100e" stroke="#39342e"/><circle cx="24" cy="24" r="6" fill="#4ade80"/><text x="42" y="21" fill="#f1ece6" font-family="Inter,Arial" font-size="12" font-weight="700">Validated mechanical producer model</text><text x="42" y="36" fill="#928a81" font-family="Inter,Arial" font-size="9">Board prism · mounting holes · component bodies · connector openings · clearance volumes</text></g></svg>`)
 	return []byte(b.String())
 }
 
-func drawIsoBox(b *strings.Builder, x, y, z0, z1, w, d int64, fill, stroke, label string) {
+func drawIsoBox(b *strings.Builder, h float64, x, y, z0, z1, w, d int64, fill, stroke, label string) {
 	x0, x1 := float64(x-w/2)/1e6, float64(x+w/2)/1e6
 	y0, y1 := float64(y-d/2)/1e6, float64(y+d/2)/1e6
-	a0 := isoProject(x0, y0, float64(z0)/1e6)
-	b0 := isoProject(x1, y0, float64(z0)/1e6)
-	c0 := isoProject(x1, y1, float64(z0)/1e6)
-	d0 := isoProject(x0, y1, float64(z0)/1e6)
-	a := isoProject(x0, y0, float64(z1)/1e6)
-	bb := isoProject(x1, y0, float64(z1)/1e6)
-	c := isoProject(x1, y1, float64(z1)/1e6)
-	d2 := isoProject(x0, y1, float64(z1)/1e6)
+	a0 := isoProject(h, x0, y0, float64(z0)/1e6)
+	b0 := isoProject(h, x1, y0, float64(z0)/1e6)
+	c0 := isoProject(h, x1, y1, float64(z0)/1e6)
+	d0 := isoProject(h, x0, y1, float64(z0)/1e6)
+	a := isoProject(h, x0, y0, float64(z1)/1e6)
+	bb := isoProject(h, x1, y0, float64(z1)/1e6)
+	c := isoProject(h, x1, y1, float64(z1)/1e6)
+	d2 := isoProject(h, x0, y1, float64(z1)/1e6)
 	pts := func(p ...isoPoint) string {
 		v := []string{}
 		for _, q := range p {
@@ -368,7 +373,7 @@ func drawIsoBox(b *strings.Builder, x, y, z0, z1, w, d int64, fill, stroke, labe
 	}
 	fmt.Fprintf(b, `<g><polygon points="%s" fill="%s" stroke="%s" stroke-width="1"/><polygon points="%s" fill="%s" opacity=".72" stroke="%s"/><polygon points="%s" fill="%s" opacity=".55" stroke="%s"/><polygon points="%s" fill="%s" stroke="%s" stroke-width="1.2"/>`, pts(a0, b0, bb, a), fill, stroke, pts(b0, c0, c, bb), fill, stroke, pts(c0, d0, d2, c), fill, stroke, pts(a, bb, c, d2), fill, stroke)
 	if label != "" {
-		q := isoProject(float64(x)/1e6, float64(y)/1e6, float64(z1)/1e6+.7)
+		q := isoProject(h, float64(x)/1e6, float64(y)/1e6, float64(z1)/1e6+.7)
 		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" text-anchor="middle" fill="#fff" font-family="Inter,Arial" font-size="8" paint-order="stroke" stroke="#111" stroke-width="2">%s</text>`, q.X, q.Y, html.EscapeString(label))
 	}
 	b.WriteString(`</g>`)

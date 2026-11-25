@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -321,7 +322,9 @@ func TestFourLayerCopperNumberingAndKiCadRoundTrip(t *testing.T) {
 
 	board := renderKiCadPCB(&def)
 	text := string(board)
-	for _, want := range []string{`(0 "F.Cu" signal)`, `(1 "In1.Cu" signal)`, `(2 "In2.Cu" signal)`, `(31 "B.Cu" signal)`, `(layer "In2.Cu")`, `(via blind (at 27.000000 5.000000)`, `(layers "F.Cu" "In1.Cu")`} {
+	// KiCad is +Y down: the via at y=5 mm sits 5 mm below the board's top edge.
+	blindAt := fmt.Sprintf("(via blind (at 27.000000 %.6f)", float64(boardTopNM(&def)-5_000_000)/1e6)
+	for _, want := range []string{`(0 "F.Cu" signal)`, `(1 "In1.Cu" signal)`, `(2 "In2.Cu" signal)`, `(31 "B.Cu" signal)`, `(layer "In2.Cu")`, blindAt, `(layers "F.Cu" "In1.Cu")`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("KiCad export lacks %s", want)
 		}
@@ -346,6 +349,9 @@ func TestFourLayerCopperNumberingAndKiCadRoundTrip(t *testing.T) {
 	}
 	if !inner || len(imported.Vias) != 2 || imported.Vias[1].ToLayer != "In1.Cu" {
 		t.Fatalf("inner trace/blind via lost in round trip: %+v", imported.Vias)
+	}
+	if v := imported.Vias[1]; v.XNM != 27_000_000 || v.YNM != 5_000_000 {
+		t.Fatalf("blind via moved in KiCad round trip: (%d, %d)", v.XNM, v.YNM)
 	}
 	again := renderKiCadPCB(imported)
 	if report := verifyKiCadPCB(imported, again); report.Counts["copper_layers"] != 4 {

@@ -36,6 +36,9 @@ func validateProductionGeometry(def *Definition) []Check {
 			if contract.LibraryID != component.Footprint {
 				add("FOOTPRINT_CONTRACT_MISMATCH", "error", "Footprint display mapping differs from the frozen library ID", component.ID)
 			}
+			if libraryFrameLegacy(component) {
+				add("FOOTPRINT_FRAME_LEGACY", "error", "Placed by PCB Studio 0.11.0 with its land pattern mirrored top-to-bottom; apply operation component.reframe_library, then re-route its nets", component.ID)
+			}
 			if !contract.Verified {
 				add("FOOTPRINT_UNVERIFIED", "warning", "Footprint contract has not been verified", component.ID)
 			}

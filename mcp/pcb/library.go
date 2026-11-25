@@ -13,8 +13,14 @@ import (
 )
 
 const (
-	librarySchema         = "apteva-pcb-library/v1"
-	libraryRevision       = "apteva-2026.11"
+	librarySchema = "apteva-pcb-library/v1"
+	// libraryRevision tags footprint contracts minted from the library. The
+	// library itself stores land patterns in KiCad's frame (+Y down); the board
+	// frame is +Y up (Gerber, pick-and-place, mechanical datum), so placement
+	// negates Y. Contracts minted by 0.11.0 carry legacyLibraryRevision and
+	// still have the KiCad frame, i.e. are mirrored top-to-bottom on the board.
+	libraryRevision       = "apteva-2026.11.1"
+	legacyLibraryRevision = "apteva-2026.11"
 	maxKiCadFootprintSize = 2 << 20
 )
 
@@ -621,6 +627,7 @@ func instantiateLibraryPart(def *Definition, part *LibraryPart, placement Librar
 		pad := source
 		pad.Layers = append([]string(nil), source.Layers...)
 		applyPadDefaults(&pad)
+		pad.YNM = -pad.YNM // library (+Y down) to board frame (+Y up)
 		if mirror {
 			pad.XNM = -pad.XNM
 			for i, layer := range pad.Layers {
@@ -654,13 +661,13 @@ func instantiateLibraryPart(def *Definition, part *LibraryPart, placement Librar
 	}
 	courtyard := make([]Point, len(part.Footprint.Courtyard))
 	for i, point := range part.Footprint.Courtyard {
+		point.YNM = -point.YNM
 		if mirror {
 			point.XNM = -point.XNM
 		}
 		courtyard[i] = point
 	}
-	contractBody, _ := json.Marshal(map[string]any{"library_id": part.Footprint.LibraryID, "revision": libraryRevision, "pads": component.Pads, "courtyard": courtyard})
-	sum := sha256.Sum256(contractBody)
+	sum := libraryContractHash(part.Footprint.LibraryID, component.Pads, courtyard)
 	compatible := []string{}
 	for _, mpn := range append([]string{part.MPN}, part.AltMPNs...) {
 		if mpn = strings.TrimSpace(mpn); mpn != "" && !containsString(compatible, mpn) {
@@ -681,6 +688,59 @@ func instantiateLibraryPart(def *Definition, part *LibraryPart, placement Librar
 		CompatibleMPNs: compatible, LibraryPartID: part.ID, Model3DRef: part.Footprint.Model3DRef,
 	}
 	return component, nil
+}
+
+func libraryContractHash(libraryID string, pads []Pad, courtyard []Point) [32]byte {
+	body, _ := json.Marshal(map[string]any{"library_id": libraryID, "revision": libraryRevision, "pads": pads, "courtyard": courtyard})
+	return sha256.Sum256(body)
+}
+
+// libraryFrameLegacy reports a component placed from the library by 0.11.0,
+// whose pads are still in the library's +Y-down frame.
+func libraryFrameLegacy(component Component) bool {
+	spec := component.FootprintSpec
+	return spec != nil && strings.HasPrefix(spec.Source, "apteva://library/") && spec.Revision == legacyLibraryRevision
+}
+
+// reframeLibraryComponent converts a 0.11.0 library placement to the board
+// frame by negating pad and courtyard Y, and re-mints the contract. Traces
+// that ended on the old pad positions must be re-routed afterwards.
+func reframeLibraryComponent(component *Component) bool {
+	if !libraryFrameLegacy(*component) {
+		return false
+	}
+	for i := range component.Pads {
+		component.Pads[i].YNM = -component.Pads[i].YNM
+	}
+	spec := component.FootprintSpec
+	for i := range spec.Courtyard {
+		spec.Courtyard[i].YNM = -spec.Courtyard[i].YNM
+	}
+	sum := libraryContractHash(spec.LibraryID, component.Pads, spec.Courtyard)
+	spec.Revision, spec.SourceSHA256 = libraryRevision, hex.EncodeToString(sum[:])
+	if component.Model3D != nil && component.Model3D.Revision == legacyLibraryRevision {
+		component.Model3D.Revision = libraryRevision
+	}
+	return true
+}
+
+func applyReframeLibraryOperation(def *Definition, op Operation) error {
+	changed := 0
+	for i := range def.Components {
+		if op.ComponentID != "" && def.Components[i].ID != op.ComponentID {
+			continue
+		}
+		if reframeLibraryComponent(&def.Components[i]) {
+			changed++
+		}
+	}
+	if changed == 0 {
+		if op.ComponentID != "" {
+			return fmt.Errorf("component %q is not a 0.11.0 library placement", op.ComponentID)
+		}
+		return errors.New("no 0.11.0 library placements to reframe")
+	}
+	return nil
 }
 
 // applyPadDefaults mirrors the mask/paste defaults attachNativeContracts

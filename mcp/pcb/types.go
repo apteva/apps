@@ -9,7 +9,7 @@ const (
 	mechanicalEnvelopeSchema = "apteva-mechanical-envelope/v1"
 	productionSchema         = "apteva-pcb-production-readiness/v1"
 	kicadExchangeSchema      = "apteva-pcb-kicad-exchange/v1"
-	engineVersion            = "pcb-native/0.11.0"
+	engineVersion            = "pcb-native/0.11.1"
 	defaultClearance         = int64(200_000)
 	defaultTraceWidth        = int64(200_000)
 	defaultEdgeClearance     = int64(250_000)

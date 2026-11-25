@@ -21,11 +21,12 @@ func dht22SensorNodeExample() Definition {
 	}
 
 	// The DHT22 is instantiated from the parts library (KiCad Aosong 2.54 mm
-	// lead row, AM2302 body and pin-out 1 VDD / 2 DATA / 3 NC / 4 GND). Rotated
-	// 270 degrees its lead row runs along +X: pin 1 at x=60.19 mm, pin 4 at
+	// lead row, AM2302 body and pin-out 1 VDD / 2 DATA / 3 NC / 4 GND). In the
+	// board frame (+Y up) the library row runs along -Y; rotated 90 degrees
+	// counter-clockwise it runs along +X: pin 1 at x=60.19 mm, pin 4 at
 	// x=67.81 mm, y=23 mm, the same copper the hand-made pads used.
 	dhtPart, _ := builtinLibraryPart("dht22")
-	dht, err := instantiateLibraryPart(&def, dhtPart, LibraryPlacement{ComponentID: "u4", Designator: "U4", Name: "DHT22 temperature and humidity sensor", Position: Position{XNM: 60_190_000, YNM: 23_000_000, RotationUdeg: 270_000_000, Side: "front"}})
+	dht, err := instantiateLibraryPart(&def, dhtPart, LibraryPlacement{ComponentID: "u4", Designator: "U4", Name: "DHT22 temperature and humidity sensor", Position: Position{XNM: 60_190_000, YNM: 23_000_000, RotationUdeg: 90_000_000, Side: "front"}})
 	if err != nil {
 		panic("dht22 example: " + err.Error())
 	}

@@ -27,6 +27,12 @@ type KiCadVerification struct {
 func renderKiCadPCB(def *Definition) []byte {
 	var out bytes.Buffer
 	f := func(format string, args ...any) { fmt.Fprintf(&out, format, args...) }
+	// KiCad's board frame is +Y down; ours is +Y up (Gerber). Flip about the
+	// board's top edge so coordinates stay positive. Footprint-local pad Y is
+	// negated. Rotation keeps its sign: KiCad angles are counter-clockwise as
+	// seen on screen, which after the flip is counter-clockwise in our frame.
+	flipH := boardTopNM(def)
+	ky := func(y int64) float64 { return nmMM(flipH - y) }
 	f("(kicad_pcb (version 20240108) (generator pcb-studio-0.9)\n")
 	f("  (general (thickness %.6f))\n", float64(def.Board.ThicknessNM)/1e6)
 	f("  (paper \"A4\")\n  (layers\n")
@@ -54,7 +60,7 @@ func renderKiCadPCB(def *Definition) []byte {
 		if footprint == "" {
 			footprint = "Apteva_Unmapped"
 		}
-		f("  (footprint \"Apteva:%s\" (layer \"%s\") (at %.6f %.6f %.6f)\n", kicadEscape(footprint), layer, nmMM(component.Position.XNM), nmMM(component.Position.YNM), float64(component.Position.RotationUdeg)/1e6)
+		f("  (footprint \"Apteva:%s\" (layer \"%s\") (at %.6f %.6f %.6f)\n", kicadEscape(footprint), layer, nmMM(component.Position.XNM), ky(component.Position.YNM), float64(component.Position.RotationUdeg)/1e6)
 		f("    (property \"Reference\" \"%s\" (at 0 -2 0) (layer \"F.SilkS\"))\n", kicadEscape(component.Designator))
 		f("    (property \"Value\" \"%s\" (at 0 2 0) (layer \"F.Fab\"))\n", kicadEscape(firstNonEmpty(component.Value, component.Name)))
 		body := inferredBody(component)
@@ -76,7 +82,7 @@ func renderKiCadPCB(def *Definition) []byte {
 			}
 			shape := kicadPadShape(pad.Shape)
 			net := netByNode[component.ID+":"+pad.PinID]
-			f("    (pad \"%s\" %s %s (at %.6f %.6f) (size %.6f %.6f)", kicadEscape(pad.ID), typeName, shape, nmMM(pad.XNM), nmMM(pad.YNM), nmMM(pad.WidthNM), nmMM(pad.HeightNM))
+			f("    (pad \"%s\" %s %s (at %.6f %.6f) (size %.6f %.6f)", kicadEscape(pad.ID), typeName, shape, nmMM(pad.XNM), nmMM(-pad.YNM), nmMM(pad.WidthNM), nmMM(pad.HeightNM))
 			if pad.DrillWidthNM > 0 && pad.DrillHeightNM > 0 {
 				f(" (drill oval %.6f %.6f)", nmMM(pad.DrillWidthNM), nmMM(pad.DrillHeightNM))
 			} else if pad.DrillNM > 0 {
@@ -109,7 +115,7 @@ func renderKiCadPCB(def *Definition) []byte {
 	for _, trace := range def.Traces {
 		for index := 1; index < len(trace.Points); index++ {
 			a, b := trace.Points[index-1], trace.Points[index]
-			f("  (segment (start %.6f %.6f) (end %.6f %.6f) (width %.6f) (layer \"%s\") (net %d))\n", nmMM(a.XNM), nmMM(a.YNM), nmMM(b.XNM), nmMM(b.YNM), nmMM(trace.WidthNM), kicadEscape(trace.Layer), netNumber[trace.NetID])
+			f("  (segment (start %.6f %.6f) (end %.6f %.6f) (width %.6f) (layer \"%s\") (net %d))\n", nmMM(a.XNM), ky(a.YNM), nmMM(b.XNM), ky(b.YNM), nmMM(trace.WidthNM), kicadEscape(trace.Layer), netNumber[trace.NetID])
 		}
 	}
 	copper := copperLayers(def)
@@ -118,19 +124,19 @@ func renderKiCadPCB(def *Definition) []byte {
 		if len(copper) > 2 && !(layerBetween(def, copper[0].ID, via.FromLayer, via.ToLayer) && layerBetween(def, copper[len(copper)-1].ID, via.FromLayer, via.ToLayer)) {
 			kind = " blind"
 		}
-		f("  (via%s (at %.6f %.6f) (size %.6f) (drill %.6f) (layers \"%s\" \"%s\") (net %d))\n", kind, nmMM(via.XNM), nmMM(via.YNM), nmMM(via.DiameterNM), nmMM(via.DrillNM), kicadEscape(via.FromLayer), kicadEscape(via.ToLayer), netNumber[via.NetID])
+		f("  (via%s (at %.6f %.6f) (size %.6f) (drill %.6f) (layers \"%s\" \"%s\") (net %d))\n", kind, nmMM(via.XNM), ky(via.YNM), nmMM(via.DiameterNM), nmMM(via.DrillNM), kicadEscape(via.FromLayer), kicadEscape(via.ToLayer), netNumber[via.NetID])
 	}
 	for _, zone := range def.Zones {
 		f("  (zone (net %d) (net_name \"%s\") (layer \"%s\") (hatch edge 0.5) (connect_pads (clearance %.6f)) (min_thickness 0.25) (polygon (pts", netNumber[zone.NetID], kicadEscape(netName(def, zone.NetID)), kicadEscape(zone.Layer), nmMM(max64(zone.ClearanceNM, def.Rules.MinClearanceNM)))
 		for _, point := range zone.Polygon {
-			f(" (xy %.6f %.6f)", nmMM(point.XNM), nmMM(point.YNM))
+			f(" (xy %.6f %.6f)", nmMM(point.XNM), ky(point.YNM))
 		}
 		f(")))\n")
 	}
 	outline := boardPolygon(def.Board)
 	for index := range outline {
 		a, b := outline[index], outline[(index+1)%len(outline)]
-		f("  (gr_line (start %.6f %.6f) (end %.6f %.6f) (stroke (width 0.1) (type default)) (layer \"Edge.Cuts\"))\n", nmMM(a.XNM), nmMM(a.YNM), nmMM(b.XNM), nmMM(b.YNM))
+		f("  (gr_line (start %.6f %.6f) (end %.6f %.6f) (stroke (width 0.1) (type default)) (layer \"Edge.Cuts\"))\n", nmMM(a.XNM), ky(a.YNM), nmMM(b.XNM), ky(b.YNM))
 	}
 	f(")\n")
 	return out.Bytes()
@@ -417,8 +423,56 @@ func importKiCadPCB(name string, body []byte) (*Definition, error) {
 		}
 		def.Board.WidthNM, def.Board.HeightNM = maxX, maxY
 	}
+	flipKiCadImport(&def)
 	attachNativeContracts(&def)
 	return &def, nil
+}
+
+// boardTopNM is the Y about which the board is flipped between KiCad
+// (+Y down) and the native frame (+Y up): the top of the board outline.
+func boardTopNM(def *Definition) int64 {
+	h := def.Board.HeightNM
+	for _, point := range boardPolygon(def.Board) {
+		h = max64(h, point.YNM)
+	}
+	return h
+}
+
+// flipKiCadImport converts a parsed KiCad board from +Y down to +Y up,
+// flipping about the outline's lowest-on-screen edge (its largest KiCad Y).
+func flipKiCadImport(def *Definition) {
+	h := def.Board.HeightNM
+	if len(def.Board.Outline) < 3 {
+		for _, c := range def.Components {
+			h = max64(h, c.Position.YNM)
+		}
+		for _, t := range def.Traces {
+			for _, p := range t.Points {
+				h = max64(h, p.YNM)
+			}
+		}
+		for _, v := range def.Vias {
+			h = max64(h, v.YNM)
+		}
+	}
+	for i := range def.Board.Outline {
+		def.Board.Outline[i].YNM = h - def.Board.Outline[i].YNM
+	}
+	for i := range def.Components {
+		c := &def.Components[i]
+		c.Position.YNM = h - c.Position.YNM
+		for j := range c.Pads {
+			c.Pads[j].YNM = -c.Pads[j].YNM
+		}
+	}
+	for i := range def.Traces {
+		for j := range def.Traces[i].Points {
+			def.Traces[i].Points[j].YNM = h - def.Traces[i].Points[j].YNM
+		}
+	}
+	for i := range def.Vias {
+		def.Vias[i].YNM = h - def.Vias[i].YNM
+	}
 }
 
 type sexpr struct {

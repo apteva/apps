@@ -39,7 +39,10 @@ func renderSVG(def *Definition) []byte {
 	}
 	fmt.Fprintf(&b, `<g font-family="ui-sans-serif,system-ui,sans-serif"><text x="0" y="-2.25" font-size=".72" font-weight="700" fill="#f5f2ef">%s</text><text x="0" y="-1.25" font-size=".38" letter-spacing=".08" fill="#9f9993">APTEVA PCB · NATIVE LAYOUT</text><circle cx="%s" cy="-2.18" r=".18" fill="#f97316"/><text x="%s" y="-2.02" text-anchor="end" font-size=".38" fill="#d0ccc8">%d COMPONENTS · %d NETS</text></g>`, html.EscapeString(shortLabel(label, 48)), mm(def.Board.WidthNM-100_000), mm(def.Board.WidthNM-500_000), len(def.Components), len(def.Nets))
 	b.WriteByte('\n')
-	b.WriteString(`<g filter="url(#board-shadow)">` + "\n")
+	// The board frame is +Y up (Gerber, pick-and-place, mechanical datum);
+	// SVG is +Y down. Flip the board group so the preview is the top view of
+	// what gets fabricated. Text is flipped back locally to stay readable.
+	fmt.Fprintf(&b, `<g filter="url(#board-shadow)"><g transform="matrix(1 0 0 -1 0 %s)">`+"\n", mm(boardTopNM(def)))
 	fmt.Fprintf(&b, `<polygon points="%s" fill="url(#board-fill)" stroke="#f97316" stroke-width=".20"/>`, svgPoints(boardOutline(def.Board)))
 	fmt.Fprintf(&b, `<polygon points="%s" fill="url(#grid)"/>`, svgPoints(boardOutline(def.Board)))
 	b.WriteByte('\n')
@@ -107,15 +110,15 @@ func renderSVG(def *Definition) []byte {
 				fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="#071612" stroke="#f2dfae" stroke-width=".04"/>`, mm(pad.XNM), mm(pad.YNM), mm(pad.DrillNM/2))
 			}
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f5f2ef" stroke="#090806" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
+		fmt.Fprintf(&b, `<text x="0" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f5f2ef" stroke="#090806" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
 		value := component.Value
 		if value == "" {
 			value = component.Name
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#9f9993">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
+		fmt.Fprintf(&b, `<text x="0" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#9f9993">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
 		b.WriteByte('\n')
 	}
-	b.WriteString("</g>\n")
+	b.WriteString("</g></g>\n")
 	// Native dimension marks make the artifact useful without a separate viewer.
 	fmt.Fprintf(&b, `<g fill="#9f9993" stroke="#756d66" stroke-width=".06" font-family="ui-monospace,monospace" font-size=".58"><path d="M0 %sV%sM%s %sV%sM0 %sH%s"/><text x="%s" y="%s" text-anchor="middle">%s mm</text><text x="%s" y="%s" text-anchor="middle" transform="rotate(-90 %s %s)">%s mm</text></g>`, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), width, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), mm(def.Board.HeightNM+1_600_000), width, mm(def.Board.WidthNM/2), mm(def.Board.HeightNM+2_500_000), width, mm(-2_400_000), mm(def.Board.HeightNM/2), mm(-2_400_000), mm(def.Board.HeightNM/2), height)
 	b.WriteString("</svg>\n")

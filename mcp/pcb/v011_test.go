@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -449,5 +452,194 @@ func TestLibraryUSBCReachesFabOutputs(t *testing.T) {
 	report := verifyManufacturingFiles(def, files)
 	if report.Errors != 0 {
 		t.Fatalf("fabrication verifier: %+v", report.Checks)
+	}
+}
+
+// gerberPadCentres returns the centre of every flash and every region in a
+// copper Gerber, in nanometres. Regions (rotated or rounded pads) are reduced
+// to the midpoint of their vertex bounding box.
+func gerberPadCentres(t *testing.T, body []byte) []Point {
+	t.Helper()
+	coord := regexp.MustCompile(`X(-?\d+)Y(-?\d+)D0([123])\*`)
+	var out, region []Point
+	inRegion := false
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "G36"):
+			inRegion, region = true, nil
+			continue
+		case strings.HasPrefix(line, "G37"):
+			inRegion = false
+			if len(region) > 0 {
+				minX, minY, maxX, maxY := region[0].XNM, region[0].YNM, region[0].XNM, region[0].YNM
+				for _, p := range region {
+					minX, minY, maxX, maxY = min64(minX, p.XNM), min64(minY, p.YNM), max64(maxX, p.XNM), max64(maxY, p.YNM)
+				}
+				out = append(out, Point{XNM: (minX + maxX) / 2, YNM: (minY + maxY) / 2})
+			}
+			continue
+		}
+		m := coord.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		x, _ := strconv.ParseInt(m[1], 10, 64)
+		y, _ := strconv.ParseInt(m[2], 10, 64)
+		p := Point{XNM: x, YNM: y}
+		if inRegion {
+			region = append(region, p)
+		} else if m[3] == "3" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestLibraryPinsAreCounterClockwiseInGerber guards the footprint frame: a
+// SOT-23-5 numbered 1..5 must run counter-clockwise when the copper Gerber
+// is viewed from the top (Gerber +Y up), and clockwise for a back-side part
+// viewed from the top. It reads positions from the fab file, not the model.
+func TestLibraryPinsAreCounterClockwiseInGerber(t *testing.T) {
+	cases := []struct {
+		name     string
+		side     string
+		rotation int64
+		file     string
+		wantCCW  bool
+	}{
+		{"front", "front", 0, "F_Cu.gbr", true},
+		{"front rotated 90", "front", 90_000_000, "F_Cu.gbr", true},
+		{"back", "back", 0, "B_Cu.gbr", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := emptyDefinition("frame test")
+			base.Board.WidthNM, base.Board.HeightNM = 20_000_000, 20_000_000
+			_, def, _, err := applyOperations(&base, []Operation{{Type: "component.add_from_library", LibraryPartID: "ap2112k-3.3", Position: &Position{XNM: 10_000_000, YNM: 10_000_000, RotationUdeg: tc.rotation, Side: tc.side}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var copper []byte
+			for name, body := range manufacturingFiles(def) {
+				if strings.HasSuffix(name, tc.file) {
+					copper = body
+				}
+			}
+			if copper == nil {
+				t.Fatalf("no %s in fab outputs", tc.file)
+			}
+			features := gerberPadCentres(t, copper)
+			component := def.Components[0]
+			byPin := map[string]Point{}
+			for _, pad := range component.Pads {
+				want := placePad(component, pad).Center
+				best, bestD := Point{}, int64(math.MaxInt64)
+				for _, f := range features {
+					dx, dy := f.XNM-want.XNM, f.YNM-want.YNM
+					if d := dx*dx + dy*dy; d < bestD {
+						best, bestD = f, d
+					}
+				}
+				if bestD > 10_000*10_000 {
+					t.Fatalf("pin %s: no Gerber feature within 10 um of %v", pad.PinID, want)
+				}
+				byPin[pad.PinID] = best
+			}
+			area := int64(0)
+			for i := 1; i <= 5; i++ {
+				a, b := byPin[strconv.Itoa(i)], byPin[strconv.Itoa(i%5+1)]
+				area += (a.XNM/1000)*(b.YNM/1000) - (b.XNM/1000)*(a.YNM/1000)
+			}
+			if (area > 0) != tc.wantCCW {
+				t.Fatalf("pins 1..5 in %s run the wrong way (signed area %d, want ccw=%v): %v", tc.file, area, tc.wantCCW, byPin)
+			}
+			if p1 := byPin["1"]; tc.rotation == 0 && tc.side == "front" && (p1.XNM >= 10_000_000 || p1.YNM <= 10_000_000) {
+				t.Fatalf("SOT-23-5 pin 1 should sit top-left seen from the top, got %v", p1)
+			}
+		})
+	}
+}
+
+func TestReframeLegacyLibraryPlacement(t *testing.T) {
+	base := emptyDefinition("legacy")
+	base.Board.WidthNM, base.Board.HeightNM = 20_000_000, 20_000_000
+	_, def, _, err := applyOperations(&base, []Operation{{Type: "component.add_from_library", LibraryPartID: "ap2112k-3.3", Position: &Position{XNM: 10_000_000, YNM: 10_000_000}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := def.Components[0]
+	// Rebuild what 0.11.0 stored: library frame pads under the old revision.
+	legacy := cloneDefinition(def)
+	c := &legacy.Components[0]
+	for i := range c.Pads {
+		c.Pads[i].YNM = -c.Pads[i].YNM
+	}
+	for i := range c.FootprintSpec.Courtyard {
+		c.FootprintSpec.Courtyard[i].YNM = -c.FootprintSpec.Courtyard[i].YNM
+	}
+	c.FootprintSpec.Revision = legacyLibraryRevision
+	if !hasCheck(validateDefinition(legacy), "FOOTPRINT_FRAME_LEGACY") {
+		t.Fatal("legacy placement not flagged")
+	}
+	_, after, _, err := applyOperations(legacy, []Operation{{Type: "component.reframe_library"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := after.Components[0]
+	if hasCheck(validateDefinition(after), "FOOTPRINT_FRAME_LEGACY") {
+		t.Fatal("still flagged after reframe")
+	}
+	if got.FootprintSpec.SourceSHA256 != fixed.FootprintSpec.SourceSHA256 {
+		t.Fatalf("reframed contract hash %s differs from a fresh placement %s", got.FootprintSpec.SourceSHA256, fixed.FootprintSpec.SourceSHA256)
+	}
+	for i := range got.Pads {
+		if got.Pads[i].YNM != fixed.Pads[i].YNM {
+			t.Fatalf("pad %s y=%d, fresh placement y=%d", got.Pads[i].ID, got.Pads[i].YNM, fixed.Pads[i].YNM)
+		}
+	}
+	if _, _, _, err := applyOperations(after, []Operation{{Type: "component.reframe_library"}}); err == nil {
+		t.Fatal("second reframe should report nothing to do")
+	}
+}
+
+func hasCheck(report ValidationReport, code string) bool {
+	for _, check := range report.Checks {
+		if check.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// A library part exported to KiCad must carry the same footprint-local pad
+// coordinates as the library (KiCad frame), so KiCad shows it unmirrored.
+func TestLibraryPartExportsToKiCadUnmirrored(t *testing.T) {
+	base := emptyDefinition("kicad frame")
+	base.Board.WidthNM, base.Board.HeightNM = 20_000_000, 20_000_000
+	_, def, _, err := applyOperations(&base, []Operation{{Type: "component.add_from_library", LibraryPartID: "ap2112k-3.3", Position: &Position{XNM: 10_000_000, YNM: 10_000_000}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, _ := builtinLibraryPart("ap2112k-3.3")
+	text := string(renderKiCadPCB(def))
+	for _, pad := range part.Footprint.Pads {
+		want := fmt.Sprintf(`(pad "%s" smd %s (at %.6f %.6f)`, pad.ID, kicadPadShape(pad.Shape), nmMM(pad.XNM), nmMM(pad.YNM))
+		if !strings.Contains(text, want) {
+			t.Fatalf("KiCad export lacks library-frame pad %s", want)
+		}
+	}
+	imported, err := importKiCadPCB("kicad frame", renderKiCadPCB(def))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, orig := imported.Components[0], def.Components[0]
+	if got.Position.YNM != orig.Position.YNM {
+		t.Fatalf("component y %d after round trip, want %d", got.Position.YNM, orig.Position.YNM)
+	}
+	for i := range orig.Pads {
+		if got.Pads[i].YNM != orig.Pads[i].YNM {
+			t.Fatalf("pad %s y %d after round trip, want %d", orig.Pads[i].ID, got.Pads[i].YNM, orig.Pads[i].YNM)
+		}
 	}
 }

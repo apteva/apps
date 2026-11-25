@@ -45,6 +45,10 @@ func applyOperation(def *Definition, op Operation) error {
 			return fmt.Errorf("component %q already exists", op.Component.ID)
 		}
 		def.Components = append(def.Components, *op.Component)
+	case "component.reframe_library":
+		if err := applyReframeLibraryOperation(def, op); err != nil {
+			return err
+		}
 	case "component.add_from_library":
 		if err := applyLibraryOperation(def, op); err != nil {
 			return err

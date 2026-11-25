@@ -77,6 +77,8 @@ Prefer library parts over hand-typed pads. The library combines about 26 built-i
 - `pcb_component_place_from_library` (`design_id`, `part_id`, `x_nm`, `y_nm`, optional `rotation_udeg`, `side`, `designator`, `component_id`, `value`, `mpn`) commits a `component.add_from_library` revision.
   - The designator and ID are auto-assigned from the part's prefix.
   - Placing on `back` mirrors X and swaps F.Cu and B.Cu.
+  - Coordinates: the board frame is +Y up, rotation counter-clockwise, as in Gerber and pick-and-place. Library and `.kicad_mod` pads are stored in KiCad's +Y-down frame (what `pcb_library_get` returns); placement negates Y. KiCad board export and import flip about the board's top edge.
+  - Parts placed by 0.11.0 kept the KiCad frame and are mirrored top-to-bottom. DRC flags them as `FOOTPRINT_FRAME_LEGACY` (error). Fix with the operation `{"type":"component.reframe_library"}` (optionally `component_id`), then re-route that part's nets.
   - The component gets the part's MPN, LCSC number and datasheet, and a frozen `footprint_spec` with `library_part_id` that later normalisation keeps.
   - Then add the new pins to nets with `net.connect`.
 - Pads carry `plated` (omitted means plated, `false` means NPTH). Manufacturing validation skips the annular-ring check for non-plated holes and checks copper clearance for netless pads too.
