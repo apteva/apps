@@ -1,0 +1,29 @@
+name: conversations-thinking-ends-after-reply
+description: |
+  On its own chat thread, the agent replies and paces with clear_wake.
+  Thinking must end with the reply and stay ended, and the operator's next
+  message must be released at once rather than queued (prod Helper regression
+  2026-11-25). The exact prod trigger (Core's send to main in the same step as
+  the pace, then one more model call) is replayed in response_progress_test.go.
+timeout: 10m
+max_iterations: 60
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_ThinkingEndsAfterReplyAndPace$", "-v", "-count=1", "-timeout=9m", "."]
+directive: |
+  You are a helper assistant for a small services business. You answer the
+  operator in chat. All data here is isolated test data.
+budget:
+  total_tokens: 300000
+trajectory_assert:
+  - tool_called_with:
+      tool: pace
+      args:
+        clear_wake: "true"
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: final
+      min_count: 2

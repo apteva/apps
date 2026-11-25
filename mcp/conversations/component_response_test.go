@@ -47,10 +47,11 @@ func TestAnsweredFormShowsMainWorkInTheConversation(t *testing.T) {
 
 	frames, cancel := app.hub.subscribeFrames(conv.ID)
 	defer cancel()
-	at = time.Now()
 	if _, err := app.resolveComponent(ctx, form, "tone", "submit", map[string]any{"tone": "detailed"}, 1, false); err != nil {
 		t.Fatal(err)
 	}
+	// Core's events follow the answer: the response opened at the answer.
+	at = time.Now()
 	if len(platform.trackedEvents) != 2 {
 		t.Fatalf("answer not delivered: %d events", len(platform.trackedEvents))
 	}

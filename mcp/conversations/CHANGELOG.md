@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.5 — 2026-11-25
+
+- Thinking no longer stays on after a finished reply. When the agent replied and then paced to wait for new messages (`clear_wake`), Core's last model call of that run reopened Thinking, nothing closed it, and the operator's next message was queued behind it (prod Helper chat). A pace now only lets a later model call count as new work once its timer is due; `clear_wake` never does, and a new message always does.
+- Tier 3 scenario 30 (reply, then pace) covers it end to end with a real model; Go tests replay the prod events exactly.
+- Tests: the answered-form test no longer fails under `-race` (its events were dated before the answer opened the response). Scenario 21 no longer requires `code_read_file`; gpt-6.2-sol reads files with `repos_run_command`.
+
 ## 0.34.4 — 2026-11-25
 
 - Answering a form or question card now shows the agent's work like a typed message does: Thinking while it works and a tool row for every call. The answer opened no live response, so nothing showed until the final reply, and on main every tool call was dropped (prod: 15 of 16 archive calls missing after a form). The response opens before the answer is sent, gated on Core's receipt; a failed or duplicate delivery closes it, and a response already running in the conversation is kept.

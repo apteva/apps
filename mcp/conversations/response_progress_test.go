@@ -400,3 +400,76 @@ func TestScheduledCheckFinalConfirmationSettlesBeforePaceAndResumesOnWake(t *tes
 		t.Fatalf("timer wake did not start a fresh response: %+v", snapshot.Frames)
 	}
 }
+
+// Prod (Helper, 2026-11-25): after the final reply the model reported to main
+// and called pace clear_wake. Core started one more model call 4ms after the
+// pace result, in the same run, with no tool and no terminal event. That call
+// must not reopen Thinking: nothing would ever close it, and the next user
+// message would queue behind it.
+func TestClearWakePaceAfterReplyLeavesNoThinking(t *testing.T) {
+	s := newStreamer(newHub())
+	chat, thread := "conv-helper", "chat-conv-helper"
+	s.resolve = func(int64, string) string { return chat }
+	s.emitAck(chat, thread, 3, 10)
+	start := time.Now()
+	s.Ingest("llm.start", 3, thread, `{}`, start)
+	s.finishResponse(chat, 3)
+	s.Ingest("llm.start", 3, thread, `{}`, start.Add(time.Second))
+	s.Ingest("tool.call", 3, thread, `{"name":"send","id":"report","args":{"id":"main"}}`, start.Add(2*time.Second))
+	s.Ingest("tool.call", 3, thread, `{"name":"pace","id":"rest","args":{"clear_wake":"true"}}`, start.Add(2*time.Second))
+	s.Ingest("tool.result", 3, thread, `{"name":"send","id":"report","success":true}`, start.Add(3*time.Second))
+	s.Ingest("tool.result", 3, thread, `{"name":"pace","id":"rest","success":true}`, start.Add(3*time.Second))
+	s.Ingest("llm.start", 3, thread, `{}`, start.Add(3*time.Second+4*time.Millisecond))
+	if s.responseActive(chat, 3) || len(s.snapshot(chat).Frames) != 0 {
+		t.Fatalf("the run's last model call reopened Thinking: %+v", s.snapshot(chat).Frames)
+	}
+	// Much later, still no input: a cleared wake never counts as one.
+	s.Ingest("llm.start", 3, thread, `{}`, start.Add(time.Hour))
+	if s.responseActive(chat, 3) {
+		t.Fatal("a cleared wake reopened Thinking")
+	}
+	// New input always starts visible work.
+	s.Ingest("event.received", 3, thread, `{}`, start.Add(2*time.Hour))
+	s.Ingest("llm.start", 3, thread, `{}`, start.Add(2*time.Hour+time.Second))
+	if !s.responseActive(chat, 3) {
+		t.Fatal("new input after a cleared wake showed no Thinking")
+	}
+}
+
+func TestTimedPaceWakesOnlyAfterItsDelay(t *testing.T) {
+	s := newStreamer(newHub())
+	chat, thread := "conv-timed", "chat-conv-timed"
+	s.resolve = func(int64, string) string { return chat }
+	s.emitAck(chat, thread, 41, 10)
+	start := time.Now()
+	s.Ingest("llm.start", 41, thread, `{}`, start)
+	s.finishResponse(chat, 41)
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(time.Second))
+	s.Ingest("tool.call", 41, thread, `{"name":"pace","id":"nap","args":{"sleep":"2m"}}`, start.Add(2*time.Second))
+	s.Ingest("tool.result", 41, thread, `{"name":"pace","id":"nap","success":true}`, start.Add(2*time.Second))
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(2*time.Second+5*time.Millisecond))
+	if s.responseActive(chat, 41) {
+		t.Fatal("a model call before the pace timer reopened Thinking")
+	}
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(2*time.Minute+2*time.Second))
+	if !s.responseActive(chat, 41) {
+		t.Fatal("the pace timer wake showed no Thinking")
+	}
+}
+
+func TestInputDuringTimedPaceShowsThinking(t *testing.T) {
+	s := newStreamer(newHub())
+	chat, thread := "conv-input", "chat-conv-input"
+	s.resolve = func(int64, string) string { return chat }
+	s.emitAck(chat, thread, 41, 10)
+	start := time.Now()
+	s.Ingest("llm.start", 41, thread, `{}`, start)
+	s.finishResponse(chat, 41)
+	s.Ingest("tool.call", 41, thread, `{"name":"pace","id":"nap","args":{"rate":"slow"}}`, start.Add(time.Second))
+	s.Ingest("tool.result", 41, thread, `{"name":"pace","id":"nap","success":true}`, start.Add(time.Second))
+	s.Ingest("event.received", 41, thread, `{}`, start.Add(3*time.Second))
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(3*time.Second+10*time.Millisecond))
+	if !s.responseActive(chat, 41) {
+		t.Fatal("input during a timed pace showed no Thinking")
+	}
+}

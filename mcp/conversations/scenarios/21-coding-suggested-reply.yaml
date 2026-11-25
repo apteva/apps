@@ -21,6 +21,7 @@ directive: |
 budget:
   total_tokens: 500000
 trajectory_assert:
-  - tool_called: code_read_file
+  # How the model reads files is its choice: gpt-6.2-sol uses repos_run_command
+  # (cat), gpt-6.1-sol used code_read_file. The driver checks the outcome.
   - tool_called: repos_run_command
   - tool_called: conversations_send

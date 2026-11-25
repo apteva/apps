@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -36,34 +37,110 @@ type responseProgressState struct {
 }
 
 // Keep the completed turn boundary through the model's post-reply work.
-// New input or a completed pace permits a subsequent event/timer turn. Scope
-// by agent/thread so one participant cannot hide another participant's work.
+// New input, or a pace's timer coming due, permits a subsequent event/timer
+// turn. Scope by agent/thread so one participant cannot hide another
+// participant's work.
 type completedResponseTurn struct {
 	settledAt time.Time
 	wakeAt    time.Time
+	// pendingPaces holds each pace call's earliest timer wake (zero: none)
+	// until its result arrives.
+	pendingPaces map[string]paceWake
+}
+
+type paceWake struct {
+	delay time.Duration
+	never bool
+}
+
+// minimumTimerWake is below Core's shortest pace rate (reactive, 500ms). A
+// model call that starts sooner after a pace result is the same run.
+const minimumTimerWake = 400 * time.Millisecond
+
+// paceWakeFromArgs reads when a pace can next wake its thread without new
+// input. Core sets the timer when pace runs: clear_wake waits for events only,
+// sleep and rate wake after their delay. A pace that changes neither keeps
+// Core's earlier timer, whose remaining time is unknown here.
+func paceWakeFromArgs(args map[string]any) paceWake {
+	text := func(key string) string { return strings.TrimSpace(fmt.Sprint(args[key])) }
+	if v := strings.ToLower(text("clear_wake")); v == "true" || v == "1" || v == "yes" {
+		return paceWake{never: true}
+	}
+	if raw := text("sleep"); raw != "" && raw != "<nil>" {
+		if d, err := time.ParseDuration(raw); err == nil && d > minimumTimerWake {
+			return paceWake{delay: d}
+		}
+	}
+	if d, ok := paceRateDelays[text("rate")]; ok && d > minimumTimerWake {
+		return paceWake{delay: d}
+	}
+	return paceWake{delay: minimumTimerWake}
+}
+
+// Core's named pace rates.
+var paceRateDelays = map[string]time.Duration{
+	"reactive": 500 * time.Millisecond, "fast": 2 * time.Second, "normal": 10 * time.Second,
+	"slow": 30 * time.Second, "sleep": 2 * time.Minute,
 }
 
 func (s *streamer) observeResponseWake(event string, agent int64, thread, raw string, ts time.Time) {
-	if event != "event.received" && event != "tool.result" {
+	if event != "event.received" && event != "tool.call" && event != "tool.result" {
 		return
 	}
-	if event == "tool.result" {
-		var data struct {
-			Name    string `json:"name"`
-			Tool    string `json:"tool"`
-			Success *bool  `json:"success"`
-		}
-		if json.Unmarshal([]byte(raw), &data) != nil || firstNonEmptyString(data.Name, data.Tool) != "pace" || (data.Success != nil && !*data.Success) {
+	var data struct {
+		ID      string         `json:"id"`
+		Name    string         `json:"name"`
+		Tool    string         `json:"tool"`
+		Success *bool          `json:"success"`
+		Args    map[string]any `json:"args"`
+	}
+	if event != "event.received" {
+		if json.Unmarshal([]byte(raw), &data) != nil || firstNonEmptyString(data.Name, data.Tool) != "pace" {
 			return
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := streamCallKey(agent, thread, "")
-	if turn, ok := s.completedTurns[key]; ok && ts.After(turn.settledAt) && ts.After(turn.wakeAt) {
-		turn.wakeAt = ts
-		s.completedTurns[key] = turn
+	turn, ok := s.completedTurns[key]
+	if !ok || !ts.After(turn.settledAt) {
+		return
 	}
+	switch event {
+	case "event.received":
+		// New input wakes the thread now, ahead of any pending timer.
+		turn.wakeAt = ts
+	case "tool.call":
+		if turn.pendingPaces == nil {
+			turn.pendingPaces = map[string]paceWake{}
+		}
+		if len(turn.pendingPaces) < 64 {
+			turn.pendingPaces[data.ID] = paceWakeFromArgs(data.Args)
+		}
+	case "tool.result":
+		wake, known := turn.pendingPaces[data.ID]
+		delete(turn.pendingPaces, data.ID)
+		if data.Success != nil && !*data.Success {
+			break
+		}
+		if !known {
+			wake = paceWake{delay: minimumTimerWake}
+		}
+		if wake.never {
+			// Only new input can start the next turn. A model call right
+			// after this result is the run finishing, not new work.
+			break
+		}
+		// Core's timer starts when pace runs; allow for event clock skew.
+		delay := wake.delay - wake.delay/10
+		if delay < minimumTimerWake {
+			delay = minimumTimerWake
+		}
+		if at := ts.Add(delay); at.After(turn.wakeAt) {
+			turn.wakeAt = at
+		}
+	}
+	s.completedTurns[key] = turn
 }
 
 // inboundPreviewMatches reports whether Core's event.received preview is the

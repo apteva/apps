@@ -59,6 +59,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Room fan-out | Two runner-owned agents reply; duplicate submission reuses one row |
 | Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
 | Form answer shows live work | Main asks with a blocking form; after the answer, Thinking shows in the conversation and every `todo_todos_complete` call is a tool row before the final reply; Thinking ends with it |
+| Thinking ends after reply and pace | The agent replies, then paces with `clear_wake`; Thinking ends with the reply and stays off for 15 s, and the next message is released, not queued, and answered |
 | Short multi-step cadence | Related list and todo lookups complete with one acknowledgement and one final reply, without an unnecessary progress message |
 | Long multi-step progress | A meaningful stage boundary produces one intermediate progress update before the final outcome |
 | Queue and steer | Three steers sent at different points land in the running todo task; two queued follow-ups (one edited) run afterwards, each in its own turn; a removed destructive one never runs; Todo data and transcript both show all work done |
@@ -424,3 +425,36 @@ GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.2-sol \
 0.34.3's `interactions.go` the same run fails as prod did: "no Thinking in the
 conversation between the answer and the final reply" (only text frames, no
 response progress after the answer).
+
+## Thinking ends after reply and pace (0.34.5)
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.2-sol \
+  scenarios/30-thinking-ends-after-reply.yaml
+```
+
+Prod 2026-11-25 (Helper, its own chat thread): after the final reply the agent
+called Core's `send` to main and `pace clear_wake` in one step. Core fed the
+send result back in one more model call, which reopened Thinking; nothing closed
+it and the operator's next message was queued. The exact sequence is replayed in
+`TestClearWakePaceAfterReplyLeavesNoThinking` (fails on 0.34.4, passes on
+0.34.5), with `TestTimedPaceWakesOnlyAfterItsDelay` and
+`TestInputDuringTimedPaceShowsThinking` for timed paces and new input.
+
+Scenario 30 guards the same contract end to end: reply, `pace clear_wake`,
+Thinking stays off for 15 s, and the next message is released and answered.
+gpt-6.2-sol did not repeat the prod batch (send + pace in one step) in five
+runs even when told to, so the scenario passes on 0.34.4 too; the Go test is the
+regression check. Separately, after a chat thread starts, Core sometimes keeps
+retrying empty Codex responses on main until the runner's timeout ("scenario
+cancelled" with a passing driver); that is Core, not Conversations.
+
+2026-11-25 full Tier 3 on 0.34.5 (openai-codex / gpt-6.2-sol, 3 lanes): 27 of
+28 runnable scenarios passed on the first run; 17 and 22 are opt-in
+(`APTEVA_RUN_CONVERSATIONS_NATIVE_IMAGE_TIER3`, `APTEVA_RUN_CONVERSATIONS_VOICE_TIER3`)
+and were not run. Scenario 21 failed once on the suggestion check (model
+produced no suggested reply), then its driver passed on rerun; its
+`code_read_file` trajectory clause was dropped because gpt-6.2-sol reads files
+with `repos_run_command`. `go test -race ./...` passes; it caught a timing flaw
+in 0.34.4's `TestAnsweredFormShowsMainWorkInTheConversation` (events dated
+before the answer opened the response), fixed in the test.
