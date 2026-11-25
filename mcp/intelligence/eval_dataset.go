@@ -10,6 +10,9 @@ package main
 //     venue's "current" or final price
 //   - a question must have been open for min_open_days before it closed, so
 //     a forecast horizon fits inside its life
+// Within the window, questions are a seeded random sample of those that
+// pass the filters, so they spread over the whole period rather than
+// bunching at its end.
 // Selection still uses information from after the forecast time (a market
 // had to resolve, and trader counts are final counts). Reports state this.
 
@@ -20,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,11 +74,12 @@ type datasetParams struct {
 	MinTrades   int      `json:"min_trades"`
 	MinOpenDays float64  `json:"min_open_days"`
 	MaxPerEvent int      `json:"max_per_event"`
+	Seed        int64    `json:"seed"`
 }
 
 func parseDatasetParams(args map[string]any) datasetParams {
 	p := datasetParams{Name: strArg(args, "name"), Venues: []string{"manifold", "kalshi"}, SinceDays: 30, MaxPerVenue: 150,
-		MinTraders: 15, MinTrades: 10, MinOpenDays: 8, MaxPerEvent: 2}
+		MinTraders: 15, MinTrades: 10, MinOpenDays: 8, MaxPerEvent: 2, Seed: 1}
 	if v := strArg(args, "venues"); v != "" {
 		p.Venues = nil
 		for _, s := range strings.Split(v, ",") {
@@ -100,6 +105,9 @@ func parseDatasetParams(args map[string]any) datasetParams {
 	}
 	if n := intArgAny(args, "max_per_event"); n > 0 {
 		p.MaxPerEvent = int(n)
+	}
+	if n := intArgAny(args, "seed"); n != 0 {
+		p.Seed = n
 	}
 	if p.Name == "" {
 		p.Name = fmt.Sprintf("%s resolved in last %dd", strings.Join(p.Venues, "+"), p.SinceDays)
@@ -160,12 +168,7 @@ func buildEvalDataset(sc sourceClient, p datasetParams, now time.Time) ([]evalIt
 }
 
 func fetchManifoldResolved(sc sourceClient, p datasetParams, since time.Time, skipped skipCounter) ([]evalItem, error) {
-	raw, ok := sc.call("manifold-markets", "search_markets", map[string]any{
-		"filter": "resolved", "sort": "resolve-date", "contractType": "BINARY", "limit": "1000"})
-	if !ok {
-		return nil, fmt.Errorf("market search failed (%s)", orStr(lastSourceError("manifold-markets"), "unavailable"))
-	}
-	var markets []struct {
+	type mmarket struct {
 		ID             string  `json:"id"`
 		Question       string  `json:"question"`
 		URL            string  `json:"url"`
@@ -175,14 +178,39 @@ func fetchManifoldResolved(sc sourceClient, p datasetParams, since time.Time, sk
 		ResolutionTime float64 `json:"resolutionTime"`
 		Bettors        int     `json:"uniqueBettorCount"`
 	}
-	if err := json.Unmarshal(raw, &markets); err != nil {
-		return nil, fmt.Errorf("market search: %w", err)
-	}
-	out := []evalItem{}
-	for _, m := range markets {
-		if len(out) >= p.MaxPerVenue {
+	// Page back through resolutions (newest first) until the window is
+	// covered.
+	var markets []mmarket
+	for page := 0; page < 20; page++ {
+		raw, ok := sc.call("manifold-markets", "search_markets", map[string]any{
+			"filter": "resolved", "sort": "resolve-date", "contractType": "BINARY", "limit": "1000", "offset": strconv.Itoa(page * 1000)})
+		if !ok {
+			if page == 0 {
+				return nil, fmt.Errorf("market search failed (%s)", orStr(lastSourceError("manifold-markets"), "unavailable"))
+			}
+			skipped.add("manifold: search paging stopped early")
 			break
 		}
+		var batch []mmarket
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			return nil, fmt.Errorf("market search: %w", err)
+		}
+		markets = append(markets, batch...)
+		if len(batch) < 1000 || msTime(batch[len(batch)-1].ResolutionTime).Before(since) {
+			break
+		}
+	}
+	type cand struct {
+		m  mmarket
+		it evalItem
+	}
+	cands := []cand{}
+	seen := map[string]bool{}
+	for _, m := range markets {
+		if seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
 		if m.Resolution != "YES" && m.Resolution != "NO" {
 			skipped.add("manifold: not a YES/NO resolution")
 			continue
@@ -206,6 +234,15 @@ func fetchManifoldResolved(sc sourceClient, p datasetParams, since time.Time, sk
 			skipped.add("open too briefly")
 			continue
 		}
+		cands = append(cands, cand{m, it})
+	}
+	rand.New(rand.NewSource(p.Seed)).Shuffle(len(cands), func(i, j int) { cands[i], cands[j] = cands[j], cands[i] })
+	out := []evalItem{}
+	for _, c := range cands {
+		if len(out) >= p.MaxPerVenue {
+			break
+		}
+		m, it := c.m, c.it
 		prices, err := manifoldPrices(sc, m.ID, it.end())
 		if err != nil {
 			skipped.add("manifold: price history failed")
@@ -276,34 +313,35 @@ func fetchKalshiSettled(sc sourceClient, p datasetParams, since, now time.Time, 
 		CloseTime   string `json:"close_time"`
 		Settlement  string `json:"settlement_ts"`
 	}
+	// Kalshi settles thousands of short-lived markets a day, so one page
+	// covers hours. Take one page from each of ten slices of the window.
 	var cands []kmarket
-	cursor := ""
-	for page := 0; page < 10; page++ {
-		args := map[string]any{"status": "settled", "mve_filter": "exclude", "limit": "1000",
-			"min_close_ts": strconv.FormatInt(since.Unix(), 10), "max_close_ts": strconv.FormatInt(now.Unix(), 10)}
-		if cursor != "" {
-			args["cursor"] = cursor
-		}
-		raw, ok := sc.call("kalshi", "list_markets", args)
+	const slices = 10
+	span := now.Sub(since) / slices
+	failed := 0
+	for k := 0; k < slices; k++ {
+		lo, hi := since.Add(time.Duration(k)*span), since.Add(time.Duration(k+1)*span)
+		raw, ok := sc.call("kalshi", "list_markets", map[string]any{"status": "settled", "mve_filter": "exclude", "limit": "1000",
+			"min_close_ts": strconv.FormatInt(lo.Unix(), 10), "max_close_ts": strconv.FormatInt(hi.Unix(), 10)})
 		if !ok {
-			if page == 0 {
-				return nil, fmt.Errorf("market list failed (%s)", orStr(lastSourceError("kalshi"), "unavailable"))
-			}
-			break
+			failed++
+			continue
 		}
 		var resp struct {
 			Markets []kmarket `json:"markets"`
-			Cursor  string    `json:"cursor"`
 		}
 		if err := json.Unmarshal(raw, &resp); err != nil {
 			return nil, err
 		}
 		cands = append(cands, resp.Markets...)
-		if resp.Cursor == "" || len(resp.Markets) == 0 {
-			break
-		}
-		cursor = resp.Cursor
 	}
+	if failed == slices {
+		return nil, fmt.Errorf("market list failed (%s)", orStr(lastSourceError("kalshi"), "unavailable"))
+	}
+	if failed > 0 {
+		skipped["kalshi: window slices unavailable"] += failed
+	}
+	rand.New(rand.NewSource(p.Seed+1)).Shuffle(len(cands), func(i, j int) { cands[i], cands[j] = cands[j], cands[i] })
 	perEvent, perSeries := map[string]int{}, map[string]int{}
 	out := []evalItem{}
 	for _, m := range cands {

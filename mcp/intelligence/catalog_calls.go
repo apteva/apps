@@ -124,7 +124,7 @@ func catalogCall(slug, tool string, args map[string]any) (string, map[string]any
 	case "manifold-markets":
 		switch tool {
 		case "search_markets":
-			out := pick("filter", "sort", "contractType")
+			out := pick("filter", "sort", "contractType", "offset")
 			out["term"] = orStr(args["term"], strArgM(args, "topic"))
 			out["limit"] = orStr(args["limit"], "20")
 			return tool, out

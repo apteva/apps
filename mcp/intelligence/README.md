@@ -91,7 +91,8 @@ them.
 **Dataset.** `evaluation_dataset_build` freezes resolved binary questions
 from Manifold and Kalshi, with each question's trade-by-trade price history.
 Questions are filtered for liquidity (traders, trades), lifetime and at most
-two per linked event. The dataset gets a content hash; every run checks it
+two per linked event (five per Kalshi series). Within the window they are a
+seeded random sample, so they spread over the whole period. The dataset gets a content hash; every run checks it
 before scoring. Skip reasons are counted.
 
 **Methods,** at each horizon h (default 24h and 168h before the earlier of
