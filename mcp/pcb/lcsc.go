@@ -193,8 +193,10 @@ type LCSCMatch struct {
 	Current      string    `json:"current_lcsc,omitempty"`
 	Match        *LCSCPart `json:"match,omitempty"`
 	Exact        bool      `json:"exact_mpn"`
-	// Basis is how the match was found: mpn (exact), parametric (same value
-	// and size, chip passives) or keyword (closest text hit; check it).
+	// Basis is how the match was found: mpn (exact), compatible_mpn (another
+	// orderable variant the frozen footprint lists; applying it also switches
+	// the component MPN), parametric (same value and size, chip passives) or
+	// keyword (closest text hit; check it).
 	Basis   string  `json:"basis,omitempty"`
 	Status  string  `json:"status"` // matched | already_set | no_match | lookup_failed
 	Error   string  `json:"error,omitempty"`
@@ -260,6 +262,24 @@ func lcscMatchBOM(catalog *lcscCatalog, def *Definition, buildQuantity int, over
 			if l.mpn != "" && strings.EqualFold(parts[i].MPN, l.mpn) {
 				best, m.Exact = &parts[i], true
 				break
+			}
+		}
+		if best == nil && l.component.FootprintSpec != nil {
+			// The exact MPN is not stocked: try the other orderable variants
+			// the frozen footprint accepts (e.g. SHTC3 -DIS vs -TR reels).
+			for _, alt := range l.component.FootprintSpec.CompatibleMPNs {
+				if strings.EqualFold(alt, l.mpn) {
+					continue
+				}
+				altParts, err := catalog.Search(alt, "", 10)
+				if err != nil {
+					continue
+				}
+				for i := range altParts {
+					if strings.EqualFold(altParts[i].MPN, alt) && (best == nil || altParts[i].Stock > best.Stock) {
+						best, m.Basis = &altParts[i], "compatible_mpn"
+					}
+				}
 			}
 		}
 		if best == nil {

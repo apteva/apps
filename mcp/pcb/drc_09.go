@@ -53,7 +53,7 @@ func validateProductionGeometry(def *Definition) []Check {
 			if len(contract.Courtyard) < 4 {
 				add("FOOTPRINT_COURTYARD_MISSING", "error", "Verified footprint needs an embedded courtyard", component.ID)
 			}
-			if component.MPN != "" && len(contract.CompatibleMPNs) > 0 && !containsString(contract.CompatibleMPNs, component.MPN) {
+			if component.MPN != "" && len(contract.CompatibleMPNs) > 0 && !containsString(contract.CompatibleMPNs, component.MPN) && !builtinPartAcceptsMPN(contract.LibraryPartID, contract.LibraryID, component.MPN) {
 				add("FOOTPRINT_MPN_MISMATCH", "error", "Component MPN is not listed as compatible with the frozen footprint", component.ID)
 			}
 		}

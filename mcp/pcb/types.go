@@ -9,7 +9,7 @@ const (
 	mechanicalEnvelopeSchema = "apteva-mechanical-envelope/v1"
 	productionSchema         = "apteva-pcb-production-readiness/v1"
 	kicadExchangeSchema      = "apteva-pcb-kicad-exchange/v1"
-	engineVersion            = "pcb-native/0.11.1"
+	engineVersion            = "pcb-native/0.11.2"
 	defaultClearance         = int64(200_000)
 	defaultTraceWidth        = int64(200_000)
 	defaultEdgeClearance     = int64(250_000)
@@ -94,6 +94,11 @@ type Pin struct {
 type Body struct {
 	WidthNM  int64 `json:"width_nm"`
 	HeightNM int64 `json:"height_nm"`
+	// OffsetXNM/OffsetYNM place the body centre relative to the footprint
+	// origin, in the footprint frame before rotation. Footprints anchored on
+	// pin 1 (headers, THT modules, encoders) have their body off the origin.
+	OffsetXNM int64 `json:"offset_x_nm,omitempty"`
+	OffsetYNM int64 `json:"offset_y_nm,omitempty"`
 }
 
 // Pad is native footprint copper geometry. X/Y are relative to the component

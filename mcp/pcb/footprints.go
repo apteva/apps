@@ -44,12 +44,20 @@ func attachNativeContracts(def *Definition) {
 			}
 		}
 		if libraryContractFrozen(component) {
+			// Stamp the body centre on library parts placed before bodies
+			// carried an offset, so every reader sees the real body.
+			if component.Body != nil && component.Body.OffsetXNM == 0 && component.Body.OffsetYNM == 0 {
+				body := componentBody(*component)
+				component.Body = &body
+			}
 			attachLibraryModel3D(component, models)
 			continue
 		}
 		body := inferredBody(*component)
 		gap := int64(250_000)
-		courtyard := []Point{{XNM: -body.WidthNM/2 - gap, YNM: -body.HeightNM/2 - gap}, {XNM: body.WidthNM/2 + gap, YNM: -body.HeightNM/2 - gap}, {XNM: body.WidthNM/2 + gap, YNM: body.HeightNM/2 + gap}, {XNM: -body.WidthNM/2 - gap, YNM: body.HeightNM/2 + gap}}
+		x1, y1 := body.OffsetXNM-body.WidthNM/2-gap, body.OffsetYNM-body.HeightNM/2-gap
+		x2, y2 := body.OffsetXNM+body.WidthNM/2+gap, body.OffsetYNM+body.HeightNM/2+gap
+		courtyard := []Point{{XNM: x1, YNM: y1}, {XNM: x2, YNM: y1}, {XNM: x2, YNM: y2}, {XNM: x1, YNM: y2}}
 		standard := "IPC-7351B"
 		if throughHole {
 			standard = "IPC-2221B"

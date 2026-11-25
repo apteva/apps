@@ -77,18 +77,15 @@ func renderSVG(def *Definition) []byte {
 	components := append([]Component(nil), def.Components...)
 	sort.SliceStable(components, func(i, j int) bool { return components[i].Designator < components[j].Designator })
 	for _, component := range components {
-		body := component.Body
-		if body == nil || body.WidthNM <= 0 || body.HeightNM <= 0 {
-			fallback := inferredBody(component)
-			body = &fallback
-		}
+		bodyValue := componentBody(component)
+		body := &bodyValue
 		bodyFill := "#171411"
 		bodyStroke := "#d0ccc8"
 		if component.Position.Side == "back" {
 			bodyFill, bodyStroke = "#1b1510", "#fdba74"
 		}
 		fmt.Fprintf(&b, `<g id="%s" transform="translate(%s %s) rotate(%s)">`, html.EscapeString(component.ID), mm(component.Position.XNM), mm(component.Position.YNM), trimFloat(float64(component.Position.RotationUdeg)/1e6))
-		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx=".28" fill="%s" fill-opacity=".92" stroke="%s" stroke-width=".13"/>`, mm(-body.WidthNM/2), mm(-body.HeightNM/2), mm(body.WidthNM), mm(body.HeightNM), bodyFill, bodyStroke)
+		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx=".28" fill="%s" fill-opacity=".92" stroke="%s" stroke-width=".13"/>`, mm(body.OffsetXNM-body.WidthNM/2), mm(body.OffsetYNM-body.HeightNM/2), mm(body.WidthNM), mm(body.HeightNM), bodyFill, bodyStroke)
 		for _, pad := range component.Pads {
 			padColor := "#fb923c"
 			if containsString(pad.Layers, "B.Cu") && !containsString(pad.Layers, "F.Cu") {
@@ -110,12 +107,12 @@ func renderSVG(def *Definition) []byte {
 				fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="#071612" stroke="#f2dfae" stroke-width=".04"/>`, mm(pad.XNM), mm(pad.YNM), mm(pad.DrillNM/2))
 			}
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f5f2ef" stroke="#090806" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
+		fmt.Fprintf(&b, `<text x="%s" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f5f2ef" stroke="#090806" stroke-width=".08" paint-order="stroke">%s</text>`, mm(body.OffsetXNM), mm(-body.OffsetYNM-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
 		value := component.Value
 		if value == "" {
 			value = component.Name
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#9f9993">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
+		fmt.Fprintf(&b, `<text x="%s" y="%s" transform="scale(1 -1)" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#9f9993">%s</text><title>%s · %s · %s</title></g>`, mm(body.OffsetXNM), mm(-body.OffsetYNM+body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
 		b.WriteByte('\n')
 	}
 	b.WriteString("</g></g>\n")
@@ -125,13 +122,45 @@ func renderSVG(def *Definition) []byte {
 	return []byte(b.String())
 }
 
+// inferredBody is the body box for a component without an explicit body:
+// the extent of its pads plus 0.25 mm per side, centred on that extent (not
+// on the footprint origin, which is often pin 1). Pad-less parts get 3x2 mm.
 func inferredBody(component Component) Body {
-	width, height := int64(3_000_000), int64(2_000_000)
-	for _, pad := range component.Pads {
-		width = max64(width, int64(math.Abs(float64(pad.XNM)))*2+pad.WidthNM+500_000)
-		height = max64(height, int64(math.Abs(float64(pad.YNM)))*2+pad.HeightNM+500_000)
+	if len(component.Pads) == 0 {
+		return Body{WidthNM: 3_000_000, HeightNM: 2_000_000}
 	}
-	return Body{WidthNM: width, HeightNM: height}
+	minX, minY, maxX, maxY := int64(math.MaxInt64), int64(math.MaxInt64), int64(math.MinInt64), int64(math.MinInt64)
+	for _, pad := range component.Pads {
+		minX, maxX = min64(minX, pad.XNM-pad.WidthNM/2), max64(maxX, pad.XNM+pad.WidthNM/2)
+		minY, maxY = min64(minY, pad.YNM-pad.HeightNM/2), max64(maxY, pad.YNM+pad.HeightNM/2)
+	}
+	return Body{WidthNM: max64(maxX-minX+500_000, 1_000_000), HeightNM: max64(maxY-minY+500_000, 1_000_000), OffsetXNM: (minX + maxX) / 2, OffsetYNM: (minY + maxY) / 2}
+}
+
+// componentBody is the body every consumer should use: the explicit body, or
+// the inferred one. Library placements made before bodies carried an offset
+// take their centre from the frozen courtyard.
+func componentBody(component Component) Body {
+	if component.Body == nil || component.Body.WidthNM <= 0 || component.Body.HeightNM <= 0 {
+		return inferredBody(component)
+	}
+	body := *component.Body
+	if body.OffsetXNM == 0 && body.OffsetYNM == 0 && component.FootprintSpec != nil && strings.HasPrefix(component.FootprintSpec.Source, "apteva://library/") {
+		body.OffsetXNM, body.OffsetYNM = pointsCentre(component.FootprintSpec.Courtyard)
+	}
+	return body
+}
+
+// pointsCentre is the centre of the points' bounding box.
+func pointsCentre(points []Point) (int64, int64) {
+	if len(points) == 0 {
+		return 0, 0
+	}
+	minX, minY, maxX, maxY := points[0].XNM, points[0].YNM, points[0].XNM, points[0].YNM
+	for _, p := range points[1:] {
+		minX, minY, maxX, maxY = min64(minX, p.XNM), min64(minY, p.YNM), max64(maxX, p.XNM), max64(maxY, p.YNM)
+	}
+	return (minX + maxX) / 2, (minY + maxY) / 2
 }
 
 func svgPoints(points []Point) string {

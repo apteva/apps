@@ -72,9 +72,10 @@ type PlacementRow struct {
 
 // placementRows lists every component that an assembler places: anything
 // with copper pads. Test points and mounting holes without an MPN are left to
-// the fab's bare-board process and excluded. Coordinates are the component
-// origin in the same frame and units as the Gerber files, so a fab can
-// overlay the two without an offset.
+// the fab's bare-board process and excluded. Coordinates are the part
+// centre (the body centre, rotated with the part) in the same frame and units
+// as the Gerber files. Footprints anchored on pin 1 would otherwise be placed
+// off by half the part.
 func placementRows(def *Definition) []PlacementRow {
 	rows := []PlacementRow{}
 	for _, c := range def.Components {
@@ -102,11 +103,13 @@ func placementRows(def *Definition) []PlacementRow {
 		for rotation >= 360 {
 			rotation -= 360
 		}
+		body := componentBody(c)
+		centre := placePad(c, Pad{XNM: body.OffsetXNM, YNM: body.OffsetYNM}).Center
 		pkg := c.Footprint
 		if pkg == "" && c.FootprintSpec != nil {
 			pkg = c.FootprintSpec.LibraryID
 		}
-		rows = append(rows, PlacementRow{Designator: c.Designator, Value: c.Value, Package: pkg, MPN: c.MPN, XMM: float64(c.Position.XNM) / 1e6, YMM: float64(c.Position.YNM) / 1e6, RotationDeg: rotation, Layer: layer, Mount: mount})
+		rows = append(rows, PlacementRow{Designator: c.Designator, Value: c.Value, Package: pkg, MPN: c.MPN, XMM: float64(centre.XNM) / 1e6, YMM: float64(centre.YNM) / 1e6, RotationDeg: rotation, Layer: layer, Mount: mount})
 	}
 	sort.Slice(rows, func(i, j int) bool { return naturalLess(rows[i].Designator, rows[j].Designator) })
 	return rows

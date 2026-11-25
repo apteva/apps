@@ -443,11 +443,7 @@ func renderSilkscreenGerber(def *Definition, layerID, function string) []byte {
 		if (component.Position.Side == "front") != front || strings.HasPrefix(component.Footprint, "Fiducial") {
 			continue
 		}
-		body := component.Body
-		if body == nil || body.WidthNM <= 0 || body.HeightNM <= 0 {
-			body = &Body{WidthNM: 3_000_000, HeightNM: 2_000_000}
-		}
-		outline := bodyPolygon(component, *body)
+		outline := bodyPolygon(component, componentBody(component))
 		if len(outline) == 0 {
 			continue
 		}
@@ -643,7 +639,7 @@ func boardCutoutContour(cutout BoardCutout) []Point {
 }
 
 func bodyPolygon(component Component, body Body) []Point {
-	pad := Pad{XNM: 0, YNM: 0, WidthNM: body.WidthNM, HeightNM: body.HeightNM}
+	pad := Pad{XNM: body.OffsetXNM, YNM: body.OffsetYNM, WidthNM: body.WidthNM, HeightNM: body.HeightNM}
 	return placePad(component, pad).Corners
 }
 

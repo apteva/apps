@@ -63,8 +63,8 @@ func renderKiCadPCB(def *Definition) []byte {
 		f("  (footprint \"Apteva:%s\" (layer \"%s\") (at %.6f %.6f %.6f)\n", kicadEscape(footprint), layer, nmMM(component.Position.XNM), ky(component.Position.YNM), float64(component.Position.RotationUdeg)/1e6)
 		f("    (property \"Reference\" \"%s\" (at 0 -2 0) (layer \"F.SilkS\"))\n", kicadEscape(component.Designator))
 		f("    (property \"Value\" \"%s\" (at 0 2 0) (layer \"F.Fab\"))\n", kicadEscape(firstNonEmpty(component.Value, component.Name)))
-		body := inferredBody(component)
-		f("    (fp_rect (start %.6f %.6f) (end %.6f %.6f) (stroke (width 0.1) (type default)) (fill none) (layer \"F.Fab\"))\n", nmMM(-body.WidthNM/2), nmMM(-body.HeightNM/2), nmMM(body.WidthNM/2), nmMM(body.HeightNM/2))
+		body := componentBody(component)
+		f("    (fp_rect (start %.6f %.6f) (end %.6f %.6f) (stroke (width 0.1) (type default)) (fill none) (layer \"F.Fab\"))\n", nmMM(body.OffsetXNM-body.WidthNM/2), nmMM(-body.OffsetYNM-body.HeightNM/2), nmMM(body.OffsetXNM+body.WidthNM/2), nmMM(-body.OffsetYNM+body.HeightNM/2))
 		for _, pad := range component.Pads {
 			typeName := "smd"
 			layers := "\"F.Cu\" \"F.Paste\" \"F.Mask\""

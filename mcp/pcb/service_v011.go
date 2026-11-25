@@ -115,7 +115,7 @@ func (s *Service) LCSCMatch(app *sdk.AppCtx, designID, revisionID, expectedParen
 	}
 	ops := []Operation{}
 	for _, m := range matches {
-		if m.Status != "matched" || m.Match == nil || !(m.Exact || acceptParametric && m.Basis == "parametric") {
+		if m.Status != "matched" || m.Match == nil || !(m.Exact || m.Basis == "compatible_mpn" || acceptParametric && m.Basis == "parametric") {
 			continue
 		}
 		for _, id := range m.ComponentIDs {
@@ -125,6 +125,9 @@ func (s *Service) LCSCMatch(app *sdk.AppCtx, designID, revisionID, expectedParen
 			}
 			c := base.Components[i]
 			c.LCSC = m.Match.LCSC
+			if m.Basis == "compatible_mpn" {
+				c.MPN = m.Match.MPN
+			}
 			ops = append(ops, Operation{Type: "component.replace", Component: &c})
 		}
 	}

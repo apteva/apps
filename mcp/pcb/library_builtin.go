@@ -70,11 +70,27 @@ var (
 	builtinByID  map[string]*LibraryPart
 )
 
+// builtinLCSC holds JLCPCB/LCSC numbers for built-in parts whose literal
+// does not carry one. Each was checked against the JLC catalog for the
+// exact MPN (2026-11-25).
+var builtinLCSC = map[string]string{
+	"shtc3":                "C194656",  // SHTC3-TR-2.5KS
+	"mcp73831-sot23-5":     "C424093",  // MCP73831T-2ACI/OT
+	"jst-sh-4-qwiic":       "C160404",  // SM04B-SRSS-TB(LF)(SN)
+	"usb-c-gct-usb4105":    "C3020560", // USB4105-GF-A
+	"esp32-s3-wroom-1":     "C2913201", // ESP32-S3-WROOM-1-N8R8
+	"relay-srd-05vdc-sl-c": "C35449",   // SRD-05VDC-SL-C
+	"dht22":                "C83988",   // AM2302
+}
+
 func builtinLibrary() []*LibraryPart {
 	builtinOnce.Do(func() {
 		builtinParts = builtinLibraryParts()
 		builtinByID = map[string]*LibraryPart{}
 		for _, part := range builtinParts {
+			if part.LCSC == "" {
+				part.LCSC = builtinLCSC[part.ID]
+			}
 			part.Schema = librarySchema
 			if part.Provenance.Source == "" {
 				part.Provenance.Source = "builtin"
@@ -239,7 +255,7 @@ func builtinLibraryParts() []*LibraryPart {
 		Notes:      []string{"Pins 1/6 and 3/4 are the pass-through pairs of each protected line; route the data line across both pads."}}
 
 	shtc3 := &LibraryPart{ID: "shtc3", Name: "Sensirion SHTC3 humidity/temperature sensor (DFN-4)", Category: "sensor", Description: "I2C humidity and temperature sensor, fixed address 0x70. Pinout per Sensirion datasheet: 1 VDD, 2 SCL, 3 SDA, 4 VSS, 5 exposed die pad.", Keywords: []string{"humidity", "temperature", "i2c", "sensirion", "shtc3"},
-		Value: "SHTC3", Manufacturer: "Sensirion", MPN: "SHTC3-DIS-B2.5KS", DatasheetURL: "https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Humidity/Sensirion_Humidity_Sensors_SHTC3_Datasheet.pdf",
+		Value: "SHTC3", Manufacturer: "Sensirion", MPN: "SHTC3-TR-2.5KS", AltMPNs: []string{"SHTC3-TR-10KS", "SHTC3-DIS-B2.5KS"}, DatasheetURL: "https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Humidity/Sensirion_Humidity_Sensors_SHTC3_Datasheet.pdf",
 		Footprint: fpFootprint("Sensirion_DFN-4-1EP_2x2mm_P1mm_EP0.7x1.6mm", "smd", -1.45, -1.25, 1.45, 1.25, 2, 2, "${KICAD10_3DMODEL_DIR}/Sensor_Humidity.3dshapes/Sensirion_DFN-4-1EP_2x2mm_P1mm_EP0.7x1.6mm.step",
 			fpSMD("1", "1", "roundrect", -0.925, -0.5, 0.55, 0.35, 0.25),
 			fpSMD("2", "2", "roundrect", -0.925, 0.5, 0.55, 0.35, 0.25),

@@ -303,11 +303,7 @@ func analysisShapes(def *Definition) []analysisShape {
 	out := make([]analysisShape, 0, len(def.Components))
 	for _, component := range def.Components {
 		shape := analysisShape{component: component, sides: componentSides(component)}
-		body := inferredBody(component)
-		if component.Body != nil && component.Body.WidthNM > 0 && component.Body.HeightNM > 0 {
-			body = *component.Body
-		}
-		shape.body = bodyPolygon(component, body)
+		shape.body = bodyPolygon(component, componentBody(component))
 		points := append([]Point(nil), shape.body...)
 		if component.FootprintSpec != nil && len(component.FootprintSpec.Courtyard) >= 3 {
 			for _, p := range component.FootprintSpec.Courtyard {
@@ -670,11 +666,8 @@ func newPlacer(def *Definition, options PlacementOptions) (*placer, error) {
 		item := &placeItem{index: ci, id: component.ID, original: component.Position, face: faces[component.ID]}
 		item.movable = !component.Fixed && !fixed[component.ID] && (len(selected) == 0 || selected[component.ID])
 		points := []Point{}
-		body := inferredBody(component)
-		if component.Body != nil && component.Body.WidthNM > 0 && component.Body.HeightNM > 0 {
-			body = *component.Body
-		}
-		points = append(points, placeRect{-body.WidthNM / 2, -body.HeightNM / 2, body.WidthNM / 2, body.HeightNM / 2}.polygon()...)
+		body := componentBody(component)
+		points = append(points, placeRect{body.OffsetXNM - body.WidthNM/2, body.OffsetYNM - body.HeightNM/2, body.OffsetXNM + body.WidthNM/2, body.OffsetYNM + body.HeightNM/2}.polygon()...)
 		if component.FootprintSpec != nil {
 			points = append(points, component.FootprintSpec.Courtyard...)
 		}

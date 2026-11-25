@@ -620,6 +620,7 @@ func instantiateLibraryPart(def *Definition, part *LibraryPart, placement Librar
 		DatasheetRef: part.DatasheetURL,
 	}
 	if part.Footprint.BodyWidth > 0 && part.Footprint.BodyHeight > 0 {
+		// The centre is set from the transformed courtyard below.
 		component.Body = &Body{WidthNM: part.Footprint.BodyWidth, HeightNM: part.Footprint.BodyHeight}
 	}
 	firstPad := map[string]string{}
@@ -666,6 +667,9 @@ func instantiateLibraryPart(def *Definition, part *LibraryPart, placement Librar
 			point.XNM = -point.XNM
 		}
 		courtyard[i] = point
+	}
+	if component.Body != nil {
+		component.Body.OffsetXNM, component.Body.OffsetYNM = pointsCentre(courtyard)
 	}
 	sum := libraryContractHash(part.Footprint.LibraryID, component.Pads, courtyard)
 	compatible := []string{}
@@ -829,4 +833,20 @@ func applyLibraryOperation(def *Definition, op Operation) error {
 	}
 	def.Components = append(def.Components, component)
 	return nil
+}
+
+// builtinPartAcceptsMPN lets a part frozen by an older library revision take
+// an MPN the current built-in part lists for the same footprint (orderable
+// variants added later, such as the SHTC3 tape-and-reel numbers).
+func builtinPartAcceptsMPN(partID, footprintID, mpn string) bool {
+	part, ok := builtinLibraryPart(partID)
+	if !ok || part.Footprint.LibraryID != footprintID {
+		return false
+	}
+	for _, candidate := range append([]string{part.MPN}, part.AltMPNs...) {
+		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(mpn)) {
+			return true
+		}
+	}
+	return false
 }

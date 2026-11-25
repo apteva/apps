@@ -409,12 +409,7 @@ func validateKeepout(def *Definition, keepout Keepout, pads []*placedPad, checks
 			if component.ID == keepout.OwnerID {
 				continue
 			}
-			body := component.Body
-			if body == nil || body.WidthNM <= 0 || body.HeightNM <= 0 {
-				fallback := inferredBody(component)
-				body = &fallback
-			}
-			if polygonsIntersect(bodyPolygon(component, *body), keepout.Polygon) {
+			if polygonsIntersect(bodyPolygon(component, componentBody(component)), keepout.Polygon) {
 				add("KEEPOUT_COMPONENT", "error", "Component body enters a keepout", keepout.ID, component.ID)
 			}
 		}
