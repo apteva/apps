@@ -21,10 +21,24 @@ export async function buildAppCardAssets(outdir:string) {
     {entry:join(import.meta.dir,"app-card-host.tsx"),name:"host.js",external:["react","react/jsx-runtime","@apteva/ui-kit"]},
   ];
   const files=new Map<string,Blob>();
+  // Serve the built panel bundles byte for byte, as the dashboard loads them.
+  // Re-bundling minified output lets Bun rename a parameter onto a top-level
+  // name it shadows (seen with Bun 1.3.13), which tests the wrong code.
+  const uiDir=join(import.meta.dir,"../../ui");
+  const panels:import("bun").BunPlugin={name:"built-panels",setup(build){
+    build.onResolve({filter:/\/ui\/[A-Za-z]+\.mjs$/},args=>{
+      const file=join(dirname(args.importer),args.path);
+      if(dirname(file)!==uiDir)return undefined;
+      const name=file.slice(uiDir.length+1);
+      files.set(`/__card-assets/ui/${name}`,Bun.file(file));
+      return {path:args.path,external:true};
+    });
+  }};
   for(const {entry,name,external} of entries){
-    const result=await Bun.build({entrypoints:[entry],target:"browser",format:"esm",external,define:{"process.env.NODE_ENV":'"production"'}});
+    const result=await Bun.build({entrypoints:[entry],target:"browser",format:"esm",external,plugins:[panels],define:{"process.env.NODE_ENV":'"production"'}});
     if(!result.success)throw new AggregateError(result.logs,"App card test host build failed");
-    files.set(`/__card-assets/${name}`,result.outputs[0]);
+    // Bun keeps the original specifier for externals: point it at the served copy.
+    files.set(`/__card-assets/${name}`,new Blob([(await result.outputs[0].text()).replace(/(["'])(?:\.\.\/)+ui\/([A-Za-z]+\.mjs)\1/g,'$1./ui/$2$1')],{type:"text/javascript"}));
   }
   return files;
 }
