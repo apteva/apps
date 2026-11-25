@@ -80,6 +80,7 @@ export const ENDPOINT_HEIGHT = 40;
 export const ENDPOINT_GAP = 18;
 export type MapLayout = {
   process: MapProcess;
+  collapsed?: boolean;
   x: number;
   y: number;
   width: number;
@@ -174,9 +175,29 @@ function shape(
 // very thin horizontal strip and forces long SOPs to be shrunk by fitView. The
 // area target below lets compact flows stay horizontal while turning longer
 // flows vertical when that gives the project map a better overall shape.
+export const CARD_WIDTH = 340;
+export const CARD_HEIGHT = 178;
+// A collapsed SOP is one card: header plus a one-line step strip.
+function card(process: MapProcess): MapLayout {
+  return {
+    process,
+    collapsed: true,
+    x: 0,
+    y: 0,
+    width: CARD_WIDTH,
+    height: CARD_HEIGHT,
+    vertical: false,
+    stepHeight: 0,
+    runWidth: 0,
+    runPositions: {},
+    positions: {},
+    endpointPositions: { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
+  };
+}
 export function layoutProject(
   processes: MapProcess[],
   runs: Record<string, MapRun[]>,
+  expanded?: (process: MapProcess) => boolean,
 ): MapLayout[] {
   if (!processes.length) return [];
   const choices = [...processes]
@@ -185,7 +206,11 @@ export function layoutProject(
       a.name.localeCompare(b.name) ||
       a.id.localeCompare(b.id),
     )
-    .map((p) => [shape(p, runs[p.id] || [], false), shape(p, runs[p.id] || [], true)]);
+    .map((p) =>
+      expanded && !expanded(p)
+        ? [card(p), { ...card(p), vertical: true }]
+        : [shape(p, runs[p.id] || [], false), shape(p, runs[p.id] || [], true)],
+    );
   const area = choices.reduce(
     (sum, pair) => sum + Math.min(...pair.map((shape) => shape.width * shape.height)),
     0,

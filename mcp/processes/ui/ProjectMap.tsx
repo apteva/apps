@@ -48,6 +48,8 @@ type BoundaryData = {
   runs: MapRun[];
   selected: boolean;
   select: () => void;
+  collapsed: boolean;
+  toggle: () => void;
 };
 type StepData = {
   step: Step;
@@ -107,6 +109,26 @@ function Boundary({ data }: NodeProps<Node<BoundaryData>>) {
           {triggers.length > 2 && <span>+{triggers.length - 2} more</span>}
         </span>
       </button>
+      {data.process.steps?.length ? (
+        <button
+          className="pm-toggle nodrag"
+          onClick={data.toggle}
+          aria-expanded={!data.collapsed}
+        >
+          {data.collapsed ? "Show steps" : "Hide steps"}
+        </button>
+      ) : null}
+      {data.collapsed && data.process.steps?.length ? (
+        <button className="pm-strip nodrag" onClick={data.toggle} aria-label={`Show the ${data.process.steps.length} steps of ${data.process.name}`}>
+          {data.process.steps.map((step) => {
+            const state = data.runs
+              .filter(liveRun)
+              .flatMap((run) => run.steps || [])
+              .find((s) => s.key === step.key)?.state;
+            return <span key={step.key} data-state={state || "idle"} title={step.name} />;
+          })}
+        </button>
+      ) : null}
       {!data.process.steps?.length && (
         <p className="pm-no-steps">
           No structured steps · select SOP for execution details
@@ -215,6 +237,10 @@ const nodeTypes = {
   sopRun: RunCard,
   sopEndpoint: MapEndpoint,
 };
+// A SOP that some agent is actively assigned to follow (paused or archived
+// assignments don't count, nor do assignments on a SOP that is not active).
+const hasActiveAssignment = (p: MapProcess) =>
+  p.status === "active" && (p.assignments || []).some((x) => x.status === "active");
 function apiURL(props: Props, path: string) {
   const q = new URLSearchParams();
   if (props.projectId) q.set("project_id", props.projectId);
@@ -233,6 +259,7 @@ export default function ProjectMap(props: Props) {
     [runs, setRuns] = useState<Record<string, MapRun[]>>({});
   const [search, setSearch] = useState(""),
     [status, setStatus] = useState(""),
+    [assignedOnly, setAssignedOnly] = useState(true),
     [category, setCategory] = useState(""),
     [liveOnly, setLiveOnly] = useState(false);
   const [loaded, setLoaded] = useState(false),
@@ -240,6 +267,9 @@ export default function ProjectMap(props: Props) {
     [error, setError] = useState(""),
     [refresh, setRefresh] = useState(0);
   const [selection, setSelection] = useState<Selection>();
+  // SOPs show as compact cards; a SOP with a live run starts expanded. Clicking
+  // "Show steps"/"Hide steps" overrides that per SOP.
+  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
   const flow = useRef<ReactFlowInstance | null>(null);
   const scope = `${props.projectId}:${props.installId}:${props.appName}`;
   const previousScope = useRef(scope);
@@ -339,15 +369,18 @@ export default function ProjectMap(props: Props) {
               .toLowerCase()
               .includes(search.toLowerCase())) &&
           (!status || p.status === status) &&
+          (!assignedOnly || hasActiveAssignment(p) || (runs[p.id] || []).some(liveRun)) &&
           (!category || (category === "uncategorized" ? !p.category : p.category === category)) &&
           (!liveOnly || (runs[p.id] || []).some(liveRun)),
       ),
-    [processes, runs, search, status, category, liveOnly],
+    [processes, runs, search, status, category, liveOnly, assignedOnly],
   );
   const graph = useMemo(() => {
     const nodes: Node[] = [],
       edges: Edge[] = [];
-    for (const box of layoutProject(visible, runs)) {
+    const isExpanded = (p: MapProcess) =>
+      expandedOverrides[p.id] ?? (runs[p.id] || []).some(liveRun);
+    for (const box of layoutProject(visible, runs, isExpanded)) {
       const p = box.process,
         rs = runs[p.id] || [],
         overlays = overlayRuns(p, rs),
@@ -368,9 +401,16 @@ export default function ProjectMap(props: Props) {
             !selection?.stepKey &&
             !selection?.runId,
           select: () => select(),
+          collapsed: !!box.collapsed,
+          toggle: () => {
+            setExpandedOverrides((o) => ({ ...o, [p.id]: !!box.collapsed }));
+            if (box.collapsed)
+              setTimeout(() => flow.current?.fitView({ nodes: [{ id: parentId }], padding: 0.12, duration: 300 }), 60);
+          },
         },
         selectable: false,
       });
+      if (box.collapsed) continue;
       const steps = p.steps || [];
       if (steps.length) {
         const byKey = new Set(steps.map((step) => step.key));
@@ -522,7 +562,7 @@ export default function ProjectMap(props: Props) {
         });
     }
     return { nodes, edges };
-  }, [visible, runs, props.agents, selection]);
+  }, [visible, runs, props.agents, selection, expandedOverrides]);
   const selectedProcess = processes.find((p) => p.id === selection?.processId),
     selectedRun =
       selectedProcess &&
@@ -555,13 +595,23 @@ export default function ProjectMap(props: Props) {
           {Array.from(new Set(processes.map((p) => p.category).filter(Boolean) as string[])).sort().map((x) => <option key={x}>{x}</option>)}
         </select>
         <select
+          aria-label="Filter SOPs by assignment"
+          value={assignedOnly ? "assigned" : ""}
+          onChange={(e) => setAssignedOnly(e.target.value === "assigned")}
+        >
+          <option value="assigned">With active assignments ({processes.filter(hasActiveAssignment).length})</option>
+          <option value="">All SOPs ({processes.length})</option>
+        </select>
+        <select
           aria-label="Filter SOP status"
           value={status}
           onChange={(e) => setStatus(e.target.value)}
         >
           <option value="">All statuses</option>
-          {["draft", "active", "paused", "archived"].map((s) => (
-            <option key={s}>{s}</option>
+          {["active", "draft", "paused", "archived"].map((s) => (
+            <option key={s} value={s}>
+              {s[0].toUpperCase() + s.slice(1)} ({processes.filter((p) => p.status === s).length})
+            </option>
           ))}
         </select>
         <label>
@@ -574,6 +624,19 @@ export default function ProjectMap(props: Props) {
         </label>
         <button onClick={() => setRefresh((r) => r + 1)} disabled={busy}>
           {busy ? "Refreshing…" : "Refresh map"}
+        </button>
+        <button
+          onClick={() => {
+            const anyCollapsed = visible.some(
+              (p) => p.steps?.length && !(expandedOverrides[p.id] ?? (runs[p.id] || []).some(liveRun)),
+            );
+            setExpandedOverrides(Object.fromEntries(visible.map((p) => [p.id, anyCollapsed])));
+            setTimeout(() => flow.current?.fitView({ padding: 0.035, duration: 250 }), 60);
+          }}
+        >
+          {visible.some((p) => p.steps?.length && !(expandedOverrides[p.id] ?? (runs[p.id] || []).some(liveRun)))
+            ? "Show all steps"
+            : "Hide all steps"}
         </button>
         <button
           onClick={() =>
@@ -594,7 +657,7 @@ export default function ProjectMap(props: Props) {
           : !loaded
             ? "Loading SOP map…"
             : `${visible.length} of ${processes.length} SOPs · ${Object.values(runs).flat().filter(liveRun).length} live executions${error ? " · execution data incomplete" : ""}`}
-        <span>Every step · select a SOP or step for details</span>
+        <span>Select a SOP for details · Show steps to expand it</span>
       </p>
       <div className="pm-workspace">
         <div className="pm-canvas">
@@ -750,4 +813,13 @@ const styles = `
 .pm button.pm-run-card{height:100%;width:100%;display:flex;flex-direction:column;gap:10px;padding:12px 14px;text-align:left;font:inherit;color:var(--pc-text);background:var(--pf-surface);border:1px solid var(--pf-border);border-left:3px solid;border-radius:9px;cursor:pointer}
 .pm-run-card-meta{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:10px;color:var(--pc-muted);width:100%}.pm-run-card strong{font-size:12px;line-height:18px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-run-current{font-size:11px;line-height:16px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--pc-muted)}
 .pm .pm-run-card.is-selected{outline:2px solid var(--pc-accent);outline-offset:3px}
+.pm .pm-boundary{position:relative}
+.pm button.pm-toggle{position:absolute;top:10px;right:12px;font-size:11px;padding:4px 9px;border-radius:6px;z-index:3}
+.pm button.pm-boundary-head{padding-right:110px}
+.pm button.pm-strip{display:flex;gap:3px;width:calc(100% - 44px);height:8px;margin:16px 22px 0;padding:0;border:0;background:none;cursor:pointer}
+.pm .pm-strip span{flex:1;border-radius:3px;background:var(--pf-divider)}
+.pm .pm-strip span[data-state=completed]{background:#43c878}
+.pm .pm-strip span[data-state=running],.pm .pm-strip span[data-state=ready]{background:#8eabff}
+.pm .pm-strip span[data-state=blocked],.pm .pm-strip span[data-state=failed]{background:#e3b86d}
+.pm .pm-strip span[data-state=waiting],.pm .pm-strip span[data-state=scheduled]{background:#c5a1ff}
 `;

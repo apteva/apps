@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Simpler project map (0.24.3)
+
+Map opens on SOPs with active assignments, as compact cards with steps on
+demand. See `docs-release-0.24.3.md`.
+
 ## Readable schedules (0.24.2)
 
 Schedules show as "Every Monday at 09:00" with a clock icon and next run.

@@ -127,3 +127,30 @@ test("every live run appears exactly once in the overlay or supplemental set", (
       expect(position.y).toBeGreaterThan(s.y + box.stepHeight);
   }
 });
+test("collapsed SOPs become fixed-size cards and only expanded ones get step positions", () => {
+  const processes: MapProcess[] = Array.from({ length: 6 }, (_, i) => ({
+    id: `p${i}`,
+    name: `SOP ${i}`,
+    status: "active",
+    version: 1,
+    steps: Array.from({ length: 5 }, (_, j) => step(`s${j}`, j ? [`s${j - 1}`] : [])),
+  }));
+  const boxes = layoutProject(processes, {}, (p) => p.id === "p2");
+  expect(boxes).toHaveLength(6);
+  for (const box of boxes) {
+    if (box.process.id === "p2") {
+      expect(box.collapsed).toBeFalsy();
+      expect(Object.keys(box.positions)).toHaveLength(5);
+    } else {
+      expect(box.collapsed).toBe(true);
+      expect(Object.keys(box.positions)).toHaveLength(0);
+      expect([box.width, box.height]).toEqual([340, 178]);
+    }
+    for (const other of boxes)
+      if (other !== box)
+        expect(
+          box.x + box.width <= other.x || other.x + other.width <= box.x ||
+            box.y + box.height <= other.y || other.y + other.height <= box.y,
+        ).toBe(true);
+  }
+});
