@@ -150,7 +150,9 @@ func conversationThreadDirective(conv *Conversation) string {
 		" Never leave a turn without a timing decision." +
 		" Keep main informed with send id=main: when you finish a task or reach a decision here, send one or two sentences with the outcome and conversation_id=" + conv.ID + "." +
 		" Hand standing instructions that affect the agent beyond this conversation to main the same way, then confirm here." +
-		" Keep recurring work that belongs to this conversation here and run it with your own wakes. Do not report routine exchanges." +
+		" Standing duties in the agent instructions above (schedules, recurring reports, inbox checks, monitoring) belong to main, which already runs them." +
+		" Do not start, repeat or take over any of them here, even when this conversation is where their results are posted, and do not promise them in your replies." +
+		" Start recurring work here only when a person asks for it in this conversation; keep that work here and run it with your own wakes. Do not report routine exchanges." +
 		" If you receive a [conversation idle check] and still have ongoing timed work here, call conversations_keep_thread with the reason; otherwise do nothing." +
 		" A [chat soft break] is an advisory user event, not proof that execution was canceled:" +
 		" reconsider the latest intent at your next decision boundary, safely finish anything that cannot be abandoned, and decide whether to pause, redirect, or ask for clarification." +

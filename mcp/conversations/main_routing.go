@@ -8,6 +8,12 @@ package main
 // chat-<id> thread. A unique index allows one such binding per agent; every
 // other conversation keeps its own chat-* thread.
 //
+// Conversations the agent created itself (origin "agent", through
+// conversations_create, which only main and unbound workers may call) qualify
+// too: main posted there for its own reports, so main is the thread that knows
+// what the person is replying to. A chat-* thread would read the same standing
+// instructions without main's history and could take over main's jobs.
+//
 // The one exception is decided when the conversation is created: a lead agent
 // without a project (the Apteva Helper) has a main thread that is not a chat
 // thread, so the create handler stores main_routing=0 and its chats always get
@@ -28,8 +34,8 @@ import (
 const mainThreadID = "main"
 
 // mainRoutingEligibleTx reports whether a conversation may be answered by the
-// agent's main thread: a one-agent operator chat started in the web UI, with no
-// transport binding and no external participant, whose lead was not excluded
+// agent's main thread: a one-agent operator chat started in the web UI or
+// created by the agent itself, with no transport binding and no external participant, whose lead was not excluded
 // at creation (main_routing=0).
 func mainRoutingEligibleTx(tx *sql.Tx, conversationID string, agentID int64) (bool, error) {
 	var lead int64
@@ -40,7 +46,7 @@ func mainRoutingEligibleTx(tx *sql.Tx, conversationID string, agentID int64) (bo
 	if err != nil {
 		return false, err
 	}
-	if mainRouting == 0 || lead != agentID || kind != "direct" || (origin != "web" && origin != "") || (audience != "operator" && audience != "") {
+	if mainRouting == 0 || lead != agentID || kind != "direct" || (origin != "web" && origin != "" && origin != "agent") || (audience != "operator" && audience != "") {
 		return false, nil
 	}
 	var bridged int
@@ -104,7 +110,19 @@ func mainReplyContract(conv *Conversation) string {
 		" covers several items. Make the reads, lookups and approved writes directly, in parallel when they are"+
 		" independent; do not spawn a thread for them. Spawn only for work that must continue after your reply"+
 		" (waiting, polling, retries or a schedule) or that is too large to finish in this turn.",
-		conv.Title, conv.ID, conv.ID)
+		conv.Title, conv.ID, conv.ID) + createdByAgentNote(conv)
+}
+
+// createdByAgentNote tells main that the person is replying in a conversation
+// main created for its own output, so the reply is about that output and the
+// jobs behind it stay where they already run.
+func createdByAgentNote(conv *Conversation) string {
+	if conv.Origin != "agent" {
+		return ""
+	}
+	return " You created this conversation yourself to post your own reports and updates; the person is now replying to them." +
+		" Answer from what you already know about that work. Your standing jobs keep running from main as before:" +
+		" do not start, copy or move them because of this reply unless the person asks for a change."
 }
 
 // withMainReplyContract appends the reply contract to the first text part of

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.33.0 — 2026-11-25
+
+- A conversation an agent created for its own reports is now answered by the agent's main thread when someone replies there. Before, only chats started in the dashboard could go to main, so a reply in an agent-created conversation got its own conversation thread. On prod, main created "Email triage" for its daily inbox summaries. A "Thanks" there gave the conversation its own thread, which read the agent's instructions, started its own hourly inbox job and sent a second daily summary a minute after main's. Main now gets the reply with a note that it created the conversation and that its standing jobs keep running where they are. Main still answers one conversation per agent; existing bindings are not moved.
+- Conversation threads no longer take over the agent's standing duties. Their instructions used to say to keep recurring work that belongs to the conversation in the thread. They now say that schedules, recurring reports, inbox checks and monitoring from the agent's instructions belong to main, and that a thread starts recurring work only when a person asks for it in that conversation. Running threads pick up the new instructions on their next message.
+
 ## 0.32.0 — 2026-11-24
 
 - Show when an agent is compacting its conversation memory. When a thread's context gets too long, Core summarizes older parts before the next model call. Emergency recovery after an over-budget request can take a minute or more with no tool calls and nothing to stream, so the chat showed a bare "Thinking…" and looked stuck (79 s on prod). The chat now shows "Compacting conversation memory…" with a running timer while it happens, and keeps a quiet "Conversation memory compacted · 79.0s" line afterwards. Hovering it explains what happened and shows the context size before and after ("77k → 24k tokens"). If compaction fails with the turn, the line says "Couldn't compact conversation memory".

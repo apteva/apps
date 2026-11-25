@@ -86,9 +86,8 @@ func TestMainRoutingSkipsPublicRoomAndBridgedConversations(t *testing.T) {
 	public := mkAgentConversation(t, app, CreateConversationInput{Title: "Visitors", Audience: "public"})
 	room := mkAgentConversation(t, app, CreateConversationInput{Title: "Room", AgentIDs: []int64{routedAgent, 78}})
 	external := mkAgentConversation(t, app, CreateConversationInput{Title: "External", ExternalIdentity: "telegram:5", ExternalName: "Visitor"})
-	agentTopic := mkAgentConversation(t, app, CreateConversationInput{Title: "Topic", Origin: "agent"})
 
-	for _, conv := range []*Conversation{public, room, external, agentTopic} {
+	for _, conv := range []*Conversation{public, room, external} {
 		postUserMessage(t, app, conv, "hi")
 		if got := bindingThread(t, app, conv, routedAgent); got != conversationThreadID(conv.ID) {
 			t.Fatalf("%s routed to %q, want its chat thread", conv.Title, got)
@@ -686,5 +685,89 @@ func TestMainReplyContractKeepsRequestedWorkOnMain(t *testing.T) {
 		if !strings.Contains(contract, fragment) {
 			t.Errorf("main reply contract missing %q:\n%s", fragment, contract)
 		}
+	}
+}
+
+// Prod 2026-11-24 (Messaging Agent): main created "Email triage" for its
+// daily summaries. The person's first reply ("Thanks") gave it a chat thread,
+// which read the agent's standing instructions and started its own hourly
+// inbox job, so two summaries went out at 17:00. A conversation the agent
+// created must be answered by main, which knows the job already runs.
+func TestAgentCreatedConversationRoutesToMain(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	created, err := app.toolCreate(callerCtx(routedAgent, mainThreadID), ctx, map[string]any{"title": "Email triage"})
+	if err != nil {
+		t.Fatalf("toolCreate: %v", err)
+	}
+	id := created.(map[string]any)["conversation_id"].(string)
+	conv, err := app.store.GetConversation(id)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if conv.Origin != "agent" {
+		t.Fatalf("origin=%q, want agent", conv.Origin)
+	}
+
+	postUserMessage(t, app, conv, "Thanks")
+	if got := bindingThread(t, app, conv, routedAgent); got != mainThreadID {
+		t.Fatalf("agent-created conversation thread=%q, want main", got)
+	}
+	if len(platform.ensures) != 0 || len(platform.spawns) != 0 {
+		t.Fatalf("a chat thread was created: ensures=%d spawns=%d", len(platform.ensures), len(platform.spawns))
+	}
+	if len(platform.trackedEvents) != 1 || platform.trackedEvents[0].ThreadID != mainThreadID {
+		t.Fatalf("reply did not reach main: %+v", platform.trackedEvents)
+	}
+	text := fmt.Sprint(platform.trackedEvents[0].Message)
+	for _, want := range []string{"Thanks", "conversation_id=" + conv.ID, "You created this conversation yourself", "standing jobs keep running from main"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("main event missing %q: %q", want, text)
+		}
+	}
+
+	// Main answers one conversation per agent. A second agent-created
+	// conversation falls back to a chat thread, whose directive keeps it off
+	// main's standing duties.
+	again, err := app.toolCreate(callerCtx(routedAgent, mainThreadID), ctx, map[string]any{"title": "Weekly digest"})
+	if err != nil {
+		t.Fatalf("toolCreate: %v", err)
+	}
+	second, _ := app.store.GetConversation(again.(map[string]any)["conversation_id"].(string))
+	postUserMessage(t, app, second, "ok")
+	if got := bindingThread(t, app, second, routedAgent); got != conversationThreadID(second.ID) {
+		t.Fatalf("second agent-created conversation thread=%q, want its chat thread", got)
+	}
+	if len(platform.ensures) != 1 || !strings.Contains(platform.ensures[0].DirectiveSuffix, "belong to main, which already runs them") {
+		t.Fatalf("chat thread ensure missing standing-duty rule: %+v", platform.ensures)
+	}
+}
+
+// The web-started chat's contract does not claim main created it.
+func TestMainReplyContractNotesOnlyAgentCreatedConversations(t *testing.T) {
+	if strings.Contains(mainReplyContract(&Conversation{ID: "c", Title: "Chat", Origin: "web"}), "You created this conversation") {
+		t.Fatal("web conversation contract claims the agent created it")
+	}
+	if !strings.Contains(mainReplyContract(&Conversation{ID: "c", Title: "Report", Origin: "agent"}), "You created this conversation") {
+		t.Fatal("agent-created conversation contract lacks the note")
+	}
+}
+
+// A chat thread reads the agent's full instructions. It must not adopt the
+// schedules and recurring reports in them; it takes on recurring work only
+// when someone asks for it in the conversation.
+func TestChatThreadDirectiveLeavesStandingDutiesToMain(t *testing.T) {
+	directive := conversationThreadDirective(&Conversation{ID: "conv-1", Title: "Email triage", Audience: "operator", Origin: "agent"})
+	for _, want := range []string{
+		"belong to main, which already runs them",
+		"Do not start, repeat or take over any of them here",
+		"Start recurring work here only when a person asks for it in this conversation",
+	} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("directive missing %q", want)
+		}
+	}
+	if strings.Contains(directive, "Keep recurring work that belongs to this conversation here") {
+		t.Error("directive still tells the thread to keep recurring work that belongs to the conversation")
 	}
 }

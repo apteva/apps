@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.32.0
+version: 0.33.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, questions, and forms). Inbox items are messages — an
@@ -25,7 +25,8 @@ description: |
   with scoped loading, readable fallback states and retry. Keep app cards visible
   in a resizable side panel or an in-page floating view. Repeated resource
   references share one mounted view while the conversation continues.
-  An agent's first operator chat is answered by its main thread; other
+  An agent's first operator chat, or a conversation it created for its own
+  reports, is answered by its main thread; other
   conversations keep their own self-pacing threads, report outcomes to main,
   stop when deleted, and sleep after a quiet period until the next message.
 author: Apteva
@@ -335,7 +336,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.32.0, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.33.0, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

@@ -152,7 +152,10 @@ directly: it sends the result to the originating conversation thread, which comm
 
 ### The conversation main answers
 
-An agent's first operator chat is answered by main itself. Its messages arrive in
+An agent's first operator chat is answered by main itself. That includes a
+conversation main created with `conversations_create` for its own reports: when
+the person replies there, main answers, because main knows what it posted and
+which jobs already run. Its messages arrive in
 main with the conversation id and a short reply rule; answer there with
 `conversations_send` using the normal acknowledgement/work/final sequence.
 `conversations_list` returns it as `main_conversation_id`. Use it for reports,
@@ -185,8 +188,12 @@ A thread that leaves a turn undecided falls back to a periodic wake.
 Keep main informed with Core `send` to `main`: one or two sentences with the
 outcome and conversation_id when a task finishes or a decision is reached here.
 Hand standing instructions that affect the agent beyond this conversation to
-main the same way. Recurring work that belongs to the conversation stays in its
-thread and runs on the thread's own wakes. Routine exchanges are not reported.
+main the same way. The agent's standing duties (schedules, recurring reports,
+inbox checks, monitoring) belong to main, which already runs them: a
+conversation thread never starts, repeats or takes them over, even when the
+conversation is where their results are posted. A thread starts recurring work
+only when a person asks for it in that conversation, and then runs it on its own
+wakes. Routine exchanges are not reported.
 
 After a long quiet period a conversation thread receives a
 `[conversation idle check]`. If it still has ongoing timed work, call
