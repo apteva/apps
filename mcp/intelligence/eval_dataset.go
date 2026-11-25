@@ -304,7 +304,7 @@ func fetchKalshiSettled(sc sourceClient, p datasetParams, since, now time.Time, 
 		}
 		cursor = resp.Cursor
 	}
-	perEvent := map[string]int{}
+	perEvent, perSeries := map[string]int{}, map[string]int{}
 	out := []evalItem{}
 	for _, m := range cands {
 		if len(out) >= p.MaxPerVenue {
@@ -326,7 +326,7 @@ func fetchKalshiSettled(sc sourceClient, p datasetParams, since, now time.Time, 
 		if settled == nil {
 			settled = closed
 		}
-		it := evalItem{Venue: "kalshi", ExternalID: m.Ticker, Cluster: "kalshi:" + m.EventTicker, Text: kalshiText(m.Title, m.YesSubTitle),
+		it := evalItem{Venue: "kalshi", ExternalID: m.Ticker, Cluster: "kalshi:" + kalshiSeries(m.EventTicker), Text: kalshiText(m.Title, m.YesSubTitle),
 			URL: "https://kalshi.com/markets/" + strings.ToLower(m.EventTicker), OpenedAt: *opened, ClosesAt: *closed, ResolvedAt: *settled}
 		if m.Result == "yes" {
 			it.Outcome = 1
@@ -337,6 +337,10 @@ func fetchKalshiSettled(sc sourceClient, p datasetParams, since, now time.Time, 
 		}
 		if perEvent[m.EventTicker] >= p.MaxPerEvent {
 			skipped.add("kalshi: event already represented")
+			continue
+		}
+		if perSeries[kalshiSeries(m.EventTicker)] >= kalshiMaxPerSeries {
+			skipped.add("kalshi: series already represented")
 			continue
 		}
 		prices, err := kalshiPrices(sc, m.Ticker, it.OpenedAt, it.end())
@@ -350,9 +354,24 @@ func fetchKalshiSettled(sc sourceClient, p datasetParams, since, now time.Time, 
 		}
 		it.Prices = prices
 		perEvent[m.EventTicker]++
+		perSeries[kalshiSeries(m.EventTicker)]++
 		out = append(out, it)
 	}
 	return out, nil
+}
+
+// kalshiMaxPerSeries keeps a few recurring daily series from filling the
+// sample.
+const kalshiMaxPerSeries = 5
+
+// kalshiSeries is the series part of an event ticker (KXHIGHNY-26NOV24 →
+// KXHIGHNY). Daily and weekly markets in one series move together, so they
+// share a bootstrap cluster.
+func kalshiSeries(eventTicker string) string {
+	if i := strings.Index(eventTicker, "-"); i > 0 {
+		return eventTicker[:i]
+	}
+	return eventTicker
 }
 
 func kalshiText(title, sub string) string {

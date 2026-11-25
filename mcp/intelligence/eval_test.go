@@ -260,3 +260,12 @@ func TestAIPredictionsRespectKnowledgeAndAvailability(t *testing.T) {
 		t.Fatalf("AI summary must encode: %v", err)
 	}
 }
+
+func TestKalshiSeriesClustersRecurringMarkets(t *testing.T) {
+	if kalshiSeries("KXHIGHNY-26NOV24") != kalshiSeries("KXHIGHNY-26NOV25") {
+		t.Fatal("daily markets of one series must share a cluster")
+	}
+	if kalshiSeries("PLAIN") != "PLAIN" {
+		t.Fatal("ticker without a date part is its own series")
+	}
+}
