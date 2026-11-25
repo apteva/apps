@@ -105,15 +105,17 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		return nil
 	}
 	var d struct {
-		Name       string   `json:"name"`
-		Tool       string   `json:"tool"`
-		ID         string   `json:"id"`
-		CallID     string   `json:"call_id"`
-		ToolCallID string   `json:"tool_call_id"`
-		Reason     string   `json:"reason"`
-		DurationMs *float64 `json:"duration_ms"`
-		Success    *bool    `json:"success"`
-		IsError    bool     `json:"is_error"`
+		Name       string         `json:"name"`
+		Tool       string         `json:"tool"`
+		ID         string         `json:"id"`
+		CallID     string         `json:"call_id"`
+		ToolCallID string         `json:"tool_call_id"`
+		Reason     string         `json:"reason"`
+		DurationMs *float64       `json:"duration_ms"`
+		Success    *bool          `json:"success"`
+		IsError    bool           `json:"is_error"`
+		ToolSpanID string         `json:"tool_span_id"`
+		Args       map[string]any `json:"args"`
 	}
 	if err := json.Unmarshal([]byte(data), &d); err != nil {
 		return nil
@@ -132,7 +134,13 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 	var item ToolActivity
 	if event == "tool.call" {
 		// Replayed starts reuse the row; provider call IDs may be reused in later turns.
-		_, err = tx.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,reason,started_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, chat, agent, thread, call, truncateActivity(name, 256), truncateActivity(d.Reason, 500), at)
+		span, spawnThread := "", ""
+		if isSpawnTool(name) {
+			span = truncateActivity(d.ToolSpanID, 256)
+			spawnThread, _ = d.Args["id"].(string)
+			spawnThread = truncateActivity(spawnThread, 256)
+		}
+		_, err = tx.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,reason,started_at,tool_span_id,spawn_thread_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, chat, agent, thread, call, truncateActivity(name, 256), truncateActivity(d.Reason, 500), at, span, spawnThread)
 		if err != nil {
 			return err
 		}
@@ -166,6 +174,9 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		return err
 	}
 	a.hub.publishStream(StreamFrame{Type: "stream", ConversationID: chat, AgentID: agent, ThreadID: thread, CallID: call, CreatedAt: ts, Activity: &item})
+	if event == "tool.call" && isSpawnTool(item.Name) {
+		a.noteSpawn(agent, chat)
+	}
 	return nil
 }
 func truncateActivity(s string, n int) string {

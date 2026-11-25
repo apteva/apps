@@ -21,6 +21,8 @@ interface ToolActivityProps {
   showCompletion?: boolean;
   showDuration?: boolean;
   waitingForModel?: boolean;
+  /** Replaces "Thinking…" while the response waits, such as on helpers. */
+  waitingLabel?: string;
 }
 
 type VisualState = "preparing" | "running" | "done" | "failed" | "interrupted";
@@ -30,7 +32,7 @@ function visualState(tool: ToolActivity): VisualState {
   return tool.success === false ? "failed" : "done";
 }
 
-function durationLabel(milliseconds?: number): string {
+export function durationLabel(milliseconds?: number): string {
   if (milliseconds === undefined || milliseconds < 0) return "";
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)}s` : `${milliseconds}ms`;
 }
@@ -118,6 +120,7 @@ export function ChatToolActivity({
   showCompletion = false,
   showDuration = false,
   waitingForModel = false,
+  waitingLabel,
 }: ToolActivityProps) {
   const { t } = useTranslation();
   // Compaction always shows how long it took: that wait is why the row exists.
@@ -157,7 +160,7 @@ export function ChatToolActivity({
   const allSucceeded = tools.every((tool) => visualState(tool) === "done");
   const remainingCount = tools.length - 1;
   const resolvedDetailsId = detailsId || `chat-tool-details-${tools[0]!.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  const accessibleSummary = `${title}, ${focusReason}, ${status.text}${waitingForModel ? `, ${t("chat.thinkingLabel")}` : ""}`;
+  const accessibleSummary = `${title}, ${focusReason}, ${status.text}${waitingForModel ? `, ${waitingLabel || t("chat.thinkingLabel")}` : ""}`;
 
   return (
     <section
@@ -183,9 +186,9 @@ export function ChatToolActivity({
         <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
-            {waitingForModel && !copyIsActive ? <span role="status" aria-live="polite" aria-label={t("chat.thinkingLabel")}
+            {waitingForModel && !copyIsActive ? <span role="status" aria-live="polite" aria-label={waitingLabel || t("chat.thinkingLabel")}
               className="chat-tool-copy chat-tool-copy-continuing truncate text-[13px] font-medium leading-5">
-              {t("chat.thinking")}
+              {waitingLabel || t("chat.thinking")}
             </span> : <span
               className={`chat-tool-copy truncate text-[13px] font-medium leading-5 ${copyIsActive ? "chat-tool-copy-running" : ""}`}
               title={focusTitle}
@@ -317,14 +320,15 @@ function ToolSourceIcon({
   tool: ToolActivity;
   visual: ToolVisual;
 }) {
-  const canRenderImage = !!visual.iconUrl && /^(https?:|data:|\/)/.test(visual.iconUrl);
   const state = visualState(tool);
-  const stateClass = state === "running" || state === "preparing"
-    ? "chat-tool-icon-running"
-    : "";
+  return <ToolVisualIcon visual={visual} running={state === "running" || state === "preparing"} />;
+}
+
+export function ToolVisualIcon({ visual, running = false }: { visual: ToolVisual; running?: boolean }) {
+  const canRenderImage = !!visual.iconUrl && /^(https?:|data:|\/)/.test(visual.iconUrl);
   return (
     <span
-      className={`chat-tool-icon relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-hover text-text-muted ${stateClass}`}
+      className={`chat-tool-icon relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-hover text-text-muted ${running ? "chat-tool-icon-running" : ""}`}
       title={visual.label}
       aria-hidden="true"
     >
@@ -367,7 +371,7 @@ function ToolGlyphIcon({ glyph }: { glyph: ToolGlyph }) {
   return <svg {...common}><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg>;
 }
 
-function ChevronIcon({ expanded }: { expanded: boolean }) {
+export function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
     <svg viewBox="0 0 20 20" className={`h-4 w-4 shrink-0 text-text-muted transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
       <path d="m5 7.5 5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
@@ -375,10 +379,10 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   );
 }
 
-function CheckIcon() {
+export function CheckIcon() {
   return <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8.5 3 3 7-7" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
-function FailureIcon() {
+export function FailureIcon() {
   return <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" strokeLinecap="round" /></svg>;
 }

@@ -50,6 +50,9 @@ type App struct {
 	compactions  map[string]*openCompaction
 	// telemetryStop cancels the bridge subscription on unmount.
 	telemetryStop func()
+	// workers watches agents' spawned threads while any is linked to a
+	// conversation and unfinished.
+	workers *workerWatches
 }
 
 func main() { sdk.Run(&App{asyncDelivery: true}) }
@@ -92,6 +95,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.releaseQueuedMessages(chat)
 	}
 	mountedCtx = ctx
+	a.workers = newWorkerWatches(a.workerObserver)
+	a.resumeWorkerWatches()
 	// Recover queue rows that were created while the process was down and no
 	// response owns the conversation anymore.
 	// The SDK serializes the app writer DB through one connection. Read the
@@ -144,6 +149,9 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	legacyThreadPlatforms.Delete(a)
 	if a.telemetryStop != nil {
 		a.telemetryStop()
+	}
+	if a.workers != nil {
+		a.workers.close()
 	}
 	if a.telegramFeedback != nil {
 		a.telegramFeedback.Close()

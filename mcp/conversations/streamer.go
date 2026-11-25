@@ -38,21 +38,22 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
-	Snapshot       bool              `json:"snapshot,omitempty"`
-	Frames         []StreamFrame     `json:"frames,omitempty"`
-	Progress       *ResponseProgress `json:"response_progress,omitempty"`
-	Activity       *ToolActivity     `json:"tool_activity,omitempty"`
-	AfterMessageID int64             `json:"after_message_id,omitempty"`
-	Type           string            `json:"type"` // always "stream"
-	ConversationID string            `json:"chat_id"`
-	AgentID        int64             `json:"agent_id,omitempty"`
-	ThreadID       string            `json:"thread_id"`
-	CallID         string            `json:"call_id"`
-	RunID          string            `json:"run_id,omitempty"`
-	Text           string            `json:"text"`
-	Phase          string            `json:"phase,omitempty"`
-	Done           bool              `json:"done"`
-	CreatedAt      time.Time         `json:"created_at"`
+	Snapshot       bool                `json:"snapshot,omitempty"`
+	Frames         []StreamFrame       `json:"frames,omitempty"`
+	Progress       *ResponseProgress   `json:"response_progress,omitempty"`
+	Activity       *ToolActivity       `json:"tool_activity,omitempty"`
+	Worker         *ConversationWorker `json:"worker,omitempty"`
+	AfterMessageID int64               `json:"after_message_id,omitempty"`
+	Type           string              `json:"type"` // always "stream"
+	ConversationID string              `json:"chat_id"`
+	AgentID        int64               `json:"agent_id,omitempty"`
+	ThreadID       string              `json:"thread_id"`
+	CallID         string              `json:"call_id"`
+	RunID          string              `json:"run_id,omitempty"`
+	Text           string              `json:"text"`
+	Phase          string              `json:"phase,omitempty"`
+	Done           bool                `json:"done"`
+	CreatedAt      time.Time           `json:"created_at"`
 }
 
 type streamState struct {
@@ -85,15 +86,15 @@ type streamer struct {
 	// wait for a receipt that cannot arrive.
 	telemetrySeen map[int64]bool
 	// models holds the provider/model each agent thread used last.
-	models map[string]ModelUse
-	hub           *hub
-	resolve       func(int64, string) string
-	throttle      time.Duration
-	mu            sync.Mutex
-	buffers       map[string]*streamState
-	lastEmit      map[string]string
-	touched       map[string]time.Time
-	ackTimes      map[string]time.Time
+	models   map[string]ModelUse
+	hub      *hub
+	resolve  func(int64, string) string
+	throttle time.Duration
+	mu       sync.Mutex
+	buffers  map[string]*streamState
+	lastEmit map[string]string
+	touched  map[string]time.Time
+	ackTimes map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones

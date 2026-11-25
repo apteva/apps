@@ -12,6 +12,8 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup, responseWaitingToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
+import { WorkerCard, spawnKey, workerUnfinished } from "./WorkerCard";
+import { AgentWorkSection } from "./AgentWork";
 import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useCodeBlockLabels, useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
@@ -35,7 +37,7 @@ import { AttachmentContent, reportSectionsText } from "./messageContent";
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { renderSafeMarkdown } from "./markdown";
 import ConversationChatView from "./ConversationChatView";
 import { VoiceControls } from "./voiceControls";
@@ -93,7 +95,7 @@ export interface WorkspaceRailProps {
 }
 
 import { agentAvatarMode, showsAgentAvatar, ConversationIdentity, type AgentAvatarMode } from "./agentAppearance";
-import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
+import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity, ConversationWorker } from "./types";
 import { ConversationActivityIndicator, ConversationUnreadIndicator, shouldShowConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
 
@@ -296,8 +298,21 @@ function StreamingBubble({ text }: { text: string }) {
 // ThinkingMessagePlaceholder is the dashboard's thinking row — the
 // animated chat-thinking-dots (class from the dashboard stylesheet)
 // with the label, occupying transcript space like a message.
-function ThinkingMessagePlaceholder({ preparing = false }: { preparing?: boolean }) {
+function ThinkingMessagePlaceholder({ preparing = false, helpers = 0 }: { preparing?: boolean; helpers?: number }) {
   const { t } = useConversationLocalization();
+  if (helpers > 0 && !preparing) return (
+    <div
+      className="grid min-h-[42px] min-w-0 shrink-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
+      role="status"
+      aria-live="polite"
+      aria-label={t("worker.waitingHelpersLabel", { count: helpers })}
+      data-waiting-helpers={helpers}
+    >
+      <span className="chat-thinking-dots inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1" aria-hidden="true"><span /><span /><span /></span>
+      <span className="text-[13px] leading-5 text-text-muted">{t("worker.waitingHelpers", { count: helpers })}</span>
+      <span className="h-4 w-4 shrink-0" aria-hidden="true" />
+    </div>
+  );
   return (
     <div
       className="grid min-h-[42px] min-w-0 shrink-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
@@ -841,11 +856,13 @@ function ContextColumn({
   agents,
   onEnsureAgents,
   onManage,
+  onOpenConversation,
   refreshHold,
   embedded = false,
   showAvatars = false,
 }: {
   showAvatars?: boolean;
+  onOpenConversation?: (id: string) => void;
   conversation: Conversation;
   agents: AgentInfo[] | null;
   onEnsureAgents: () => void;
@@ -959,6 +976,7 @@ function ContextColumn({
             {t("chat.manage")}
           </button>
         </div>
+        <AgentWorkSection conversation={conversation} agentName={agentName} onOpenConversation={onOpenConversation} />
       </div>
     </div>
   );
@@ -1089,6 +1107,15 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }
     return changed ? [...map.values()] : current;
   });
+  const [workers, setWorkers] = useState<ConversationWorker[]>([]);
+  const mergeWorkers = (incoming: ConversationWorker[]) => setWorkers(current => {
+    const map = new Map(current.map(item => [item.id,item]));
+    let changed = false;
+    for (const item of incoming) if (item.chat_id === conversationID && (!map.has(item.id) || item.revision > map.get(item.id)!.revision)) {
+      map.set(item.id,item); changed = true;
+    }
+    return changed ? [...map.values()].sort((a,b)=>a.id-b.id) : current;
+  });
   const [bubbles, setBubbles] = useState<StreamBubbleState[]>([]);
   const [connected, setConnected] = useState(false);
   const [historyError, setHistoryError] = useState("");
@@ -1148,8 +1175,8 @@ function useConversationTransport(conversationID: string, projectId: string) {
   }, [conversationID, projectId, mergeMessages]);
   useEffect(() => {
     generationRef.current++;
-    let cancelled = false, loading = false, initialized = false, cursor = 0;
-    setMessages([]); setActivities([]); setProgresses([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
+    let cancelled = false, loading = false, initialized = false, cursor = 0, workersAvailable = true;
+    setMessages([]); setActivities([]); setWorkers([]); setProgresses([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
     streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
     messagesRef.current=[];
     let paintHandle: number | undefined;
@@ -1171,6 +1198,11 @@ function useConversationTransport(conversationID: string, projectId: string) {
         setProgresses([]);
         for (const current of frame.frames ?? []) applyFrame(current);
         publishBubbles();
+        return;
+      }
+      // Worker frames say nothing about the response itself.
+      if (frame.worker) {
+        mergeWorkers([frame.worker]);
         return;
       }
       if (frame.response_progress || (!frame.tool_activity && !frame.done)) {
@@ -1253,6 +1285,13 @@ function useConversationTransport(conversationID: string, projectId: string) {
         const activity = await conversationsClient.activity(conversationID);
         if (!Array.isArray(activity)) throw new Error("Invalid tool activity response");
         if (!cancelled) mergeActivities(activity);
+        // Workers are optional: older app servers and visitors have none.
+        if (workersAvailable) {
+          try {
+            const rows = await conversationsClient.workers(conversationID);
+            if (!cancelled && Array.isArray(rows)) mergeWorkers(rows);
+          } catch { workersAvailable = false; }
+        }
         setHistoryError("");
       } catch (err) { if (!cancelled) setHistoryError(String(err)); }
       finally { loading=false; }
@@ -1274,7 +1313,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }, 5000);
     return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); if (paintHandle!==undefined) window.cancelAnimationFrame(paintHandle); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles.find(b=>!b.done) ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, workers, progresses, beginResponse, bubbles, bubble:bubbles.find(b=>!b.done) ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
@@ -1327,6 +1366,8 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onContextCleared?: (context: import("./pageContext").PageContext) => void;
   showToolCompletion?: boolean;
   showToolDuration?: boolean;
+  /** Open helper cards with their steps shown. */
+  showHelperSteps?: boolean;
   onOpenDetails?: () => void;
   leadingAction?: ReactNode;
   headerActions?: ReactNode;
@@ -1346,6 +1387,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onContextCleared,
   showToolCompletion = false,
   showToolDuration = false,
+  showHelperSteps = false,
   onOpenDetails,
   leadingAction,
   headerActions,
@@ -1357,7 +1399,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, replySuggestions, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const { messages, activities: storedActivities, workers, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   const hostPage = useHostPageContext();
   const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
   // Resolve display names only for a room or a transcript with multiple speakers.
@@ -1642,6 +1684,19 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
       : []);
     const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
+    // A spawn row whose thread is linked to this conversation shows as a
+    // worker card. Nested workers render inside their parent's card.
+    const workerBySpawn = new Map<string, ConversationWorker>();
+    for (const w of workers) if (w.spawn_call_id) {
+      const key = spawnKey(w.agent_id, w.parent_thread_id, w.spawn_call_id);
+      const previous = workerBySpawn.get(key);
+      if (!previous || previous.id < w.id) workerBySpawn.set(key, w);
+    }
+    const workerFor = (tool: TimelineTool) => workerBySpawn.get(spawnKey(tool.agentId, tool.threadId, tool.callId));
+    // Helpers this response is waiting on: unfinished workers its thread
+    // spawned directly.
+    const waitingHelpers = (agentId?: number, threadId?: string) => workers.filter(w => w.agent_id === agentId && w.spawn_call_id
+      && (!threadId || w.parent_thread_id === threadId) && workerUnfinished(w)).length;
     const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
     const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
     const progressShowsThinking = (p: LiveResponseProgress) => {
@@ -1672,18 +1727,36 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
       {timeline.map(item => {
         if (item.kind === "toolGroup" || item.kind === "tool") {
-          return <ChatToolActivity
-            key={item.key}
-            tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
-            parallel={item.kind === "toolGroup" && item.parallel}
-            expanded={expandedToolGroups.has(item.key)}
-            onToggle={() => toggleToolGroup(item.key)}
-            waitingForModel={waitingToolGroups.has(item.key)}
-            registry={toolVisualRegistry}
-            detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
-            showCompletion={showToolCompletion}
-            showDuration={showToolDuration}
-          />;
+          const tools = item.kind === "toolGroup" ? item.tools : [item.tool];
+          const linked = tools.filter(tool => workerFor(tool));
+          const plain = linked.length ? tools.filter(tool => !workerFor(tool)) : tools;
+          const waiting = waitingToolGroups.has(item.key);
+          const owner = tools[tools.length - 1];
+          const helpers = waiting && owner ? waitingHelpers(owner.agentId, owner.threadId) : 0;
+          return <Fragment key={item.key}>
+            {plain.length > 0 && <ChatToolActivity
+              tools={plain}
+              parallel={item.kind === "toolGroup" && item.parallel && plain.length > 1}
+              expanded={expandedToolGroups.has(item.key)}
+              onToggle={() => toggleToolGroup(item.key)}
+              waitingForModel={waiting && linked.length === 0}
+              waitingLabel={helpers > 0 ? t("worker.waitingHelpers", { count: helpers }) : undefined}
+              registry={toolVisualRegistry}
+              detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
+              showCompletion={showToolCompletion}
+              showDuration={showToolDuration}
+            />}
+            {linked.map(tool => <WorkerCard
+              key={`worker-${tool.id}`}
+              worker={workerFor(tool)!}
+              workers={workers}
+              spawnTool={tool}
+              registry={toolVisualRegistry}
+              chatId={conversation.id}
+              defaultExpanded={showHelperSteps}
+            />)}
+            {waiting && linked.length > 0 && <ThinkingMessagePlaceholder helpers={helpers} />}
+          </Fragment>;
         }
         if (item.kind === "stream") {
           const name = agentName(item.stream.agentId);
@@ -1710,12 +1783,12 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       {bubbles.map(b => {
         const phase = pendingResponsePhase(b, activities, messages);
         if (b.text || phase === null || ownsToolGroup(b) || waitsInToolGroup(b) || progresses.some(p => p.agent_id === b.agentId)) return null;
-        return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic} />;
+        return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic} helpers={waitingHelpers(b.agentId, b.threadId)} />;
       })}
       {progresses.map(p => {
         if (!progressShowsThinking(p)) return null;
         if (!awaitingProgressMessage(p) && waitsInToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})) return null;
-        return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} />;
+        return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} helpers={waitingHelpers(p.agent_id, p.thread_id)} />;
       })}
     </> : null;
     return { messageNodes, streamNode, hasTranscript: timeline.length > 0 };
@@ -1723,7 +1796,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     activities, agentNames, archived, awaitingProgressMessage, bubbles, conversation.id,
     conversation.lead_agent_id, conversation.lead_agent_name, deliveries, expandedToolGroups,
     hasOlder, loadOlder, messages, onAction, progresses, retryDelivery, showAgentNames,
-    showToolCompletion, showToolDuration, t, toggleToolGroup, toolVisualRegistry,
+    showToolCompletion, showToolDuration, showHelperSteps, t, toggleToolGroup, toolVisualRegistry, workers,
   ]);
 
   return (
@@ -2157,13 +2230,14 @@ const TOOL_DISPLAY_STORAGE_KEY = "conversations:tool-display:v1";
 interface ToolDisplayPreferences {
   showCompletion: boolean;
   showDuration: boolean;
+  showHelperSteps: boolean;
 }
 function readToolDisplayPreferences(): ToolDisplayPreferences {
-  const defaults = { showCompletion: false, showDuration: false };
+  const defaults = { showCompletion: false, showDuration: false, showHelperSteps: false };
   try {
     const saved = JSON.parse(window.localStorage.getItem(TOOL_DISPLAY_STORAGE_KEY) || "null");
     if (!saved || typeof saved !== "object") return defaults;
-    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true };
+    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true, showHelperSteps: saved.showHelperSteps === true };
   } catch { return defaults; }
 }
 
@@ -2311,6 +2385,10 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   const openManage = () => {
     ensureAgents();
     setDetailsOpen(true);
+  };
+  const openConversationFromDetails = (id: string) => {
+    setSelectedId(id);
+    if (isMobile) setMobileDetail(true);
   };
 
   const openConversation = async (conversationID: string) => {
@@ -2532,6 +2610,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               archived={showArchived}
               showToolCompletion={toolDisplay.showCompletion}
               showToolDuration={toolDisplay.showDuration}
+              showHelperSteps={toolDisplay.showHelperSteps}
               leadingAction={isMobile && <button ref={mobileBackRef} type="button" onClick={() => setMobileDetail(false)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t(tab === "inbox" ? "panel.backToInbox" : "panel.backToChats")}><Glyph d={GLYPH_BACK} size={18} /></button>}
               headerActions={<details className="relative">
                 <summary role="button" className={`flex cursor-pointer list-none items-center rounded text-xs text-text-muted hover:bg-bg-input hover:text-text ${isMobile ? "h-11 w-11 justify-center border border-border" : "border border-border px-2 py-1.5"}`} aria-label={isMobile ? t("panel.conversationOptions") : undefined}>{isMobile ? <Glyph d={GLYPH_MORE} size={16} /> : t("chat.toolDisplay")}</summary>
@@ -2545,6 +2624,10 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
                     <input type="checkbox" checked={toolDisplay.showDuration} onChange={event => setToolDisplay(current => ({...current, showDuration: event.target.checked}))} />
                     {t("chat.showToolDuration")}
+                  </label>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
+                    <input type="checkbox" checked={toolDisplay.showHelperSteps} onChange={event => setToolDisplay(current => ({...current, showHelperSteps: event.target.checked}))} />
+                    {t("worker.showSteps")}
                   </label>
                 </div>
               </details>}
@@ -2579,6 +2662,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                     agents={agents}
                     onEnsureAgents={ensureAgents}
                     onManage={openManage}
+                    onOpenConversation={openConversationFromDetails}
                     refreshHold={detailsOpen}
                     embedded
                   />
@@ -2590,6 +2674,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   agents={agents}
                   onEnsureAgents={ensureAgents}
                   onManage={openManage}
+                  onOpenConversation={openConversationFromDetails}
                   refreshHold={detailsOpen}
                 />
               )}
@@ -2636,6 +2721,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   agents={agents}
                   onEnsureAgents={ensureAgents}
                   onManage={openManage}
+                  onOpenConversation={openConversationFromDetails}
                   refreshHold={detailsOpen}
                   embedded
                 />

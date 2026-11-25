@@ -56,6 +56,27 @@ export interface ToolActivity {
   name: string; reason: string; status: "running" | "completed" | "failed" | "interrupted";
   started_at: string; ended_at: string; duration_ms?: number; revision: number;
 }
+export type WorkerState = "working" | "sleeping" | "waiting" | "paused" | "blocked" | "done" | "failed" | "stopped";
+/** A thread the agent spawned from this conversation (or from one of its workers). */
+export interface ConversationWorker {
+  id: number; chat_id: string; agent_id: number; thread_id: string; parent_thread_id: string;
+  spawn_call_id?: string; depth: number; name: string; purpose?: string; state: WorkerState | string;
+  current?: { kind: "model" | "tool" | string; tool?: string; since: string };
+  model?: string; next_wake_at?: string; started_at: string; last_activity_at?: string;
+  ended_at?: string; outcome?: string; result?: string; result_truncated?: boolean; revision: number;
+}
+export interface WorkerStep {
+  kind: "model" | "tool" | "message" | "end" | string; started_at: string; ended_at?: string; duration_ms?: number;
+  status: string; model?: string; tool?: string; child_thread_id?: string; to?: string; outcome?: string;
+  reason?: string; text?: string; arguments?: string; result?: string; error?: string; truncated?: boolean;
+}
+export interface WorkerActivityPage { steps: WorkerStep[]; next_cursor?: string; projection: "metadata" | "content" | string }
+export interface AgentWorkThread {
+  id: string; parent_id?: string; kind: "main" | "chat" | "voice" | "worker"; name?: string; purpose?: string;
+  state: string; next_wake_at?: string; current?: ConversationWorker["current"]; started_at?: string;
+  ended_at?: string; outcome?: string; blocked_reason?: string; chat_id?: string; title?: string; this_conversation?: boolean;
+}
+export interface AgentWork { available: boolean; agents: Array<{ agent_id: number; available: boolean; threads: AgentWorkThread[] }> }
 export interface ResponseProgress {
  completion_message_id?: number;
  phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
@@ -69,6 +90,7 @@ export interface StreamFrame {
 
   created_at?: string;
   tool_activity?: ToolActivity;
+  worker?: ConversationWorker;
  after_message_id?: number;
  run_id?: string;
   chat_id: string;

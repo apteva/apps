@@ -15,6 +15,7 @@ const activityRows=new Map<string,any[]>();
 const replyModels=new Map<string,any>();
 const responseFrames=new Map<string,any>();
 const resolved=new Set<string>();
+const workerRows=new Map<string,any[]>();const workerSteps=new Map<string,any[]>();let agentWork:any=null;
 let room=false;let deliveryStatus="delivered";
 const streams = new Set<ReadableStreamDefaultController>();
 const activityStreams = new Set<ReadableStreamDefaultController>();
@@ -30,11 +31,13 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
  if(url.pathname==="/__app-card-test")return new Response(appCardHTML.replace('<script type="module"', '<script>window.APP_CARD_TEST={projectId:"project",installId:7,agentId:41}</script><script type="module"'),{headers:{"Content-Type":"text/html","Set-Cookie":"host_session=fixture; SameSite=Lax; Path=/"}});
  if(url.pathname.startsWith("/__card-assets/")){const file=cardAssets.get(url.pathname);return file?new Response(file,{headers:{"Content-Type":"text/javascript"}}):new Response("missing",{status:404});}
- if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();replyModels.clear();responseFrames.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();replyModels.clear();responseFrames.clear();workerRows.clear();workerSteps.clear();agentWork=null;resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
  if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();publishActivity();return Response.json({ok:true});}
  // An agent reply that records a model lands in an open conversation.
  if(url.pathname==="/seed-reply-model" && req.method==="POST"){const {chat_id,provider,model}=await req.json();replyModels.set(chat_id,{agent_id:41,thread_id:"main",last_reply:{provider,model},reply_thread_id:"main",replied_at:new Date().toISOString()});const row=panelRows.find(c=>c.id===chat_id);if(row)row.updated_at=new Date().toISOString();publishListMessage(chat_id);return Response.json({ok:true});}
+ if(url.pathname==="/seed-worker-steps" && req.method==="POST"){const {thread_id,steps}=await req.json();workerSteps.set(thread_id,steps);return Response.json({ok:true});}
+ if(url.pathname==="/seed-agent-work" && req.method==="POST"){agentWork=await req.json();return Response.json({ok:true});}
  if(url.pathname==="/seed-unread" && req.method==="POST"){const {chat_id,count}=await req.json();unreadConversations.set(chat_id,count);publishListMessage(chat_id);return Response.json({ok:true});}
  if(url.pathname==="/seed" && req.method==="POST") {
   const options=await req.json();room=Boolean(options.room);deliveryStatus=options.deliveryStatus || "delivered";
@@ -57,6 +60,10 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
    const key=`${frame.chat_id}:${frame.agent_id}`;
    if(frame.response_progress.phase==="idle")responseFrames.delete(key);
    else responseFrames.set(key,frame);
+  }
+  if(frame.worker) {
+   const current=workerRows.get(frame.chat_id)??[];
+   workerRows.set(frame.chat_id,[...current.filter(w=>w.id!==frame.worker.id),frame.worker].sort((a,b)=>a.id-b.id));
   }
   if(frame.tool_activity) {
    const current=activityRows.get(frame.chat_id)??[];
@@ -102,6 +109,9 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
   const found=uploaded.get(`${chat}:${url.searchParams.get("id")}`);return found?Response.json(found):new Response("missing",{status:404});
  }
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
+ if(path==="/workers")return Response.json(workerRows.get(url.searchParams.get("chat_id")||"")??[]);
+ if(path==="/workers/activity"){const steps=[...(workerSteps.get(url.searchParams.get("thread_id")||"")??[])].reverse();const detail=url.searchParams.get("detail")==="1";return Response.json({steps:detail?steps:steps.map(({arguments:_a,result:_r,...rest}:any)=>rest),next_cursor:"",projection:"content"});}
+ if(path==="/agent-work")return agentWork?Response.json(agentWork):new Response("not found",{status:404});
  if(path==="/activity-summary")return Response.json({active_conversation_ids:activeConversations});
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",status:"running",attached:true},{id:42,name:"Scheduling assistant",status:"running",attached:true}]);
  if(path==="/unread-summary")return Response.json([...unreadConversations].map(([conversation_id,unread])=>({conversation_id,unread,latest_id:101})));
