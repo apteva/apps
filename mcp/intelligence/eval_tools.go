@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -17,6 +18,23 @@ import (
 // evalJobs allows one dataset build or run at a time: both are paced by
 // the same public sources (GDELT allows one call every few seconds).
 var evalJobs sync.Mutex
+
+// reapOrphanedEvalJobs marks builds and runs left in progress by a previous
+// process (the sidecar restarted mid-job) as failed. Callers must hold
+// evalJobs, so no job of this process can be running.
+func reapOrphanedEvalJobs(db *sql.DB, now time.Time) {
+	const msg = "interrupted: the app restarted while this job was running; start it again"
+	_, _ = db.Exec(`UPDATE intel_eval_runs SET status = 'failed', error = ?, finished_at = ? WHERE status = 'running'`, msg, ts(now))
+	_, _ = db.Exec(`UPDATE intel_eval_datasets SET status = 'failed', error = ? WHERE status = 'building'`, msg)
+}
+
+// reapIfIdle reaps orphaned jobs when no job is running in this process.
+func reapIfIdle(db *sql.DB) {
+	if evalJobs.TryLock() {
+		reapOrphanedEvalJobs(db, nowUTC())
+		evalJobs.Unlock()
+	}
+}
 
 func (a *App) evalTools() []sdk.Tool {
 	return []sdk.Tool{
@@ -56,6 +74,7 @@ func (a *App) toolEvalDatasetBuild(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	p := parseDatasetParams(args)
 	db := ctx.AppDB()
+	reapOrphanedEvalJobs(db, nowUTC())
 	id, err := createEvalDataset(db, pid, p, nowUTC())
 	if err != nil {
 		evalJobs.Unlock()
@@ -78,6 +97,7 @@ func (a *App) toolEvalDatasets(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	reapIfIdle(ctx.AppDB())
 	ds, err := listEvalDatasets(ctx.AppDB(), pid, intArgAny(args, "id"))
 	if err != nil {
 		return nil, err
@@ -113,6 +133,7 @@ func (a *App) toolEvalRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !evalJobs.TryLock() {
 		return nil, errors.New("another evaluation job is running; try again when it finishes")
 	}
+	reapOrphanedEvalJobs(db, nowUTC())
 	runID, err := createEvalRun(db, pid, p, env.now)
 	if err != nil {
 		evalJobs.Unlock()
@@ -184,6 +205,7 @@ func (a *App) toolEvalRuns(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	reapIfIdle(ctx.AppDB())
 	runs, err := listEvalRuns(ctx.AppDB(), pid)
 	if err != nil {
 		return nil, err

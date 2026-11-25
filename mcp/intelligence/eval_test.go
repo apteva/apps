@@ -279,3 +279,33 @@ func TestEvalParamsAcceptDateOnlyKnowledgeCutoff(t *testing.T) {
 		t.Fatal("ai without a knowledge cutoff must be rejected")
 	}
 }
+
+func TestOrphanedEvalJobsAreMarkedFailed(t *testing.T) {
+	db := openTestDB(t)
+	id, err := createEvalDataset(db, "p", datasetParams{}, evalT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := createEvalRun(db, "p", evalParams{DatasetID: id}, evalT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reapIfIdle(db)
+	runs, _ := listEvalRuns(db, "p")
+	ds, _ := listEvalDatasets(db, "p", id)
+	if len(runs) != 1 || runs[0].ID != runID || runs[0].Status != "failed" || !strings.Contains(runs[0].Error, "restarted") {
+		t.Fatalf("orphaned run must be failed: %+v", runs)
+	}
+	if ds[0].Status != "failed" {
+		t.Fatalf("orphaned build must be failed: %+v", ds[0])
+	}
+	// A job held by this process is left alone.
+	evalJobs.Lock()
+	_, _ = db.Exec(`UPDATE intel_eval_runs SET status = 'running' WHERE id = ?`, runID)
+	reapIfIdle(db)
+	evalJobs.Unlock()
+	runs, _ = listEvalRuns(db, "p")
+	if runs[0].Status != "running" {
+		t.Fatalf("a live job must not be reaped, got %s", runs[0].Status)
+	}
+}
