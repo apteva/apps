@@ -60,7 +60,8 @@ func TestSyntheticSeedShowsStaleMissingAndConflicts(t *testing.T) {
 
 func TestSyntheticRowsNeverFeedForecastsAndClearCleanly(t *testing.T) {
 	db := openTestDB(t)
-	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	// Evidence is stamped with the real clock, so the cutoff must follow it.
+	now := nowUTC().Truncate(time.Second)
 	if _, err := seedSynthetic(db, "p", now); err != nil {
 		t.Fatal(err)
 	}

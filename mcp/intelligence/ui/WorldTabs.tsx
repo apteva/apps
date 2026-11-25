@@ -6,18 +6,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 export type Api = <T>(path: string, params?: Record<string, string>) => Promise<T>;
 export type Post = <T>(path: string, body: unknown) => Promise<T>;
-type SetError = (e: string | null) => void;
+export type SetError = (e: string | null) => void;
 
-const card = "border border-border rounded bg-bg-card";
-const input = "text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
-const btn = "px-3 py-1 rounded bg-accent text-bg font-medium disabled:opacity-50";
-const btnGhost = "px-2 py-1 rounded border border-border text-text-muted hover:text-text disabled:opacity-50";
+export const card = "border border-border rounded bg-bg-card";
+export const input = "text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
+export const btn = "px-3 py-1 rounded bg-accent text-bg font-medium disabled:opacity-50";
+export const btnGhost = "px-2 py-1 rounded border border-border text-text-muted hover:text-text disabled:opacity-50";
 
-const pct = (p?: number | null) => (p == null ? "—" : `${(p * 100).toFixed(1)}%`);
-const when = (s?: string | null) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+export const pct = (p?: number | null) => (p == null ? "—" : `${(p * 100).toFixed(1)}%`);
+export const when = (s?: string | null) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
 const ago = (sec?: number) => (sec == null || sec < 0 ? "never" : sec < 120 ? `${sec}s ago` : sec < 7200 ? `${Math.round(sec / 60)}m ago` : sec < 172800 ? `${Math.round(sec / 3600)}h ago` : `${Math.round(sec / 86400)}d ago`);
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+export function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return <div className={`${card} p-3`}>
     <div className="text-xs uppercase tracking-wide text-text-dim">{label}</div>
     <div className="text-xl font-semibold mt-1">{value}</div>
@@ -25,18 +25,18 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   </div>;
 }
 
-function Badge({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "accent" | "good" | "bad" | "warn" }) {
+export function Badge({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "accent" | "good" | "bad" | "warn" }) {
   const color = { muted: "var(--text-muted)", accent: "var(--accent)", good: "var(--color-green)", bad: "var(--color-error)", warn: "var(--color-warn)" }[tone];
   return <span className="text-xs px-1.5 py-0.5 rounded border" style={{ color, borderColor: color }}>{children}</span>;
 }
 
 const statusTone = (s: string): "good" | "accent" | "warn" | "muted" => (s === "observed" ? "good" : s === "reported" ? "accent" : s === "assumed" ? "warn" : "muted");
 
-function Empty({ children }: { children: React.ReactNode }) {
+export function Empty({ children }: { children: React.ReactNode }) {
   return <div className="p-8 text-center text-text-muted">{children}</div>;
 }
 
-function useLoad<T>(load: () => Promise<T>, deps: unknown[], setError: SetError) {
+export function useLoad<T>(load: () => Promise<T>, deps: unknown[], setError: SetError) {
   const [data, setData] = useState<T | null>(null);
   const [busy, setBusy] = useState(false);
   const reload = useCallback(async () => {

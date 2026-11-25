@@ -120,7 +120,7 @@ func catalogCall(slug, tool string, args map[string]any) (string, map[string]any
 				"srsearch": orStr(args["srsearch"], strArgM(args, "topic"))}
 		}
 	case "kalshi":
-		return tool, pick("series_ticker", "event_ticker", "ticker", "status", "limit", "cursor", "min_close_ts", "max_close_ts", "mve_filter")
+		return tool, pick("series_ticker", "event_ticker", "ticker", "status", "limit", "cursor", "min_close_ts", "max_close_ts", "mve_filter", "min_ts", "max_ts")
 	case "manifold-markets":
 		switch tool {
 		case "search_markets":

@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import GeographyView from "./GeographyView";
 import WorldMap from "./WorldMap";
 import { ConnectorsTab, LedgerTab, OverviewTab, QuestionsTab, ScenariosTab, WorldTab } from "./WorldTabs";
+import { EvaluationTab } from "./EvaluationView";
 
 // ─── Inlined SDK app-event hook (forward-compat; v0.2 emits signals) ──
 interface AppEventEnvelope<T = unknown> {
@@ -50,10 +51,10 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "overview" | "questions" | "world" | "scenarios" | "ledger" | "connectors" | "research" | "map" | "markets" | "signals" | "sources" | "query";
+type TabId = "overview" | "questions" | "world" | "scenarios" | "ledger" | "evaluation" | "connectors" | "research" | "map" | "markets" | "signals" | "sources" | "query";
 const TABS: { id: TabId; label: string; group: "core" | "market" }[] = [
   { id: "overview", label: "Overview", group: "core" }, { id: "map", label: "Map", group: "core" }, { id: "questions", label: "Questions", group: "core" }, { id: "world", label: "World", group: "core" },
-  { id: "scenarios", label: "Scenarios", group: "core" }, { id: "ledger", label: "Ledger", group: "core" }, { id: "connectors", label: "Connectors", group: "core" },
+  { id: "scenarios", label: "Scenarios", group: "core" }, { id: "ledger", label: "Ledger", group: "core" }, { id: "evaluation", label: "Evaluation", group: "core" }, { id: "connectors", label: "Connectors", group: "core" },
   { id: "research", label: "Research", group: "core" },
   { id: "markets", label: "Markets", group: "market" }, { id: "signals", label: "Signals", group: "market" }, { id: "sources", label: "Integrations", group: "market" }, { id: "query", label: "Query", group: "market" },
 ];
@@ -115,6 +116,7 @@ export default function IntelligencePanel({ projectId, installId }: NativePanelP
         {tab === "world" && <WorldTab api={api} setError={setError} openQuestion={openQuestion} />}
         {tab === "scenarios" && <ScenariosTab api={api} post={post} setError={setError} openQuestion={openQuestion} />}
         {tab === "ledger" && <LedgerTab api={api} setError={setError} openQuestion={openQuestion} />}
+        {tab === "evaluation" && <EvaluationTab api={api} post={post} setError={setError} />}
         {tab === "connectors" && <ConnectorsTab api={api} post={post} setError={setError} />}
         {tab === "research" && <ResearchTab api={api} setError={setError} />}
         {tab === "map" && <MapTab api={api} post={post} />}

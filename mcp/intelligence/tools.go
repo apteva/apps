@@ -18,7 +18,7 @@ import (
 )
 
 func (a *App) MCPTools() []sdk.Tool {
-	tools := append(a.mcpTools(), a.geoTools()...)
+	tools := append(append(a.mcpTools(), a.geoTools()...), a.evalTools()...)
 	return applyReaderScopes(tools)
 }
 
