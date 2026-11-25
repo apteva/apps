@@ -194,8 +194,8 @@ func TestPCBEnclosureShapesMagnetsPogoAndSnap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !result.Report.Valid || result.Report.BodyCount != 2 {
-			t.Fatalf("%s: want base + lid as two valid solids, got valid=%v bodies=%d", name, result.Report.Valid, result.Report.BodyCount)
+		if !result.Report.Valid || result.Report.BodyCount != 3 {
+			t.Fatalf("%s: want base + lid + PCB as three valid solids, got valid=%v bodies=%d", name, result.Report.Valid, result.Report.BodyCount)
 		}
 		return result, report
 	}

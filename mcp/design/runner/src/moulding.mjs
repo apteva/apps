@@ -58,9 +58,13 @@ export function analyzeMoulding(shape, check) {
   // (+pull for faces turned toward it, -pull for faces turned away). If the
   // part is in the way, that surface is trapped in a straight-pull mould.
   const undercuts = [];
+  let sampling = null;
   if (check.undercuts !== false) {
     const candidates = triangles.filter((tri) => Math.abs(dot(tri.n, pull)) > Math.sin((Math.max(minDraft, 0.05) * Math.PI) / 180) * 0.5);
-    const stride = Math.max(1, Math.ceil(candidates.length / 1024));
+    const samples = Math.round(Number(check.undercut_samples ?? 1024));
+    if (!(samples >= 16 && samples <= 8192)) throw new Error("undercut_samples must be between 16 and 8192");
+    const stride = Math.max(1, Math.ceil(candidates.length / samples));
+    sampling = { candidates: candidates.length, sampled: Math.ceil(candidates.length / stride), stride };
     const trapped = new Map();
     for (let i = 0; i < candidates.length; i += stride) {
       const tri = candidates[i];
@@ -84,9 +88,10 @@ export function analyzeMoulding(shape, check) {
   const parts = [];
   if (lowDraft.length) parts.push(`${lowDraft.length} face(s) under ${minDraft}° draft`);
   if (undercuts.length) parts.push(`${undercuts.length} undercut face(s)`);
+  const sampledNote = sampling && sampling.stride > 1 ? ` (undercuts sampled on ${sampling.sampled} of ${sampling.candidates} triangles; raise undercut_samples for a denser search)` : "";
   return {
     status: failed ? "fail" : "pass",
-    message: failed ? `Not mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}]: ${parts.join(", ")}` : `Mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}] with at least ${minDraft}° draft and no undercuts`,
+    message: (failed ? `Not mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}]: ${parts.join(", ")}` : `Mouldable along [${pull.map((v) => +v.toFixed(3)).join(", ")}] with at least ${minDraft}° draft and no undercuts`) + sampledNote,
     expected: minDraft,
     actual: Math.min(...[...faces.values()].map((face) => face.min_draft_deg)),
     details: {
@@ -95,6 +100,7 @@ export function analyzeMoulding(shape, check) {
       low_draft_faces: lowDraft.sort((a, b) => a.min_draft_deg - b.min_draft_deg).slice(0, 64),
       undercut_faces: undercuts.slice(0, 64),
       method: "mesh_normals_and_ray_casting",
+      undercut_sampling: sampling,
     },
   };
 }

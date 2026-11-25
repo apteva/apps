@@ -272,7 +272,13 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 			}
 			interfaces[mechanical.ID] = mechanical.PartID
 		}
-		if err := validatePlacementGraph(definition.Assembly, interfaces); err != nil {
+		linked := map[string]bool{}
+		for id, part := range parts {
+			if part.Source != nil {
+				linked[id] = true
+			}
+		}
+		if err := validatePlacementGraph(definition.Assembly, interfaces, linked); err != nil {
 			return err
 		}
 		joints := map[string]bool{}
@@ -478,7 +484,18 @@ func anyNumber(value any) float64 {
 // an instance is placed one way, interfaces belong to the right parts, no
 // interface takes two mates, an instance has at most one joint as child, and
 // the graph is acyclic.
-func validatePlacementGraph(assembly *AssemblySpec, interfaces map[string]string) error {
+//
+// A linked part (one with a source) also carries its source's interfaces,
+// named "<part id>/<source interface id>"; those are resolved from the pinned
+// source revision at build time.
+func validatePlacementGraph(assembly *AssemblySpec, interfaces map[string]string, linked map[string]bool) error {
+	owns := func(id, part string) bool {
+		if owner, ok := interfaces[id]; ok {
+			return owner == part
+		}
+		prefix, rest, found := strings.Cut(id, "/")
+		return found && prefix == part && linked[part] && parameterNameRE.MatchString(rest)
+	}
 	partOf := map[string]string{}
 	for _, instance := range assembly.Instances {
 		partOf[instance.ID] = instance.PartID
@@ -503,10 +520,10 @@ func validatePlacementGraph(assembly *AssemblySpec, interfaces map[string]string
 		if !ok || mate.ToInstance == instance.ID {
 			return fmt.Errorf("assembly instance %q mates to unknown instance %q", instance.ID, mate.ToInstance)
 		}
-		if owner, ok := interfaces[mate.Interface]; !ok || owner != instance.PartID {
+		if !owns(mate.Interface, instance.PartID) {
 			return fmt.Errorf("assembly instance %q mate.interface %q is not an interface of part %q", instance.ID, mate.Interface, instance.PartID)
 		}
-		if owner, ok := interfaces[mate.ToInterface]; !ok || owner != targetPart {
+		if !owns(mate.ToInterface, targetPart) {
 			return fmt.Errorf("assembly instance %q mate.to_interface %q is not an interface of part %q", instance.ID, mate.ToInterface, targetPart)
 		}
 		key := mate.ToInstance + "/" + mate.ToInterface

@@ -13,7 +13,7 @@ import (
 const (
 	pcbMechanicalEnvelopeSchema  = "apteva-mechanical-envelope/v1"
 	pcbEnclosureGenerator        = "pcb-enclosure"
-	pcbEnclosureGeneratorVersion = "2"
+	pcbEnclosureGeneratorVersion = "3"
 )
 
 type PCBMechanicalResponse struct {
@@ -164,8 +164,15 @@ type EnclosureOptions struct {
 	PogoWindows []EnclosureWindow `json:"pogo_windows,omitempty"`
 }
 
-// EnclosureMagnet is a blind pocket opened on the inside face of the base
-// floor or the lid, leaving a skin on the outside.
+// EnclosureMagnet is a blind pocket for a press-fit magnet. Face picks the
+// surface: floor (default for the base) or lid use x_mm/y_mm in board
+// coordinates; north/south/east/west put it in a side wall of the base at
+// along_mm (board x for north/south, board y for east/west) and z_mm (above
+// the PCB's bottom face). From says which side the pocket opens on: inside
+// leaves a skin on the outer face; outside (the default for walls) sets the
+// magnet flush with the outer face for the strongest pull to a neighbour.
+// Every magnet also becomes a mechanical interface (kind "magnet") carrying
+// its polarity, so assemblies can check that facing magnets attract.
 type EnclosureMagnet struct {
 	XMM        float64 `json:"x_mm"`
 	YMM        float64 `json:"y_mm"`
@@ -173,10 +180,18 @@ type EnclosureMagnet struct {
 	DepthMM    float64 `json:"depth_mm"`
 	Part       string  `json:"part,omitempty"` // base (default) | lid
 	FitMM      float64 `json:"fit_mm,omitempty"`
+	Face       string  `json:"face,omitempty"` // floor | lid | north | south | east | west
+	AlongMM    float64 `json:"along_mm,omitempty"`
+	ZMM        float64 `json:"z_mm,omitempty"`
+	From       string  `json:"from,omitempty"`     // inside | outside
+	Polarity   string  `json:"polarity,omitempty"` // N | S (the pole facing out)
+	ID         string  `json:"id,omitempty"`
 }
 
-// EnclosureWindow is a through opening in the floor (bottom) or lid (top),
-// for pogo-pin access, test pads or programming headers.
+// EnclosureWindow is a through opening for pogo-pin access, test pads or
+// programming headers: in the floor (bottom, default) or lid (top) at
+// x_mm/y_mm, or in a side wall (north/south/east/west) at along_mm/z_mm,
+// where width_mm runs along the wall and height_mm is vertical.
 type EnclosureWindow struct {
 	ID             string  `json:"id,omitempty"`
 	XMM            float64 `json:"x_mm"`
@@ -184,7 +199,13 @@ type EnclosureWindow struct {
 	WidthMM        float64 `json:"width_mm"`
 	HeightMM       float64 `json:"height_mm"`
 	CornerRadiusMM float64 `json:"corner_radius_mm,omitempty"`
-	Face           string  `json:"face,omitempty"` // bottom (default) | top
+	Face           string  `json:"face,omitempty"` // bottom (default) | top | north | south | east | west
+	AlongMM        float64 `json:"along_mm,omitempty"`
+	ZMM            float64 `json:"z_mm,omitempty"`
+}
+
+func isWallFace(face string) bool {
+	return face == "north" || face == "south" || face == "east" || face == "west"
 }
 
 type EnclosureGenerationReport struct {
@@ -284,28 +305,71 @@ func normalizeEnclosureOptions(input EnclosureOptions, envelope PCBMechanicalEnv
 	if len(input.Magnets) > 32 || len(input.PogoWindows) > 32 {
 		return input, errors.New("at most 32 magnets and 32 pogo windows")
 	}
-	for index, magnet := range input.Magnets {
-		thickness := input.FloorThicknessMM
+	for index := range input.Magnets {
+		magnet := &input.Magnets[index]
+		magnet.Polarity = strings.ToUpper(strings.TrimSpace(magnet.Polarity))
+		if magnet.Polarity != "" && magnet.Polarity != "N" && magnet.Polarity != "S" {
+			return input, fmt.Errorf("magnets[%d].polarity must be N or S", index)
+		}
+		if magnet.ID != "" && !parameterNameRE.MatchString(magnet.ID) {
+			return input, fmt.Errorf("magnets[%d].id must be a simple identifier", index)
+		}
 		switch magnet.Part {
-		case "", "base":
-		case "lid":
-			thickness = input.LidThicknessMM
+		case "", "base", "lid":
 		default:
 			return input, fmt.Errorf("magnets[%d].part must be base or lid", index)
+		}
+		if magnet.Face == "" {
+			magnet.Face = map[bool]string{true: "lid", false: "floor"}[magnet.Part == "lid"]
+		}
+		switch {
+		case magnet.Face == "lid":
+			magnet.Part = "lid"
+		case magnet.Face == "floor" || isWallFace(magnet.Face):
+			if magnet.Part == "lid" {
+				return input, fmt.Errorf("magnets[%d]: lid magnets go on face lid; the %s belongs to the base", index, magnet.Face)
+			}
+			magnet.Part = "base"
+		default:
+			return input, fmt.Errorf("magnets[%d].face must be floor, lid, north, south, east or west", index)
+		}
+		thickness, surface := input.FloorThicknessMM, "floor"
+		if magnet.Face == "lid" {
+			thickness, surface = input.LidThicknessMM, "lid"
+		}
+		if isWallFace(magnet.Face) {
+			thickness, surface = input.WallThicknessMM, magnet.Face+" wall"
+			if input.Shape == "outline" {
+				return input, fmt.Errorf("magnets[%d]: side-wall magnets need a box or rounded shape", index)
+			}
+			if magnet.From == "" {
+				magnet.From = "outside"
+			}
+		} else if magnet.From == "" {
+			magnet.From = "inside"
+		}
+		if magnet.From != "inside" && magnet.From != "outside" {
+			return input, fmt.Errorf("magnets[%d].from must be inside or outside", index)
 		}
 		if magnet.DiameterMM <= 0 || magnet.DepthMM <= 0 || magnet.FitMM < 0 || magnet.FitMM > 1 {
 			return input, fmt.Errorf("magnets[%d] needs a positive diameter_mm and depth_mm (fit_mm 0-1)", index)
 		}
 		if magnet.DepthMM > thickness-0.4 {
-			return input, fmt.Errorf("magnets[%d] depth %.2f mm leaves less than 0.4 mm of the %.2f mm %s; thicken it or use a thinner magnet", index, magnet.DepthMM, thickness, map[bool]string{true: "lid", false: "floor"}[magnet.Part == "lid"])
+			return input, fmt.Errorf("magnets[%d] depth %.2f mm leaves less than 0.4 mm of the %.2f mm %s; thicken it or use a thinner magnet", index, magnet.DepthMM, thickness, surface)
 		}
 	}
 	for index, window := range input.PogoWindows {
 		if window.WidthMM <= 0 || window.HeightMM <= 0 || window.CornerRadiusMM < 0 || window.CornerRadiusMM*2 > math.Min(window.WidthMM, window.HeightMM) {
 			return input, fmt.Errorf("pogo_windows[%d] needs positive width_mm/height_mm and corner_radius_mm up to half the shorter side", index)
 		}
-		if window.Face != "" && window.Face != "bottom" && window.Face != "top" {
-			return input, fmt.Errorf("pogo_windows[%d].face must be bottom or top", index)
+		if window.Face != "" && window.Face != "bottom" && window.Face != "top" && !isWallFace(window.Face) {
+			return input, fmt.Errorf("pogo_windows[%d].face must be bottom, top, north, south, east or west", index)
+		}
+		if isWallFace(window.Face) && input.Shape == "outline" {
+			return input, fmt.Errorf("pogo_windows[%d]: side-wall windows need a box or rounded shape", index)
+		}
+		if window.ID != "" && !parameterNameRE.MatchString(window.ID) {
+			return input, fmt.Errorf("pogo_windows[%d].id must be a simple identifier", index)
 		}
 	}
 	if input.LipThicknessMM*2+input.LidFitMM*2 >= nm(envelope.Board.WidthNM) || input.LipThicknessMM*2+input.LidFitMM*2 >= nm(envelope.Board.HeightNM) {
@@ -531,37 +595,156 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 		}
 		topCutters = append(topCutters, cutterID)
 	}
+	// Side-wall features are placed on the flat part of a wall: on a rounded
+	// enclosure the corner arcs are excluded.
+	flat := 0.0
+	if options.Shape == "rounded" {
+		flat = math.Max(0, math.Min(cornerRadius+options.WallThicknessMM+options.XYClearanceMM, math.Min(outerW, outerD)/2-0.01))
+	}
+	wallOffset := options.WallThicknessMM + options.XYClearanceMM
+	wallSpan := func(face string, along, z, halfAlong, halfZ float64, label string) (float64, float64, error) {
+		center, length := wallOffset+along-minY, outerD
+		if face == "north" || face == "south" {
+			center, length = wallOffset+along-minX, outerW
+		}
+		zWorld := options.FloorThicknessMM + options.StandoffHeightMM + z
+		if center-halfAlong < flat+0.4 || center+halfAlong > length-flat-0.4 {
+			return 0, 0, fmt.Errorf("%s does not fit on the flat part of the %s wall (along_mm puts it %.2f-%.2f mm along a wall whose flat run is %.2f-%.2f mm)", label, face, center-halfAlong, center+halfAlong, flat+0.4, length-flat-0.4)
+		}
+		if zWorld-halfZ < 0.4 || zWorld+halfZ > baseH-0.4 {
+			return 0, 0, fmt.Errorf("%s does not fit in the %s wall height (z_mm puts it %.2f-%.2f mm above the base bottom; the wall is %.2f mm tall)", label, face, zWorld-halfZ, zWorld+halfZ, baseH)
+		}
+		return center, zWorld, nil
+	}
+	alongExpr := func(face string, along float64) string {
+		if face == "north" || face == "south" {
+			return boardX(along)
+		}
+		return boardY(along)
+	}
+	zExpr := func(z float64) string { return fmt.Sprintf("floor+standoff+%s", number(z)) }
+	// outward normal and a point on the outer face for each wall
+	wallPoint := func(face, along, z string, depth string) ([]any, []any) {
+		switch face {
+		case "west":
+			return []any{depth, along, z}, []any{-1, 0, 0}
+		case "east":
+			return []any{fmt.Sprintf("%s-(%s)", outerWidthExpr, depth), along, z}, []any{1, 0, 0}
+		case "south":
+			return []any{along, depth, z}, []any{0, -1, 0}
+		default:
+			return []any{along, fmt.Sprintf("%s-(%s)", outerDepthExpr, depth), z}, []any{0, 1, 0}
+		}
+	}
+	// Lid features are modelled where the lid sits on the base; the lid part
+	// is then turned outside-face-down for printing (180° about X), so a lid
+	// point (x, y, z) becomes (x, outer_depth - y, base_height + lid - z).
+	lidPrintY := func(y string) string { return fmt.Sprintf("%s-(%s)", outerDepthExpr, y) }
+	interfaces := []MechanicalInterface{
+		{ID: "rim", Kind: "lid_seat", PartID: "base", Position: []any{fmt.Sprintf("(%s)/2", outerWidthExpr), fmt.Sprintf("(%s)/2", outerDepthExpr), baseHeightExpr}, Direction: []any{0, 0, 1}, Up: []any{1, 0, 0}, Notes: "Top of the base walls, where the lid panel rests"},
+		{ID: "seat", Kind: "lid_seat", PartID: "lid", Position: []any{fmt.Sprintf("(%s)/2", outerWidthExpr), fmt.Sprintf("(%s)/2", outerDepthExpr), "lid"}, Direction: []any{0, 0, 1}, Up: []any{1, 0, 0}, Notes: "Underside of the lid panel (lid part frame, printed outside face down)"},
+	}
+	usedIDs := map[string]bool{"rim": true, "seat": true}
+	interfaceID := func(given, prefix string, index int) (string, error) {
+		id := given
+		if id == "" {
+			id = fmt.Sprintf("%s_%d", prefix, index+1)
+		}
+		if usedIDs[id] {
+			return "", fmt.Errorf("duplicate enclosure feature id %q", id)
+		}
+		usedIDs[id] = true
+		return id, nil
+	}
 	for index, window := range options.PogoWindows {
 		id := fmt.Sprintf("pogo_window_%d", index+1)
-		cut := map[string]any{"id": id, "type": "extrude_profile", "profile": map[string]any{
-			"kind": "rounded_rectangle", "width": window.WidthMM, "height": window.HeightMM, "radius": window.CornerRadiusMM,
-			"center": []any{boardX(window.XMM), boardY(window.YMM)},
-		}}
-		if window.Face == "top" {
+		interfaceName, err := interfaceID(window.ID, "pogo_window", index)
+		if err != nil {
+			return nil, EnclosureGenerationReport{}, err
+		}
+		parameters := map[string]any{"width_mm": window.WidthMM, "height_mm": window.HeightMM}
+		profile := map[string]any{"kind": "rounded_rectangle", "width": window.WidthMM, "height": window.HeightMM, "radius": window.CornerRadiusMM}
+		cut := map[string]any{"id": id, "type": "extrude_profile", "profile": profile}
+		switch {
+		case isWallFace(window.Face):
+			if _, _, err := wallSpan(window.Face, window.AlongMM, window.ZMM, window.WidthMM/2, window.HeightMM/2, fmt.Sprintf("pogo_windows[%d]", index)); err != nil {
+				return nil, EnclosureGenerationReport{}, err
+			}
+			along, z := alongExpr(window.Face, window.AlongMM), zExpr(window.ZMM)
+			through := "wall+xy_clearance/2+1"
+			profile["center"] = []any{along, z}
+			switch window.Face {
+			case "south": // XZ sketches extrude toward -Y
+				cut["plane"], cut["origin"] = "XZ", []any{0, "wall+xy_clearance/2", 0}
+			case "north":
+				cut["plane"], cut["origin"] = "XZ", []any{0, fmt.Sprintf("%s+1", outerDepthExpr), 0}
+			case "west": // YZ sketches extrude toward +X
+				cut["plane"], cut["origin"] = "YZ", []any{-1, 0, 0}
+			case "east":
+				cut["plane"], cut["origin"] = "YZ", []any{fmt.Sprintf("%s-wall-xy_clearance/2", outerWidthExpr), 0, 0}
+			}
+			cut["height"] = through
+			cutters = append(cutters, id)
+			position, direction := wallPoint(window.Face, along, z, "0")
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "pogo_window", PartID: "base", Position: position, Direction: direction, Up: []any{0, 0, 1}, Parameters: parameters})
+		case window.Face == "top":
+			profile["center"] = []any{boardX(window.XMM), boardY(window.YMM)}
 			cut["origin"], cut["height"] = []any{0, 0, fmt.Sprintf("%s-lip_depth-1", baseHeightExpr)}, "lid+lip_depth+2"
 			topCutters = append(topCutters, id)
-		} else {
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "pogo_window", PartID: "lid", Position: []any{boardX(window.XMM), lidPrintY(boardY(window.YMM)), 0}, Direction: []any{0, 0, -1}, Up: []any{1, 0, 0}, Parameters: parameters})
+		default:
+			profile["center"] = []any{boardX(window.XMM), boardY(window.YMM)}
 			cut["origin"], cut["height"] = []any{0, 0, -1}, "floor+2"
 			bottomCutters = append(bottomCutters, id)
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "pogo_window", PartID: "base", Position: []any{boardX(window.XMM), boardY(window.YMM), 0}, Direction: []any{0, 0, -1}, Up: []any{1, 0, 0}, Parameters: parameters})
 		}
 		operations = append(operations, cut)
 	}
 	lidMagnets := []EnclosureMagnet{}
-	baseMagnets := 0
 	for index, magnet := range options.Magnets {
+		interfaceName, err := interfaceID(magnet.ID, "magnet", index)
+		if err != nil {
+			return nil, EnclosureGenerationReport{}, err
+		}
+		parameters := map[string]any{"diameter_mm": magnet.DiameterMM, "depth_mm": magnet.DepthMM, "from": magnet.From}
+		if magnet.Polarity != "" {
+			parameters["polarity"] = magnet.Polarity
+		}
 		if magnet.Part == "lid" {
 			lidMagnets = append(lidMagnets, magnet)
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "magnet", PartID: "lid", Position: []any{boardX(magnet.XMM), lidPrintY(boardY(magnet.YMM)), 0}, Direction: []any{0, 0, -1}, Up: []any{1, 0, 0}, Parameters: parameters})
 			continue
 		}
-		baseMagnets++
 		fit := magnet.FitMM
 		if fit == 0 {
 			fit = 0.2
 		}
 		id := fmt.Sprintf("magnet_%d", index+1)
-		operations = append(operations, map[string]any{"id": id, "type": "hole", "input": baseSolid,
-			"position": []any{boardX(magnet.XMM), boardY(magnet.YMM), "floor"}, "direction": []any{0, 0, -1},
-			"diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM})
+		hole := map[string]any{"id": id, "type": "hole", "input": baseSolid, "diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM}
+		if isWallFace(magnet.Face) {
+			radius := (magnet.DiameterMM + fit) / 2
+			if _, _, err := wallSpan(magnet.Face, magnet.AlongMM, magnet.ZMM, radius, radius, fmt.Sprintf("magnets[%d]", index)); err != nil {
+				return nil, EnclosureGenerationReport{}, err
+			}
+			along, z := alongExpr(magnet.Face, magnet.AlongMM), zExpr(magnet.ZMM)
+			outer, normal := wallPoint(magnet.Face, along, z, "0")
+			if magnet.From == "outside" {
+				hole["position"], hole["direction"] = outer, []any{-normal[0].(int), -normal[1].(int), -normal[2].(int)}
+			} else {
+				inner, _ := wallPoint(magnet.Face, along, z, "wall")
+				hole["position"], hole["direction"] = inner, normal
+			}
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "magnet", PartID: "base", Position: outer, Direction: normal, Up: []any{0, 0, 1}, Parameters: parameters})
+		} else {
+			position := []any{boardX(magnet.XMM), boardY(magnet.YMM), "floor"}
+			direction := []any{0, 0, -1}
+			if magnet.From == "outside" {
+				position, direction = []any{boardX(magnet.XMM), boardY(magnet.YMM), 0}, []any{0, 0, 1}
+			}
+			hole["position"], hole["direction"] = position, direction
+			interfaces = append(interfaces, MechanicalInterface{ID: interfaceName, Kind: "magnet", PartID: "base", Position: []any{boardX(magnet.XMM), boardY(magnet.YMM), 0}, Direction: []any{0, 0, -1}, Up: []any{1, 0, 0}, Parameters: parameters})
+		}
+		operations = append(operations, hole)
 		baseSolid = id
 	}
 	snapGrooves, snapBumps := []string{}, []string{}
@@ -600,9 +783,12 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 			fit = 0.2
 		}
 		id := fmt.Sprintf("lid_magnet_%d", index+1)
+		position, direction := []any{boardX(magnet.XMM), boardY(magnet.YMM), baseHeightExpr}, []any{0, 0, 1}
+		if magnet.From == "outside" {
+			position, direction = []any{boardX(magnet.XMM), boardY(magnet.YMM), fmt.Sprintf("%s+lid", baseHeightExpr)}, []any{0, 0, -1}
+		}
 		operations = append(operations, map[string]any{"id": id, "type": "hole", "input": lidSolid,
-			"position": []any{boardX(magnet.XMM), boardY(magnet.YMM), baseHeightExpr}, "direction": []any{0, 0, 1},
-			"diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM})
+			"position": position, "direction": direction, "diameter": magnet.DiameterMM + fit, "depth": magnet.DepthMM})
 		lidSolid = id
 	}
 	if len(topCutters) > 0 {
@@ -610,10 +796,36 @@ func generatePCBEnclosure(response PCBMechanicalResponse, input EnclosureOptions
 		operations = append(operations, map[string]any{"id": "lid_finished", "type": "cut", "inputs": inputs})
 		lidSolid = "lid_finished"
 	}
-	operations = append(operations, map[string]any{"id": "enclosure", "type": "compound", "inputs": []string{baseSolid, lidSolid}})
+	boardPoints := make([]any, 0, len(envelope.Board.Outline))
+	for _, point := range envelope.Board.Outline {
+		boardPoints = append(boardPoints, []any{boardX(nm(point.XNM)), boardY(nm(point.YNM))})
+	}
+	operations = append(operations,
+		map[string]any{"id": "enclosure", "type": "compound", "inputs": []string{baseSolid, lidSolid}},
+		// The lid part is stored outside face down, the way it prints.
+		map[string]any{"id": "lid_print", "type": "rotate", "input": lidSolid, "angle": 180,
+			"center": []any{0, fmt.Sprintf("(%s)/2", outerDepthExpr), fmt.Sprintf("(%s+lid)/2", baseHeightExpr)}, "direction": []any{1, 0, 0}},
+		map[string]any{"id": "pcb_board", "type": "extrude_profile", "profile": map[string]any{"kind": "polygon", "points": boardPoints},
+			"origin": []any{0, 0, "floor+standoff"}, "height": number(nm(envelope.Board.ThicknessNM))},
+	)
+	parts := []DesignPart{
+		{ID: "base", Name: "Base", Output: baseSolid, Manufacturing: &PartManufacturing{Classification: "printed"}},
+		{ID: "lid", Name: "Lid", Output: "lid_print", Manufacturing: &PartManufacturing{Classification: "printed"}},
+		{ID: "pcb", Name: "PCB", Output: "pcb_board", Color: "#166534", Manufacturing: &PartManufacturing{Classification: "reference"}},
+	}
+	assembly := &AssemblySpec{
+		Name: "enclosure",
+		Instances: []AssemblyInstance{
+			{ID: "base_1", PartID: "base"},
+			{ID: "lid_1", PartID: "lid", Mate: &InstanceMate{Interface: "seat", ToInstance: "base_1", ToInterface: "rim"}},
+			{ID: "pcb_1", PartID: "pcb"},
+		},
+		Interfaces: interfaces,
+	}
 
 	definition := &DesignDefinition{
 		Schema: designSchema, Units: "mm", Parameters: parameters, Operations: operations, Output: "enclosure",
+		Parts: parts, Assembly: assembly,
 		Checks: []map[string]any{{"type": "bounding_box", "max": []any{outerW + .01, outerD + .01, totalH + .01}}},
 		Provenance: &DesignProvenance{
 			Kind: "pcb-mechanical-envelope", SourceSchema: envelope.Schema, SourceApp: envelope.SourceApp,
