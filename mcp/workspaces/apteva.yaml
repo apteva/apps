@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.9.0
+version: 0.10.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -29,6 +29,9 @@ description: |
   v0.9.0 runs workspaces on Instances hosts: workspaces_create takes an
   optional instance_id, commands on remote hosts run one at a time (no shell
   session), and remote previews are reached through an Instances tunnel.
+  v0.10.0 adds two dashboard widgets: a Home overview of workspaces with a
+  compact project-wide activity feed, and an agent/thread widget with the
+  running command, last output and recent commands.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -165,6 +168,12 @@ provides:
       description: A workspace command reached a terminal state.
     - name: workspace.suspended
       description: A workspace container was stopped with its writable layer and volumes preserved.
+    - name: workspace.stopped
+      description: An operator or app stopped a workspace; container and volumes are preserved.
+    - name: workspace.resumed
+      description: A stopped workspace was started again.
+    - name: workspace.preview.changed
+      description: A workspace preview started, went live, crashed or stopped. Payload has workspace_id, status and url.
     - name: workspace.expired
       description: A workspace TTL elapsed and the workspace was suspended.
     - name: workspace.destroyed
@@ -179,6 +188,86 @@ provides:
       label: Workspaces
       icon: square-terminal
       entry: /ui/WorkspacesPanel.mjs
+  ui_components:
+    - name: workspaces-overview
+      label: Workspaces
+      description: Running and stopped workspaces, who owns them, what they are running, when they expire, and recent activity across them.
+      entry: /ui/WorkspacesOverviewWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [workspace.created, workspace.stopped, workspace.suspended, workspace.expired, workspace.resumed, workspace.destroyed, workspace.command.started, workspace.command.completed, workspace.preview.changed]
+      preview_props: {preview: true}
+      settings_schema:
+        type: object
+        properties:
+          show:
+            type: string
+            title: Show
+            enum: [active, attention, all]
+            enum_names: [Running and busy, Needs attention, All]
+            default: active
+          host:
+            type: string
+            title: Host
+            enum: ["", local, remote]
+            enum_names: [All hosts, Local Docker, Instances hosts]
+            default: ""
+          include_test:
+            type: boolean
+            title: Include test workspaces
+            default: false
+          max_rows:
+            type: integer
+            title: Maximum workspaces
+            default: 6
+            minimum: 3
+            maximum: 15
+          show_activity:
+            type: boolean
+            title: Recent activity
+            default: true
+          activity_kinds:
+            type: string
+            title: Activity
+            enum: [all, commands, changes]
+            enum_names: [Everything, Commands only, Commands and file changes]
+            default: all
+          activity_limit:
+            type: integer
+            title: Activity lines
+            default: 5
+            minimum: 3
+            maximum: 15
+    - name: agent-workspace
+      label: Agent workspace
+      description: The workspace an agent or thread is using, its running command, last output and recent commands, and its live preview.
+      entry: /ui/AgentWorkspaceWidget.mjs
+      slots: [dashboard.agent_detail, dashboard.thread_sidebar]
+      suggested: true
+      visibility: attached
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [workspace.created, workspace.stopped, workspace.suspended, workspace.expired, workspace.resumed, workspace.destroyed, workspace.command.started, workspace.command.completed, workspace.preview.changed]
+      preview_props: {preview: true}
+      settings_schema:
+        type: object
+        properties:
+          output_lines:
+            type: integer
+            title: Output lines
+            description: Lines of the last finished command's output. Zero hides it.
+            default: 12
+            minimum: 0
+            maximum: 40
+          recent_limit:
+            type: integer
+            title: Recent commands
+            default: 5
+            minimum: 0
+            maximum: 15
   skills:
     - name: how-to-use-workspaces
       command: /workspaces
@@ -196,7 +285,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.9.0
+    ref: workspaces/v0.10.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health

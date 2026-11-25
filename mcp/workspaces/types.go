@@ -60,6 +60,8 @@ type Workspace struct {
 	DeleteAt          string   `json:"delete_at"`
 	DestroyedAt       string   `json:"destroyed_at,omitempty"`
 	CurrentCommand    *Command `json:"current_command,omitempty"`
+	Preview           *Preview `json:"preview,omitempty"`
+	ActivityBuckets   []int    `json:"activity_buckets,omitempty"`
 	StorageBytes      int64    `json:"storage_bytes,omitempty"`
 	Kind              string   `json:"kind"`
 	NetworkMode       string   `json:"network_mode,omitempty"`

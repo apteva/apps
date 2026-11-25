@@ -79,19 +79,61 @@ func getWorkspaceByIdempotency(db *sql.DB, projectID, key string) (*Workspace, e
 }
 
 func listWorkspaces(db *sql.DB, projectID, status string, includeDestroyed bool, limit int) ([]*Workspace, error) {
+	return listWorkspacesFiltered(db, projectID, workspaceFilter{Status: status, IncludeDestroyed: includeDestroyed, Limit: limit})
+}
+
+// workspaceFilter narrows the operator list. Kind is dev|test, Host is
+// local|remote; empty values do not filter.
+type workspaceFilter struct {
+	Status           string
+	IncludeDestroyed bool
+	Limit            int
+	Kind             string
+	Host             string
+	OwnerAgentID     int64
+	OwnerThreadID    string
+}
+
+func listWorkspacesFiltered(db *sql.DB, projectID string, f workspaceFilter) ([]*Workspace, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	query := `SELECT ` + workspaceColumns + ` FROM workspaces WHERE project_id=?`
 	args := []any{projectID}
-	status = strings.TrimSpace(strings.ToLower(status))
+	status := strings.TrimSpace(strings.ToLower(f.Status))
 	if status == "busy" {
 		query += ` AND lifecycle_status='running' AND activity_status='executing'`
 	} else if status != "" {
 		query += ` AND lifecycle_status=?`
 		args = append(args, status)
-	} else if !includeDestroyed {
+	} else if !f.IncludeDestroyed {
 		query += ` AND lifecycle_status!='destroyed'`
+	}
+	switch strings.TrimSpace(f.Kind) {
+	case "":
+	case kindDev, kindTest:
+		query += ` AND kind=?`
+		args = append(args, f.Kind)
+	default:
+		return nil, errors.New("kind must be dev or test")
+	}
+	switch strings.TrimSpace(f.Host) {
+	case "":
+	case "local":
+		query += ` AND instance_id=0`
+	case "remote":
+		query += ` AND instance_id>0`
+	default:
+		return nil, errors.New("host must be local or remote")
+	}
+	if f.OwnerAgentID > 0 {
+		query += ` AND owner_agent_id=?`
+		args = append(args, f.OwnerAgentID)
+	}
+	if f.OwnerThreadID != "" {
+		query += ` AND owner_thread_id=?`
+		args = append(args, f.OwnerThreadID)
 	}
 	query += ` ORDER BY updated_at DESC LIMIT ?`
 	args = append(args, limit)

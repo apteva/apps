@@ -153,6 +153,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 		return nil, err
 	}
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.started", actor, "Container preview starting", map[string]any{"execution_id": p.ExecutionID, "port": p.HostPort, "instance_id": p.InstanceID, "tunnel_port": p.TunnelPort})
+	emitPreviewChanged(app, w, p)
 	p, _ = getPreview(app.AppDB(), w.ID)
 	return map[string]any{"preview": p}, nil
 }
@@ -169,6 +170,7 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 	if p.Status != "starting" && p.Status != "live" {
 		return p, nil
 	}
+	previous := p.Status
 	var out executionResponse
 	if p.ExecutionID == "" {
 		p.Status = "crashed"
@@ -213,7 +215,22 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 	if err = savePreview(app.AppDB(), p); err != nil {
 		return p, err
 	}
+	if p.Status != previous {
+		runtimeActor := Actor{Kind: "runtime", Label: "Containers"}
+		if p.Status == "live" {
+			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.live", runtimeActor, fmt.Sprintf("Preview live on port %d", p.ContainerPort), map[string]any{"url": p.URL})
+		} else if p.Status == "crashed" {
+			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.crashed", runtimeActor, "Preview crashed: "+p.Error, nil)
+		}
+		emitPreviewChanged(app, w, p)
+	}
 	return p, nil
+}
+
+// emitPreviewChanged lets widgets refresh when a preview starts, goes live,
+// crashes or stops. Previews have no other app event.
+func emitPreviewChanged(app *sdk.AppCtx, w *Workspace, p *Preview) {
+	app.EmitWithProject("workspace.preview.changed", w.ProjectID, map[string]any{"workspace_id": w.ID, "status": p.Status, "url": p.URL})
 }
 func (a *App) cancelPreview(app *sdk.AppCtx, w *Workspace) error {
 	p, err := getPreview(app.AppDB(), w.ID)
@@ -227,9 +244,16 @@ func (a *App) cancelPreview(app *sdk.AppCtx, w *Workspace) error {
 		}
 	}
 	closeTunnel(app, p)
+	wasActive := p.Status == "starting" || p.Status == "live"
 	p.Status = "stopped"
 	p.Error = ""
-	return savePreview(app.AppDB(), p)
+	if err = savePreview(app.AppDB(), p); err != nil {
+		return err
+	}
+	if wasActive {
+		emitPreviewChanged(app, w, p)
+	}
+	return nil
 }
 
 // openPreviewTunnel opens or reuses the Instances tunnel to a port published

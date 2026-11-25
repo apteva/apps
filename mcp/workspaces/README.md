@@ -1,5 +1,47 @@
 # Workspaces
 
+## v0.10.0
+
+Two dashboard widgets, plus the API they read.
+
+- **Workspaces overview** (`workspaces-overview`, Home). Counts of running,
+  busy, stopped and failed workspaces; one row per workspace with owner,
+  host, current command or last error, time left, and the preview link;
+  "+60m" when a running workspace has 15 minutes or less left (it sets the
+  time left to one hour). Full size adds purpose, repo/branch, a 12-cell
+  activity bar for the last hour, and Stop. Settings: show
+  (running/attention/all), host, include test workspaces, maximum rows.
+  - **Recent activity** below the rows: one line per event across the
+    project. Consecutive file writes by the same actor in the same workspace
+    within 2 minutes become one line ("Changed 7 files"); a command shows once,
+    with its exit code and duration, once it has finished. Failures are shown
+    in red. Settings: on/off, everything / commands / commands and file
+    changes, number of lines.
+- **Agent workspace** (`agent-workspace`, agent detail and thread sidebar,
+  attached agents only). The thread's workspace in the thread sidebar, the
+  agent's most active one on the agent page (with a switcher when there are
+  several): status, host, time left, preview, the running command with a
+  timer, the last finished command's output, and recent commands with exit
+  codes. Output only exists once a command finishes. Settings: output lines,
+  recent commands.
+- Clicking a row or activity line opens the Workspaces panel on that
+  workspace (`?workspace_id=…&tab=…`).
+- Widgets refresh on Workspaces events and every 30 seconds while visible;
+  file edits and source syncs emit no event.
+
+API (operator HTTP, used by the widgets and the panel):
+- `GET /api/workspaces` takes `kind` (dev|test), `host` (local|remote),
+  `owner_agent_id`, `owner_thread_id`, and `include=activity_buckets`
+  (12 five-minute counts for the last hour, oldest first). Rows now carry
+  their `preview`.
+- `GET /api/activity?limit=&kinds=all|commands|changes&include_test=1&workspace_id=`
+  is the grouped project-wide feed. `limit` counts lines (max 50).
+- New events: `workspace.preview.changed` (start, live, crash, stop),
+  `workspace.resumed`; `workspace.stopped` is now declared. Previews also
+  record `preview.live` / `preview.crashed` activity, and finished commands
+  record `duration_ms`.
+- Migration 006 adds project indexes on the activity log.
+
 ## v0.9.0
 
 Requires Containers 0.8.0 or later. Remote previews also need the Instances

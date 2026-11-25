@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -40,15 +41,39 @@ func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	actor := operatorActor(globalCtx)
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := listWorkspaces(globalCtx.AppDB(), actor.ProjectID, r.URL.Query().Get("status"), r.URL.Query().Get("include_destroyed") == "1", queryInt(r, "limit", 100))
+		q := r.URL.Query()
+		rows, err := listWorkspacesFiltered(globalCtx.AppDB(), actor.ProjectID, workspaceFilter{
+			Status: q.Get("status"), IncludeDestroyed: q.Get("include_destroyed") == "1", Limit: queryInt(r, "limit", 100),
+			Kind: q.Get("kind"), Host: q.Get("host"),
+			OwnerAgentID: int64(queryInt(r, "owner_agent_id", 0)), OwnerThreadID: strings.TrimSpace(q.Get("owner_thread_id")),
+		})
 		if err != nil {
 			writeHTTPError(w, err)
 			return
+		}
+		previews, err := listProjectPreviews(globalCtx.AppDB(), actor.ProjectID)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		var buckets map[string][]int
+		if includes(q.Get("include"), "activity_buckets") {
+			if buckets, err = activityBucketsFor(globalCtx.AppDB(), actor.ProjectID, time.Now().UTC()); err != nil {
+				writeHTTPError(w, err)
+				return
+			}
 		}
 		for _, workspace := range rows {
 			active, _ := listActiveCommands(globalCtx.AppDB(), workspace.ID)
 			if len(active) > 0 {
 				workspace.CurrentCommand = active[0]
+			}
+			workspace.Preview = previews[workspace.ID]
+			if buckets != nil {
+				workspace.ActivityBuckets = buckets[workspace.ID]
+				if workspace.ActivityBuckets == nil {
+					workspace.ActivityBuckets = make([]int, activityBuckets)
+				}
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"workspaces": rows, "count": len(rows), "summary": workspaceSummary(rows)})
@@ -70,6 +95,34 @@ func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleActivity is the project-wide activity feed for the overview widget.
+func (a *App) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := operatorActor(globalCtx)
+	q := r.URL.Query()
+	lines, err := listProjectActivity(globalCtx.AppDB(), actor.ProjectID, activityQuery{
+		Limit: queryInt(r, "limit", 5), Kinds: q.Get("kinds"), IncludeTest: q.Get("include_test") == "1",
+		WorkspaceID: strings.TrimSpace(q.Get("workspace_id")),
+	})
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"activity": lines, "count": len(lines)})
+}
+
+func includes(list, item string) bool {
+	for _, part := range strings.Split(list, ",") {
+		if strings.TrimSpace(part) == item {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) handleWorkspaceItem(w http.ResponseWriter, r *http.Request) {

@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.9.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.10.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -63,6 +63,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/workspaces", Handler: a.handleWorkspaces},
 		{Pattern: "/api/workspaces/", Handler: a.handleWorkspaceItem},
 		{Pattern: "/api/profiles", Handler: a.handleProfiles},
+		{Pattern: "/api/activity", Handler: a.handleActivity},
 	}
 }
 

@@ -164,9 +164,16 @@ function commandMark(status: string): string {
 export default function WorkspacesPanel({ projectId, installId }: NativePanelProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [summary, setSummary] = useState<Record<string, number>>({});
-  const [selectedId, setSelectedId] = useState("");
+  // Widgets deep-link here with ?workspace_id=…&tab=….
+  const initialRoute = useMemo(() => {
+    const query = new URLSearchParams(typeof window === "undefined" ? "" : window.location.search);
+    const requested = query.get("tab") || "";
+    const tabs: Tab[] = ["overview", "commands", "runtime", "activity"];
+    return { id: query.get("workspace_id") || "", tab: (tabs.includes(requested as Tab) ? requested : "overview") as Tab };
+  }, []);
+  const [selectedId, setSelectedId] = useState(initialRoute.id);
   const [detail, setDetail] = useState<Detail | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialRoute.tab);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [defaultProfile, setDefaultProfile] = useState("go");
   const [showCreate, setShowCreate] = useState(false);

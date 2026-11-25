@@ -336,7 +336,11 @@ func (a *App) refreshCommand(app *sdk.AppCtx, c *Command) (*Command, error) {
 	if !wasTerminal && commandTerminal(current.Status) {
 		actor := Actor{Kind: "runtime", Label: "Containers"}
 		summary := "Command " + current.Status + ": " + current.DisplayCommand
-		_ = recordActivity(app.AppDB(), current.WorkspaceID, current.ProjectID, "command."+current.Status, actor, summary, map[string]any{"command_id": current.ID, "exit_code": current.ExitCode})
+		data := map[string]any{"command_id": current.ID, "exit_code": current.ExitCode}
+		if started, finished := parseTime(current.StartedAt), parseTime(current.FinishedAt); !started.IsZero() && !finished.IsZero() {
+			data["duration_ms"] = finished.Sub(started).Milliseconds()
+		}
+		_ = recordActivity(app.AppDB(), current.WorkspaceID, current.ProjectID, "command."+current.Status, actor, summary, data)
 		app.EmitWithProject("workspace.command.completed", current.ProjectID, map[string]any{"workspace_id": current.WorkspaceID, "command_id": current.ID, "status": current.Status, "exit_code": current.ExitCode})
 	}
 	active, _ := listActiveCommands(app.AppDB(), c.WorkspaceID)
@@ -491,6 +495,7 @@ func (a *App) resumeWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace) (*Work
 		"health_status": out.Workload.HealthStatus, "last_error": "", "updated_at": nowUTC(),
 	})
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.resumed", actor, "Workspace resumed", nil)
+	app.EmitWithProject("workspace.resumed", w.ProjectID, map[string]any{"workspace_id": w.ID})
 	return requireWorkspace(app.AppDB(), w.ProjectID, w.ID)
 }
 
