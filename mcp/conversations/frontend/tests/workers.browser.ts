@@ -55,7 +55,7 @@ for (const width of [1280, 390]) {
     await expect(card.locator("button[aria-expanded]").first()).toHaveAttribute("aria-expanded", "true");
     await expect(card.getByText("Find the three cheapest suppliers.").first()).toBeVisible();
     await expect(card.getByText(/Model: large · Started /)).toBeVisible();
-    await expect(card.getByText("Thinking · 2.1s")).toBeVisible();
+    await expect(card.getByText("Thought for 2.1s")).toBeVisible();
     await expect(card.getByText("Searching suppliers")).toBeVisible();
     await expect(card.getByText("Reported to main: Found three suppliers")).toBeVisible();
     await expect(card.getByText("Ended with the helper")).toBeVisible();
@@ -245,5 +245,28 @@ test("finished helper: no thinking row after its report, and pace shows the real
   await expect(card.getByText("Ended with the helper")).toHaveCount(0);
   await expect(steps.nth(1)).toContainText("Waiting 60 seconds");
   await expect(steps.nth(1)).toContainText("60.0s");
+  // Finished turns sit still and read in the past tense.
+  await expect(steps.first()).toHaveText("Thought for 2.1s");
+  await expect(card.locator(".chat-thinking-dots")).toHaveCount(0);
   await expect(card.getByText("Result", { exact: true })).toBeVisible();
+});
+
+test("a helper still thinking keeps the moving dots", async ({ page, request }) => {
+  await request.post("/reset");
+  await page.goto("/?host=dashboard");
+  await expect(page.getByTitle("Live")).toBeVisible();
+  await emit(request, { tool_activity: spawnRow() });
+  await emit(request, { worker: worker({ state: "working", current: { kind: "model", started_at: ago(3000) } }) });
+  await request.post("/seed-worker-steps", { data: { thread_id: "researcher", steps: [
+    { kind: "model", started_at: ago(9000), ended_at: ago(7000), duration_ms: 2000, status: "done" },
+    { kind: "tool", tool: "web_search", reason: "Searching suppliers", started_at: ago(7000), ended_at: ago(4000), duration_ms: 3000, status: "done" },
+    { kind: "model", started_at: ago(3000), status: "running" },
+  ] } });
+  const card = page.locator('[data-worker-thread="researcher"]');
+  await card.locator("button[aria-expanded]").first().click();
+  const steps = card.locator("ol > li");
+  await expect(steps).toHaveCount(3);
+  await expect(steps.first()).toHaveText("Thought for 2.0s");
+  await expect(steps.last()).toContainText("Thinking · ");
+  await expect(card.locator(".chat-thinking-dots")).toHaveCount(1);
 });

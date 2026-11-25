@@ -307,6 +307,7 @@ export const catalog = {
   "worker.started": ["Started {time}", "Démarré à {time}", "Iniciado a las {time}"],
   "worker.model": ["Model: {model}", "Modèle : {model}", "Modelo: {model}"],
   "worker.thinkingFor": ["Thinking · {duration}", "Réflexion · {duration}", "Pensando · {duration}"],
+  "worker.thoughtFor": ["Thought for {duration}", "Réflexion de {duration}", "Pensó durante {duration}"],
   "worker.reportedMain": ["Reported to main: {text}", "Rapport à main : {text}", "Informó a main: {text}"],
   "worker.reported": ["Reported: {text}", "Rapport : {text}", "Informó: {text}"],
   "worker.stepEnded": ["Ended with the helper", "Terminé avec l’assistant", "Terminó con el ayudante"],

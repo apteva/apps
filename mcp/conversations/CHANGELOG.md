@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.3 — 2026-11-25
+
+- A helper's finished model turns no longer look busy. They show a still mark and read "Thought for 2.1s"; the moving dots and "Thinking · …" are kept for a turn that is still running.
+- Test host: the app-card tests serve the built panel bundles unchanged. Re-bundling the minified output let Bun 1.3.13 rename a parameter onto the name it shadows, failing the tests on code the dashboard never runs.
+
 ## 0.34.2 — 2026-11-25
 
 - A finished helper's steps no longer end with a stray "Thinking · 1.0s · Ended with the helper" after its report. That row was the model turn that called `done`: the `done` call is hidden and the helper ended with it, so it is now left out. Seen on dev with demo-helper.

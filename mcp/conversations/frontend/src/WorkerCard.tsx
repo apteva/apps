@@ -307,9 +307,16 @@ function WorkerStepRow({ step, registry, t, now, waitedMs }: { step: WorkerStep;
   if (step.kind === "model") {
     return (
       <li className="grid min-h-8 min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 border-t border-border/60 py-0.5 first:border-t-0">
-        <span className="chat-thinking-dots inline-flex h-7 w-7 items-center justify-center gap-1 text-text-muted" aria-hidden="true"><span /><span /><span /></span>
+        {open ? (
+          <span className="chat-thinking-dots inline-flex h-7 w-7 items-center justify-center gap-1 text-text-muted" aria-hidden="true"><span /><span /><span /></span>
+        ) : (
+          // A finished turn: a still mark, so only live thinking moves.
+          <span className="inline-flex h-7 w-7 items-center justify-center text-text-dim" aria-hidden="true">
+            <svg viewBox="0 0 12 12" width="12" height="12"><circle cx="6" cy="6" r="2" fill="currentColor" /></svg>
+          </span>
+        )}
         <span className="text-[12px] text-text-muted">
-          {t("worker.thinkingFor", { duration: durationLabel(duration) || "…" })}
+          {t(open ? "worker.thinkingFor" : "worker.thoughtFor", { duration: durationLabel(duration) || "…" })}
           {statusNote && <span className="ml-2">{statusNote}</span>}
         </span>
       </li>
