@@ -13,6 +13,9 @@ type T = (key: string, params?: Record<string, unknown>) => string;
 const VISIBLE_STEPS = 8;
 const MAX_NESTING = 2;
 const RESULT_PREVIEW_CHARS = 600;
+// Core plumbing that other rows already show: send is the report row, done
+// the end of the helper.
+const HIDDEN_STEP_TOOLS = new Set(["send", "done", "search_tools"]);
 const HELPER_VISUAL: ToolVisual = { key: "native:spawn", label: "Apteva", glyph: "agent" };
 
 export function workerUnfinished(worker: ConversationWorker): boolean {
@@ -121,6 +124,10 @@ export function WorkerCard({ worker, workers, spawnTool, registry, chatId, defau
   const failed = worker.state === "failed" || worker.outcome === "lost" || worker.outcome === "failed";
   const detailsId = `worker-${chatId}-${worker.id}`.replace(/[^a-zA-Z0-9_-]/g, "-");
   const [announcement, setAnnouncement] = useState("");
+  // What the steps tell beyond the list: the model actually used (the list
+  // may only know the tier) and the text the helper ended with.
+  const [stepInfo, setStepInfo] = useState<{ model?: string; endText?: string }>({});
+  const shownWorker = useMemo(() => ({ ...worker, model: stepInfo.model || worker.model, result: worker.result || stepInfo.endText }), [worker, stepInfo]);
   const previous = useRef(unfinished);
   useEffect(() => {
     if (previous.current && !unfinished) setAnnouncement(t(failed ? "worker.announceFailed" : "worker.announceFinished", { name }));
@@ -161,8 +168,8 @@ export function WorkerCard({ worker, workers, spawnTool, registry, chatId, defau
       <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
       {expanded && (
         <div id={detailsId} className="mt-1 grid min-w-0 gap-2 pb-1 pl-1 sm:pl-9">
-          <WorkerHeader worker={worker} t={t} time={time} />
-          <WorkerSteps worker={worker} chatId={chatId} registry={registry} t={t} />
+          <WorkerHeader worker={shownWorker} t={t} time={time} hidePurpose={name === worker.purpose?.trim()} />
+          <WorkerSteps worker={worker} chatId={chatId} registry={registry} t={t} onInfo={setStepInfo} />
           {children.length > 0 && (level < MAX_NESTING ? (
             <div className="grid min-w-0 gap-1" aria-label={t("worker.nestedHelpers")}>
               {children.map(child => <WorkerCard key={child.id} worker={child} workers={workers} registry={registry} chatId={chatId} level={level + 1} />)}
@@ -170,18 +177,18 @@ export function WorkerCard({ worker, workers, spawnTool, registry, chatId, defau
           ) : (
             <p className="text-[11px] text-text-muted">{t("worker.moreHelpers", { count: helpers.length })}</p>
           ))}
-          {worker.result && <WorkerResult worker={worker} t={t} />}
+          {shownWorker.result && !workerUnfinished(worker) && <WorkerResult worker={shownWorker} t={t} />}
         </div>
       )}
     </section>
   );
 }
 
-function WorkerHeader({ worker, t, time }: { worker: ConversationWorker; t: T; time: (v: string) => string }) {
+function WorkerHeader({ worker, t, time, hidePurpose = false }: { worker: ConversationWorker; t: T; time: (v: string) => string; hidePurpose?: boolean }) {
   const parts = [worker.model ? t("worker.model", { model: worker.model }) : "", worker.started_at ? t("worker.started", { time: time(worker.started_at) }) : ""].filter(Boolean);
   return (
     <div className="grid min-w-0 gap-0.5">
-      {worker.purpose && <p className="text-[13px] leading-5 text-text [overflow-wrap:anywhere]">{worker.purpose}</p>}
+      {worker.purpose && !hidePurpose && <p className="text-[13px] leading-5 text-text [overflow-wrap:anywhere]">{worker.purpose}</p>}
       {parts.length > 0 && <p className="text-[11px] text-text-muted">{parts.join(" · ")}</p>}
     </div>
   );
@@ -205,7 +212,10 @@ function WorkerResult({ worker, t }: { worker: ConversationWorker; t: T }) {
   );
 }
 
-function WorkerSteps({ worker, chatId, registry, t }: { worker: ConversationWorker; chatId: string; registry: ToolVisualRegistry; t: T }) {
+function WorkerSteps({ worker, chatId, registry, t, onInfo }: {
+  worker: ConversationWorker; chatId: string; registry: ToolVisualRegistry; t: T;
+  onInfo?: (info: { model?: string; endText?: string }) => void;
+}) {
   const { conversationsClient } = useConversationAPI();
   const [steps, setSteps] = useState<WorkerStep[] | null>(null);
   const [cursor, setCursor] = useState("");
@@ -238,9 +248,15 @@ function WorkerSteps({ worker, chatId, registry, t }: { worker: ConversationWork
       setCursor(page.next_cursor || "");
     } catch { setError(true); }
   };
+  useEffect(() => {
+    if (!steps || !onInfo) return;
+    const model = [...steps].reverse().find(step => step.kind === "model" && step.model)?.model;
+    const endText = steps.find(step => step.kind === "end")?.text;
+    onInfo({ model, endText });
+  }, [steps, onInfo]);
   if (steps === null) return <p className="text-[11px] text-text-muted" role="status">{error ? t("worker.stepsUnavailable") : t("worker.loadingSteps")}</p>;
   // Spawn steps show as nested cards, and the end step as the result.
-  const shown = steps.filter(step => step.kind !== "end");
+  const shown = steps.filter(step => step.kind !== "end" && !(step.kind === "tool" && HIDDEN_STEP_TOOLS.has((step.tool || "").toLowerCase())));
   if (!shown.length) return <p className="text-[11px] text-text-muted">{t("worker.noSteps")}</p>;
   const visible = showAll ? shown : shown.slice(-VISIBLE_STEPS);
   const hidden = shown.length - visible.length;

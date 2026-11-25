@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.1 — 2026-11-25
+
+- Keep one helper card per helper. Core can list a new helper a moment before it reports which spawn call started it. 0.34.0 stored that first sighting under its start time, then stored the helper again once the spawn was known and marked the first copy "Stopped without finishing" (seen live on dev). The first row is now kept and updated.
+- Helper steps take the model and result from what the helper actually did: the header shows the model of its last turn (the thread list only knows the tier, such as "large"), and the result falls back to the text the helper ended with. The helper's own `send` and `done` calls are no longer listed, since "Reported to main: …" and the result already show them. A helper with no thread name is named by its purpose, which is no longer repeated under it.
+
 ## 0.34.0 — 2026-11-25
 
 - See what an agent's helpers are doing. When an agent spawns a thread to do part of the work, the spawn row in the conversation used to stay a one-line "Start a helper" entry while the helper worked unseen. Once the platform reports the spawned thread, the row becomes a helper card: its name (thread name, then purpose, then the spawn reason), what it is doing now ("Using web search", "Thinking", "Sleeping until 14:05") with the app icon of the current tool, a running timer, and "+n helpers" when it started helpers of its own. Expanding it shows the purpose, model and start time, the last eight steps oldest first ("Show earlier" for the rest), "Thinking · 2.1s" for model turns, "Reported to main: …" for its reports, "Ended with the helper" or "Stopped without finishing" for steps cut short, its own helpers as nested cards (two levels), and the result with "Show full". Each tool step folds its arguments and output behind "Details". The card stays after the reply as a record; a helper finishing adds no unread count or notification.

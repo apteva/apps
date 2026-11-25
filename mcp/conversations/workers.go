@@ -364,6 +364,7 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 	sorted := append([]sdk.ObservedThread(nil), threads...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Depth < sorted[j].Depth })
 	seen := map[int64]bool{}
+	chosen := map[string]int64{} // thread id → row used for it in this pass
 	var changed []ConversationWorker
 	for _, t := range sorted {
 		if t.ID == "" || conversationThread(t.ID) {
@@ -391,9 +392,12 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 		if incarnation != "" {
 			w, found = byKey[t.ID+"\x00"+incarnation]
 		}
-		if !found && incarnation == "" {
-			// No identity of its own: follow the newest row for this id.
-			if prev, ok := latest[t.ID]; ok && prev.EndedAt == "" {
+		if !found {
+			// The spawn span can arrive after the thread is first listed (Core
+			// reports worker.created a moment later), and a start time can
+			// shift between lists. An open row for this thread without a
+			// different span is the same helper: adopt it.
+			if prev, ok := latest[t.ID]; ok && prev.EndedAt == "" && (span == "" || !strings.HasPrefix(prev.incarnation, "span:") || prev.incarnation == incarnation) {
 				w, found = prev, true
 			}
 		}
@@ -415,16 +419,20 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 			w = ConversationWorker{ConversationID: chat, AgentID: agent, ThreadID: t.ID, ParentThreadID: parent, SpawnCallID: call, Depth: depth, incarnation: incarnation}
 		}
 		before := w
+		if span != "" {
+			// The span is the identity once known.
+			w.incarnation = incarnation
+		}
 		applyObservedThread(&w, t)
 		if found && workerEqual(before, w) {
-			seen[w.ID] = true
+			seen[w.ID], chosen[w.ThreadID] = true, w.ID
 			continue
 		}
 		saved, err := a.store.saveWorker(w)
 		if err != nil {
 			return err
 		}
-		seen[saved.ID] = true
+		seen[saved.ID], chosen[saved.ThreadID] = true, saved.ID
 		byKey[saved.ThreadID+"\x00"+saved.incarnation] = saved
 		if prev, ok := latest[saved.ThreadID]; !ok || prev.ID <= saved.ID {
 			latest[saved.ThreadID] = saved
@@ -434,8 +442,13 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 	if complete {
 		// An unfinished worker Core no longer lists, not even as ended, was
 		// lost (a restart or a kill without telemetry).
+		listed := map[string]bool{}
+		for _, t := range threads {
+			listed[t.ID] = true
+		}
 		for _, w := range existing {
-			if w.EndedAt != "" || seen[w.ID] {
+			// Still listed, and no other row took the thread: keep it.
+			if w.EndedAt != "" || seen[w.ID] || (listed[w.ThreadID] && chosen[w.ThreadID] == 0) {
 				continue
 			}
 			w.State, w.Outcome, w.EndedAt, w.Current = sdk.ThreadStateStopped, "lost", activityTime(time.Now()), nil
@@ -538,8 +551,8 @@ func (s *store) saveWorker(w ConversationWorker) (ConversationWorker, error) {
 		return scanWorker(s.db.QueryRow(`SELECT `+workerColumns+` FROM conversation_workers WHERE agent_id=? AND thread_id=? AND incarnation=?`, w.AgentID, w.ThreadID, w.incarnation))
 	}
 	w.Revision++
-	_, err := s.db.Exec(`UPDATE conversation_workers SET name=?,purpose=?,state=?,current_json=?,model=?,next_wake_at=?,started_at=?,last_activity_at=?,ended_at=?,outcome=?,result=?,result_truncated=?,revision=? WHERE id=?`,
-		w.Name, w.Purpose, w.State, current, w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated), w.Revision, w.ID)
+	_, err := s.db.Exec(`UPDATE conversation_workers SET incarnation=?,name=?,purpose=?,state=?,current_json=?,model=?,next_wake_at=?,started_at=?,last_activity_at=?,ended_at=?,outcome=?,result=?,result_truncated=?,revision=? WHERE id=?`,
+		w.incarnation, w.Name, w.Purpose, w.State, current, w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated), w.Revision, w.ID)
 	return w, err
 }
 

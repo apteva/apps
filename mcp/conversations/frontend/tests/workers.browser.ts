@@ -186,3 +186,33 @@ test("panel: Show helper steps opens worker cards", async ({ page, request }) =>
   const card = page.locator('[data-worker-thread="researcher"]');
   await expect(card.locator("button[aria-expanded]").first()).toHaveAttribute("aria-expanded", "true");
 });
+
+// Shape seen live on dev: the result comes as the end step's text, the
+// helper's own send/done calls repeat the report and the end, and the list
+// only knows the model tier.
+test("worker card uses the steps for the model and result, and hides send/done", async ({ page, request }) => {
+  await request.post("/reset");
+  await page.goto("/?host=dashboard");
+  await expect(page.getByTitle("Live")).toBeVisible();
+  await emit(request, { tool_activity: spawnRow() });
+  await emit(request, { worker: worker({ name: "", state: "done", current: undefined, ended_at: ago(1000), outcome: "completed", model: "large" }) });
+  await request.post("/seed-worker-steps", { data: { thread_id: "researcher", steps: [
+    { kind: "tool", tool: "pace", reason: "Waiting 20 seconds", started_at: ago(30_000), ended_at: ago(10_000), duration_ms: 20_000, status: "done" },
+    { kind: "model", model: "deepseek-v4-1-flash", started_at: ago(9000), ended_at: ago(8000), duration_ms: 1210, status: "done" },
+    { kind: "tool", tool: "send", reason: "Reporting DONE to parent", started_at: ago(7900), ended_at: ago(7900), status: "done" },
+    { kind: "message", to: "main", text: "DONE", started_at: ago(7900), status: "done" },
+    { kind: "tool", tool: "done", reason: "Finishing with DONE result", started_at: ago(7000), ended_at: ago(7000), status: "done" },
+    { kind: "end", text: "DONE", outcome: "completed", started_at: ago(6900), status: "done" },
+  ] } });
+  const card = page.locator('[data-worker-thread="researcher"]');
+  // No thread name: the purpose names the card, and is not repeated below.
+  await expect(card.getByText("Find the three cheapest suppliers.")).toHaveCount(1);
+  await card.locator("button[aria-expanded]").first().click();
+  await expect(card.getByText("Waiting 20 seconds")).toBeVisible();
+  await expect(card.getByText("Reported to main: DONE")).toBeVisible();
+  await expect(card.getByText("Reporting DONE to parent")).toHaveCount(0);
+  await expect(card.getByText("Finishing with DONE result")).toHaveCount(0);
+  await expect(card.getByText(/Model: deepseek-v4-1-flash · Started /)).toBeVisible();
+  await expect(card.getByText("Result", { exact: true })).toBeVisible();
+  await expect(card.getByText("Find the three cheapest suppliers.")).toHaveCount(1);
+});

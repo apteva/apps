@@ -364,3 +364,48 @@ func TestAgentWorkNamesConversationThreads(t *testing.T) {
 		t.Fatalf("worker = %+v", w)
 	}
 }
+
+// Live on dev (2026-11-25): Core listed the helper before its worker.created
+// event carried the spawn span, so the first list had no span. The second
+// list must update that row, not add a second one and mark the first lost.
+func TestWorkerKeepsOneRowWhenTheSpawnSpanArrivesLate(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	withFakeObserver(t, a)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	now := time.Now().UTC()
+	spawnCall(t, a, 41, thread, "call-1", "span-1", "helper", now)
+	first := []sdk.ObservedThread{{ID: "helper", ParentID: thread, Depth: 1, State: "working", StartedAt: now.Add(time.Second)}}
+	if err := a.reconcileWorkers(41, first, true); err != nil {
+		t.Fatal(err)
+	}
+	second := []sdk.ObservedThread{{ID: "helper", ParentID: thread, Depth: 1, State: "working", StartedAt: now.Add(1200 * time.Millisecond),
+		SpawnedBy: &sdk.ThreadSpawnLink{ThreadID: thread, ToolSpanID: "span-1"}}}
+	if err := a.reconcileWorkers(41, second, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileWorkers(41, second, true); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := a.store.conversationWorkers(conv.ID)
+	if len(rows) != 1 || rows[0].EndedAt != "" || rows[0].State != "working" || rows[0].SpawnCallID != "call-1" || rows[0].incarnation != "span:span-1" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	// A later spawn reusing the id after the first ended is a new row.
+	ended := []sdk.ObservedThread{{ID: "helper", ParentID: thread, State: "done", SpawnedBy: &sdk.ThreadSpawnLink{ThreadID: thread, ToolSpanID: "span-1"},
+		Ended: &sdk.ThreadEnd{At: now.Add(time.Minute), Outcome: "completed"}}}
+	if err := a.reconcileWorkers(41, ended, true); err != nil {
+		t.Fatal(err)
+	}
+	spawnCall(t, a, 41, thread, "call-2", "span-2", "helper", now.Add(2*time.Minute))
+	again := []sdk.ObservedThread{{ID: "helper", ParentID: thread, State: "working", StartedAt: now.Add(2 * time.Minute),
+		SpawnedBy: &sdk.ThreadSpawnLink{ThreadID: thread, ToolSpanID: "span-2"}}}
+	if err := a.reconcileWorkers(41, again, true); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = a.store.conversationWorkers(conv.ID)
+	if len(rows) != 2 || rows[0].State != "done" || rows[0].Outcome != "completed" || rows[1].SpawnCallID != "call-2" || rows[1].EndedAt != "" {
+		t.Fatalf("respawn rows = %+v", rows)
+	}
+}

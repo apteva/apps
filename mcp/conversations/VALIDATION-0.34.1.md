@@ -1,4 +1,4 @@
-# Conversations v0.34.0 validation — 2026-11-25
+# Conversations v0.34.0 / v0.34.1 validation — 2026-11-25
 
 Helper cards, "Waiting for N helpers…" and the Agent work section in Details,
 built on the thread observation API (app-sdk v0.122.1, server#104).
@@ -35,7 +35,29 @@ built on the thread observation API (app-sdk v0.122.1, server#104).
   conversation opens on click); paused banner; "Show helper steps" opens cards.
 - Full suites: `GOWORK=off go test -race -tags=integration ./...`, `go vet`
   (also `-tags 'integration scenario'`), Bun 148 (app root) and 49
-  (frontend), Playwright 198.
+  (frontend), Playwright 199 (one thread-actions test failed once while the
+  Go suite loaded the machine and passed on rerun).
+
+## Live run on dev (:5280, server#104 build, Conversations 0.34.0 on install 1765)
+
+Agent 1903 ("venice test", main-routed operator chat
+conv-b077c7a0c66c9484a6712bfd) was asked to spawn one helper that paces 20 s
+and reports DONE. Main spawned `probe-helper-034`; Conversations linked it
+to the conversation through main's spawn call, and the helper went working →
+done 24 s later with a "Reported to main: DONE" step, the real model on its
+model steps and the end text DONE.
+
+Found and fixed in 0.34.1:
+
+- Two rows for the one helper: the first list had no spawn span yet, so it
+  was keyed by start time; the second created another row and marked the
+  first lost. Now the open row is adopted and its key upgraded
+  (`TestWorkerKeepsOneRowWhenTheSpawnSpanArrivesLate`).
+- The topology's result was empty while the end step carried DONE, the
+  header showed the tier "large", and the helper's own `send` / `done` calls
+  repeated the report and the end. The card now takes the model and result
+  from the steps and hides those two calls (Playwright case built from the
+  live step shape).
 
 ## Not covered
 
