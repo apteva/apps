@@ -501,6 +501,45 @@ type aiDetail struct {
 	Cited      []int64         `json:"cited,omitempty"`
 	Rationale  string          `json:"rationale,omitempty"`
 	QueryError string          `json:"query_error,omitempty"`
+	// SearchAttempts counts GDELT requests, including retries after 429.
+	SearchAttempts int `json:"search_attempts,omitempty"`
+}
+
+// GDELT asks clients for at most one request every five seconds and
+// answers faster callers with HTTP 429. Backtests make one search per
+// question, so they pace themselves and wait out rate limits.
+var (
+	gdeltMinGap   = 6 * time.Second
+	gdeltBackoffs = []time.Duration{15 * time.Second, 45 * time.Second, 90 * time.Second}
+	evalSleep     = time.Sleep
+)
+
+type gdeltPacer struct{ last time.Time }
+
+// search runs one GDELT doc search. It returns the response, or the last
+// failure reason once rate-limit retries are used up or the failure is
+// not a rate limit, and the number of requests made.
+func (g *gdeltPacer) search(env *ingestEnv, args map[string]any) (json.RawMessage, string, int) {
+	attempts := 0
+	for {
+		if !g.last.IsZero() {
+			if wait := gdeltMinGap - time.Since(g.last); wait > 0 {
+				evalSleep(wait)
+			}
+		}
+		g.last = time.Now()
+		attempts++
+		raw, ok := env.sc.call("gdelt", "doc_search", args)
+		if ok {
+			return raw, "", attempts
+		}
+		reason := orStr(lastSourceError("gdelt"), "news search failed")
+		if !strings.Contains(reason, "429") || attempts > len(gdeltBackoffs) {
+			return nil, reason, attempts
+		}
+		evalSleep(gdeltBackoffs[attempts-1])
+		g.last = time.Time{} // the backoff already exceeds the gap
+	}
 }
 
 // aiPredictions runs the live model's evidence shift on historical
@@ -537,6 +576,7 @@ func aiPredictions(env *ingestEnv, items []evalItem, p evalParams, now time.Time
 	}
 	// Deterministic sample when there are more eligible questions than the
 	// budget allows.
+	pacer := &gdeltPacer{}
 	rng := rand.New(rand.NewSource(p.Seed))
 	rng.Shuffle(len(cands), func(i, j int) { cands[i], cands[j] = cands[j], cands[i] })
 	for i, c := range cands {
@@ -546,7 +586,7 @@ func aiPredictions(env *ingestEnv, items []evalItem, p evalParams, now time.Time
 			out = append(out, pr)
 			continue
 		}
-		v, det, err := aiForecastAt(env, c.it, c.cutoff, c.price, p.AIEvidenceDays)
+		v, det, err := aiForecastAt(env, pacer, c.it, c.cutoff, c.price, p.AIEvidenceDays)
 		b, _ := json.Marshal(det)
 		pr.Detail = string(b)
 		if err != nil {
@@ -563,7 +603,7 @@ func aiPredictions(env *ingestEnv, items []evalItem, p evalParams, now time.Time
 	return out
 }
 
-func aiForecastAt(env *ingestEnv, it evalItem, cutoff time.Time, price float64, evidenceDays int) (float64, aiDetail, error) {
+func aiForecastAt(env *ingestEnv, pacer *gdeltPacer, it evalItem, cutoff time.Time, price float64, evidenceDays int) (float64, aiDetail, error) {
 	det := aiDetail{Evidence: []evidenceBrief{}}
 	topics := questionTopics(it.Text)
 	if len(topics) > 0 {
@@ -578,10 +618,11 @@ func aiForecastAt(env *ingestEnv, it evalItem, cutoff time.Time, price float64, 
 		if len(terms) > 1 {
 			query = "(" + strings.Join(terms, " OR ") + ")"
 		}
-		raw, ok := env.sc.call("gdelt", "doc_search", map[string]any{"query": query + " sourcelang:english", "maxrecords": "10",
+		raw, qerr, attempts := pacer.search(env, map[string]any{"query": query + " sourcelang:english", "maxrecords": "10",
 			"startdatetime": ts(cutoff.Add(-time.Duration(evidenceDays) * 24 * time.Hour)), "enddatetime": ts(cutoff)})
-		if !ok {
-			det.QueryError = orStr(lastSourceError("gdelt"), "news search failed")
+		det.SearchAttempts = attempts
+		if qerr != "" {
+			det.QueryError = qerr
 		} else {
 			for _, n := range parseNews(raw, "gdelt") {
 				seen := parseTS(n.Date)

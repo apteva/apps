@@ -117,6 +117,8 @@ Trained methods abstain until 30 outcomes are known.
 - Training uses only outcomes known strictly before each forecast time.
 - AI evidence must have a first-seen time before the forecast time; undated
   articles are dropped.
+  Searches are paced 6s apart and wait out GDELT rate limits (15s, 45s,
+  90s) before a question is counted as an error.
 - AI forecasts are scored only on questions resolving after the model's
   stated knowledge cutoff (`ai_knowledge_cutoff`, required). That cutoff is
   stated by the operator and not verified, and the report says so.

@@ -309,3 +309,67 @@ func TestOrphanedEvalJobsAreMarkedFailed(t *testing.T) {
 		t.Fatalf("a live job must not be reaped, got %s", runs[0].Status)
 	}
 }
+
+// flakyGDELT rate-limits the first `limited` searches, then answers.
+type flakyGDELT struct {
+	fakeSources
+	limited int
+	n       int
+}
+
+func (f *flakyGDELT) call(slug, tool string, args map[string]any) (json.RawMessage, bool) {
+	if slug == "gdelt" {
+		f.n++
+		if f.n <= f.limited {
+			sourceErrors.Store("gdelt", "rate limited (HTTP 429)")
+			return nil, false
+		}
+		sourceErrors.Delete("gdelt")
+	}
+	return f.fakeSources.call(slug, tool, args)
+}
+
+func withFakeSleep(t *testing.T) *[]time.Duration {
+	t.Helper()
+	slept := []time.Duration{}
+	oldSleep, oldGap := evalSleep, gdeltMinGap
+	evalSleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { evalSleep, gdeltMinGap = oldSleep, oldGap; sourceErrors.Delete("gdelt") })
+	return &slept
+}
+
+func TestGDELTPacerWaitsOutRateLimits(t *testing.T) {
+	slept := withFakeSleep(t)
+	sc := &flakyGDELT{fakeSources: fakeSources{responses: map[string]string{"gdelt/doc_search": `{"articles":[]}`}}, limited: 2}
+	env := &ingestEnv{sc: sc}
+	raw, reason, attempts := (&gdeltPacer{}).search(env, map[string]any{"query": "x"})
+	if reason != "" || raw == nil || attempts != 3 {
+		t.Fatalf("two 429s then success: reason=%q attempts=%d", reason, attempts)
+	}
+	if len(*slept) != 2 || (*slept)[0] != gdeltBackoffs[0] || (*slept)[1] != gdeltBackoffs[1] {
+		t.Fatalf("expected the first two backoffs, slept %v", *slept)
+	}
+
+	// Persistent rate limiting gives up after the last backoff.
+	*slept = (*slept)[:0]
+	sc = &flakyGDELT{fakeSources: sc.fakeSources, limited: 100}
+	_, reason, attempts = (&gdeltPacer{}).search(&ingestEnv{sc: sc}, map[string]any{"query": "x"})
+	if !strings.Contains(reason, "429") || attempts != len(gdeltBackoffs)+1 {
+		t.Fatalf("persistent 429: reason=%q attempts=%d", reason, attempts)
+	}
+}
+
+func TestGDELTPacerSpacesSearches(t *testing.T) {
+	slept := withFakeSleep(t)
+	gdeltMinGap = time.Hour // any real gap is shorter, so the pacer must wait
+	env := &ingestEnv{sc: &fakeSources{responses: map[string]string{"gdelt/doc_search": `{"articles":[]}`}}}
+	g := &gdeltPacer{}
+	g.search(env, map[string]any{"query": "a"})
+	if len(*slept) != 0 {
+		t.Fatalf("first search must not wait, slept %v", *slept)
+	}
+	g.search(env, map[string]any{"query": "b"})
+	if len(*slept) != 1 || (*slept)[0] <= 59*time.Minute {
+		t.Fatalf("second search must wait out the gap, slept %v", *slept)
+	}
+}
