@@ -89,6 +89,9 @@ func parseEvalParams(args map[string]any) (evalParams, error) {
 	if p.AI {
 		p.AIKnowledgeCutoff = strArg(args, "ai_knowledge_cutoff")
 		t := parseTS(p.AIKnowledgeCutoff)
+		if d, err := time.Parse("2006-01-02", p.AIKnowledgeCutoff); t == nil && err == nil {
+			t = &d
+		}
 		if t == nil {
 			return p, errors.New("ai=true needs ai_knowledge_cutoff (the model's training-data cutoff, RFC3339 or YYYY-MM-DD); questions resolving before it are excluded from the AI comparison")
 		}

@@ -269,3 +269,13 @@ func TestKalshiSeriesClustersRecurringMarkets(t *testing.T) {
 		t.Fatal("ticker without a date part is its own series")
 	}
 }
+
+func TestEvalParamsAcceptDateOnlyKnowledgeCutoff(t *testing.T) {
+	p, err := parseEvalParams(map[string]any{"dataset_id": 1, "ai": true, "ai_knowledge_cutoff": "2026-10-01"})
+	if err != nil || p.AIKnowledgeCutoff != "2026-10-01T00:00:00Z" {
+		t.Fatalf("date-only cutoff: %q %v", p.AIKnowledgeCutoff, err)
+	}
+	if _, err := parseEvalParams(map[string]any{"dataset_id": 1, "ai": true}); err == nil {
+		t.Fatal("ai without a knowledge cutoff must be rejected")
+	}
+}
