@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Readable schedules (0.24.2)
+
+Schedules show as "Every Monday at 09:00" with a clock icon and next run.
+See `docs-release-0.24.2.md`.
+
 ## Trigger source app and event title (0.24.1)
 
 Starts column shows the source app icon and name with a readable event
