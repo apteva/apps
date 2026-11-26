@@ -1,4 +1,10 @@
-# CRM v0.10.0
+# CRM v0.10.1
+
+Release `crm/v0.10.1`: on the All projects Home, each Customer inbox row's
+project badge shows the project's colour as a dot next to its name, read from
+the dashboard's `widgetContext.projects` (`#rgb`/`#rrggbb`). Projects without
+a colour, invalid values, and dashboards that don't send `projects` keep the
+neutral badge.
 
 Release `crm/v0.10.0`: the Customer inbox widget works on the All projects
 Home (`dashboard_scopes: [project, global]`). In global scope it calls
