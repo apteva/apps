@@ -209,7 +209,13 @@ app/tool, expands `{{...}}` templates from the account/customer/plan
 context, and stores selected output fields in account metadata. Actions
 default to `once_per_transition`; set `execution_policy` to `always` only
 for operations that are explicitly safe to repeat. SaaS reserves each run
-before calling the target and passes a deterministic `idempotency_key`.
+before calling the target and builds a deterministic `idempotency_key`.
+For app actions the key is passed only when the target tool lists
+`idempotency_key` in its input schema (read once from the app's MCP
+`tools/list` and cached for 10 minutes); tools that reject unknown fields,
+such as `containers_run`, never receive it. If the tool list cannot be read,
+the key is left out (v0.13.2). `integration_execute` actions always receive
+it.
 
 `account_past_due` actions do not run while the account is still in its
 initial paid checkout (`checkout_status` is `processing` or

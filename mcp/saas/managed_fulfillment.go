@@ -99,7 +99,7 @@ func (a *App) executeFulfillmentAction(ctx *sdk.AppCtx, pid string, acct *Accoun
 	switch firstNonEmpty(action.ExecutionKind, "app") {
 	case "app":
 		var out map[string]any
-		err := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
+		err := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, appActionInput(pid, action, args), &out)
 		return out, err
 	case "integration_execute":
 		return a.executeIntegrationFulfillment(ctx, pid, acct, action, run, args)
