@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.9.0
+version: 0.10.0
 description: |
+  v0.10.0 adds a read_video_frames step that saves frames of a page video at exact times or a fixed interval through Computer 0.16.0 video_frames (inline JPEG, one retry for frames still loading), and an actors_run_frames tool that returns a run's saved frames to an agent as image blocks, a page at a time.
   v0.9.0 passes Android selection steps to Computer 0.15.0: native_select (native_state), native_scroll_to (native_container, direction, max_swipes) and native_checked guards on any native step, with {{input}} selectors rendered in guard keys.
   v0.8.1 accepts next_cursor passed back as cursor on actors_list, actors_dataset_read and actors_dataset_query (it was ignored and restarted at the first page).
   v0.8.0 adds Android Instagram login variants with encrypted context-bound password references, private secret input confirmation, guarded onboarding and verified account identity.
@@ -138,6 +139,8 @@ provides:
       description: Queue a named operation with optional revision, preset, input and idempotency key.
     - name: actors_run_get
       description: Get run status, bounded output, immutable snapshot and export references; detail=summary returns the compact terminal receipt with read coverage.
+    - name: actors_run_frames
+      description: Return a run's saved video frames as images with their times, a page at a time.
     - name: actors_run_cancel
       description: Cancel queued work or request cancellation of an active run.
     - name: actors_run_retry
@@ -189,7 +192,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: actors/v0.9.0
+    ref: actors/v0.10.0
     entry: mcp/actors
   port: 8080
   health_check: /health

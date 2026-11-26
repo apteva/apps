@@ -1,5 +1,7 @@
 # Actors
 
+Actors v0.10.0 adds `read_video_frames`: a read-only step that saves frames of a video on the current page at exact times or a fixed interval, and `actors_run_frames`, which hands those frames to an agent as images. See [Video frames](#video-frames-v0100).
+
 Actors v0.7.0 adds guarded Android native field reads, verified replacement and explicit clearing, alongside the existing iOS native guards. The shared [Instagram example](examples/instagram.md) provides both platform variants. This release retains confirmed upload receipts and adds the reviewed media-example guard regressions from the other Actors work.
 
 Actors v0.6.0 adds platform variants: one operation can have iOS, Android and web implementations, selected before queueing with the chosen implementation and device pinned in the run snapshot.
@@ -15,7 +17,7 @@ Actors is a standalone Apteva app for reusable browser workflows. It depends dir
 - Revisioned actor definitions with immutable revision history and per-run snapshots.
 - Named operations sharing browser options, defaults, presets and limits; single-operation `steps` definitions also work.
 - Computer browser sessions, saved-context selection, proxy/environment forwarding and saved-context exclusion between Actors runs.
-- Navigate, click, fill, key, scroll, wait, extract, paginate, assert URL/element and screenshot steps.
+- Navigate, click, fill, key, scroll, wait, extract, paginate, assert URL/element, screenshot and video frame steps.
 - Queue, history, progress, cancellation, explicit snapshot retry and deadline-aware Computer calls.
 - Saved tasks pinned to actor revision/operation/input.
 - Page-by-page dataset persistence and cursor reads, including partial output after failure; private JSONL/CSV exports on success.
@@ -602,3 +604,57 @@ requirements per platform. Add `platform: "android"` for that implementation's
 complete contract; immutable exports support the same selector. Response and
 export bounds remain enforced. Variants do not add device capabilities: each
 implementation must use actions supported by its Computer/Mobile session.
+
+## Video frames (v0.10.0)
+
+`read_video_frames` reads frames from a `<video>` on the current page through
+Computer's `computer_use` `video_frames` action (Computer 0.16.0 or later on a
+browser backend). It is read-only, so it can run in `read_only:true`
+operations. It is not available on mobile sessions or with `private_screen`.
+
+Pick exactly one mode:
+
+- `at_seconds`: up to 24 exact times, as a list or a comma-separated string
+  (`"0, 2.5, 10"`).
+- `every_seconds`: one frame per interval from `start_seconds` (default 0),
+  up to `end_seconds` or the video's end, with `max_frames` (1-24).
+
+Optional: `selector` and `video_index` pick the video, `max_edge` (64-1920)
+and `quality` (1-100) size the JPEG, `min_height` (for example 720) waits for
+a sharper rendition of adaptive streams, and `timeout_ms` (1000-60000) bounds
+each call. Any number can be an input template such as `"{{every_seconds}}"`.
+
+```json
+{
+  "schema_version": 1,
+  "read_only": true,
+  "allowed_hosts": ["example.com"],
+  "defaults": {"every_seconds": 2, "max_frames": 8},
+  "steps": [
+    {"action": "goto", "url": "{{video_page_url}}"},
+    {"action": "read_video_frames", "video_frames": {
+      "every_seconds": "{{every_seconds}}",
+      "max_frames": "{{max_frames}}",
+      "min_height": 720
+    }}
+  ]
+}
+```
+
+When Computer reports frames that were still loading (`retry_at_seconds`),
+the step asks once more for just those times. Adaptive streams often open at a
+low rendition and switch within a few seconds; the player keeps those first
+segments, so early frames can stay below `min_height` and are flagged
+`low_resolution` rather than re-read. Each frame is saved privately in
+Storage under `/.actors/video_frame/` and becomes one dataset row with
+`frame_index`, `requested_s`, `actual_s`, `width`, `height`, `source_width`,
+`source_height`, `mime_type`, `sha256`, `duplicate_of` (the `frame_index` of an identical earlier frame),
+`low_resolution`, `video_duration`, `page_url`, `frame_artifact_id` and `frame_storage_id`. Run
+output adds `video_frame_count` and a per-step `video_frames` summary with any
+times still skipped.
+
+`actors_run_frames(run_id, offset?, limit?)` returns those frames to the
+calling agent: a JSON text block (frame times, sizes, `content_index` of each
+image, `next_offset`) followed by up to 12 image blocks (default 6). Images are
+not kept in conversation history, so describe what you need from them in the
+same turn and pass `next_offset` for the rest.

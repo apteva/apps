@@ -70,6 +70,8 @@ type actorExecution struct {
 	startedAt            time.Time
 	workerCtx            context.Context
 	screenshot           *artifactSummary
+	videoFrameCount      int
+	videoFrameSummaries  []map[string]any
 	datasetJSONL         *artifactSummary
 	datasetCSV           *artifactSummary
 	traceArtifact        *artifactSummary
@@ -556,6 +558,10 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		out["screenshot_artifact_id"] = exec.screenshot.ID
 		out["screenshot_url"] = exec.screenshot.URL
 	}
+	if len(exec.videoFrameSummaries) > 0 {
+		out["video_frames"] = exec.videoFrameSummaries
+		out["video_frame_count"] = exec.videoFrameCount
+	}
 	if status == "completed" {
 		cont, err := exec.saveReadContinuation()
 		if err != nil {
@@ -844,6 +850,8 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.revealControl(step)
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
+	case "read_video_frames":
+		return e.readVideoFrames(step)
 	case "goto_record":
 		return e.gotoRecord(step)
 	case "read_navigation":
@@ -2348,6 +2356,12 @@ func previewActorTrace(trace []map[string]any) []map[string]any {
 }
 
 func storeBytesArtifact(callCtx context.Context, ctx *sdk.AppCtx, runID int64, kind, title, contentType string, data []byte, extension string) (*artifactSummary, error) {
+	return storeBytesArtifactMeta(callCtx, ctx, runID, kind, title, contentType, data, extension, nil)
+}
+
+// storeBytesArtifactMeta also records extra metadata (for example a video
+// frame's time and size) alongside the compact artifact metadata.
+func storeBytesArtifactMeta(callCtx context.Context, ctx *sdk.AppCtx, runID int64, kind, title, contentType string, data []byte, extension string, extra map[string]any) (*artifactSummary, error) {
 	folder := "/.actors/" + kind + "/" + time.Now().UTC().Format("2006-01")
 	var up struct {
 		ID  int64  `json:"id"`
@@ -2358,7 +2372,13 @@ func storeBytesArtifact(callCtx context.Context, ctx *sdk.AppCtx, runID int64, k
 	if err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "storage", "files_upload", args, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
-	art, err := insertArtifact(ctx, runID, kind, "", title, up.ID, up.URL, contentType, len(data), compactArtifactMetadata(kind, "", title, contentType, len(data)))
+	meta := compactArtifactMetadata(kind, "", title, contentType, len(data))
+	for k, v := range extra {
+		if _, taken := meta[k]; !taken {
+			meta[k] = v
+		}
+	}
+	art, err := insertArtifact(ctx, runID, kind, "", title, up.ID, up.URL, contentType, len(data), meta)
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), actorCleanupTimeout)
 		defer cancel()
