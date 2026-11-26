@@ -59,20 +59,26 @@ type overviewCounts struct {
 	Attention int `json:"attention"`
 	Recent    int `json:"recent"`
 	Review    int `json:"review"`
+	// Active assignments on active procedures, how many start on events, and
+	// how many have a sync or trigger problem.
+	Assignments      int `json:"assignments"`
+	EventDriven      int `json:"event_driven"`
+	AssignmentIssues int `json:"assignment_issues"`
 }
 type processOverview struct {
-	Scope       string            `json:"scope,omitempty"`
-	Projects    []overviewProject `json:"projects,omitempty"`
-	Coverage    string            `json:"coverage"`
-	Counts      overviewCounts    `json:"counts"`
-	Active      []overviewItem    `json:"active"`
-	Upcoming    []overviewItem    `json:"upcoming"`
-	Recent      []overviewItem    `json:"recent"`
-	Attention   []overviewItem    `json:"attention"`
-	LiveSteps   []overviewStep    `json:"live_steps"`
-	Warnings    []string          `json:"warnings"`
-	Partial     bool              `json:"partial"`
-	GeneratedAt string            `json:"generated_at"`
+	Scope       string               `json:"scope,omitempty"`
+	Projects    []overviewProject    `json:"projects,omitempty"`
+	Coverage    string               `json:"coverage"`
+	Counts      overviewCounts       `json:"counts"`
+	Active      []overviewItem       `json:"active"`
+	Upcoming    []overviewItem       `json:"upcoming"`
+	Recent      []overviewItem       `json:"recent"`
+	Attention   []overviewItem       `json:"attention"`
+	Assignments []overviewAssignment `json:"assignments"`
+	LiveSteps   []overviewStep       `json:"live_steps"`
+	Warnings    []string             `json:"warnings"`
+	Partial     bool                 `json:"partial"`
+	GeneratedAt string               `json:"generated_at"`
 }
 
 type overviewProject struct {
@@ -83,7 +89,7 @@ type overviewProject struct {
 // Reads never dispatch work or acquire the worker mutex. Direct-run counts cover
 // the full project; payloads and optional inter-app history requests are bounded.
 func (a *App) overview(project string) (*processOverview, error) {
-	out := &processOverview{Active: []overviewItem{}, Upcoming: []overviewItem{}, Recent: []overviewItem{}, Attention: []overviewItem{}, LiveSteps: []overviewStep{}, Warnings: []string{}, GeneratedAt: timestamp()}
+	out := &processOverview{Active: []overviewItem{}, Upcoming: []overviewItem{}, Recent: []overviewItem{}, Attention: []overviewItem{}, Assignments: []overviewAssignment{}, LiveSteps: []overviewStep{}, Warnings: []string{}, GeneratedAt: timestamp()}
 	const direct = `(r.backend='agent' OR r.workflow=1)`
 	const active = `r.state NOT IN ('completed','failed','cancelled')`
 	const attention = `(r.state IN ('waiting','blocked') OR r.delivery_warning<>'' OR EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','cancelled') AND (s.state IN ('waiting','blocked','failed') OR (s.due_at<>'' AND julianday(s.due_at)<=julianday('now') AND s.state NOT IN ('completed','failed','cancelled')) OR s.delivery_warning<>'')))`
@@ -205,6 +211,12 @@ func (a *App) overview(project string) (*processOverview, error) {
 	if out.Partial {
 		out.Coverage = "Partial overview: " + strings.Join(out.Warnings, " ")
 	}
+	assignments, e := a.overviewAssignments(project, out.Active)
+	if e != nil {
+		return nil, e
+	}
+	countAssignments(&out.Counts, assignments)
+	out.Assignments = capAssignments(assignments)
 	out.Active = capOverview(out.Active)
 	out.Recent = capOverview(out.Recent)
 	out.Upcoming = capOverview(out.Upcoming)
@@ -264,6 +276,7 @@ func (a *App) overviewGlobal(selector string) (*processOverview, error) {
 		Upcoming:    []overviewItem{},
 		Recent:      []overviewItem{},
 		Attention:   []overviewItem{},
+		Assignments: []overviewAssignment{},
 		LiveSteps:   []overviewStep{},
 		Warnings:    []string{},
 		GeneratedAt: timestamp(),
@@ -281,6 +294,14 @@ func (a *App) overviewGlobal(selector string) (*processOverview, error) {
 		out.Counts.Attention += part.Counts.Attention
 		out.Counts.Recent += part.Counts.Recent
 		out.Counts.Review += part.Counts.Review
+		out.Counts.Assignments += part.Counts.Assignments
+		out.Counts.EventDriven += part.Counts.EventDriven
+		out.Counts.AssignmentIssues += part.Counts.AssignmentIssues
+		for i := range part.Assignments {
+			part.Assignments[i].ProjectID = project.ID
+			part.Assignments[i].ProjectName = project.Name
+		}
+		out.Assignments = append(out.Assignments, part.Assignments...)
 		out.Partial = out.Partial || part.Partial
 		out.Warnings = append(out.Warnings, part.Warnings...)
 		annotate := func(items []overviewItem) {
@@ -325,6 +346,8 @@ func (a *App) overviewGlobal(selector string) (*processOverview, error) {
 	out.Recent = capOverview(out.Recent)
 	out.Upcoming = capOverview(out.Upcoming)
 	out.Attention = capOverview(out.Attention)
+	sortOverviewAssignments(out.Assignments)
+	out.Assignments = capAssignments(out.Assignments)
 	if len(out.LiveSteps) > 24 {
 		out.LiveSteps = out.LiveSteps[:24]
 	}

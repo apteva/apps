@@ -94,13 +94,19 @@ test("overview shows simultaneous steps, names, schedules and scoped links; refr
   expect(document.querySelector(".po-detail")!.textContent).toContain(
     "2/3 steps complete",
   );
-  await act(async () =>
-    Array.from(el.querySelectorAll("button"))
-      .find((b) => b.textContent === "Scheduled")!
-      .click(),
-  );
-  expect(el.querySelectorAll(".po-row").length).toBe(1);
-  expect(el.querySelector(".po-row")!.textContent).toContain("Hourly forecast");
+  const summary = el.querySelector(".po-event-summary")!;
+  expect(summary.textContent).toContain("1 assignment waiting for events");
+  expect(summary.textContent).toContain("1 need attention");
+  await act(async () => (summary as HTMLButtonElement).click());
+  expect(el.querySelector('.po-filters button[aria-pressed="true"]')!.textContent).toBe("Assignments");
+  const rows = Array.from(el.querySelectorAll(".po-assignment-row"));
+  expect(rows.length).toBe(2);
+  expect(rows[0].textContent).toContain("Hourly forecast");
+  expect(rows[0].textContent).toContain("Every hour");
+  expect(rows[0].getAttribute("href")).toContain("assignment_id=barcelona");
+  expect(rows[1].textContent).toContain("Conversation message received");
+  expect(rows[1].textContent).toContain("not listening");
+  expect(rows[1].textContent).toContain("Never run");
   expect(document.querySelector(".po-detail")).toBeNull();
   expect(reads.filter((u) => u.startsWith("/api/agents")).length).toBe(1);
 });

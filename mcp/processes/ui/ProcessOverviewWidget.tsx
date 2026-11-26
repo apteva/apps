@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { eventsForStep, useWorkerActivity } from "./execution-activity";
 import { callsForExecution, resolveToolSource, type ToolSource } from "./ExecutionTools";
+import { eventTitle, scheduleTitle } from "./start-labels";
 
 type Props = {
   appName?: string;
@@ -54,6 +55,36 @@ export type Item = {
   execution_id?: string;
   summary?: string;
 };
+export type AssignmentTrigger = {
+  id: string;
+  name: string;
+  topic: string;
+  source_install_id: number;
+  status: string;
+  subscription_enabled: boolean;
+  sync_error?: string;
+};
+/** An active assignment as the overview lists it (Processes 0.25.0+). */
+export type OverviewAssignment = {
+  id: string;
+  project_id?: string;
+  project_name?: string;
+  process_id: string;
+  process_name: string;
+  name: string;
+  agent_id: number;
+  start: "schedule" | "event" | "manual";
+  schedule?: Item["schedule"];
+  next_run_at?: string;
+  triggers: AssignmentTrigger[];
+  ongoing_count: number;
+  live_run_id?: string;
+  last_run_id?: string;
+  last_run_state?: string;
+  last_run_at?: string;
+  warning?: string;
+  needs_attention: boolean;
+};
 export type Data = {
   scope?: "project" | "global";
   projects?: Array<{ id: string; name: string }>;
@@ -63,7 +94,11 @@ export type Data = {
     attention: number;
     recent: number;
     review?: number;
+    assignments?: number;
+    event_driven?: number;
+    assignment_issues?: number;
   };
+  assignments?: OverviewAssignment[];
   active: Item[];
   upcoming: Item[];
   recent: Item[];
@@ -495,6 +530,119 @@ function ToolIcon({ tool, sources }: { tool: string; sources: ToolSource[] }) {
     </svg>
   );
 }
+/** How an assignment starts, in words: "Every day at 09:00", "CRM · Conversation
+ * message received", or "Started by hand". */
+export function assignmentStartText(x: OverviewAssignment, sources: ToolSource[] = []) {
+  if (x.start === "schedule" && x.schedule) return scheduleTitle(x.schedule);
+  const trigger = x.triggers.find((t) => t.status !== "archived");
+  if (x.start === "event" && trigger) {
+    const app = sources.find((s) => s.key === `app:${trigger.source_install_id}`)?.label;
+    return [app, eventTitle(trigger.topic)].filter(Boolean).join(" · ");
+  }
+  return "Started by hand";
+}
+/** Event-driven assignments in a list, and those whose trigger would not fire. */
+export function eventSummary(data: Data) {
+  const events = (data.assignments || []).filter((x) => x.start === "event");
+  return {
+    total: data.counts.event_driven ?? events.length,
+    issues: events.filter((x) => x.needs_attention).length,
+    installs: Array.from(new Set(events.flatMap((x) => x.triggers.map((t) => t.source_install_id)))),
+  };
+}
+function SourceIcon({ source, kind }: { source?: ToolSource; kind: OverviewAssignment["start"] }) {
+  const [failed, setFailed] = useState("");
+  if (source?.icon && failed !== source.icon) {
+    if (source.iconStyle === "monochrome")
+      return (
+        <span className="po-tool-icon po-start-icon mono" title={source.label} aria-hidden="true">
+          <span style={{ maskImage: `url("${source.icon}")`, WebkitMaskImage: `url("${source.icon}")` }} />
+          <img src={source.icon} alt="" onError={() => setFailed(source.icon!)} />
+        </span>
+      );
+    return <img className="po-tool-icon po-start-icon" src={source.icon} alt="" title={source.label} onError={() => setFailed(source.icon!)} />;
+  }
+  const path =
+    kind === "schedule"
+      ? "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"
+      : kind === "event"
+        ? "M13 3L4 14h7l-1 7 9-11h-7l1-7z"
+        : "M8 5v14l11-7z";
+  return (
+    <svg className="po-tool-icon po-start-icon fallback" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={path} />
+    </svg>
+  );
+}
+/** One active assignment: how it starts, who runs it, and its last run. */
+function AssignmentRow({ x, props, name, relative, badge }: {
+  x: OverviewAssignment;
+  props: Props;
+  name: (id?: number) => string;
+  relative: (value?: string) => string;
+  badge: (state: string) => ReactNode;
+}) {
+  const sources = useToolSources(x.project_id || props.projectId);
+  const trigger = x.triggers.find((t) => t.status !== "archived");
+  const source = x.start === "event" && trigger ? sources.find((s) => s.key === `app:${trigger.source_install_id}`) : undefined;
+  const start = assignmentStartText(x, sources);
+  const live = !!x.live_run_id || x.ongoing_count > 0;
+  const state = live ? "running" : x.needs_attention ? "attention" : x.start === "schedule" ? "scheduled" : x.start;
+  const label = live ? "Running" : x.needs_attention ? (x.warning || "Attention").replace(/^Trigger /, "") : x.start === "schedule" ? `Next ${relative(x.next_run_at)}` : x.start === "event" ? "On event" : "Manual";
+  const href = overviewLink(
+    props,
+    { id: x.live_run_id || x.id, process_id: x.process_id, project_id: x.project_id, assignment_id: x.id, state: "" } as Item,
+    !x.live_run_id,
+  );
+  const context = [start, x.project_name, name(x.agent_id)].filter(Boolean).join(" · ");
+  const last = x.last_run_at ? `Last ${relative(x.last_run_at)}` : "Never run";
+  return (
+    <a
+      className="po-row po-assignment-row"
+      href={href}
+      data-start={x.start}
+      title={[x.process_name, start, x.warning, trigger && `${trigger.name} · ${trigger.topic}`].filter(Boolean).join("\n")}
+      aria-label={`${x.name || x.process_name} · ${label} · ${context}`}
+    >
+      <span className="po-copy">
+        <span className="po-title-line">
+          <span className="po-title">{x.name || x.process_name}</span>
+        </span>
+        <span className={`po-summary${x.needs_attention ? " attention" : ""}`}>
+          <SourceIcon source={source} kind={x.start} />
+          {context}
+        </span>
+      </span>
+      <span className="po-meta">
+        <span className={`po-badge ${state}`}>{label}</span>
+        <span className="po-meta-line">
+          {x.last_run_state && x.last_run_state !== "running" && <span className={`po-last ${x.last_run_state}`}>{stateLabel(x.last_run_state)}</span>}
+          <span>{last}</span>
+        </span>
+      </span>
+    </a>
+  );
+}
+/** "All" view's one-line note about assignments that wait for events. */
+function EventSummaryLine({ data, projectID, onOpen }: { data: Data; projectID?: string; onOpen: () => void }) {
+  const sources = useToolSources(projectID);
+  const { total, issues, installs } = eventSummary(data);
+  if (!total) return null;
+  return (
+    <button type="button" className="po-event-summary" onClick={onOpen}>
+      <span className="po-event-icons">
+        {installs.slice(0, 3).map((id) => (
+          <SourceIcon key={id} source={sources.find((s) => s.key === `app:${id}`)} kind="event" />
+        ))}
+      </span>
+      <span className="po-event-text">
+        {total} {total === 1 ? "assignment" : "assignments"} waiting for events
+        {issues > 0 && <span className="po-event-issue"> · {issues} need attention</span>}
+      </span>
+      <span aria-hidden="true">→</span>
+    </button>
+  );
+}
 /** The running row's single activity line: the latest tool call with its
  * app's icon (the step name until there is one), and a live marker. The last finished
  * thought is the line's tooltip; the full timeline is in the details. */
@@ -787,6 +935,19 @@ const css = `
 .po-timing{display:grid;gap:5px;padding:4px 12px 8px;font-size:11px;color:var(--color-text-muted,#aaa);border-bottom:1px solid var(--color-border,#303030);margin-bottom:4px}.po-split{display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--color-border,#303030)}.po-split .model{background:#8eabff80}.po-split .tools{background:#43c878}.po-feed li{display:block;padding:0}.po-feed-line{display:flex;align-items:center;gap:8px;width:100%;padding:5px 12px;font:inherit;font-size:11px;line-height:16px;color:inherit;background:transparent;border:0;text-align:left;min-width:0}button.po-feed-line{cursor:pointer}button.po-feed-line:hover{background:var(--color-bg-hover,#202020)}.po-feed li[data-kind=thought] .po-feed-text{color:var(--color-text-muted,#aaa)}.po-feed-tool{flex:none;max-width:30%;font-size:10px;color:var(--color-text-muted,#888);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-feed-title{flex:1;min-width:0;max-width:none;font-weight:500}.po-feed-time{flex:none;min-width:36px;text-align:right;font-size:10px;color:var(--color-text-muted,#999);font-variant-numeric:tabular-nums}.po-call{padding:2px 12px 8px 32px;font-size:10px;color:var(--color-text-muted,#aaa)}.po-call strong{display:block;margin:4px 0 2px;font-weight:600}.po-call pre{margin:0;max-height:160px;overflow:auto;padding:6px 8px;background:var(--color-bg-hover,#1d1d1d);border-radius:3px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:14px}
 .po-modal footer{padding:10px 16px;border-top:1px solid var(--color-border,#303030);font-size:11px}.po-modal footer a{color:var(--color-accent,#ff8c36);text-decoration:none}
 @media(max-width:480px){.po-modal-backdrop{padding:0;align-items:flex-end}.po-modal{max-height:90vh;border-radius:8px 8px 0 0}}
+.po-widget a.po-row{text-decoration:none;color:inherit}
+.po-widget a.po-row:hover{background:var(--color-bg-hover,#1e1e1e)}
+.po-widget .po-assignment-row .po-summary{display:flex;align-items:center;gap:6px}
+.po-widget .po-start-icon{width:14px;height:14px;margin-right:0}
+.po-widget .po-start-icon.fallback{color:var(--color-text-muted,#aaa)}
+.po-widget .po-badge.event,.po-widget .po-badge.manual{color:var(--color-text-muted,#aaa)}
+.po-widget .po-badge{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.po-widget .po-last{text-transform:capitalize}.po-widget .po-last.completed{color:#43c878}.po-widget .po-last.failed{color:#f08b8b}.po-widget .po-last.cancelled{color:#d49ab2}
+.po-widget button.po-event-summary{display:flex;align-items:center;gap:8px;width:100%;padding:10px 16px;background:transparent;border:0;border-bottom:1px solid var(--color-border,#303030);color:var(--color-text-muted,#aaa);font-size:11px;text-align:left}
+.po-widget button.po-event-summary:hover{background:var(--color-bg-hover,#1e1e1e);color:var(--color-text,#eceef2)}
+.po-widget .po-event-icons{display:flex;gap:4px;flex:none}
+.po-widget .po-event-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.po-widget .po-event-issue{color:#e3b86d}
 @media(max-width:480px){.po-widget .po-row{column-gap:10px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
 `;
 export default function ProcessOverviewWidget(props: Props) {
@@ -891,6 +1052,9 @@ function Overview(props: Props) {
   const queue = data ? overviewQueue(data, props.widgetSettings) : [];
   const filtered = queue.filter((x) => view === "all" || x.group === view);
   const shown = filtered.slice(0, limit);
+  const assignmentList = data?.assignments || [];
+  const assignmentsShown = assignmentList.slice(0, limit);
+  const assignmentsTotal = data?.counts.assignments ?? assignmentList.length;
   const detail = queue.find((x) => key(x) === selected);
   const badge = (state: string) => (
     <span
@@ -920,8 +1084,8 @@ function Overview(props: Props) {
         <h2>Processes</h2>
         <p>
           {props.dashboardScope === "global"
-            ? "Running flows, upcoming schedules, and recent outcomes across projects"
-            : "Running flows, upcoming schedules, and recent outcomes"}
+            ? "Live runs, active assignments and recent outcomes across projects"
+            : "Live runs, active assignments and recent outcomes"}
         </p>
         {props.dashboardScope === "global" && data?.projects?.length ? (
           <label className="po-project-filter">
@@ -948,7 +1112,7 @@ function Overview(props: Props) {
         {[
           ["all", "All"],
           ["running", "Running"],
-          ["scheduled", "Scheduled"],
+          ["assignments", "Assignments"],
           ["history", "History"],
         ].map(([value, label]) => (
           <button
@@ -984,6 +1148,16 @@ function Overview(props: Props) {
           {!!data.warnings.length && (
             <p className="po-warning">{data.warnings.join(" ")}</p>
           )}
+          {view === "assignments" ? (
+          <div className="po-queue" aria-label="Active assignments">
+            {assignmentsShown.map((x) => (
+              <AssignmentRow key={`${x.project_id || ""}:${x.id}`} x={x} props={props} name={name} relative={relative} badge={badge} />
+            ))}
+            {!assignmentsShown.length && (
+              <p className="po-empty">No active assignments.</p>
+            )}
+          </div>
+          ) : (
           <div className="po-queue" aria-label="Process executions">
             {shown.map((entry) => {
               const x = entry.item;
@@ -1064,13 +1238,22 @@ function Overview(props: Props) {
                   ? "process executions"
                   : view === "history"
                     ? "past or blocked runs"
-                    : view === "scheduled"
-                      ? "scheduled processes"
-                      : "running processes"}
+                    : "running processes"}
                 .
               </p>
             )}
+            {view === "all" && (
+              <EventSummaryLine
+                data={data}
+                projectID={projectFilter || props.projectId}
+                onOpen={() => {
+                  setView("assignments");
+                  setSelected(null);
+                }}
+              />
+            )}
           </div>
+          )}
           {detail && (
             <DetailModal
               key={key(detail)}
@@ -1083,9 +1266,13 @@ function Overview(props: Props) {
           )}
           <footer>
             <span>
-              {filtered.length > limit
-                ? `Showing first ${limit}`
-                : `${shown.length} shown`}
+              {view === "assignments"
+                ? assignmentsTotal > assignmentsShown.length
+                  ? `Showing ${assignmentsShown.length} of ${assignmentsTotal}`
+                  : `${assignmentsShown.length} active`
+                : filtered.length > limit
+                  ? `Showing first ${limit}`
+                  : `${shown.length} shown`}
             </span>
             <a
               href={overviewLink({

@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Assignments tab in the widget (0.25.0)
+
+The dashboard widget lists active assignments, including event-driven ones,
+and All shows how many wait for events. See `docs-release-0.25.0.md`.
+
 ## One-line SOP in assignments (0.24.4)
 
 The SOP line under each assignment no longer wraps. See
