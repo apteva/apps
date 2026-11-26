@@ -1986,6 +1986,12 @@ func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if v, _ := args["force"].(bool); v {
 			force = true
 		}
+		if indexInFlight(pid, fid) {
+			// A live worker owns the file; a second one would be skipped.
+			// Say so instead of reporting a queue entry that cannot run.
+			return map[string]any{"queued": 0, "file_id": fid, "force": force, "in_flight": true,
+				"note": "file is being indexed by a running worker; its result will land when that finishes"}, nil
+		}
 		if err := queueMediaReindex(ctx.AppDB(), pid, fid, force); err != nil {
 			return nil, err
 		}
@@ -2062,6 +2068,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Attempts  int64  `json:"attempts"`
 		ClaimedAt string `json:"claimed_at,omitempty"`
 		LastError string `json:"last_error,omitempty"`
+		InFlight  bool   `json:"in_flight,omitempty"`
 	}
 	qrows, err := ctx.AppDB().Query(`
 		SELECT file_id, index_attempts, COALESCE(index_claimed_at,''), COALESCE(index_last_error,'')
@@ -2078,6 +2085,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if err := qrows.Scan(&row.FileID, &row.Attempts, &row.ClaimedAt, &row.LastError); err != nil {
 			return nil, err
 		}
+		row.InFlight = indexInFlight(pid, row.FileID)
 		queue = append(queue, row)
 	}
 	if err := qrows.Err(); err != nil {

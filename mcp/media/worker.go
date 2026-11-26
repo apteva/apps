@@ -229,6 +229,12 @@ func claimInFlight(projectID, fileID string) bool {
 	return !loaded
 }
 
+// indexInFlight reports whether this sidecar is indexing the file now.
+func indexInFlight(projectID, fileID string) bool {
+	_, ok := inFlightIndex.Load(projectID + "|" + fileID)
+	return ok
+}
+
 func releaseInFlight(projectID, fileID string) {
 	inFlightIndex.Delete(projectID + "|" + fileID)
 }
@@ -531,6 +537,16 @@ func tryRemoteIndex(
 	thumbSeek, thumbWidth, waveW, waveH any,
 ) bool {
 	logger := app.Logger()
+	// One admission lease covers every stage of this file. Taking a lease
+	// per stage sent each keyframe back to the tail of the queue, behind
+	// whole renders, so one video could take hours to index. It is taken
+	// before signing so a long wait cannot outlive the source URL.
+	ctx, release, err := acquireMediaWork(withMediaAdmissionObserver(ctx, "index:"+projectID+":"+fid, nil), app, 1)
+	if err != nil {
+		logger.Warn("remote index: admission", "file_id", fid, "err", err)
+		return false
+	}
+	defer release()
 	// Time-limited signed URL the remote uses for both probe + derivations.
 	// Generous TTL covers slow installs of ffmpeg on first remote use.
 	signedURL, err := sc.GetSignedURL(ctx, projectID, f.ID, 3600)
@@ -551,19 +567,48 @@ func tryRemoteIndex(
 		KeyframesEnabled:     keyframesEnabled(app),
 	}
 	reuseRemoteIndexGeneration(ctx, app, sc, projectID, f, &params)
-	probe, thumbID, waveID, keyframes, err := runRemoteIndexing(ctx, app, projectID, params)
-	if err != nil {
-		logger.Warn("remote index: pipeline", "file_id", fid, "err", err)
-		return false
+	if params.ReuseProbe == nil {
+		probeParams := params
+		probeParams.Stage = "probe"
+		probeParams.KeyframesEnabled = false
+		probe, _, _, _, err := runRemoteIndexStage(ctx, app, projectID, probeParams)
+		if err != nil {
+			logger.Warn("remote index: probe", "file_id", fid, "err", err)
+			return false
+		}
+		params.ReuseProbe = probe
 	}
+	probe := params.ReuseProbe
 	if !probe.HasVideo && !probe.HasAudio && !probe.IsImage {
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "unsupported",
 			"no audio, video, or image stream")
 		return true
 	}
+	// Persist the probe before derivations, as the local path does, so
+	// duration-dependent work (transcription) never waits on keyframes.
 	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder, f.Name); err != nil {
 		logger.Warn("remote index: upsert media", "file_id", fid, "err", err)
 		return false
+	}
+	app.EmitWithProject("media.indexed", projectID, map[string]any{
+		"file_id":     fid,
+		"name":        f.Name,
+		"has_video":   probe.HasVideo,
+		"has_audio":   probe.HasAudio,
+		"is_image":    probe.IsImage,
+		"duration_ms": probe.DurationMs,
+		"executor":    "component",
+	})
+	if probe.HasAudio {
+		notifyTranscriber(projectID, fid)
+	}
+	probe, thumbID, waveID, keyframes, err := runRemoteIndexing(ctx, app, projectID, params)
+	if err != nil {
+		// The probe is already usable. Leave the derivations to the
+		// repair queue instead of failing the whole file.
+		logger.Warn("remote index: derivations", "file_id", fid, "err", err)
+		_, _ = app.AppDB().Exec(`UPDATE media SET derivation_retry_at=datetime('now','+10 minutes'), derivation_retry_reason='remote_derivations_failed' WHERE project_id=? AND file_id=?`, projectID, fid)
+		return true
 	}
 	previousDerivations, err := listDerivations(app.AppDB(), projectID, fid)
 	if err != nil {
@@ -587,15 +632,6 @@ func tryRemoteIndex(
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
 		"thumb_id", thumbID, "wave_id", waveID,
 	)
-	app.EmitWithProject("media.indexed", projectID, map[string]any{
-		"file_id":     fid,
-		"name":        f.Name,
-		"has_video":   probe.HasVideo,
-		"has_audio":   probe.HasAudio,
-		"is_image":    probe.IsImage,
-		"duration_ms": probe.DurationMs,
-		"executor":    "component",
-	})
 	// media.derived — same contract as the local path: fires after
 	// the indexer has finished derive work for this file, regardless
 	// of whether the transcriber/describer integrations are bound.
@@ -615,9 +651,7 @@ func tryRemoteIndex(
 		"executor":      "component",
 	})
 
-	if probe.HasAudio {
-		notifyTranscriber(projectID, fid)
-	} else {
+	if !probe.HasAudio {
 		notifyDescriber(projectID, fid)
 	}
 	// Same tail-call as the local path — see comment there.

@@ -291,6 +291,12 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		_ = markFailure("media row missing: " + err.Error())
 		return
 	}
+	if media.ProbeStatus != "ok" {
+		// Claims wait while the source is indexing; reaching here means
+		// indexing gave up, so say that instead of a missing duration.
+		_ = markFailure(fmt.Sprintf("media_index_failed: probe %s: %s", media.ProbeStatus, media.ProbeError))
+		return
+	}
 	if media.DurationMs > int64(maxMinutes)*60_000 {
 		_ = markSkipped(
 			fmt.Sprintf("source duration %d ms exceeds cap of %d minutes", media.DurationMs, maxMinutes))

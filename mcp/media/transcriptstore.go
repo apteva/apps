@@ -151,6 +151,17 @@ func claimNextPendingLocalTranscript(db *sql.DB, projectID string) (*TranscriptR
 	return claimPendingTranscript(db, projectID, ` AND lower(COALESCE(json_extract(request_options,'$.model'),'')) LIKE 'parakeet%'`)
 }
 
+// transcriptIndexWaitFailures is how many consecutive index failures a
+// transcript waits through before it fails with media_index_failed.
+const transcriptIndexWaitFailures = 3
+
+// transcriptMediaReadySQL keeps a transcript pending while its source is
+// still being indexed (no duration yet) or is between index retries.
+var transcriptMediaReadySQL = fmt.Sprintf(` AND NOT EXISTS (SELECT 1 FROM media m
+		      WHERE m.project_id = transcripts.project_id AND m.file_id = transcripts.file_id
+		        AND (m.probe_status = 'pending'
+		             OR (m.probe_status = 'failed' AND m.index_failures < %d)))`, transcriptIndexWaitFailures)
+
 func claimPendingTranscript(db *sql.DB, projectID, filter string) (*TranscriptRow, error) {
 	if projectID == "" {
 		return nil, errors.New("project_id required")
@@ -161,7 +172,7 @@ func claimPendingTranscript(db *sql.DB, projectID, filter string) (*TranscriptRo
 		   SET status = 'running', started_at = ?
 		 WHERE file_id = (
 		   SELECT file_id FROM transcripts
-		    WHERE status = 'pending' AND project_id = ?`+filter+`
+		    WHERE status = 'pending' AND project_id = ?`+transcriptMediaReadySQL+filter+`
 		    ORDER BY created_at
 		    LIMIT 1
 		 ) AND project_id = ? AND status = 'pending'

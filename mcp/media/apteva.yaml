@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.17.0
+version: 0.17.1
 description: |
+  v0.17.1 saves an executor probe before thumbnails and keyframes, and holds one
+  work lease per file, so renders no longer delay a file's duration for hours.
+  Transcripts wait while their source is indexing and fail with
+  media_index_failed once indexing gives up; reindex reports in-flight files.
   v0.17.0 adds local transcription with Parakeet TDT 0.6B v3 (int8, CPU) as an
   alternative to Deepgram: transcribe_engine=parakeet|auto, or model
   parakeet-tdt-0.6b-v3 per request. It runs on the media executor when offloading
@@ -737,7 +741,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.17.0
+    ref: media/v0.17.1
     entry: mcp/media
   port: 8080
   health_check: /health
