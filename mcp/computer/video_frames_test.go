@@ -56,6 +56,12 @@ func TestVideoFramesMCPResponse(t *testing.T) {
 	if len(res.Content) != 3 || res.Content[0].Type != "text" || res.Content[1].Type != "image" || res.Content[1].MIMEType != "image/jpeg" {
 		t.Fatalf("content blocks: %+v", res.Content)
 	}
+	for i, want := range []string{"Frame 0 at 0.00 s", "Frame 1 at 2.00 s"} {
+		meta := res.Content[i+1].Meta
+		if meta["io.apteva/label"] != want || meta["io.apteva/retention"] != "keep" {
+			t.Fatalf("image block %d _meta = %#v", i+1, meta)
+		}
+	}
 	if _, err := base64.StdEncoding.DecodeString(res.Content[2].Data); err != nil {
 		t.Fatalf("image data is not base64: %v", err)
 	}
