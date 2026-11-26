@@ -295,6 +295,12 @@ func localSidecarURL(t *testing.T, sc *tk.Sidecar, remote string) string {
 	if path == parsed.Path {
 		t.Fatalf("public app URL has unexpected path: %s", remote)
 	}
+	// The platform strips an install-pinned prefix before it forwards.
+	if rest, ok := strings.CutPrefix(path, "/_install/"); ok {
+		if slash := strings.Index(rest, "/"); slash > 0 {
+			path = rest[slash:]
+		}
+	}
 	if parsed.RawQuery != "" {
 		path += "?" + parsed.RawQuery
 	}

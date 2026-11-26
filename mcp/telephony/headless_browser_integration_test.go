@@ -186,10 +186,10 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		"payload": map[string]any{"call_control_id": "call-control-test-1", "connection_id": "application-test-1", "direction": "incoming", "from": tier2Caller, "to": tier2Number},
 	}})
 	resp := tier2SignedPOST(t, platform, localSidecarURL(t, sc, created["inbound_url"].(string)), incoming)
-	io.Copy(io.Discard, resp.Body)
+	incomingBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("incoming status: %d", resp.StatusCode)
+		t.Fatalf("incoming status: %d: %s", resp.StatusCode, incomingBody)
 	}
 
 	target, _ := url.Parse(sc.URL())

@@ -40,11 +40,12 @@ const node=()=>({connect:(n:any)=>n,disconnect(){},port:{postMessage(){},onmessa
 const track=()=>({getSettings:()=>({}),stop(){},readyState:"live",muted:false,enabled:true,onended:null as any,onmute:null,onunmute:null});
 const mediaStream=()=>{const t=track();return {getAudioTracks:()=>[t],getTracks:()=>[t]};};
 /** Devices a test can count: microphones opened and audio contexts created. */
-export const fakeDevices={opened:0,contexts:0};
+export const fakeDevices={opened:0,contexts:0,silenceSources:0};
 class FakeContext{
  constructor(){fakeDevices.contexts++;}
  state="running";sampleRate=48000;onstatechange:any;destination={};audioWorklet={addModule:async()=>{}};currentTime=0;
  createMediaStreamDestination(){return {channelCount:2,stream:mediaStream()};}
+ createConstantSource(){fakeDevices.silenceSources++;return {...node(),offset:{value:1},start(){},stop(){}};}
  createMediaStreamSource(){return node();}
  createGain(){return {...node(),gain:{value:1}};}
  createAnalyser(){return {...node(),fftSize:256,getFloatTimeDomainData(){}};}
@@ -55,7 +56,7 @@ class FakeWorklet{port={postMessage(){},onmessage:null as any};connect(n:any){re
 export function installFakeBrowser(){
  const names=["WebSocket","RTCPeerConnection","AudioContext","AudioWorkletNode","navigator"];
  const saved=new Map(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
- FakeSocket.instances=[];FakePeer.instances=[];fakeDevices.opened=fakeDevices.contexts=0;
+ FakeSocket.instances=[];FakePeer.instances=[];fakeDevices.opened=fakeDevices.contexts=fakeDevices.silenceSources=0;
  const define=(name:string,value:unknown)=>Object.defineProperty(globalThis,name,{configurable:true,writable:true,value});
  define("WebSocket",FakeSocket);define("RTCPeerConnection",FakePeer);define("AudioContext",FakeContext);define("AudioWorkletNode",FakeWorklet);
  define("navigator",{onLine:true,mediaDevices:{getUserMedia:async()=>{fakeDevices.opened++;return mediaStream();}}});

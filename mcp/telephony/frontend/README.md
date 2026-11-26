@@ -451,9 +451,11 @@ listener.setAudioOptions({ mediaTransport: "auto" }); // next attachment only
 `createCallListener({ audio: {...} })` also accepts the same nested profile as
 `createSoftphone`; explicit top-level listener options take precedence.
 Explicit WebRTC fails when unavailable; automatic mode may fall back only before
-ready. Listening never opens a microphone. WebRTC coaching uses a new uplink PC
-per press, retaining the existing adviser pin, authorization, short PTT lease,
-and no-auto-retarget behavior. The adviser's selected media transport determines
+ready. Listening never opens a microphone. WebRTC coaching prepares one uplink
+PC when coaching opens and reuses it for every press, retaining the existing
+adviser pin, authorization, short PTT lease, and no-auto-retarget behavior.
+After the first press, both transports open the microphone while `coach.start`
+is in flight. The adviser's selected media transport determines
 private delivery, without adding a carrier stream or including coaching in
 recordings/listener taps. See [listening](../docs/live-listening.md) and
 [coaching](../docs/private-coaching.md) for limits and diagnostic differences.
