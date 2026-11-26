@@ -61,3 +61,18 @@ export function rankingRows(data: Record<string, any> | null): Array<{ label: st
   if (Array.isArray(data?.top)) return data.top.map((row: any) => ({ label: String(row.value ?? "(none)"), value: Number(row.count ?? 0), count: Number(row.count ?? 0) }));
   return (data?.rows ?? []).map((row: any) => ({ label: String(row.group ?? "(none)"), value: Number(row.value), count: Number(row.count) }));
 }
+export interface WidgetScope { global: boolean; projectId: string; selectedProject: string }
+export type GlobalProject = { id: string; name: string };
+// widgetQueryRequest builds the Trend/Ranking query. Inside a project it is
+// unchanged; on All projects it asks for scope=global and names a project
+// only when the viewer picked one from the backend's project list.
+export function widgetQueryRequest(api: string, kind: "trend" | "ranking", config: WidgetConfig, scope: WidgetScope): { url: string; body: Record<string, unknown> } | null {
+  const type = kind === "trend" ? "timeseries" : config.aggregation === "count" ? "top" : "table";
+  const widget = { type, config };
+  if (scope.global) return { url: `${api}/query-widget?scope=global`, body: scope.selectedProject ? { project_id: scope.selectedProject, widget } : { widget } };
+  if (!scope.projectId) return null;
+  return { url: `${api}/query-widget?project_id=${encodeURIComponent(scope.projectId)}`, body: { widget } };
+}
+export function globalProjects(data: Record<string, any> | null): GlobalProject[] {
+  return Array.isArray(data?.projects) ? data.projects.filter((p: any) => typeof p?.id === "string").map((p: any) => ({ id: p.id, name: String(p.name || p.id) })) : [];
+}

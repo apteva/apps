@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { widgetConfig } from "./standalone-config";
+import { globalProjects, widgetConfig, widgetQueryRequest } from "./standalone-config";
 
 describe("standalone widget filters", () => {
   test("a distinct trend counts the configured Distinct field", () => {
@@ -39,5 +39,27 @@ describe("standalone widget filters", () => {
       { topic: "page_view", filter: "makecademy.com", window: "30d" },
     );
     expect(config.where).toEqual({ "props.host": "makecademy.com" });
+  });
+});
+
+describe("standalone widget scope", () => {
+  const config = { app: "site", topic: "page_view", aggregation: "count", window: "7d", by: "props.country", limit: 5, where: {} } as any;
+
+  test("a global widget queries every visible project, or one picked project", () => {
+    const all = widgetQueryRequest("/api", "ranking", config, { global: true });
+    expect(all?.url).toBe("/api/query-widget?scope=global");
+    expect(all?.body).toEqual({ widget: { type: "top", config } });
+    const one = widgetQueryRequest("/api", "trend", config, { global: true, selectedProject: "p2" });
+    expect(one?.body).toEqual({ project_id: "p2", widget: { type: "timeseries", config } });
+  });
+
+  test("a project widget stays on its project and waits without one", () => {
+    expect(widgetQueryRequest("/api", "ranking", config, { global: false, projectId: "a b" })?.url).toBe("/api/query-widget?project_id=a%20b");
+    expect(widgetQueryRequest("/api", "ranking", config, { global: false })).toBeNull();
+  });
+
+  test("the project filter reads the projects the server returned", () => {
+    expect(globalProjects({ projects: [{ id: "p1", name: "Alpha" }, { id: "p2" }, { name: "no id" }] })).toEqual([{ id: "p1", name: "Alpha" }, { id: "p2", name: "p2" }]);
+    expect(globalProjects(null)).toEqual([]);
   });
 });

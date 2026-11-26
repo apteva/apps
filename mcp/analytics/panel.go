@@ -106,32 +106,13 @@ func (a *App) handleGlobalSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
-		http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
+	projects, ok := globalViewerProjects(w, r)
+	if !ok {
 		return
 	}
-	projects, err := globalCtx.PlatformAPI().ListProjects()
-	if err != nil {
-		http.Error(w, "unable to list projects", http.StatusInternalServerError)
+	ids, ok := globalProjectIDs(w, projects, r.URL.Query().Get("project_id"))
+	if !ok {
 		return
-	}
-	allowed := make(map[string]sdk.PlatformProject, len(projects))
-	ids := make([]string, 0, len(projects))
-	for _, project := range projects {
-		id := strings.TrimSpace(project.ID)
-		if id == "" {
-			continue
-		}
-		allowed[id] = project
-		ids = append(ids, id)
-	}
-	selected := strings.TrimSpace(r.URL.Query().Get("project_id"))
-	if selected != "" {
-		if _, ok := allowed[selected]; !ok {
-			http.Error(w, "project is not visible to this install", http.StatusForbidden)
-			return
-		}
-		ids = []string{selected}
 	}
 	since := parseInt64(r.URL.Query().Get("since"))
 	until := parseInt64(r.URL.Query().Get("until"))
@@ -168,13 +149,7 @@ func (a *App) handleGlobalSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	projectRows := make([]map[string]string, 0, len(projects))
-	for _, project := range projects {
-		if _, ok := allowed[project.ID]; ok {
-			projectRows = append(projectRows, map[string]string{"id": project.ID, "name": project.Name})
-		}
-	}
-	writeJSON(w, map[string]any{"total": total, "apps": apps, "topics": topics, "topics_list": topicRows, "projects": projectRows, "selected_project_id": selected})
+	writeJSON(w, map[string]any{"total": total, "apps": apps, "topics": topics, "topics_list": topicRows, "projects": projects, "selected_project_id": strings.TrimSpace(r.URL.Query().Get("project_id"))})
 }
 
 func addSQLCondition(where, condition string) string {

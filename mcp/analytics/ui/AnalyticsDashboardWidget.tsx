@@ -603,6 +603,16 @@ function DashboardWidgetContent(props: HostProps) {
   const [globalSummary, setGlobalSummary] = useState<GlobalSummary | null>(null);
   const [globalMetricResults, setGlobalMetricResults] = useState<GlobalMetricResult[]>([]);
   const [selectedGlobalProject, setSelectedGlobalProject] = useState("");
+  // All projects gets no live app events, so global data reloads on the
+  // host's periodic eventRevision bump and on this widget's own timer.
+  const [globalTick, setGlobalTick] = useState(0);
+  useEffect(() => {
+    if (!globalMode || props.preview) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") setGlobalTick((tick) => tick + 1);
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [globalMode, props.preview]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -658,7 +668,7 @@ function DashboardWidgetContent(props: HostProps) {
       })).then(setGlobalMetricResults);
     }
     return () => { cancelled = true; };
-  }, [api, getJSON, globalMetrics, globalMode, props.preview, selectedGlobalProject]);
+  }, [api, getJSON, globalMetrics, globalMode, props.preview, selectedGlobalProject, props.eventRevision, globalTick]);
 
   const loadDashboards = useCallback(async () => {
     if (globalMode || !projectID || props.preview) return;

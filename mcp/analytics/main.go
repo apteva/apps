@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.18.4
+version: 0.19.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -113,6 +113,13 @@ description: |
   v0.18.4 fixes Analytics Trend widgets set to Distinct: they now count the
   Distinct field from the settings form (for example props.visitor_id for
   unique visitors) instead of failing.
+
+  v0.19.0 makes the Analytics widgets work on the global dashboard. Trend
+  and Ranking can now be added there; global widgets cover the projects the
+  viewer can see (not every project on the install), with a Project filter
+  to narrow to one. Agents and app-to-app calls cannot read across projects,
+  a viewer with no projects sees nothing, and global widgets refresh on new
+  events and every 30 seconds.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [project, global]
@@ -259,7 +266,7 @@ provides:
       description: A configurable metric trend over time.
       entry: /ui/AnalyticsTrendWidget.mjs
       slots: [dashboard.home]
-      dashboard_scopes: [project]
+      dashboard_scopes: [project, global]
       visibility: project
       supported_sizes: [half, full]
       default_size: half
@@ -331,7 +338,7 @@ provides:
       description: A configurable ranking of grouped event values.
       entry: /ui/AnalyticsRankingWidget.mjs
       slots: [dashboard.home]
-      dashboard_scopes: [project]
+      dashboard_scopes: [project, global]
       visibility: project
       supported_sizes: [half, full]
       default_size: half
@@ -442,7 +449,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.18.4
+    ref: analytics/v0.19.0
     entry: mcp/analytics
   port: 8080
   health_check: /health

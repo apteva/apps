@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatMetric, scopedAppURL } from "./dashboard-ui";
 import TrendChart from "./TrendChart";
-import { allowedValues, rankingRows, settingString, widgetConfig, WidgetConfig } from "./standalone-config";
+import { allowedValues, globalProjects, GlobalProject, rankingRows, settingString, widgetConfig, widgetQueryRequest } from "./standalone-config";
 import { useLiveRefresh } from "./use-live-refresh";
 
 export interface WidgetHostProps {
-  appName?: string; projectId?: string; eventRevision?: number; preview?: boolean;
+  appName?: string; projectId?: string; eventRevision?: number; preview?: boolean; dashboardScope?: "project" | "global";
   widgetId?: string; widgetSize?: "half" | "full"; widgetSettings?: Record<string, unknown>;
 }
 type Option = { value: string; label: string };
@@ -17,11 +17,16 @@ function Selector({label, value, options, onChange, all = true}: {label: string;
   </select></label>;
 }
 export default function StandaloneWidget(props: WidgetHostProps & { kind: "trend" | "ranking" }) {
-  return <WidgetContent key={`${props.projectId}:${JSON.stringify(props.widgetSettings || {})}`} {...props}/>;
+  return <WidgetContent key={`${props.dashboardScope || "project"}:${props.projectId}:${JSON.stringify(props.widgetSettings || {})}`} {...props}/>;
 }
 function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
   const settings = props.widgetSettings || {};
   const appName = props.appName || "analytics", project = props.projectId || "";
+  // All projects Home: one view across the viewer's projects, filtered to one
+  // when picked. Branch on the scope, never on a missing project.
+  const global = props.dashboardScope === "global";
+  const [selectedProject, setSelectedProject] = useState("");
+  const [projects, setProjects] = useState<GlobalProject[]>([]);
   const api = `/api/apps/${encodeURIComponent(appName)}`;
   const [topic, setTopic] = useState(settingString(settings, "topic"));
   const [filter, setFilter] = useState(settingString(settings, "filter_value"));
@@ -41,7 +46,8 @@ function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
     const discover = async (valueField: string, configured: unknown): Promise<Option[]> => {
       const allowed = allowedValues(configured);
       if (allowed.length) return allowed.map(value => ({ value, label: value.replaceAll("_", " ") }));
-      if (props.preview || !project) return [];
+      // Value discovery needs one project; on All projects use configured lists.
+      if (props.preview || global || !project) return [];
       const source = { value_field: valueField, app, ...(valueField !== "topic" ? {topic} : {}) };
       const res = await fetch(scopedAppURL(`${api}/dashboard-filter-options?filter=${encodeURIComponent(JSON.stringify({ source }))}`, project), { credentials: "same-origin", signal: abort.signal });
       if (!res.ok) throw new Error(await res.text());
@@ -50,37 +56,41 @@ function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
     discover("topic", settings.event_options).then(setEventOptions).catch(() => {});
     if (field) discover(field, settings.filter_options).then(setFilterOptions).catch(() => {});
     return () => abort.abort();
-  }, [api, project, app, field, topic, props.preview, props.widgetSettings]);
+  }, [api, project, global, app, field, topic, props.preview, props.widgetSettings]);
   const refresh = useCallback(async () => {
     const id = ++sequence.current;
     controller.current?.abort();
-    if (props.preview || !project || !query.config) { setLoading(false); return; }
+    const request = query.config && widgetQueryRequest(api, props.kind, query.config, { global, projectId: project, selectedProject });
+    if (props.preview || !request) { setLoading(false); return; }
     const abort = new AbortController(); controller.current = abort;
     // Event-driven refreshes (the dashboard's shared SSE path) update the
     // existing result in place. Only the first request needs a loading view.
     if (!hasData.current) setLoading(true);
     try {
-      const queryType = props.kind === "trend" ? "timeseries" : query.config.aggregation === "count" ? "top" : "table";
-      const res = await fetch(scopedAppURL(`${api}/query-widget`, project), { method: "POST", credentials: "same-origin", signal: abort.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify({ widget: {type: queryType, config: query.config} }) });
+      const res = await fetch(request.url, { method: "POST", credentials: "same-origin", signal: abort.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(request.body) });
       if (!res.ok) throw new Error((await res.text()).trim() || res.statusText);
       const next = await res.json();
-      if (id === sequence.current) { setData(next); hasData.current = true; setError(""); }
+      if (id === sequence.current) { setData(next); hasData.current = true; setError(""); if (global) setProjects(globalProjects(next)); }
     } catch (reason) {
       if (id === sequence.current && !abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
     } finally { if (id === sequence.current) setLoading(false); }
-  }, [api, project, props.kind, props.preview, query]);
+  }, [api, project, global, selectedProject, props.kind, props.preview, query]);
   useEffect(() => { setData(null); hasData.current = false; setError(""); setLoading(!props.preview); void refresh(); return () => { sequence.current++; controller.current?.abort(); }; }, [refresh, props.preview]);
   const queued = useLiveRefresh(refresh);
   useEffect(() => { queued(); }, [props.eventRevision, queued]);
+  // On All projects there are no live app events; this timer and the host's
+  // periodic eventRevision bump keep the view current.
   useEffect(() => { if (props.preview) return; const timer = globalThis.setInterval(() => { if (document.visibilityState !== "hidden") void refresh(); }, 30000); return () => globalThis.clearInterval(timer); }, [refresh, props.preview]);
   const config = query.config;
   const rows = props.preview ? Array.from({length: 7}, (_, i) => ({bucket: `${i + 1} Oct`, count: [42,58,51,74,68,91,84][i]})) : data?.series || [];
   const ranked = props.preview ? [{label: "Example A", value: 120, count: 120}, {label: "Example B", value: 84, count: 84}] : rankingRows(data);
   const max = Math.max(1, ...ranked.map(row => Math.abs(row.value)));
   const problem = query.error || error;
+  if (!global && !project && !props.preview) return <section className="flex h-full items-center justify-center rounded border border-border bg-bg-card p-4"><p className="text-xs text-text-dim">Select a project to see {title}.</p></section>;
   return <section className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-border bg-bg-card">
     <header className="flex items-center gap-2 border-b border-border px-4 py-3"><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-text">{title}</h2><p className="truncate text-[10px] text-text-dim">{config?.aggregation || "count"}{props.kind === "ranking" ? ` by ${config?.by || "group"}` : ` per ${config?.interval || "day"}`}</p></div><button className="text-[10px] text-text-muted hover:text-text" onClick={() => void refresh()} aria-label="Refresh analytics widget">Refresh</button></header>
     <nav className="flex flex-wrap gap-2 border-b border-border px-4 py-2" aria-label="Widget filters">
+      {global && <Selector label="Project" value={selectedProject} options={projects.map(p => ({ value: p.id, label: p.name }))} onChange={setSelectedProject}/>}
       {settings.show_event_selector !== false && <Selector label="Event" value={topic} options={eventOptions} onChange={setTopic}/>}
       {field && <Selector label={settingString(settings, "filter_label", "Filter")} value={filter} options={filterOptions} onChange={setFilter}/>}
       <Selector label="Window" value={window} options={["7d","30d","90d","all"].map(value => ({value, label: value === "all" ? "All time" : value}))} all={false} onChange={setWindow}/>

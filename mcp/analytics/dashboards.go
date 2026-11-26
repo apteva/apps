@@ -126,6 +126,15 @@ func (a *App) handleWidgetItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("scope") {
+	case "":
+	case "global":
+		a.handleGlobalWidgetQuery(w, r)
+		return
+	default:
+		http.Error(w, "scope must be global when provided", http.StatusBadRequest)
+		return
+	}
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -650,8 +659,24 @@ func evaluateWidget(db sqlRunner, projectID string, w DashboardWidget, selectedF
 	return evaluateWidgetUncached(db, projectID, w, selectedFilters)
 }
 func evaluateWidgetUncached(db sqlRunner, projectID string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
+	return evaluateWidgetScoped(db, projectID, nil, w, selectedFilters)
+}
+
+// evaluateWidgetAcrossProjects runs one read-only widget over several
+// projects for the All projects Home. projectIDs must come from the viewer's
+// platform project list (globalViewerProjects), never from the request.
+// Calculated metrics resolve against the global metric catalog.
+func evaluateWidgetAcrossProjects(db sqlRunner, projectIDs []string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
+	return evaluateWidgetScoped(db, globalMetricProject, projectIDs, w, selectedFilters)
+}
+
+func evaluateWidgetScoped(db sqlRunner, projectID string, projectIDs []string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
 	cfg := resolveDashboardFilters(w.Config, selectedFilters)
 	f := filterFromWidget(projectID, cfg)
+	if projectIDs != nil {
+		f.ProjectID = ""
+		f.ProjectIDs = projectIDs
+	}
 	if plan, ok := db.(*evaluationPlan); ok {
 		if ms := windowMillis(stringConfig(cfg, "window", "24h")); ms > 0 {
 			f.Since = plan.now - ms

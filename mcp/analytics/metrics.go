@@ -76,25 +76,18 @@ func (a *App) handleGlobalMetric(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
-		http.Error(w, "platform unavailable", 503)
-		return
-	}
 	key := strings.TrimSpace(r.URL.Query().Get("metric"))
 	if key == "" {
 		http.Error(w, "metric is required", 400)
 		return
 	}
-	projects, err := globalCtx.PlatformAPI().ListProjects()
-	if err != nil {
-		http.Error(w, "unable to list projects", 500)
+	projects, ok := globalViewerProjects(w, r)
+	if !ok {
 		return
 	}
-	ids := make([]string, 0, len(projects))
-	for _, p := range projects {
-		if strings.TrimSpace(p.ID) != "" {
-			ids = append(ids, p.ID)
-		}
+	ids, ok := globalProjectIDs(w, projects, r.URL.Query().Get("project_id"))
+	if !ok {
+		return
 	}
 	metric, err := getMetricDefinition(requestReadDB(r), "__global__", key)
 	if err != nil {
@@ -107,7 +100,7 @@ func (a *App) handleGlobalMetric(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	writeJSON(w, map[string]any{"metric": metric.Key, "value": value, "unit": metric.Unit, "format": metric.Format, "currency": metric.Currency, "projects": ids})
+	writeJSON(w, map[string]any{"metric": metric.Key, "value": value, "unit": metric.Unit, "format": metric.Format, "currency": metric.Currency, "projects": projects})
 }
 
 func (a *App) handleGlobalQueryWidget(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +108,8 @@ func (a *App) handleGlobalQueryWidget(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
-		http.Error(w, "platform unavailable", 503)
+	projects, ok := globalViewerProjects(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -127,26 +120,9 @@ func (a *App) handleGlobalQueryWidget(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", 400)
 		return
 	}
-	projects, err := globalCtx.PlatformAPI().ListProjects()
-	if err != nil {
-		http.Error(w, "unable to list projects", 500)
+	ids, ok := globalProjectIDs(w, projects, body.ProjectID)
+	if !ok {
 		return
-	}
-	ids := make([]string, 0, len(projects))
-	visible := make(map[string]bool, len(projects))
-	for _, p := range projects {
-		if strings.TrimSpace(p.ID) != "" {
-			id := strings.TrimSpace(p.ID)
-			ids = append(ids, id)
-			visible[id] = true
-		}
-	}
-	if selected := strings.TrimSpace(body.ProjectID); selected != "" {
-		if !visible[selected] {
-			http.Error(w, "project is not visible to this install", http.StatusForbidden)
-			return
-		}
-		ids = []string{selected}
 	}
 	metric, ok, err := metricFromConfig(requestReadDB(r), "__global__", body.Widget.Config)
 	if err != nil {
