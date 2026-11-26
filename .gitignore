@@ -20,6 +20,7 @@ mcp/composer/renderer/renderer
 mcp/computer/computer
 mcp/content/content
 mcp/crm/crm
+mcp/crypto-wallet/crypto-wallet
 mcp/deploy/deploy
 mcp/dlna/dlna
 mcp/docs/docs

@@ -1,0 +1,118 @@
+schema: apteva-app/v1
+
+name: crypto-wallet
+display_name: Crypto Wallet
+version: 0.1.0
+description: |
+  On-chain wallets for your own company's funds, spent by agents under rules
+  they cannot change. Keys are generated and held by the app, encrypted with a
+  master key kept outside its database. Every outgoing transfer passes per-
+  transfer and rolling 24-hour caps, a recipient allowlist and a token list
+  before anything is signed; transfers above the approval threshold wait for a
+  person, in the Conversations inbox or the panel. Agents can read balances and
+  propose transfers or new recipients; only people can create wallets, change
+  policies, approve, freeze or export keys. v0.1 supports ETH and USDC on Base
+  and Base Sepolia. Not for holding other people's money.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/crypto-wallet
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [crypto, wallet, usdc, base, ethereum, payments, treasury]
+
+scopes: [project]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress                 # chain RPC endpoints and the ETH/USD price
+    - platform.apps.call         # approval cards in Conversations
+  apps:
+    - name: conversations
+      version: ">=0.9.0"
+      reason: transfers above the approval threshold are approved from the inbox
+      optional: true             # without it, approvals happen in the panel only
+
+provides:
+  http_routes:
+    - prefix: /api/
+  mcp_tools:
+    - name: crypto_wallet_list
+      description: List the wallets agents may use, with chain, address and frozen state.
+    - name: crypto_wallet_balance
+      description: ETH and USDC balances of a wallet, with USD values.
+    - name: crypto_wallet_receive_address
+      description: The address a payer should send funds to.
+    - name: crypto_wallet_history
+      description: Recent proposals and on-chain transactions for a wallet.
+    - name: crypto_wallet_transfer_propose
+      description: Propose a transfer; it is signed, sent for approval, or refused with the rule that refused it.
+    - name: crypto_wallet_recipient_propose
+      description: Ask a person to add an address to a wallet's allowlist.
+    - name: crypto_wallet_proposal_status
+      description: Status of a transfer or recipient proposal.
+  publishes:
+    - name: crypto_wallet.created
+      description: A person created a wallet.
+      payload: {wallet_id: integer, chain: string, address: string}
+    - name: crypto_wallet.transfer.sent
+      description: A transfer was signed and broadcast.
+      payload: {wallet_id: integer, proposal_id: integer, tx_hash: string, token: string, amount: string, to: string}
+    - name: crypto_wallet.transfer.confirmed
+      description: A sent transfer reached the chain's confirmation depth.
+      payload: {wallet_id: integer, proposal_id: integer, tx_hash: string, token: string, amount: string, to: string}
+    - name: crypto_wallet.transfer.failed
+      description: A sent transfer reverted, was dropped, or was interrupted.
+      payload: {wallet_id: integer, proposal_id: integer, tx_hash: string, token: string, amount: string, to: string}
+    - name: crypto_wallet.transfer.received
+      description: USDC arrived in a wallet.
+      payload: {wallet_id: integer, token: string, amount: string, from: string, tx_hash: string}
+  ui_panels:
+    - slot: project.page
+      label: Crypto Wallet
+      icon: coins
+      entry: /ui/CryptoWalletPanel.mjs
+  skills:
+    - name: how-to-use-crypto-wallet
+      command: /crypto-wallet
+      body_file: skills/how-to-use-crypto-wallet.md
+      description: |
+        How agents use Crypto Wallet: read balances, propose transfers and
+        recipients, and what each refusal means. Triggers on: "crypto",
+        "USDC", "pay in crypto", "send ETH", "wallet address", "on-chain".
+      metadata:
+        category: finance
+
+config_schema:
+  - name: master_key
+    type: secret
+    default: ""
+    label: Master key
+    description: 32 random bytes, base64 or hex. Encrypts every wallet key. Kept by the platform, outside the app database, so a database backup alone cannot spend funds. Generate one from the panel. Changing it makes existing wallets unusable. CRYPTO_WALLET_MASTER_KEY overrides it.
+  - name: base_rpc_url
+    type: text
+    default: "https://mainnet.base.org"
+    label: Base RPC URL
+    description: JSON-RPC endpoint for Base mainnet. The public endpoint is rate limited; use Alchemy, Infura or similar for real use.
+  - name: base_sepolia_rpc_url
+    type: text
+    default: "https://sepolia.base.org"
+    label: Base Sepolia RPC URL
+    description: JSON-RPC endpoint for the Base Sepolia test network.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/crypto-wallet
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/crypto-wallet.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
