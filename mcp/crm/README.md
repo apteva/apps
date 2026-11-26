@@ -1,4 +1,10 @@
-# CRM v0.9.32
+# CRM v0.9.33
+
+Release `crm/v0.9.33`: Customer inbox widget fixes. Email rows no longer show
+the subject twice (activity bodies start with the subject, so the preview now
+drops it), a failed background refresh keeps the last rows and shows the error
+above them instead of replacing the list, and the loading/empty/error states
+use an inline minimum height (`min-h-28` is not in the dashboard CSS).
 
 Release `crm/v0.9.32`: `conversation.message.received` carries email routing
 fields so triggers can route by receiving address without reading the CRM:
