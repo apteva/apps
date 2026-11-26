@@ -2,12 +2,20 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.11.1
+version: 0.11.2
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
-  UI while the required Containers app owns Docker workloads, volumes,
-  command execution, and bounded logs. v0.4.0 adds a generic, app-only source
+  UI. Each workspace runs on one of two drivers:
+  - local (no other app needed): a folder on the machine running Apteva,
+    with commands in the OS sandbox (Seatbelt on macOS, bubblewrap on Linux)
+    using the machine's own toolchains. Used by default when the Containers
+    app is not installed.
+  - containers (optional Containers app): a Docker container per workspace,
+    with a persistent shell, container images and Instances hosts. Used by
+    default when Containers is installed. Test workspaces always need it.
+  Containers is not required to install or use Workspaces.
+  History: v0.4.0 adds a generic, app-only source
   round trip: producers can refresh managed files without deleting caches,
   export a filtered source snapshot, and acknowledge an applied revision.
   v0.6.2 lets operators and originating apps select an allowlisted custom
@@ -35,11 +43,12 @@ description: |
   v0.11.0 adds runtime drivers. Each workspace records its driver:
   containers (Docker, as before) or local, a folder on the machine running
   Apteva with commands in the OS sandbox (Seatbelt on macOS, bubblewrap on
-  Linux) and the machine's own toolchains, no Docker needed. The local driver
-  is off until an operator turns it on (local_driver_enabled).
-  v0.11.1 makes Containers optional: without it, workspaces that do not name
-  a driver use the local driver when it is on, and Docker calls say that
-  Containers is missing. Workspaces
+  Linux) and the machine's own toolchains, no Docker needed.
+  v0.11.1 makes Containers optional, and Docker calls without it say that
+  Containers is missing.
+  v0.11.2 turns the local driver on by default (local_driver_enabled), so a
+  project without Containers can create workspaces, and the panel offers only
+  the drivers that are available. Workspaces
   report their capabilities (isolation, hardened, sessions, preview, images).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -63,7 +72,7 @@ requires:
     - name: containers
       version: ">=0.8.0"
       optional: true
-      reason: Needed for Docker workspaces and all test workspaces; without it, workspaces run only as sandboxed folders (local driver, local_driver_enabled). Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces. 0.8.0 adds command runs and volume copies on Instances hosts.
+      reason: Optional. Runs Docker workspaces and all test workspaces; without it, workspaces run as sandboxed folders on this machine (local driver). Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces. 0.8.0 adds command runs and volume copies on Instances hosts.
     - name: instances
       version: ">=0.4.18"
       optional: true
@@ -294,7 +303,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.11.1
+    ref: workspaces/v0.11.2
     entry: mcp/workspaces
   port: 8080
   health_check: /health
@@ -342,14 +351,14 @@ config_schema:
     description: Require per-workspace image overrides to use an @sha256 digest.
   - name: local_driver_enabled
     type: boolean
-    default: false
+    default: true
     label: Allow sandboxed folders on this machine
-    description: Lets workspaces use the local driver, a folder on the machine running Apteva with commands in the OS sandbox (sandbox-exec on macOS, bubblewrap on Linux). Commands run as the Apteva user and share its kernel; only turn this on where the operator owns the machine. Test workspaces always use Docker.
+    description: Lets workspaces use the local driver, a folder on the machine running Apteva with commands in the OS sandbox (sandbox-exec on macOS, bubblewrap on Linux). On by default. Commands run as the Apteva user and share its kernel, so turn this off on a shared machine where agents should not run code on the host. Test workspaces always use Docker.
   - name: default_driver
     type: text
     default: containers
-    label: Default runtime driver
-    description: Driver used when workspace creation omits driver; containers or local (local needs the setting above).
+    label: Preferred runtime driver
+    description: Preferred driver when workspace creation omits driver. containers uses Docker when the Containers app is installed and the local driver otherwise; local always uses the local driver (needs the setting above).
   - name: local_network
     type: text
     default: open

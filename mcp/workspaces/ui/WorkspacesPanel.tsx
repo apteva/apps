@@ -224,7 +224,8 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
         setProfiles(response.profiles || []);
         setDefaultProfile(response.default || "go");
         setDrivers(response.drivers || []);
-        const driver = (response.drivers || []).find((item) => item.key === response.default_driver && item.available) ? response.default_driver! : "containers";
+        const available = (response.drivers || []).filter((item) => item.available);
+        const driver = available.find((item) => item.key === response.default_driver)?.key || available[0]?.key || "containers";
         setDefaultDriver(driver);
         setCreate((current) => ({ ...current, profile: response.default || "go", driver }));
       })

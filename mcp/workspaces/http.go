@@ -38,10 +38,14 @@ func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
 	if err := localDriverAvailable(globalCtx); err != nil {
 		localDriver["available"], localDriver["reason"] = false, err.Error()
 	}
-	drivers := []map[string]any{{"key": driverContainers, "label": "Docker container", "available": true}, localDriver}
+	containersDriver := map[string]any{"key": driverContainers, "label": "Docker container", "available": true}
+	if !containersInstalled(globalCtx) {
+		containersDriver["available"], containersDriver["reason"] = false, "the Containers app is not installed"
+	}
+	drivers := []map[string]any{containersDriver, localDriver}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"profiles": profiles, "default": configString(globalCtx, "default_profile", "go"),
-		"drivers": drivers, "default_driver": configString(globalCtx, "default_driver", driverContainers),
+		"drivers": drivers, "default_driver": defaultDriver(globalCtx),
 	})
 }
 

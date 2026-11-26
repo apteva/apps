@@ -169,3 +169,31 @@ func TestContainersPresentKeepsDockerDefault(t *testing.T) {
 		t.Fatalf("driver = %q, want containers", w.Driver)
 	}
 }
+
+func TestLocalDriverOnByDefault(t *testing.T) {
+	if detectSandbox() == sandboxNone {
+		t.Skip("no OS sandbox on this machine")
+	}
+	localRuntime.mu.Lock()
+	localRuntime.driver = newLocalDriver(t.TempDir(), detectSandbox(), "open")
+	localRuntime.mu.Unlock()
+	t.Cleanup(func() {
+		localRuntime.mu.Lock()
+		localRuntime.driver = nil
+		localRuntime.mu.Unlock()
+	})
+	app := &App{}
+	manifest := app.Manifest()
+	platform := &platformStub{containersGone: true}
+	ctx := sdk.NewAppCtxForTest(&manifest, nil, sdk.Config{}, platform, nil)
+	if err := localDriverAvailable(ctx); err != nil {
+		t.Fatalf("local driver should be on without config: %v", err)
+	}
+	if got := defaultDriver(ctx); got != driverLocal {
+		t.Fatalf("default without Containers = %q, want local", got)
+	}
+	platform.containersGone = false
+	if got := defaultDriver(ctx); got != driverContainers {
+		t.Fatalf("default with Containers = %q, want containers", got)
+	}
+}
