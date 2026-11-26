@@ -7,6 +7,7 @@ import {
   crmInboxHeaderLink,
   crmInboxIsGlobal,
   crmInboxPageLink,
+  crmInboxProjectColor,
   crmInboxPreferences,
   crmInboxSummary,
   crmInboxRelativeTime,
@@ -165,11 +166,20 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span className="truncate text-xs font-semibold text-text">{crmInboxContactLabel(item)}</span>
-                {global && item.project_name && (
-                  <span className="shrink-0 truncate rounded border border-border bg-bg-input px-1.5 py-0.5 text-[10px] text-text-muted" style={{ maxWidth: "40%" }} title={item.project_name}>
-                    {item.project_name}
-                  </span>
-                )}
+                {global && item.project_name && (() => {
+                  const color = crmInboxProjectColor(props, item.project_id);
+                  return (
+                    <span
+                      className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-bg-input px-1.5 py-0.5 text-[10px] text-text-muted"
+                      style={{ maxWidth: "40%" }}
+                      title={item.project_name}
+                      data-project-color={color || undefined}
+                    >
+                      {color && <span aria-hidden="true" className="shrink-0 rounded-full" style={{ width: 6, height: 6, backgroundColor: color }} />}
+                      <span className="truncate">{item.project_name}</span>
+                    </span>
+                  );
+                })()}
                 {(item.channels || [item.channel]).map(channel => <span key={channel} className="shrink-0 rounded px-1.5 py-0.5 text-[8px] font-bold" style={channelPresentation[channel] ? {color: channelPresentation[channel].color, backgroundColor: channelPresentation[channel].backgroundColor} : undefined}>
                   {channelPresentation[channel]?.icon} {channelPresentation[channel]?.label || channelLabel(channel)}
                 </span>)}

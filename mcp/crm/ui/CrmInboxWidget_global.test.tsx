@@ -3,7 +3,7 @@ import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import CrmInboxWidget from "./CrmInboxWidget";
-import { crmInboxAPIURL, crmInboxHeaderLink, crmInboxPageLink, crmInboxPreferences, crmPanelInitialRoute, type InboxItem } from "./inbox";
+import { crmInboxAPIURL, crmInboxHeaderLink, crmInboxPageLink, crmInboxPreferences, crmInboxProjectColor, crmPanelInitialRoute, type InboxItem } from "./inbox";
 
 const previousGlobals = {
   window: globalThis.window, document: globalThis.document,
@@ -117,4 +117,40 @@ test("a project widget without a project still asks for one", async () => {
   const host = await render({ appName: "crm", installId: 5 });
   expect(host.textContent).toContain("Select a project");
   expect(requests.length).toBe(0);
+});
+
+test("project colour comes from widgetContext and falls back to neutral", () => {
+  const projects = [{ id: "proj-a", name: "Alpha", color: "#10B981" }, { id: "proj-b", name: "Beta", color: "" }, { id: "proj-c", name: "Gamma", color: "red; background:url(x)" }];
+  const props = { dashboardScope: "global" as const, widgetContext: { projects } };
+  expect(crmInboxProjectColor(props, "proj-a")).toBe("#10B981");
+  expect(crmInboxProjectColor(props, "proj-b")).toBe("");
+  expect(crmInboxProjectColor(props, "proj-c")).toBe("");
+  expect(crmInboxProjectColor(props, "proj-x")).toBe("");
+  expect(crmInboxProjectColor(props, undefined)).toBe("");
+  expect(crmInboxProjectColor({ dashboardScope: "global" }, "proj-a")).toBe("");
+  expect(crmInboxProjectColor({ dashboardScope: "global", widgetContext: {} }, "proj-a")).toBe("");
+});
+
+function projectBadges(host: Element) {
+  return [...host.querySelectorAll("span[title]")]
+    .filter(el => el.textContent === "Alpha" || el.textContent === "Beta")
+    .map(el => ({ name: el.textContent, color: el.getAttribute("data-project-color"), dot: (el.querySelector("span[aria-hidden]") as HTMLElement | null)?.style.backgroundColor || "" }));
+}
+
+test("rows show a colour dot next to the project name when the project has a colour", async () => {
+  serve({ inbox: [row(1, "proj-a", "Alpha"), row(2, "proj-b", "Beta")], total: 2, projects: [{ id: "proj-a", name: "Alpha" }, { id: "proj-b", name: "Beta" }] });
+  const host = await render({
+    appName: "crm", installId: 5, dashboardScope: "global",
+    widgetContext: { projects: [{ id: "proj-a", name: "Alpha", color: "#10b981" }, { id: "proj-b", name: "Beta", color: "" }] },
+  });
+  const badges = projectBadges(host);
+  expect(badges.find(b => b.name === "Alpha")?.color).toBe("#10b981");
+  expect(badges.find(b => b.name === "Alpha")?.dot).not.toBe("");
+  expect(badges.find(b => b.name === "Beta")).toEqual({ name: "Beta", color: null, dot: "" });
+});
+
+test("rows keep the neutral badge when the dashboard sends no projects", async () => {
+  serve({ inbox: [row(1, "proj-a", "Alpha")], total: 1, projects: [{ id: "proj-a", name: "Alpha" }] });
+  const host = await render({ appName: "crm", installId: 5, dashboardScope: "global" });
+  expect(projectBadges(host)).toEqual([{ name: "Alpha", color: null, dot: "" }]);
 });
