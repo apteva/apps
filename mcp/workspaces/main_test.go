@@ -187,7 +187,7 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.11.2" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.11.3" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false

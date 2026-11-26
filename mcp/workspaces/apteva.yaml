@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.11.2
+version: 0.11.3
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -48,7 +48,12 @@ description: |
   Containers is missing.
   v0.11.2 turns the local driver on by default (local_driver_enabled), so a
   project without Containers can create workspaces, and the panel offers only
-  the drivers that are available. Workspaces
+  the drivers that are available.
+  v0.11.3: the dashboard widgets show the server's error text instead of a
+  generic "Operator access is required", keep their content on screen during
+  background refreshes, and lay out as separate cards (counts, one card per
+  workspace, recent activity; status, running command, output and recent
+  commands for an agent's workspace). Workspaces
   report their capabilities (isolation, hardened, sessions, preview, images).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -303,7 +308,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.11.2
+    ref: workspaces/v0.11.3
     entry: mcp/workspaces
   port: 8080
   health_check: /health

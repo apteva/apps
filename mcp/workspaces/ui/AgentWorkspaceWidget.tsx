@@ -98,7 +98,7 @@ export default function AgentWorkspaceWidget(props: WidgetHostProps) {
     return (
       <section className="wsw">
         <style>{widgetCSS}</style>
-        <div className="wsw-empty">Select a project to see agent workspaces.</div>
+        <div className="wsw-card wsw-empty">Select a project to see agent workspaces.</div>
       </section>
     );
   }
@@ -106,7 +106,7 @@ export default function AgentWorkspaceWidget(props: WidgetHostProps) {
     return (
       <section className="wsw">
         <style>{widgetCSS}</style>
-        <div className="wsw-empty">Open an agent or a thread to see its workspace.</div>
+        <div className="wsw-card wsw-empty">Open an agent or a thread to see its workspace.</div>
       </section>
     );
   }
@@ -138,73 +138,72 @@ export default function AgentWorkspaceWidget(props: WidgetHostProps) {
         )}
       </header>
       {error && <div className="wsw-banner" role="alert">{error}</div>}
-      <div className="wsw-body">
-        {!selected && !list.loading && (
-          <div className="wsw-empty">
-            <EmptyIcon />
-            <span>{byThread ? "No workspace for this thread yet." : "No workspace for this agent yet."}</span>
-          </div>
-        )}
-        {selected && (
-          <>
-            <div className="wsw-section">
-              <div className="wsw-row" style={{ padding: "2px 0" }}>
-                <StatusDot status={selected.status} />
-                <span className="wsw-main">
-                  <span className="wsw-line">
-                    <span>{selected.status === "busy" ? "Running a command" : selected.status}</span>
-                    {selected.status === "failed" && selected.last_error && <span className="wsw-error wsw-trunc">{selected.last_error}</span>}
-                  </span>
+      {!selected && list.loaded && !list.error && (
+        <div className="wsw-card wsw-empty">
+          <EmptyIcon />
+          <span>{byThread ? "No workspace for this thread yet." : "No workspace for this agent yet."}</span>
+        </div>
+      )}
+      {!selected && !list.loaded && !props.preview && <div className="wsw-card wsw-empty wsw-dim">Loading workspace…</div>}
+      {selected && (
+        <>
+          <div className="wsw-card">
+            <div className="wsw-ws-top">
+              <StatusDot status={selected.status} />
+              <span className="wsw-main">
+                <span className="wsw-line">
+                  <span>{selected.status === "busy" ? "Running a command" : selected.status}</span>
+                  {selected.status === "failed" && selected.last_error && <span className="wsw-error wsw-trunc">{selected.last_error}</span>}
                 </span>
-                <span className="wsw-side">
-                  {selected.preview?.status === "live" && selected.preview.url && (
-                    <a className="wsw-pill wsw-link" href={selected.preview.url} target="_blank" rel="noreferrer">Preview</a>
-                  )}
-                  {selected.preview?.status === "crashed" && <span className="wsw-pill wsw-error">Preview crashed</span>}
-                  {selected.lifecycle_status === "running" && left.label && <span className={`wsw-pill ${left.soon ? "wsw-warn" : ""}`}>{left.label}</span>}
-                </span>
-              </div>
+              </span>
+              <span className="wsw-side">
+                {selected.preview?.status === "live" && selected.preview.url && (
+                  <a className="wsw-pill wsw-link" href={selected.preview.url} target="_blank" rel="noreferrer">Preview</a>
+                )}
+                {selected.preview?.status === "crashed" && <span className="wsw-pill wsw-error">Preview crashed</span>}
+                {selected.lifecycle_status === "running" && left.label && <span className={`wsw-pill ${left.soon ? "wsw-warn" : ""}`}>{left.label}</span>}
+              </span>
             </div>
-            {current && (
-              <div className="wsw-section">
-                <h3>Running now</h3>
-                <div className="wsw-line">
-                  <span className="wsw-mono wsw-trunc">{current.display_command}</span>
-                  <span className="wsw-when">{commandDuration(current, now)}</span>
-                </div>
-                <div className="wsw-dim" style={{ marginTop: 2 }}>Output appears when the command finishes.</div>
+          </div>
+          {current && (
+            <div className="wsw-card">
+              <h3>Running now</h3>
+              <div className="wsw-line">
+                <span className="wsw-mono wsw-trunc">{current.display_command}</span>
+                <span className="wsw-when">{commandDuration(current, now)}</span>
               </div>
-            )}
-            {latest && outputLines > 0 && (
-              <div className="wsw-section">
-                <h3>
-                  Last output · <span className="wsw-mono" style={{ textTransform: "none", letterSpacing: 0 }}>{latest.display_command}</span>
-                </h3>
-                <pre className="wsw-output">{output || (logs.loading ? "Loading…" : "No output.")}</pre>
-              </div>
-            )}
-            {recentLimit > 0 && finished.length > 0 && (
-              <div className="wsw-section">
-                <h3>Recent commands</h3>
-                <ul className="wsw-list">
-                  {finished.slice(0, recentLimit).map((command) => {
-                    const failed = command.status !== "succeeded";
-                    return (
-                      <li key={command.id} className="wsw-act" style={{ gridTemplateColumns: "minmax(0,1fr) auto auto" }}>
-                        <span className={`wsw-mono wsw-trunc ${failed ? "wsw-error" : ""}`} title={command.display_command}>{command.display_command}</span>
-                        <span className={failed ? "wsw-error" : "wsw-dim"}>
-                          {command.exit_code != null ? `exit ${command.exit_code}` : command.status.replace("_", " ")}
-                        </span>
-                        <span className="wsw-when">{commandDuration(command, now)}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+              <div className="wsw-dim" style={{ marginTop: 2 }}>Output appears when the command finishes.</div>
+            </div>
+          )}
+          {latest && outputLines > 0 && (
+            <div className="wsw-card">
+              <h3>
+                Last output · <span className="wsw-mono wsw-trunc" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>{latest.display_command}</span>
+              </h3>
+              <pre className="wsw-output">{output || (logs.loaded || props.preview ? "No output." : "Loading…")}</pre>
+            </div>
+          )}
+          {recentLimit > 0 && finished.length > 0 && (
+            <div className="wsw-card">
+              <h3>Recent commands</h3>
+              <ul className="wsw-list">
+                {finished.slice(0, recentLimit).map((command) => {
+                  const failed = command.status !== "succeeded";
+                  return (
+                    <li key={command.id} className="wsw-act" style={{ gridTemplateColumns: "minmax(0,1fr) auto auto" }}>
+                      <span className={`wsw-mono wsw-trunc ${failed ? "wsw-error" : ""}`} title={command.display_command}>{command.display_command}</span>
+                      <span className={failed ? "wsw-error" : "wsw-dim"}>
+                        {command.exit_code != null ? `exit ${command.exit_code}` : command.status.replace("_", " ")}
+                      </span>
+                      <span className="wsw-when">{commandDuration(command, now)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
     </section>
   );
 }
