@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Assignment badge follows the run state (0.25.1)
+
+The widget shows Blocked or Waiting instead of Running for open runs that
+are not running. See `docs-release-0.25.1.md`.
+
 ## Assignments tab in the widget (0.25.0)
 
 The dashboard widget lists active assignments, including event-driven ones,

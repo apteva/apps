@@ -79,6 +79,8 @@ export type OverviewAssignment = {
   triggers: AssignmentTrigger[];
   ongoing_count: number;
   live_run_id?: string;
+  /** State of the open run the row links to (0.25.1+): running, waiting, blocked... */
+  live_run_state?: string;
   last_run_id?: string;
   last_run_state?: string;
   last_run_at?: string;
@@ -542,6 +544,25 @@ export function assignmentStartText(x: OverviewAssignment, sources: ToolSource[]
   return "Started by hand";
 }
 /** Event-driven assignments in a list, and those whose trigger would not fire. */
+/** Badge for an assignment with an open run, named by that run's real state. */
+export function assignmentRunState(x: OverviewAssignment): { state: string; label: string } | null {
+  if (!x.live_run_id && x.ongoing_count <= 0) return null;
+  switch (x.live_run_state) {
+    case "running":
+      return { state: "running", label: "Running" };
+    case "ready":
+    case "queued":
+    case "pending":
+      return { state: "ready", label: "Starting" };
+    case "waiting":
+    case "review":
+      return { state: "waiting", label: "Waiting" };
+    case "blocked":
+      return { state: "blocked", label: "Blocked" };
+  }
+  return { state: "waiting", label: x.ongoing_count > 1 ? `${x.ongoing_count} open runs` : "Open run" };
+}
+
 export function eventSummary(data: Data) {
   const events = (data.assignments || []).filter((x) => x.start === "event");
   return {
@@ -586,9 +607,9 @@ function AssignmentRow({ x, props, name, relative, badge }: {
   const trigger = x.triggers.find((t) => t.status !== "archived");
   const source = x.start === "event" && trigger ? sources.find((s) => s.key === `app:${trigger.source_install_id}`) : undefined;
   const start = assignmentStartText(x, sources);
-  const live = !!x.live_run_id || x.ongoing_count > 0;
-  const state = live ? "running" : x.needs_attention ? "attention" : x.start === "schedule" ? "scheduled" : x.start;
-  const label = live ? "Running" : x.needs_attention ? (x.warning || "Attention").replace(/^Trigger /, "") : x.start === "schedule" ? `Next ${relative(x.next_run_at)}` : x.start === "event" ? "On event" : "Manual";
+  const runState = assignmentRunState(x);
+  const state = runState ? runState.state : x.needs_attention ? "attention" : x.start === "schedule" ? "scheduled" : x.start;
+  const label = runState ? runState.label : x.needs_attention ? (x.warning || "Attention").replace(/^Trigger /, "") : x.start === "schedule" ? `Next ${relative(x.next_run_at)}` : x.start === "event" ? "On event" : "Manual";
   const href = overviewLink(
     props,
     { id: x.live_run_id || x.id, process_id: x.process_id, project_id: x.project_id, assignment_id: x.id, state: "" } as Item,

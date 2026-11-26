@@ -24,6 +24,7 @@ type overviewAssignment struct {
 	Triggers       []assignmentTriggerSummary `json:"triggers"`
 	OngoingCount   int                        `json:"ongoing_count"`
 	LiveRunID      string                     `json:"live_run_id,omitempty"`
+	LiveRunState   string                     `json:"live_run_state,omitempty"`
 	LastRunID      string                     `json:"last_run_id,omitempty"`
 	LastRunState   string                     `json:"last_run_state,omitempty"`
 	LastRunAt      string                     `json:"last_run_at,omitempty"`
@@ -85,9 +86,8 @@ func (a *App) overviewAssignments(project string, live []overviewItem) ([]overvi
 			y.Triggers = []assignmentTriggerSummary{}
 		}
 		for _, run := range live {
-			if run.AssignmentID == x.ID {
-				y.LiveRunID = run.ID
-				break
+			if run.AssignmentID == x.ID && liveRank(run.State) < liveRank(y.LiveRunState) {
+				y.LiveRunID, y.LiveRunState = run.ID, run.State
 			}
 		}
 		if x.SyncPending || x.SyncError != "" {
@@ -101,11 +101,32 @@ func (a *App) overviewAssignments(project string, live []overviewItem) ([]overvi
 				y.Warning = p
 			}
 		}
+		if y.Warning == "" && y.LiveRunState == "blocked" {
+			y.Warning = "Run blocked"
+		}
 		y.NeedsAttention = y.Warning != ""
 		out = append(out, y)
 	}
 	sortOverviewAssignments(out)
 	return out, nil
+}
+
+// liveRank orders open run states so an assignment points at its most active
+// run: a running one beats one that is waiting or blocked.
+func liveRank(state string) int {
+	switch state {
+	case "running":
+		return 0
+	case "ready", "queued", "pending":
+		return 1
+	case "waiting", "review":
+		return 2
+	case "blocked":
+		return 3
+	case "":
+		return 99
+	}
+	return 4
 }
 
 // sortOverviewAssignments orders scheduled assignments by next run, then

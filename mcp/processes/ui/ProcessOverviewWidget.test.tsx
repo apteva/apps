@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Widget, {
   overviewLink,
+  assignmentRunState,
   overviewQueue,
   executionStatus,
   currentStepLabel,
@@ -342,4 +343,14 @@ test("step activity keeps finished thoughts, labels actions and times them", () 
   expect(actionLabel("processes_step_update", "", { state: "blocked" })).toBe("Reported blocker");
   expect(actionLabel("search_tools", "")).toBe("Looked up tools");
   expect([duration(0), duration(91), duration(271), duration(5081), duration(29000), duration(75000)]).toEqual(["<0.01s", "0.09s", "0.3s", "5.1s", "29s", "1m 15s"]);
+});
+
+test("assignment badge names the open run's real state", () => {
+  const base = { id: "a", process_id: "p", process_name: "P", name: "A", agent_id: 7, start: "event" as const, triggers: [], ongoing_count: 0, needs_attention: false };
+  expect(assignmentRunState(base)).toBeNull();
+  expect(assignmentRunState({ ...base, ongoing_count: 4, live_run_id: "r", live_run_state: "blocked" })).toEqual({ state: "blocked", label: "Blocked" });
+  expect(assignmentRunState({ ...base, ongoing_count: 1, live_run_id: "r", live_run_state: "running" })).toEqual({ state: "running", label: "Running" });
+  expect(assignmentRunState({ ...base, ongoing_count: 1, live_run_id: "r", live_run_state: "waiting" })?.label).toBe("Waiting");
+  // A 0.25.0 backend sends no state: never claim Running.
+  expect(assignmentRunState({ ...base, ongoing_count: 2, live_run_id: "r" })?.label).toBe("2 open runs");
 });
