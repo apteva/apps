@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.10.0
+version: 0.11.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -32,6 +32,12 @@ description: |
   v0.10.0 adds two dashboard widgets: a Home overview of workspaces with a
   compact project-wide activity feed, and an agent/thread widget with the
   running command, last output and recent commands.
+  v0.11.0 adds runtime drivers. Each workspace records its driver:
+  containers (Docker, as before) or local, a folder on the machine running
+  Apteva with commands in the OS sandbox (Seatbelt on macOS, bubblewrap on
+  Linux) and the machine's own toolchains, no Docker needed. The local driver
+  is off until an operator turns it on (local_driver_enabled). Workspaces
+  report their capabilities (isolation, hardened, sessions, preview, images).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -82,7 +88,7 @@ provides:
       description: "Stop a preview. keep_workspace_running defaults to true for agents (preview process only) and false for app callers (container stops, volumes retained). Args: workspace_id, keep_workspace_running?."
       requires: workspaces.write
     - name: workspaces_create
-      description: "Create a development workspace from an approved runtime profile on local Docker or an Instances host, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, preview_port?, instance_id?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
+      description: "Create a development workspace from an approved runtime profile on local Docker or an Instances host, optionally overriding it with an allowlisted digest-pinned image, or (driver local) as a sandboxed folder on the Apteva machine using its own toolchains. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, preview_port?, instance_id?, driver? (containers|local), owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
       requires: workspaces.write
     - name: workspaces_list
       description: "List current-project workspaces. Args: status?, include_destroyed?, limit?."
@@ -212,8 +218,8 @@ provides:
           host:
             type: string
             title: Host
-            enum: ["", local, remote]
-            enum_names: [All hosts, Local Docker, Instances hosts]
+            enum: ["", local, remote, machine]
+            enum_names: [All hosts, Local Docker, Instances hosts, This machine (sandbox)]
             default: ""
           include_test:
             type: boolean
@@ -285,7 +291,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.10.0
+    ref: workspaces/v0.11.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health
@@ -331,6 +337,26 @@ config_schema:
     default: true
     label: Require immutable custom images
     description: Require per-workspace image overrides to use an @sha256 digest.
+  - name: local_driver_enabled
+    type: boolean
+    default: false
+    label: Allow sandboxed folders on this machine
+    description: Lets workspaces use the local driver, a folder on the machine running Apteva with commands in the OS sandbox (sandbox-exec on macOS, bubblewrap on Linux). Commands run as the Apteva user and share its kernel; only turn this on where the operator owns the machine. Test workspaces always use Docker.
+  - name: default_driver
+    type: text
+    default: containers
+    label: Default runtime driver
+    description: Driver used when workspace creation omits driver; containers or local (local needs the setting above).
+  - name: local_network
+    type: text
+    default: open
+    label: Local driver network
+    description: open, or none to limit sandboxed commands to loopback.
+  - name: local_root
+    type: text
+    default: ""
+    label: Local driver folder
+    description: Absolute folder for local workspaces. Defaults to ~/apteva-workspaces/install-<id>. Must not contain spaces or sit inside ~/.apteva, ~/.ssh or another folder the sandbox hides.
   - name: default_cpu
     type: text
     default: "2"

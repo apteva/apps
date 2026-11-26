@@ -15,7 +15,7 @@ const workspaceColumns = `id, project_id, name, purpose, profile, image, workloa
 	repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
 	source_digest, source_manifest_json, source_synced_at, last_error, created_at,
 	updated_at, last_activity_at, expires_at, delete_at, destroyed_at,
-	kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id`
+	kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver`
 
 func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 	_, err := db.Exec(`INSERT INTO workspaces (
@@ -27,8 +27,8 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		source_digest, source_manifest_json, source_synced_at,
 		last_error, idempotency_key, created_at, updated_at, last_activity_at,
 		expires_at, delete_at, destroyed_at,
-		kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.ProjectID, w.Name, w.Purpose, w.Profile, w.Image, w.WorkloadID,
 		w.LifecycleStatus, w.ActivityStatus, w.RuntimeStatus, w.HealthStatus, w.HostLabel,
 		w.NetworkPolicy, w.CPU, w.MemoryMB, w.ConsumerApp, w.ConsumerInstallID,
@@ -37,7 +37,7 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		w.SourceDigest, mustJSON(w.SourceManifest), w.SourceSyncedAt,
 		w.LastError, idempotencyKey, w.CreatedAt, w.UpdatedAt, w.LastActivityAt,
 		w.ExpiresAt, w.DeleteAt, w.DestroyedAt,
-		firstNonEmpty(w.Kind, kindDev), w.NetworkMode, w.CacheVolumeID, w.CacheKey, w.ResultsExportedAt, w.InstanceID)
+		firstNonEmpty(w.Kind, kindDev), w.NetworkMode, w.CacheVolumeID, w.CacheKey, w.ResultsExportedAt, w.InstanceID, firstNonEmpty(w.Driver, driverContainers))
 	return err
 }
 
@@ -52,7 +52,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (*Workspace, error) 
 		&w.RepoLabel, &w.BranchLabel, &w.OriginLabel, &w.OriginHref, &w.DirtyState, &w.UnpushedState,
 		&w.SourceDigest, &sourceManifest, &w.SourceSyncedAt,
 		&w.LastError, &w.CreatedAt, &w.UpdatedAt, &w.LastActivityAt, &w.ExpiresAt, &w.DeleteAt, &w.DestroyedAt,
-		&w.Kind, &w.NetworkMode, &w.CacheVolumeID, &w.CacheKey, &w.ResultsExportedAt, &w.InstanceID,
+		&w.Kind, &w.NetworkMode, &w.CacheVolumeID, &w.CacheKey, &w.ResultsExportedAt, &w.InstanceID, &w.Driver,
 	)
 	if err != nil {
 		return nil, err
@@ -121,11 +121,13 @@ func listWorkspacesFiltered(db *sql.DB, projectID string, f workspaceFilter) ([]
 	switch strings.TrimSpace(f.Host) {
 	case "":
 	case "local":
-		query += ` AND instance_id=0`
+		query += ` AND instance_id=0 AND driver='containers'`
 	case "remote":
 		query += ` AND instance_id>0`
+	case "machine":
+		query += ` AND driver='local'`
 	default:
-		return nil, errors.New("host must be local or remote")
+		return nil, errors.New("host must be local, remote or machine")
 	}
 	if f.OwnerAgentID > 0 {
 		query += ` AND owner_agent_id=?`

@@ -223,7 +223,7 @@ func (a *App) toolSourceSync(callCtx context.Context, app *sdk.AppCtx, args map[
 		}
 	}
 	var imported map[string]any
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
+	if err := runtimeCall(app, "containers_volume_import", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": ".", "archive_base64": archive,
 	}, &imported); err != nil {
 		return nil, err
@@ -327,7 +327,7 @@ func (a *App) exportManagedSource(callCtx context.Context, app *sdk.AppCtx, acto
 		_ = a.runMaintenanceExecution(context.Background(), app, w, []string{"/bin/rm", "-f", "--", archivePath}, 30)
 	}()
 	var outer map[string]any
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_export", map[string]any{
+	if err := runtimeCall(app, "containers_volume_export", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "cache", "path": archiveName,
 	}, &outer); err != nil {
 		return nil, err
@@ -346,7 +346,7 @@ func (a *App) exportManagedSource(callCtx context.Context, app *sdk.AppCtx, acto
 
 func (a *App) runMaintenanceExecution(callCtx context.Context, app *sdk.AppCtx, w *Workspace, argv []string, timeoutSeconds int) error {
 	var started executionResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{
+	if err := runtimeCall(app, "containers_exec_start", map[string]any{
 		"workload_id": w.WorkloadID, "argv": argv, "working_directory": "/workspace", "timeout_s": timeoutSeconds,
 	}, &started); err != nil {
 		return err
@@ -370,7 +370,7 @@ func (a *App) runMaintenanceExecution(callCtx context.Context, app *sdk.AppCtx, 
 			return errors.New("maintenance execution did not finish before deadline")
 		case <-ticker.C:
 			var out executionResponse
-			if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_get", map[string]any{"execution_id": id}, &out); err != nil {
+			if err := runtimeCall(app, "containers_exec_get", map[string]any{"execution_id": id}, &out); err != nil {
 				return err
 			}
 			exec := out.Execution
@@ -381,7 +381,7 @@ func (a *App) runMaintenanceExecution(callCtx context.Context, app *sdk.AppCtx, 
 				return nil
 			}
 			var logs executionLogsResponse
-			_ = app.PlatformAPI().CallAppResult("containers", "containers_exec_logs", map[string]any{"execution_id": id, "tail": 50}, &logs)
+			_ = runtimeCall(app, "containers_exec_logs", map[string]any{"execution_id": id, "tail": 50}, &logs)
 			return fmt.Errorf("execution %s: %s", exec.Status, strings.TrimSpace(logs.Logs))
 		}
 	}

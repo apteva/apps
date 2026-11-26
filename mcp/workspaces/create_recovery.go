@@ -50,7 +50,7 @@ func neverReady(app *sdk.AppCtx, w *Workspace) bool {
 func (a *App) retireFailedCreate(app *sdk.AppCtx, w *Workspace, reason string) error {
 	if w.WorkloadID != "" && w.RuntimeStatus != "destroyed" {
 		var out map[string]any
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_destroy", map[string]any{
+		if err := runtimeCall(app, "containers_destroy", map[string]any{
 			"workload_id": w.WorkloadID, "delete_volumes": true,
 		}, &out); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{

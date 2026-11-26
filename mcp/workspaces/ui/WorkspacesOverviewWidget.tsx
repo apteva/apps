@@ -23,7 +23,7 @@ import {
 } from "./widgetShared";
 
 const SHOW = ["active", "attention", "all"] as const;
-const HOSTS = ["", "local", "remote"] as const;
+const HOSTS = ["", "local", "remote", "machine"] as const;
 const KINDS = ["all", "commands", "changes"] as const;
 
 interface ListResponse {

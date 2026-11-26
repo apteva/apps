@@ -34,7 +34,15 @@ func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		profiles = append(profiles, map[string]any{"key": profile.key, "label": profile.label, "image": image, "available": image != ""})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles, "default": configString(globalCtx, "default_profile", "go")})
+	localDriver := map[string]any{"key": driverLocal, "label": "This machine (sandbox)", "available": true}
+	if err := localDriverAvailable(globalCtx); err != nil {
+		localDriver["available"], localDriver["reason"] = false, err.Error()
+	}
+	drivers := []map[string]any{{"key": driverContainers, "label": "Docker container", "available": true}, localDriver}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profiles": profiles, "default": configString(globalCtx, "default_profile", "go"),
+		"drivers": drivers, "default_driver": configString(globalCtx, "default_driver", driverContainers),
+	})
 }
 
 func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {

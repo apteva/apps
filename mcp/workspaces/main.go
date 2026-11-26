@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.10.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.11.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -77,7 +77,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		"ttl_minutes": intSchema(), "owner_label": strSchema(), "repo_label": strSchema(),
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
 		"preview_port": intSchema(),
-		"instance_id":  map[string]any{"type": "integer", "description": "Instances host to run on. Omit for the default: local Docker for preview workspaces, otherwise Containers' default host."},
+		"instance_id":  map[string]any{"type": "integer", "description": "Instances host to run on (containers driver). Omit for the default: local Docker for preview workspaces, otherwise Containers' default host."},
+		"driver":       map[string]any{"type": "string", "enum": []string{driverContainers, driverLocal}, "description": "Where the workspace runs. containers: a Docker container (default). local: a folder on the machine running Apteva, commands in the OS sandbox, using the machine's own toolchains; only when the operator enabled it."},
 	}
 	appCreateProps := make(map[string]any, len(createProps)+8)
 	for key, value := range createProps {
@@ -91,10 +92,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
 	return append(a.previewTools(), []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, on local Docker or an Instances host (instance_id). Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, on local Docker, an Instances host (instance_id), or as a sandboxed folder on the Apteva machine (driver local). Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
-		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host each command runs on its own, so cd and exported variables do not carry over (use working_directory).", InputSchema: schemaObject(map[string]any{
+		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host or the local driver each command runs on its own, so cd and exported variables do not carry over (use working_directory). The workspace's capabilities.sessions says which.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema(), "maxItems": 256},
 			"shell_command": strSchema(), "working_directory": strSchema(), "timeout_s": intSchema(), "idempotency_key": strSchema(),
 			"user":    map[string]any{"type": "string", "enum": []string{"builder", "runner"}, "description": "Test workspaces only. Default runner."},
@@ -452,7 +453,7 @@ func (a *App) toolSourceExport(callCtx context.Context, app *sdk.AppCtx, args ma
 		return nil, errors.New("path must be relative to /workspace and must not contain '..'")
 	}
 	var out map[string]any
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_export", map[string]any{
+	if err := runtimeCall(app, "containers_volume_export", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": rel,
 	}, &out); err != nil {
 		return nil, err
@@ -477,7 +478,7 @@ func (a *App) workspaceDetail(app *sdk.AppCtx, w *Workspace) (map[string]any, er
 	}
 	var usage usageResponse
 	if w.WorkloadID != "" && w.LifecycleStatus != statusDestroyed {
-		_ = app.PlatformAPI().CallAppResult("containers", "containers_usage_get", map[string]any{"workload_id": w.WorkloadID}, &usage)
+		_ = runtimeCall(app, "containers_usage_get", map[string]any{"workload_id": w.WorkloadID}, &usage)
 		for _, metric := range usage.Metrics {
 			if metric.FeatureKey == "containers.storage.bytes" && metric.Source == "docker_volume_total" {
 				w.StorageBytes = metric.Quantity

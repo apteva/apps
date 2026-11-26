@@ -110,7 +110,7 @@ func exportWorkspaceFile(app *sdk.AppCtx, w *Workspace, rel string) ([]byte, *ta
 	var exported struct {
 		ArchiveBase64 string `json:"archive_base64"`
 	}
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_export", map[string]any{
+	if err := runtimeCall(app, "containers_volume_export", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": rel,
 	}, &exported); err != nil {
 		return nil, nil, &errFileUnavailable{fmt.Errorf("read %s: %w (the file may not exist or may be behind a symlink)", rel, err)}
@@ -208,7 +208,7 @@ func importWorkspaceFile(app *sdk.AppCtx, w *Workspace, rel string, header *tar.
 		return err
 	}
 	var imported map[string]any
-	return app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
+	return runtimeCall(app, "containers_volume_import", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": dir, "archive_base64": archive,
 	}, &imported)
 }
@@ -433,7 +433,7 @@ func (a *App) toolSourceImport(callCtx context.Context, app *sdk.AppCtx, args ma
 		return nil, err
 	}
 	var out map[string]any
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
+	if err := runtimeCall(app, "containers_volume_import", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": rel, "archive_base64": archive,
 	}, &out); err != nil {
 		return nil, err
@@ -578,7 +578,7 @@ func parseListOutput(logs string, limit int) ([]listedEntry, bool) {
 // its output on success.
 func (a *App) runMaintenanceCapture(callCtx context.Context, app *sdk.AppCtx, w *Workspace, argv []string, timeoutSeconds, tailLines int) (string, error) {
 	var started executionResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{
+	if err := runtimeCall(app, "containers_exec_start", map[string]any{
 		"workload_id": w.WorkloadID, "argv": argv, "working_directory": "/workspace", "timeout_s": timeoutSeconds,
 	}, &started); err != nil {
 		return "", err
@@ -599,14 +599,14 @@ func (a *App) runMaintenanceCapture(callCtx context.Context, app *sdk.AppCtx, w 
 			return "", errors.New("helper did not finish before its deadline")
 		case <-ticker.C:
 			var out executionResponse
-			if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_get", map[string]any{"execution_id": id}, &out); err != nil {
+			if err := runtimeCall(app, "containers_exec_get", map[string]any{"execution_id": id}, &out); err != nil {
 				return "", err
 			}
 			if !commandTerminal(out.Execution.Status) {
 				continue
 			}
 			var logs executionLogsResponse
-			if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_logs", map[string]any{"execution_id": id, "tail": tailLines}, &logs); err != nil {
+			if err := runtimeCall(app, "containers_exec_logs", map[string]any{"execution_id": id, "tail": tailLines}, &logs); err != nil {
 				return "", err
 			}
 			if out.Execution.Status == "succeeded" && (out.Execution.ExitCode == nil || *out.Execution.ExitCode == 0) {

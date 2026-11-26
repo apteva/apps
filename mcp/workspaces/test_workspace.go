@@ -331,7 +331,7 @@ func (a *App) createTestWorkspace(callCtx context.Context, app *sdk.AppCtx, args
 				ID string `json:"id"`
 			} `json:"volume"`
 		}
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_create", map[string]any{
+		if err := runtimeCall(app, "containers_volume_create", map[string]any{
 			"name":   "wst-" + profile + "-" + cacheKey[:24],
 			"labels": map[string]string{"app": "workspaces", "kind": "test-cache", "profile": profile, "cache_key": cacheKey},
 		}, &created); err != nil {
@@ -347,7 +347,7 @@ func (a *App) createTestWorkspace(callCtx context.Context, app *sdk.AppCtx, args
 		}
 	}
 	var runOut workloadResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_run", map[string]any{
+	if err := runtimeCall(app, "containers_run", map[string]any{
 		"name":     "workspace-" + strings.TrimPrefix(w.ID, "wsp_")[:12],
 		"image":    image,
 		"hardened": true, "user": testBuilderUser, "network_mode": networkNone,
@@ -380,7 +380,7 @@ func (a *App) createTestWorkspace(callCtx context.Context, app *sdk.AppCtx, args
 	}
 	for _, step := range imports {
 		var imported map[string]any
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
+		if err := runtimeCall(app, "containers_volume_import", map[string]any{
 			"workload_id": w.WorkloadID, "volume": step.volume, "path": step.path,
 			"archive_base64": step.archive, "owner": step.owner,
 		}, &imported); err != nil {
@@ -451,7 +451,7 @@ func (a *App) switchTestNetwork(app *sdk.AppCtx, w *Workspace, mode string) erro
 		input["egress_allow"] = testEgressAllow(app)
 	}
 	var out workloadResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_network_set", input, &out); err != nil {
+	if err := runtimeCall(app, "containers_network_set", input, &out); err != nil {
 		return fmt.Errorf("switch network to %s: %w", mode, err)
 	}
 	w.NetworkMode = mode
@@ -522,7 +522,7 @@ func (a *App) toolResultsExport(callCtx context.Context, app *sdk.AppCtx, args m
 		CompressedBytes int    `json:"compressed_bytes"`
 		Format          string `json:"format"`
 	}
-	err = app.PlatformAPI().CallAppResult("containers", "containers_volume_export", map[string]any{
+	err = runtimeCall(app, "containers_volume_export", map[string]any{
 		"workload_id": w.WorkloadID, "volume": "workspace", "path": testResultsPath,
 	}, &out)
 	if err == nil {
@@ -575,7 +575,7 @@ func (a *App) collectTestCaches(app *sdk.AppCtx, now time.Time) error {
 	var listed struct {
 		Volumes []standaloneVolume `json:"volumes"`
 	}
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_list", map[string]any{
+	if err := runtimeCall(app, "containers_volume_list", map[string]any{
 		"labels": map[string]string{"app": "workspaces", "kind": "test-cache"},
 	}, &listed); err != nil {
 		return fmt.Errorf("list test caches: %w", err)
@@ -591,7 +591,7 @@ func (a *App) collectTestCaches(app *sdk.AppCtx, now time.Time) error {
 			continue
 		}
 		var deleted map[string]any
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_delete", map[string]any{"volume_id": v.ID}, &deleted); err != nil {
+		if err := runtimeCall(app, "containers_volume_delete", map[string]any{"volume_id": v.ID}, &deleted); err != nil {
 			errs = append(errs, fmt.Errorf("delete test cache %s: %w", v.Name, err))
 		}
 	}

@@ -114,7 +114,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 		return nil, err
 	}
 	var runtime workloadResponse
-	if err = app.PlatformAPI().CallAppResult("containers", "containers_get", map[string]any{"workload_id": w.WorkloadID}, &runtime); err != nil {
+	if err = runtimeCall(app, "containers_get", map[string]any{"workload_id": w.WorkloadID}, &runtime); err != nil {
 		return nil, err
 	}
 	p := &Preview{WorkspaceID: w.ID, InstanceID: workloadTarget(runtime.Workload), Status: "starting", StartedAt: nowUTC()}
@@ -137,7 +137,7 @@ func (a *App) toolPreviewStart(c context.Context, app *sdk.AppCtx, args map[stri
 		return nil, err
 	}
 	var out executionResponse
-	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{"workload_id": w.WorkloadID, "argv": argv, "env": args["env"], "working_directory": "/workspace", "umask": "022", "timeout_s": ttl, "idempotency_key": "preview-" + w.ID + "-" + p.StartedAt}, &out)
+	err = runtimeCall(app, "containers_exec_start", map[string]any{"workload_id": w.WorkloadID, "argv": argv, "env": args["env"], "working_directory": "/workspace", "umask": "022", "timeout_s": ttl, "idempotency_key": "preview-" + w.ID + "-" + p.StartedAt}, &out)
 	if err != nil {
 		p.Status = "crashed"
 		p.Error = err.Error()
@@ -176,7 +176,7 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 		p.Status = "crashed"
 		p.Error = "preview start interrupted before execution was recorded"
 	} else {
-		if err = app.PlatformAPI().CallAppResult("containers", "containers_exec_get", map[string]any{"execution_id": p.ExecutionID}, &out); err != nil {
+		if err = runtimeCall(app, "containers_exec_get", map[string]any{"execution_id": p.ExecutionID}, &out); err != nil {
 			return p, err
 		}
 		if commandTerminal(out.Execution.Status) {
@@ -204,7 +204,7 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 				p.Error = ""
 			} else if p.Status == "starting" && time.Since(parseTime(p.StartedAt)) > 10*time.Minute {
 				var cancelled executionResponse
-				if err = app.PlatformAPI().CallAppResult("containers", "containers_exec_cancel", map[string]any{"execution_id": p.ExecutionID}, &cancelled); err != nil {
+				if err = runtimeCall(app, "containers_exec_cancel", map[string]any{"execution_id": p.ExecutionID}, &cancelled); err != nil {
 					return p, err
 				}
 				p.Status = "crashed"
@@ -216,7 +216,7 @@ func (a *App) refreshPreview(app *sdk.AppCtx, w *Workspace) (*Preview, error) {
 		return p, err
 	}
 	if p.Status != previous {
-		runtimeActor := Actor{Kind: "runtime", Label: "Containers"}
+		runtimeActor := Actor{Kind: "runtime", Label: runtimeActorLabel(w)}
 		if p.Status == "live" {
 			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "preview.live", runtimeActor, fmt.Sprintf("Preview live on port %d", p.ContainerPort), map[string]any{"url": p.URL})
 		} else if p.Status == "crashed" {
@@ -239,7 +239,7 @@ func (a *App) cancelPreview(app *sdk.AppCtx, w *Workspace) error {
 	}
 	if p.ExecutionID != "" && (p.Status == "starting" || p.Status == "live") {
 		var out executionResponse
-		if err = app.PlatformAPI().CallAppResult("containers", "containers_exec_cancel", map[string]any{"execution_id": p.ExecutionID}, &out); err != nil {
+		if err = runtimeCall(app, "containers_exec_cancel", map[string]any{"execution_id": p.ExecutionID}, &out); err != nil {
 			return err
 		}
 	}
@@ -311,7 +311,7 @@ func (a *App) toolPreviewLogs(c context.Context, app *sdk.AppCtx, args map[strin
 		return map[string]any{"logs": ""}, nil
 	}
 	var out executionLogsResponse
-	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_logs", map[string]any{"execution_id": p.ExecutionID, "tail": intArg(args, "tail", 300)}, &out)
+	err = runtimeCall(app, "containers_exec_logs", map[string]any{"execution_id": p.ExecutionID, "tail": intArg(args, "tail", 300)}, &out)
 	return out, err
 }
 func (a *App) toolPreviewStop(c context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

@@ -31,6 +31,8 @@ interface Workspace {
   runtime_status: string;
   health_status: string;
   host_label: string;
+  driver?: string;
+  capabilities?: { isolation: string; hardened: boolean; sessions: boolean; preview: boolean; images: boolean };
   network_policy: string;
   cpu: number;
   memory_mb: number;
@@ -83,6 +85,13 @@ interface Detail {
   activity: Activity[];
   destroy_risk?: string;
   runtime_error?: string;
+}
+
+interface Driver {
+  key: string;
+  label: string;
+  available: boolean;
+  reason?: string;
 }
 
 interface Profile {
@@ -176,13 +185,15 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
   const [tab, setTab] = useState<Tab>(initialRoute.tab);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [defaultProfile, setDefaultProfile] = useState("go");
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [defaultDriver, setDefaultDriver] = useState("containers");
   const [showCreate, setShowCreate] = useState(false);
   const [showDestroy, setShowDestroy] = useState(false);
   const [logs, setLogs] = useState<{ command: Command; body: string } | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [commandText, setCommandText] = useState("");
-  const [create, setCreate] = useState({ name: "", purpose: "", profile: "go", image: "", ttl_minutes: 120 });
+  const [create, setCreate] = useState({ name: "", purpose: "", profile: "go", image: "", ttl_minutes: 120, driver: "containers" });
 
   const loadList = useCallback(async () => {
     try {
@@ -208,11 +219,14 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
 
   useEffect(() => {
     loadList();
-    request<{ profiles: Profile[]; default: string }>(projectId, installId, "/profiles")
+    request<{ profiles: Profile[]; default: string; drivers?: Driver[]; default_driver?: string }>(projectId, installId, "/profiles")
       .then((response) => {
         setProfiles(response.profiles || []);
         setDefaultProfile(response.default || "go");
-        setCreate((current) => ({ ...current, profile: response.default || "go" }));
+        setDrivers(response.drivers || []);
+        const driver = (response.drivers || []).find((item) => item.key === response.default_driver && item.available) ? response.default_driver! : "containers";
+        setDefaultDriver(driver);
+        setCreate((current) => ({ ...current, profile: response.default || "go", driver }));
       })
       .catch(() => undefined);
     const timer = window.setInterval(loadList, 5000);
@@ -238,7 +252,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
     try {
       const response = await request<{ workspace: Workspace }>(projectId, installId, "/workspaces", { method: "POST", body: JSON.stringify(create) });
       setShowCreate(false);
-      setCreate({ name: "", purpose: "", profile: defaultProfile, image: "", ttl_minutes: 120 });
+      setCreate({ name: "", purpose: "", profile: defaultProfile, image: "", ttl_minutes: 120, driver: defaultDriver });
       await loadList();
       setSelectedId(response.workspace.id);
       setTab("overview");
@@ -432,16 +446,25 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
       {showCreate && (
         <div className="ws-modal-backdrop" onMouseDown={() => !busy && setShowCreate(false)}>
           <div className="ws-modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="ws-modal-head"><div><h2>New workspace</h2><p>Local Docker · approved profiles only</p></div><button className="ws-close" onClick={() => setShowCreate(false)}>×</button></div>
+            <div className="ws-modal-head"><div><h2>New workspace</h2><p>{create.driver === "local" ? "Sandboxed folder on this machine" : "Docker container · approved profiles only"}</p></div><button className="ws-close" onClick={() => setShowCreate(false)}>×</button></div>
             <label>Name<input autoFocus value={create.name} onChange={(event) => setCreate({ ...create, name: event.target.value })} placeholder="code-apteva-42" /></label>
             <label>Purpose<input value={create.purpose} onChange={(event) => setCreate({ ...create, purpose: event.target.value })} placeholder="Develop apteva/apps" /></label>
+            {drivers.some((item) => item.key === "local" && item.available) && (
+              <label>Runs on<select value={create.driver} onChange={(event) => setCreate({ ...create, driver: event.target.value })}>{drivers.map((item) => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}</option>)}</select></label>
+            )}
             <div className="ws-form-grid">
               <label>Runtime profile<select value={create.profile} onChange={(event) => setCreate({ ...create, profile: event.target.value })}>{profiles.map((profile) => <option key={profile.key} value={profile.key} disabled={!profile.available && !create.image.trim()}>{profile.label}{profile.available ? "" : " (custom image required)"}</option>)}</select></label>
               <label>TTL (minutes)<input type="number" min={1} max={480} value={create.ttl_minutes} onChange={(event) => setCreate({ ...create, ttl_minutes: Number(event.target.value) })} /></label>
             </div>
-            <label>Custom image (optional)<input value={create.image} onChange={(event) => setCreate({ ...create, image: event.target.value })} placeholder="ghcr.io/apteva/workspace-dev@sha256:…" /></label>
-            <div className="ws-profile-note">Image: <code>{create.image.trim() || profiles.find((profile) => profile.key === create.profile)?.image || "Not configured"}</code><br />Custom images must match the operator allowlist and use an immutable digest. Network policy: isolated Docker network with outbound access; no host bind mounts.</div>
-            <div className="ws-modal-actions"><button className="ws-button" onClick={() => setShowCreate(false)}>Cancel</button><button className="ws-primary" disabled={!create.name.trim() || !!busy || (!create.image.trim() && !profiles.find((profile) => profile.key === create.profile)?.available)} onClick={createWorkspace}>{busy === "create" ? "Provisioning…" : "Create workspace"}</button></div>
+            {create.driver === "local" ? (
+              <div className="ws-profile-note">Commands run in the OS sandbox as the Apteva user, with the toolchains installed on this machine. They can write only inside the workspace folder, and credential folders in the home directory are hidden. No shell session: each command starts in its working directory.</div>
+            ) : (
+              <>
+                <label>Custom image (optional)<input value={create.image} onChange={(event) => setCreate({ ...create, image: event.target.value })} placeholder="ghcr.io/apteva/workspace-dev@sha256:…" /></label>
+                <div className="ws-profile-note">Image: <code>{create.image.trim() || profiles.find((profile) => profile.key === create.profile)?.image || "Not configured"}</code><br />Custom images must match the operator allowlist and use an immutable digest. Network policy: isolated Docker network with outbound access; no host bind mounts.</div>
+              </>
+            )}
+            <div className="ws-modal-actions"><button className="ws-button" onClick={() => setShowCreate(false)}>Cancel</button><button className="ws-primary" disabled={!create.name.trim() || !!busy || (create.driver !== "local" && !create.image.trim() && !profiles.find((profile) => profile.key === create.profile)?.available)} onClick={createWorkspace}>{busy === "create" ? "Provisioning…" : "Create workspace"}</button></div>
           </div>
         </div>
       )}
@@ -484,7 +507,7 @@ function Overview({ workspace, runtime, runtimeError }: { workspace: Workspace; 
           <Row label="Created by" value={workspace.consumer_app} />
           <Row label="Owner" value={workspace.owner_label || "Unassigned"} sub={workspace.owner_thread_id} />
           <Row label="Repository" value={workspace.repo_label || "Not linked"} sub={workspace.branch_label} mono />
-          <Row label="Profile" value={workspace.profile} sub={workspace.image} mono />
+          <Row label="Profile" value={workspace.profile} sub={workspace.driver === "local" ? "Machine toolchains" : workspace.image} mono />
           <Row label="Host" value={workspace.host_label} sub={workspace.workload_id} mono />
           <Row label="Created" value={exactTime(workspace.created_at)} />
           <Row label="Expires" value={`${relativeTime(workspace.expires_at)} · ${exactTime(workspace.expires_at)}`} />

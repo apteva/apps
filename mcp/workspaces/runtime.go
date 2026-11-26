@@ -38,6 +38,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if instanceID < 0 {
 		return nil, errors.New("instance_id must be a positive Instances host id")
 	}
+	driver, err := normalizeDriver(app, strArg(args, "driver"), instanceID)
+	if err != nil {
+		return nil, err
+	}
 	name, err := normalizeWorkspaceName(strArg(args, "name"))
 	if err != nil {
 		return nil, err
@@ -45,6 +49,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	profile, image, err := resolveProfile(app, strArg(args, "profile"), strArg(args, "image"))
 	if err != nil {
 		return nil, err
+	}
+	if driver == driverLocal {
+		// No image: commands use the toolchains installed on the machine.
+		image = ""
 	}
 	maxTTL := configInt(app, "max_ttl_minutes", 480)
 	ttl := intArg(args, "ttl_minutes", configInt(app, "default_ttl_minutes", 120))
@@ -112,7 +120,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		ID: newID("wsp"), ProjectID: actor.ProjectID, Name: name,
 		Purpose: strArg(args, "purpose"), Profile: profile, Image: image,
 		LifecycleStatus: statusProvisioning, ActivityStatus: activityIdle,
-		HostLabel: hostLabel(instanceID), InstanceID: instanceID, NetworkPolicy: "isolated-egress",
+		HostLabel: hostLabelFor(driver, instanceID), InstanceID: instanceID, Driver: driver, NetworkPolicy: "isolated-egress",
 		CPU: configFloat(app, "default_cpu", 2), MemoryMB: configInt(app, "default_memory_mb", 4096),
 		ConsumerApp: consumerApp, ConsumerInstallID: consumerInstallID,
 		OwnerAgentID: ownerAgentID, OwnerThreadID: ownerThreadID, OwnerLabel: ownerLabel,
@@ -152,7 +160,9 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		"working_directory": "/workspace",
 		"command":           []string{"/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done"},
 	}
-	if instanceID > 0 {
+	if driver == driverLocal {
+		input["driver"] = driverLocal
+	} else if instanceID > 0 {
 		input["instance_id"] = instanceID
 	} else if previewPort > 0 {
 		// Without an explicit instance_id, preview workspaces stay on local
@@ -163,7 +173,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		input["ports"] = []map[string]any{{"container_port": previewPort, "host_port": 0, "protocol": "tcp", "bind_addr": "127.0.0.1"}}
 	}
 	var runOut workloadResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_run", input, &runOut); err != nil {
+	if err := runtimeCall(app, "containers_run", input, &runOut); err != nil {
 		return nil, a.failCreate(app, w, err)
 	}
 	if runOut.Workload.ID == "" {
@@ -172,14 +182,14 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	w.WorkloadID = runOut.Workload.ID
 	// Record where Containers actually placed it (explicit or default host).
 	w.InstanceID = workloadTarget(runOut.Workload)
-	w.HostLabel = hostLabel(w.InstanceID)
+	w.HostLabel = hostLabelFor(w.Driver, w.InstanceID)
 	if sourceArchive != "" {
 		var imported map[string]any
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_volume_import", map[string]any{
+		if err := runtimeCall(app, "containers_volume_import", map[string]any{
 			"workload_id": w.WorkloadID, "volume": "workspace", "path": ".", "archive_base64": sourceArchive,
 		}, &imported); err != nil {
 			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"workload_id": w.WorkloadID, "instance_id": w.InstanceID, "host_label": w.HostLabel, "updated_at": nowUTC()})
-			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.import_failed", Actor{Kind: "runtime", Label: "Containers"}, "Source archive import failed", map[string]any{"error": err.Error()})
+			_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.import_failed", Actor{Kind: "runtime", Label: runtimeActorLabel(w)}, "Source archive import failed", map[string]any{"error": err.Error()})
 			return nil, a.failCreate(app, w, fmt.Errorf("source import: %w", err))
 		}
 		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.imported", actor, "Source archive imported", nil)
@@ -263,15 +273,15 @@ func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[st
 	if w.Kind == kindTest {
 		execInput["user"] = opts.UID
 		err = a.switchTestNetwork(app, w, opts.Network)
-	} else if w.InstanceID == 0 {
+	} else if w.Capabilities.Sessions {
 		// Containers keeps shell sessions open in its own process, so they
-		// exist only on local Docker. Remote commands run one at a time:
+		// exist only on local Docker. Elsewhere commands run one at a time:
 		// working directory and env are per command, shell state is not kept.
 		execInput["session_key"] = "workspace"
 	}
 	var out executionResponse
 	if err == nil {
-		err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", execInput, &out)
+		err = runtimeCall(app, "containers_exec_start", execInput, &out)
 	}
 	if err != nil {
 		_ = updateCommand(app.AppDB(), c.ID, map[string]any{
@@ -310,7 +320,7 @@ func (a *App) refreshCommand(app *sdk.AppCtx, c *Command) (*Command, error) {
 		return c, nil
 	}
 	var out executionResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_get", map[string]any{"execution_id": c.ExecutionID}, &out); err != nil {
+	if err := runtimeCall(app, "containers_exec_get", map[string]any{"execution_id": c.ExecutionID}, &out); err != nil {
 		return c, err
 	}
 	exec := out.Execution
@@ -335,6 +345,9 @@ func (a *App) refreshCommand(app *sdk.AppCtx, c *Command) (*Command, error) {
 	}
 	if !wasTerminal && commandTerminal(current.Status) {
 		actor := Actor{Kind: "runtime", Label: "Containers"}
+		if strings.HasPrefix(c.ExecutionID, localExecPrefix) {
+			actor.Label = "Local sandbox"
+		}
 		summary := "Command " + current.Status + ": " + current.DisplayCommand
 		data := map[string]any{"command_id": current.ID, "exit_code": current.ExitCode}
 		if started, finished := parseTime(current.StartedAt), parseTime(current.FinishedAt); !started.IsZero() && !finished.IsZero() {
@@ -364,7 +377,7 @@ func (a *App) refreshWorkspace(app *sdk.AppCtx, w *Workspace) (*ContainerWorkloa
 		_, _ = a.refreshCommand(app, command)
 	}
 	var out workloadResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_get", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
+	if err := runtimeCall(app, "containers_get", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
 		_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
@@ -374,9 +387,9 @@ func (a *App) refreshWorkspace(app *sdk.AppCtx, w *Workspace) (*ContainerWorkloa
 		"last_error": runtime.LastError, "updated_at": nowUTC(),
 	}
 	// Workspaces created before 0.9.0 never recorded their host.
-	if target := workloadTarget(runtime); target != w.InstanceID {
+	if target := workloadTarget(runtime); target != w.InstanceID || w.HostLabel != hostLabelFor(w.Driver, target) {
 		fields["instance_id"] = target
-		fields["host_label"] = hostLabel(target)
+		fields["host_label"] = hostLabelFor(w.Driver, target)
 	}
 	if w.LifecycleStatus != statusExpired && w.LifecycleStatus != statusDestroying && w.LifecycleStatus != statusDestroyed {
 		switch runtime.Status {
@@ -405,7 +418,7 @@ func (a *App) commandLogs(app *sdk.AppCtx, c *Command, tail int) (map[string]any
 		return map[string]any{"command_id": c.ID, "status": c.Status, "logs": "", "output_bytes": 0}, nil
 	}
 	var out executionLogsResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_logs", map[string]any{
+	if err := runtimeCall(app, "containers_exec_logs", map[string]any{
 		"execution_id": c.ExecutionID, "tail": tail,
 	}, &out); err != nil {
 		return nil, err
@@ -425,7 +438,7 @@ func (a *App) cancelCommand(app *sdk.AppCtx, actor Actor, w *Workspace, c *Comma
 		return requireCommand(app.AppDB(), c.ProjectID, c.WorkspaceID, c.ID)
 	}
 	var out executionResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_exec_cancel", map[string]any{"execution_id": c.ExecutionID}, &out); err != nil {
+	if err := runtimeCall(app, "containers_exec_cancel", map[string]any{"execution_id": c.ExecutionID}, &out); err != nil {
 		return nil, err
 	}
 	status := firstNonEmpty(out.Execution.Status, "cancelling")
@@ -458,7 +471,7 @@ func (a *App) stopWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace, eventTyp
 	}
 	if w.RuntimeStatus != "stopped" && w.WorkloadID != "" {
 		var out workloadResponse
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_stop", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
+		if err := runtimeCall(app, "containers_stop", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
 			return nil, err
 		}
 	}
@@ -487,7 +500,7 @@ func (a *App) resumeWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace) (*Work
 		return nil, errors.New("workspace TTL has expired; extend it before resuming")
 	}
 	var out workloadResponse
-	if err := app.PlatformAPI().CallAppResult("containers", "containers_start", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
+	if err := runtimeCall(app, "containers_start", map[string]any{"workload_id": w.WorkloadID}, &out); err != nil {
 		return nil, err
 	}
 	_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{
@@ -532,7 +545,7 @@ func (a *App) destroyWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace) (*Wor
 	a.closePreviewTunnel(app, w)
 	if w.WorkloadID != "" {
 		var out map[string]any
-		if err := app.PlatformAPI().CallAppResult("containers", "containers_destroy", map[string]any{
+		if err := runtimeCall(app, "containers_destroy", map[string]any{
 			"workload_id": w.WorkloadID, "delete_volumes": true,
 		}, &out); err != nil {
 			_ = updateWorkspace(app.AppDB(), w.ID, map[string]any{"lifecycle_status": statusFailed, "last_error": err.Error(), "updated_at": nowUTC()})
