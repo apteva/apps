@@ -133,3 +133,39 @@ func TestLocalWorkspaceEndToEnd(t *testing.T) {
 		t.Fatalf("local Docker filter matched the local driver: %d", len(rows))
 	}
 }
+
+func TestNoContainersFallsBackToLocal(t *testing.T) {
+	a, ctx, platform := localWorkspaceFixture(t, true)
+	platform.containersGone = true
+	w, err := a.createWorkspace(agentContext("p", 5, "t1", "tc-fb"), ctx, map[string]any{"name": "fallback"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Driver != driverLocal {
+		t.Fatalf("driver = %q, want local", w.Driver)
+	}
+	_, err = a.createWorkspace(agentContext("p", 5, "t1", "tc-dk"), ctx, map[string]any{"name": "docker", "driver": "containers"}, false)
+	if err == nil || !strings.Contains(err.Error(), "need the Containers app") || !strings.Contains(err.Error(), "driver local") {
+		t.Fatalf("explicit containers err = %v", err)
+	}
+}
+
+func TestNoContainersWithLocalOffExplains(t *testing.T) {
+	a, ctx, platform := localWorkspaceFixture(t, false)
+	platform.containersGone = true
+	_, err := a.createWorkspace(agentContext("p", 5, "t1", "tc-off"), ctx, map[string]any{"name": "docker"}, false)
+	if err == nil || !strings.Contains(err.Error(), "need the Containers app") || !strings.Contains(err.Error(), "local_driver_enabled") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestContainersPresentKeepsDockerDefault(t *testing.T) {
+	a, ctx, _ := localWorkspaceFixture(t, true)
+	w, err := a.createWorkspace(agentContext("p", 5, "t1", "tc-dd"), ctx, map[string]any{"name": "docker", "profile": "go"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Driver != driverContainers {
+		t.Fatalf("driver = %q, want containers", w.Driver)
+	}
+}

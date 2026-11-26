@@ -71,6 +71,11 @@ func normalizeDriver(app *sdk.AppCtx, requested string, instanceID int64) (strin
 			return driverContainers, nil
 		}
 		driver = strings.ToLower(configString(app, "default_driver", driverContainers))
+		// Containers is optional: without it, an unspecified driver falls
+		// back to local when the operator has allowed that.
+		if driver == driverContainers && localDriverAvailable(app) == nil && !containersInstalled(app) {
+			driver = driverLocal
+		}
 	}
 	switch driver {
 	case driverContainers:
@@ -108,7 +113,32 @@ func runtimeCall(app *sdk.AppCtx, tool string, input map[string]any, out any) er
 		}
 		return driver.Call(tool, input, out)
 	}
-	return app.PlatformAPI().CallAppResult("containers", tool, input, out)
+	err := app.PlatformAPI().CallAppResult("containers", tool, input, out)
+	if err != nil && containersMissing(err) {
+		return containersMissingError(app)
+	}
+	return err
+}
+
+// containersMissing recognises the platform's answer for a call to an app
+// that is not installed (or not running) in this project.
+func containersMissing(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "target unreachable") || strings.Contains(text, "not installed")
+}
+
+func containersMissingError(app *sdk.AppCtx) error {
+	if localDriverAvailable(app) == nil {
+		return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or create the workspace with driver local")
+	}
+	return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or have an operator turn on local_driver_enabled in the Workspaces settings to run workspaces as sandboxed folders on this machine")
+}
+
+// containersInstalled probes Containers with a lookup that cannot match.
+func containersInstalled(app *sdk.AppCtx) bool {
+	var out map[string]any
+	err := app.PlatformAPI().CallAppResult("containers", "containers_get", map[string]any{"workload_id": "probe-workspaces"}, &out)
+	return err == nil || !containersMissing(err)
 }
 
 func ownedByLocal(input map[string]any) bool {

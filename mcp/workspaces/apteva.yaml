@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.11.0
+version: 0.11.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -36,7 +36,10 @@ description: |
   containers (Docker, as before) or local, a folder on the machine running
   Apteva with commands in the OS sandbox (Seatbelt on macOS, bubblewrap on
   Linux) and the machine's own toolchains, no Docker needed. The local driver
-  is off until an operator turns it on (local_driver_enabled). Workspaces
+  is off until an operator turns it on (local_driver_enabled).
+  v0.11.1 makes Containers optional: without it, workspaces that do not name
+  a driver use the local driver when it is on, and Docker calls say that
+  Containers is missing. Workspaces
   report their capabilities (isolation, hardened, sessions, preview, images).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -59,8 +62,8 @@ requires:
   apps:
     - name: containers
       version: ">=0.8.0"
-      optional: false
-      reason: Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces. 0.8.0 adds command runs and volume copies on Instances hosts.
+      optional: true
+      reason: Needed for Docker workspaces and all test workspaces; without it, workspaces run only as sandboxed folders (local driver, local_driver_enabled). Owns each persistent Docker workspace, named and standalone volumes, stateful PTY shell execution, hardened workloads, per-command user, umask and network, cancellation, and bounded logs used by Workspaces. 0.8.0 adds command runs and volume copies on Instances hosts.
     - name: instances
       version: ">=0.4.18"
       optional: true
@@ -291,7 +294,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.11.0
+    ref: workspaces/v0.11.1
     entry: mcp/workspaces
   port: 8080
   health_check: /health
