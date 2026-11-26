@@ -7,6 +7,7 @@ import Widget, {
   assignmentRunState,
   rowAgentNames,
   GLOBAL_REFRESH_MS,
+  projectColor,
   overviewQueue,
   executionStatus,
   currentStepLabel,
@@ -374,4 +375,63 @@ test("global rows name their agents and the widget refreshes itself", () => {
   data.assignments![1] = { ...data.assignments![1], agent_id: 9, agent_name: "Beta triage" };
   expect(rowAgentNames(data)).toEqual({ 7: "Alpha writer", 9: "Beta triage" });
   expect(GLOBAL_REFRESH_MS).toBe(15000);
+});
+
+test("project colour comes from the dashboard and falls back to none", () => {
+  const projects = [
+    { id: "project-a", name: "Alpha", color: "#e11d48" },
+    { id: "project-b", name: "Beta", color: "" },
+    { id: "project-c", name: "Gamma", color: "red;background:url(x)" },
+  ];
+  expect(projectColor({ widgetContext: { projects } }, "project-a")).toBe("#e11d48");
+  expect(projectColor({ widgetContext: { projects } }, "project-b")).toBe("");
+  expect(projectColor({ widgetContext: { projects } }, "project-c")).toBe("");
+  expect(projectColor({}, "project-a")).toBe("");
+  expect(projectColor({ widgetContext: {} }, "project-a")).toBe("");
+});
+
+async function renderGlobal(widgetContext?: { projects?: Array<{ id: string; name?: string; color?: string }> }) {
+  const data: Data = {
+    ...structuredClone(overviewFixture),
+    scope: "global",
+    projects: [
+      { id: "project-a", name: "Alpha" },
+      { id: "project-b", name: "Beta" },
+    ],
+  };
+  data.active[0] = { ...data.active[0], project_id: "project-a", project_name: "Alpha" };
+  data.upcoming[0] = { ...data.upcoming[0], project_id: "project-b", project_name: "Beta" };
+  globalThis.fetch = (async (_input: unknown) => Response.json(data)) as typeof fetch;
+  const el = document.createElement("div");
+  document.body.append(el);
+  root = createRoot(el);
+  await act(async () => root.render(<Widget dashboardScope="global" installId={88} widgetContext={widgetContext} />));
+  return el;
+}
+
+test("All projects rows show a coloured dot next to the project name", async () => {
+  const el = await renderGlobal({ projects: [{ id: "project-a", name: "Alpha", color: "#e11d48" }, { id: "project-b", name: "Beta", color: "" }] });
+  const alpha = el.querySelector('.po-queue .po-project[data-project="project-a"]')!;
+  expect(alpha.textContent).toBe("Alpha");
+  expect((alpha.querySelector(".po-project-dot") as HTMLElement).style.backgroundColor).toBeTruthy();
+  // Empty colour: name only, neutral as before.
+  const beta = el.querySelector('.po-queue .po-project[data-project="project-b"]')!;
+  expect(beta.textContent).toBe("Beta");
+  expect(beta.querySelector(".po-project-dot")).toBeNull();
+});
+
+test("All projects rows keep project names on dashboards without colours", async () => {
+  const el = await renderGlobal(undefined);
+  const tags = Array.from(el.querySelectorAll(".po-queue .po-project"));
+  expect(tags.map((t) => t.textContent)).toEqual(["Alpha", "Beta"]);
+  expect(el.querySelector(".po-project-dot")).toBeNull();
+});
+
+test("project widget shows no project tags", async () => {
+  globalThis.fetch = (async (_input: unknown) => Response.json(structuredClone(overviewFixture))) as typeof fetch;
+  const el = document.createElement("div");
+  document.body.append(el);
+  root = createRoot(el);
+  await act(async () => root.render(<Widget projectId="project-a" widgetContext={{ projects: [{ id: "project-a", color: "#e11d48" }] }} />));
+  expect(el.querySelector(".po-project")).toBeNull();
 });

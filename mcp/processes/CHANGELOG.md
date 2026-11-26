@@ -2,6 +2,10 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Project colours on All projects rows (0.25.3)
+
+Rows show a project colour dot and name. See `docs-release-0.25.3.md`.
+
 ## Viewer-scoped All projects widget (0.25.2)
 
 The global overview lists only the viewer's projects, names agents on each

@@ -13,6 +13,8 @@ type Props = {
   eventRevision?: number;
   widgetSize?: "half" | "full";
   widgetSettings?: Record<string, unknown>;
+  /** Dashboard context; projects carry Project Settings colours (newer dashboards). */
+  widgetContext?: { projects?: Array<{ id: string; name?: string; color?: string }> };
 };
 type Step = {
   start_at?: string;
@@ -565,6 +567,27 @@ export function assignmentRunState(x: OverviewAssignment): { state: string; labe
   return { state: "waiting", label: x.ongoing_count > 1 ? `${x.ongoing_count} open runs` : "Open run" };
 }
 
+/** A project's colour from the dashboard, or "" when it has none (or the
+ * dashboard predates project colours). Only #rgb / #rrggbb is accepted. */
+export function projectColor(props: Props, projectID?: string) {
+  if (!projectID) return "";
+  const color = props.widgetContext?.projects?.find((p) => p.id === projectID)?.color || "";
+  return /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(color) ? color : "";
+}
+
+/** Project marker on All projects rows: colour dot (when the project has a
+ * colour) next to the name, so colour is never the only cue. */
+function ProjectTag({ props, id, name }: { props: Props; id?: string; name?: string }) {
+  if (!name && !id) return null;
+  const color = projectColor(props, id);
+  return (
+    <span className="po-project" data-project={id}>
+      {color && <span className="po-project-dot" aria-hidden="true" style={{ backgroundColor: color }} />}
+      <span className="po-project-name">{name || id}</span>
+    </span>
+  );
+}
+
 /** How often the All projects widget reloads; it gets no live app events. */
 export const GLOBAL_REFRESH_MS = 15000;
 
@@ -615,9 +638,11 @@ function SourceIcon({ source, kind }: { source?: ToolSource; kind: OverviewAssig
   );
 }
 /** One active assignment: how it starts, who runs it, and its last run. */
-function AssignmentRow({ x, props, name, relative, badge }: {
+function AssignmentRow({ x, props, name, relative, badge, showProject }: {
   x: OverviewAssignment;
   props: Props;
+  /** All projects with no project filter: mark each row's project. */
+  showProject?: boolean;
   name: (id?: number) => string;
   relative: (value?: string) => string;
   badge: (state: string) => ReactNode;
@@ -634,7 +659,7 @@ function AssignmentRow({ x, props, name, relative, badge }: {
     { id: x.live_run_id || x.id, process_id: x.process_id, project_id: x.project_id, assignment_id: x.id, state: "" } as Item,
     !x.live_run_id,
   );
-  const context = [start, x.project_name, name(x.agent_id)].filter(Boolean).join(" · ");
+  const context = [start, name(x.agent_id)].filter(Boolean).join(" · ");
   const last = x.last_run_at ? `Last ${relative(x.last_run_at)}` : "Never run";
   return (
     <a
@@ -642,11 +667,12 @@ function AssignmentRow({ x, props, name, relative, badge }: {
       href={href}
       data-start={x.start}
       title={[x.process_name, start, x.warning, trigger && `${trigger.name} · ${trigger.topic}`].filter(Boolean).join("\n")}
-      aria-label={`${x.name || x.process_name} · ${label} · ${context}`}
+      aria-label={[x.name || x.process_name, label, showProject && x.project_name, context].filter(Boolean).join(" · ")}
     >
       <span className="po-copy">
         <span className="po-title-line">
           <span className="po-title">{x.name || x.process_name}</span>
+          {showProject && <ProjectTag props={props} id={x.project_id} name={x.project_name} />}
         </span>
         <span className={`po-summary${x.needs_attention ? " attention" : ""}`}>
           <SourceIcon source={source} kind={x.start} />
@@ -988,6 +1014,9 @@ const css = `
 .po-widget .po-event-icons{display:flex;gap:4px;flex:none}
 .po-widget .po-event-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .po-widget .po-event-issue{color:#e3b86d}
+.po-widget .po-project{flex:0 1 auto;display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:40%;font-size:11px;font-weight:500;line-height:20px;color:var(--color-text-muted,#aaa);white-space:nowrap}
+.po-widget .po-project-dot{flex:none;width:8px;height:8px;border-radius:50%}
+.po-widget .po-project-name{overflow:hidden;text-overflow:ellipsis}
 @media(max-width:480px){.po-widget .po-row{column-gap:10px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
 `;
 export default function ProcessOverviewWidget(props: Props) {
@@ -1113,6 +1142,8 @@ function Overview(props: Props) {
       {state === "sync pending" ? "Attention" : state.replaceAll("_", " ")}
     </span>
   );
+  // Rows name their project only when they can come from several.
+  const showProject = props.dashboardScope === "global" && !projectFilter;
   const relative = (value?: string) => {
     const time = Date.parse(value || "");
     if (!Number.isFinite(time)) return "—";
@@ -1201,7 +1232,7 @@ function Overview(props: Props) {
           {view === "assignments" ? (
           <div className="po-queue" aria-label="Active assignments">
             {assignmentsShown.map((x) => (
-              <AssignmentRow key={`${x.project_id || ""}:${x.id}`} x={x} props={props} name={name} relative={relative} badge={badge} />
+              <AssignmentRow key={`${x.project_id || ""}:${x.id}`} x={x} props={props} name={name} relative={relative} badge={badge} showProject={showProject} />
             ))}
             {!assignmentsShown.length && (
               <p className="po-empty">No active assignments.</p>
@@ -1212,8 +1243,8 @@ function Overview(props: Props) {
             {shown.map((entry) => {
               const x = entry.item;
               const status = executionStatus(entry);
+              // The project shows as its own tag (All projects) or is implied.
               const identity = [
-                x.project_name || x.project_id,
                 x.assignment_name || name(x.agent_id),
               ]
                 .filter(Boolean)
@@ -1254,6 +1285,7 @@ function Overview(props: Props) {
                   <span className="po-copy">
                     <span className="po-title-line">
                       <span className="po-title">{x.process_name}</span>
+                      {showProject && <ProjectTag props={props} id={x.project_id} name={x.project_name} />}
                       {!entry.assignment && !terminal(x.state) && currentStepLabel(x.steps || []) && (
                         <span className="po-title-step">
                           <span aria-hidden="true">›</span> {currentStepLabel(x.steps || [])}
