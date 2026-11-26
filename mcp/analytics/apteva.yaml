@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.18.3
+version: 0.18.4
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -139,6 +139,10 @@ description: |
   the ISO code Apteva Server resolves from the visitor IP (X-Apteva-Country,
   when the server GeoIP lookup is on) and stores it as country; the IP is
   not kept. Sites need no change.
+
+  v0.18.4 fixes Analytics Trend widgets set to Distinct: they now count the
+  Distinct field from the settings form (for example props.visitor_id for
+  unique visitors) instead of failing.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
@@ -476,7 +480,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.18.3
+    ref: analytics/v0.18.4
     entry: mcp/analytics
   port: 8080
   health_check: /health

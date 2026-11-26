@@ -46,7 +46,9 @@ export function widgetConfig(settings: Settings, kind: "trend" | "ranking", sele
   if (value) config.value = value;
   if (kind === "trend") {
     config.interval = settingString(settings, "interval", "day");
-    if (config.aggregation === "distinct") config.by = value;
+    // The settings form stores the distinct field as group_by; older widgets
+    // put it in value, so that still works as a fallback.
+    if (config.aggregation === "distinct") config.by = settingString(settings, "group_by") || value;
   } else {
     config.by = settingString(settings, "group_by");
     const limit = Number(settings.limit ?? 10);
