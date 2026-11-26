@@ -170,8 +170,12 @@ func TestListenerStuckAccessCheckPausesAudio(t *testing.T) {
 	for {
 		select {
 		case <-resumed:
-			if l.sent[0].Load() < 2 {
-				t.Fatal("audio did not resume after the check completed")
+			// The server counts a frame only after its write returns, so the
+			// browser can hold the frame a moment before the count moves.
+			for counted := time.Now().Add(time.Second); l.sent[0].Load() < 2; time.Sleep(5 * time.Millisecond) {
+				if time.Now().After(counted) {
+					t.Fatal("audio did not resume after the check completed")
+				}
 			}
 			return
 		case <-timeout:
