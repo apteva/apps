@@ -44,7 +44,7 @@ func TestLargeActorHTMLReadsRemainCompleteAndBounded(t *testing.T) {
 					e.coverage = &actorReadCoverage{}
 					e.currentURL = "https://example.com/posts"
 					c := fixtureReadViews()
-					root, readErr := e.readViewDOM(c, c.Views[0])
+					root, readErr := e.readViewDOM(c, c.Views[0], true)
 					err = readErr
 					if root != nil {
 						doc = &browserExtractResult{Rendered: true}

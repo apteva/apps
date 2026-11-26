@@ -442,7 +442,7 @@ func (e *actorExecution) waitFor(step actorStep) error {
 	matched, _ := out["matched"].(bool)
 	timedOut, _ := out["timed_out"].(bool)
 	if !matched || timedOut {
-		return fmt.Errorf("wait_for required conditions not met (timed_out=%t, media_embed_status=%q)", timedOut, stringFromAny(out["media_embed_status"]))
+		return fmt.Errorf("%w (timed_out=%t, media_embed_status=%q)", errActorWaitNotMet, timedOut, stringFromAny(out["media_embed_status"]))
 	}
 	if out["media_embed_status"] == "loaded" {
 		media := map[string]any{"kind": "embed", "status": "loaded"}

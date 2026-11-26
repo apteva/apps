@@ -895,6 +895,9 @@ func (e *actorExecution) runStep(step actorStep) error {
 		}
 		return e.gotoURL(target)
 	case "click":
+		if step.Opens != nil {
+			return e.clickAndConfirmOpen(step)
+		}
 		return e.clickOnce(step)
 	case "click_verified":
 		return e.clickVerified(step)
