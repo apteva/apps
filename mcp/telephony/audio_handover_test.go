@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
+	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -31,9 +35,8 @@ func handoverTestCtx(t *testing.T, on bool) *App {
 
 func handoverTestLimits(t *testing.T, sample, hold, quiet time.Duration) {
 	t.Helper()
-	a, b, c := rtcHandoverSample, rtcHandoverHoldLimit, rtcHandoverQuiet
-	rtcHandoverSample, rtcHandoverHoldLimit, rtcHandoverQuiet = sample, hold, quiet
-	t.Cleanup(func() { rtcHandoverSample, rtcHandoverHoldLimit, rtcHandoverQuiet = a, b, c })
+	previous := rtcHandoverLimitsOverride.Swap(&handoverLimits{sample: sample, hold: hold, quiet: quiet})
+	t.Cleanup(func() { rtcHandoverLimitsOverride.Store(previous) })
 }
 
 type handoverFixture struct {
@@ -417,6 +420,73 @@ func TestHandoverHoldDoesNotOutliveTheLease(t *testing.T) {
 	if took := waitForDetach(t, f.app, f.row.ID, 4*time.Second); took > 3*time.Second {
 		t.Fatal("the media watchdog must end a hold when the lease ends", took)
 	}
+}
+
+// A socket whose writes can be made to fail as a reset peer's do, while its
+// reads carry on until the socket is closed here.
+type resettableConn struct {
+	net.Conn
+	reset *atomic.Bool
+}
+
+func (c resettableConn) Write(p []byte) (int, error) {
+	if c.reset.Load() {
+		return 0, &net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.ECONNRESET)}
+	}
+	return c.Conn.Write(p)
+}
+
+type resettableListener struct {
+	net.Listener
+	mu     sync.Mutex
+	latest *atomic.Bool
+}
+
+func (l *resettableListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	reset := new(atomic.Bool)
+	l.mu.Lock()
+	l.latest = reset
+	l.mu.Unlock()
+	return resettableConn{c, reset}, nil
+}
+
+// The writer closes the socket when a write fails. When that write fails
+// before the reader sees the peer go, the reader finds a socket closed here:
+// that is still the signaling path failing, not a revocation, so healthy
+// audio is held.
+func TestHandoverHoldsWhenAWriteFailsFirst(t *testing.T) {
+	handoverTestLimits(t, 200*time.Millisecond, time.Minute, 300*time.Millisecond)
+	app := handoverTestCtx(t, true)
+	row := insertSoftphoneCall(t, app, "in-progress")
+	listener := &resettableListener{}
+	server := softphoneTestServer(t, app, func(l net.Listener) net.Listener { listener.Listener = l; return listener })
+	dialWS(t, server.URL+"/peer/"+row.ID+"/cb-secret")
+	first, e := app.issuePhoneSession(&row, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	browser := rtcTestConnect(t, handoverMediaURL(server, row.ID, first.SessionToken))
+	writer := app.softphones.lookup(row.ID).browserWriter()
+	stop := keepMicFlowing(t, browser)
+	defer stop()
+	// The media socket is the latest one accepted. From now on its writes fail,
+	// and the browser's side stays open, so only the failed write is seen.
+	listener.mu.Lock()
+	listener.latest.Store(true)
+	listener.mu.Unlock()
+	if e := writer.Write(ws.OpText, []byte(`{"type":"call.notice"}`)); e != nil {
+		t.Fatal(e)
+	}
+	stillAttached(t, app, row.ID, writer, 600*time.Millisecond)
+	if n := len(handoverEvents(app, "softphone.browser.signaling_lost")); n != 1 {
+		t.Fatal("the lost signaling path was not held", n)
+	}
+	stop()
+	waitForDetach(t, app, row.ID, 2*time.Second)
 }
 
 func TestHandoverHoldEndsAtTakeover(t *testing.T) {

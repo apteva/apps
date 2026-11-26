@@ -22,7 +22,7 @@ import (
 // softphoneTestServer mounts the two softphone WebSocket routes on an httptest
 // server so tests can drive them exactly as the carrier bridge and the operator
 // browser do in production.
-func softphoneTestServer(t *testing.T, app *App) *httptest.Server {
+func softphoneTestServer(t *testing.T, app *App, wrap ...func(net.Listener) net.Listener) *httptest.Server {
 	t.Helper()
 	// httptest.Server.Close does not wait for hijacked (WebSocket) connections,
 	// so without an explicit drain the handler goroutines outlive the test and
@@ -40,7 +40,11 @@ func softphoneTestServer(t *testing.T, app *App) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/peer/", tracked(app.handlePeerSocket))
 	mux.HandleFunc("/softphone/media/", tracked(app.handleSoftphoneMedia))
-	server := httptest.NewServer(mux)
+	server := httptest.NewUnstartedServer(mux)
+	for _, w := range wrap {
+		server.Listener = w(server.Listener)
+	}
+	server.Start()
 	t.Cleanup(func() {
 		server.Close()
 		drained := make(chan struct{})
