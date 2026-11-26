@@ -493,6 +493,15 @@ func (p *websocketWriterPump) setError(err error) {
 	}
 }
 
+// writeFailed reports whether the pump stopped because a write failed on its
+// own (a reset or broken peer, a timeout), rather than because this side
+// closed the socket under it.
+func (p *websocketWriterPump) writeFailed() bool {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.err != nil && !errors.Is(p.err, net.ErrClosed)
+}
+
 func (p *websocketWriterPump) terminalError() error {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()

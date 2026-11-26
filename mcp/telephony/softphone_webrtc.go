@@ -643,9 +643,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 				disconnect.capture(err, "")
 				// A close frame is the browser choosing to leave, and a socket closed from
 				// this side is a revocation that must stop audio now. Anything else may
-				// be the signaling path alone, with audio still flowing.
+				// be the signaling path alone, with audio still flowing. That includes a
+				// socket the writer closed because a write failed before this read saw
+				// the peer go; a revocation closes done first, so no hold starts then.
 				var closed wsutil.ClosedError
-				if c.Handover && !errors.As(err, &closed) && !errors.Is(err, net.ErrClosed) {
+				revoked := errors.Is(err, net.ErrClosed) && !signalWriter.writeFailed()
+				if c.Handover && !errors.As(err, &closed) && !revoked {
 					signalWriter.discard.Store(true)
 					holdRTCForHandover(pc, stats, done, func() {
 						if c.CollectNetwork == nil {
