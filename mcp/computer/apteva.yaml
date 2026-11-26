@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.16.1
+version: 0.16.2
 description: |
+  v0.16.2 labels each video_frames image ("Frame N at X.XX s") and marks it
+  to be kept across turns (MCP _meta io.apteva/label + io.apteva/retention
+  keep). Cores that support it keep the frames after the agent's next
+  action; older Cores ignore the hint. app-sdk v0.123.0.
   v0.16.1 upload_file failures report how far the file got: upload_phase
   (staging, resolving, assigning) and site_upload_dispatched (false, unknown,
   true), with a recover hint to check for an existing draft before retrying
@@ -610,7 +614,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.16.1
+    ref: computer/v0.16.2
     entry: mcp/computer
   port: 8080
   health_check: /health

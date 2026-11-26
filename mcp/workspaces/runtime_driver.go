@@ -70,12 +70,7 @@ func normalizeDriver(app *sdk.AppCtx, requested string, instanceID int64) (strin
 		if instanceID > 0 {
 			return driverContainers, nil
 		}
-		driver = strings.ToLower(configString(app, "default_driver", driverContainers))
-		// Containers is optional: without it, an unspecified driver falls
-		// back to local when the operator has allowed that.
-		if driver == driverContainers && localDriverAvailable(app) == nil && !containersInstalled(app) {
-			driver = driverLocal
-		}
+		driver = defaultDriver(app)
 	}
 	switch driver {
 	case driverContainers:
@@ -93,9 +88,24 @@ func normalizeDriver(app *sdk.AppCtx, requested string, instanceID int64) (strin
 	}
 }
 
+// defaultDriver picks the driver for a workspace that names none: Docker when
+// the Containers app is installed (unless default_driver is local), otherwise
+// the local sandbox when it is available. With neither, it stays containers
+// so the create fails with the "Containers is missing" message.
+func defaultDriver(app *sdk.AppCtx) string {
+	driver := strings.ToLower(configString(app, "default_driver", driverContainers))
+	if driver == driverLocal {
+		return driverLocal
+	}
+	if localDriverAvailable(app) == nil && !containersInstalled(app) {
+		return driverLocal
+	}
+	return driverContainers
+}
+
 func localDriverAvailable(app *sdk.AppCtx) error {
-	if !configBool(app, "local_driver_enabled", false) {
-		return errors.New("the local driver is off; an operator can turn it on in the Workspaces settings (local_driver_enabled)")
+	if !configBool(app, "local_driver_enabled", true) {
+		return errors.New("the local driver was turned off in the Workspaces settings (local_driver_enabled)")
 	}
 	if detectSandbox() == sandboxNone {
 		return errors.New("the local driver needs an OS sandbox: sandbox-exec on macOS or bubblewrap (bwrap) on Linux")
@@ -131,7 +141,7 @@ func containersMissingError(app *sdk.AppCtx) error {
 	if localDriverAvailable(app) == nil {
 		return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or create the workspace with driver local")
 	}
-	return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or have an operator turn on local_driver_enabled in the Workspaces settings to run workspaces as sandboxed folders on this machine")
+	return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or turn local_driver_enabled back on in the Workspaces settings (it also needs sandbox-exec on macOS or bubblewrap on Linux) to run workspaces as sandboxed folders on this machine")
 }
 
 // containersInstalled probes Containers with a lookup that cannot match.

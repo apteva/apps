@@ -66,6 +66,9 @@ export interface CRMInboxHostProps {
   eventRevision?: number;
   // "global" on the All projects Home: no projectId, rows from every project.
   dashboardScope?: "project" | "global";
+  // Dashboard-supplied project details; color is "#rgb"/"#rrggbb" or "".
+  // Older dashboards omit projects.
+  widgetContext?: { projects?: { id: string; name?: string; color?: string }[] };
   widgetSize?: "half" | "full";
   widgetSettings?: Record<string, unknown>;
 }
@@ -148,6 +151,15 @@ export function crmInboxPageLink(props: CRMInboxHostProps, item?: InboxItem, pro
     if (inboxStatuses.has(item.status as CRMInboxStatus)) query.set("status", item.status);
   }
   return `/apps/${encodeURIComponent(props.appName || "crm")}/page?${query.toString()}`;
+}
+
+const hexColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+// The project's colour from the dashboard, or "" for the neutral look.
+export function crmInboxProjectColor(props: CRMInboxHostProps, projectId?: string): string {
+  if (!projectId) return "";
+  const color = props.widgetContext?.projects?.find(project => project.id === projectId)?.color?.trim() || "";
+  return hexColor.test(color) ? color : "";
 }
 
 // The "View inbox" link needs one project: in global scope only once the

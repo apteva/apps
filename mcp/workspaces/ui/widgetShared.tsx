@@ -92,9 +92,28 @@ export async function apiRequest<T>(props: WidgetHostProps, path: string, params
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(response.status === 403 ? "Operator access is required." : text.trim() || `Request failed (HTTP ${response.status}).`);
+    throw new Error(errorMessage(response.status, text));
   }
   return (await response.json()) as T;
+}
+
+// errorMessage shows what the server said. A 403 with no reason is the
+// operator API itself refusing; anything else keeps the server's wording
+// (for example "app install is scoped to another project").
+export function errorMessage(status: number, body: string): string {
+  let text = body.trim();
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const value = parsed.error ?? parsed.message;
+      if (typeof value === "string" && value.trim()) text = value.trim();
+    } catch {
+      // Not JSON; show it as is.
+    }
+  }
+  if (text.length > 300) text = text.slice(0, 300) + "…";
+  if (text) return text;
+  return status === 403 ? "Operator access is required." : `Request failed (HTTP ${status}).`;
 }
 
 export function panelLink(props: WidgetHostProps, workspaceId?: string, tab?: string): string {
@@ -108,17 +127,18 @@ export function panelLink(props: WidgetHostProps, workspaceId?: string, tab?: st
 
 // useWidgetData reloads when key or the host's event revision changes, and
 // every 30 s while the page is visible. Out-of-order responses are dropped.
+// Background reloads keep the current data on screen: `loading` is true only
+// until the first answer arrives, and `loaded` says whether one has.
 export function useWidgetData<T>(props: WidgetHostProps, key: string, load: () => Promise<T>, enabled = true) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const generation = useRef(0);
   const loader = useRef(load);
   loader.current = load;
   const reload = useCallback(async () => {
     if (!enabled) return;
     const current = ++generation.current;
-    setLoading(true);
     try {
       const value = await loader.current();
       if (current !== generation.current) return;
@@ -128,9 +148,10 @@ export function useWidgetData<T>(props: WidgetHostProps, key: string, load: () =
       if (current !== generation.current) return;
       setError((reason as Error).message || "Request failed.");
     } finally {
-      if (current === generation.current) setLoading(false);
+      if (current === generation.current) setLoaded(true);
     }
   }, [enabled]);
+  const loading = enabled && !loaded;
   useEffect(() => {
     void reload();
   }, [reload, key, props.eventRevision]);
@@ -141,7 +162,7 @@ export function useWidgetData<T>(props: WidgetHostProps, key: string, load: () =
     }, 30000);
     return () => window.clearInterval(timer);
   }, [reload, enabled]);
-  return { data, error, loading, reload };
+  return { data, error, loading, loaded, reload };
 }
 
 export function intSetting(settings: Record<string, unknown> | undefined, key: string, fallback: number, min: number, max: number): number {
@@ -289,22 +310,26 @@ export function activitySummary(line: ActivityLine): string {
 }
 
 export const widgetCSS = `
-.wsw{box-sizing:border-box;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--color-border,#2a2f36);border-radius:8px;background:var(--color-bg-card,#12161b);color:var(--color-text,#e7ebef);font-family:var(--font-base,inherit);font-size:12px}
+.wsw{box-sizing:border-box;height:100%;min-height:0;display:flex;flex-direction:column;gap:8px;overflow:auto;color:var(--color-text,#e7ebef);font-family:var(--font-base,inherit);font-size:12px}
+.wsw-card{border:1px solid var(--color-border,#2a2f36);border-radius:8px;background:var(--color-bg-card,#12161b);padding:10px 12px;min-width:0;flex-shrink:0}
+.wsw-card>h3{margin:0 0 6px;color:var(--color-text-muted,#9aa4ae);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;gap:6px}
+.wsw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.wsw-ws-card{display:flex;flex-direction:column;gap:6px}
+.wsw-ws-card:hover{border-color:var(--color-text-dim,#6b7280)}
+.wsw-ws-top{display:flex;align-items:center;gap:8px;min-width:0}
+.wsw-ws-foot{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .wsw *{box-sizing:border-box}
 .wsw a{color:inherit;text-decoration:none}
-.wsw-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--color-border,#2a2f36)}
+.wsw-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 2px 0;flex-shrink:0}
 .wsw-head h2{margin:0;font-size:13px;font-weight:600}
 .wsw-head p{margin:2px 0 0;color:var(--color-text-muted,#9aa4ae);font-size:11px}
 .wsw-btn{border:1px solid var(--color-border,#2a2f36);background:transparent;color:var(--color-text-muted,#9aa4ae);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap}
 .wsw-btn:hover{color:var(--color-text,#e7ebef)}
 .wsw-btn:disabled{opacity:.5;cursor:default}
-.wsw-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:8px 12px;border-bottom:1px solid var(--color-border,#2a2f36)}
+.wsw-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .wsw-count{display:flex;flex-direction:column;gap:1px}
 .wsw-count span{color:var(--color-text-muted,#9aa4ae);font-size:11px}
 .wsw-count strong{font-size:17px;font-variant-numeric:tabular-nums}
-.wsw-body{flex:1;min-height:0;overflow:auto}
-.wsw-section{padding:6px 12px 8px}
-.wsw-section h3{margin:4px 0 6px;color:var(--color-text-muted,#9aa4ae);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .wsw-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
 .wsw-row{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;min-width:0}
 .wsw-row:hover{background:var(--color-bg-input,#1a1f26)}
@@ -329,8 +354,8 @@ export const widgetCSS = `
 .wsw-act.warning .wsw-icon{color:var(--color-accent,#f59e0b)}
 .wsw-ws{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
 .wsw-when{color:var(--color-text-dim,#6b7280);white-space:nowrap;font-variant-numeric:tabular-nums}
-.wsw-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:20px 12px;color:var(--color-text-muted,#9aa4ae);text-align:center}
-.wsw-banner{margin:8px 12px 0;padding:6px 8px;border-radius:6px;border:1px solid var(--color-red,#f87171);color:var(--color-red,#f87171);font-size:11px}
+.wsw-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 12px;color:var(--color-text-muted,#9aa4ae);text-align:center}
+.wsw-banner{flex-shrink:0;padding:6px 8px;border-radius:6px;border:1px solid var(--color-red,#f87171);color:var(--color-red,#f87171);font-size:11px;overflow-wrap:anywhere}
 .wsw-output{margin:0;padding:8px;border-radius:6px;background:var(--color-bg,#0b0d10);border:1px solid var(--color-border,#2a2f36);font-family:var(--font-mono-fixed,ui-monospace,monospace);font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto}
 .wsw-select{background:var(--color-bg-input,#1a1f26);color:var(--color-text,#e7ebef);border:1px solid var(--color-border,#2a2f36);border-radius:6px;padding:2px 6px;font-size:11px;max-width:160px}
 .wsw-bar{flex-shrink:0}

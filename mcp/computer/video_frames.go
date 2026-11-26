@@ -187,7 +187,16 @@ func (a *App) computerUseVideoFrames(ctx *sdk.AppCtx, id string, sess *session, 
 			entry["data_b64"] = encoded
 		} else {
 			entry["content_index"] = i + 1
-			blocks = append(blocks, sdk.MCPContent{Type: "image", MIMEType: f.MIMEType, Data: encoded})
+			blocks = append(blocks, sdk.MCPContent{
+				Type: "image", MIMEType: f.MIMEType, Data: encoded,
+				// Core keeps a "keep" image with its result across turns and
+				// shows the label beside it. Without the hint, images from a
+				// computer_* tool count as screenshots: the next one replaces them.
+				Meta: map[string]any{
+					"io.apteva/label":     fmt.Sprintf("Frame %d at %.2f s", f.Index, f.ActualS),
+					"io.apteva/retention": "keep",
+				},
+			})
 		}
 		frames = append(frames, entry)
 	}

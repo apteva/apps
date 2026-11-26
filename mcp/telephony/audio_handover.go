@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -105,12 +106,20 @@ func (a *App) enqueueHandoverEvent(network audioNetworkEvent, event, reason stri
 	a.audioNetworks.enqueue(network)
 }
 
-// Variables so tests need not wait out the production limits.
-var (
-	rtcHandoverSample    = 500 * time.Millisecond
-	rtcHandoverHoldLimit = 20 * time.Second
-	rtcHandoverQuiet     = 3 * time.Second
-)
+type handoverLimits struct{ sample, hold, quiet time.Duration }
+
+var rtcHandoverLimits = handoverLimits{sample: 500 * time.Millisecond, hold: 20 * time.Second, quiet: 3 * time.Second}
+
+// Lets tests shorten the limits. Atomic because a hold from an earlier test
+// can still be reading them when the next test sets its own.
+var rtcHandoverLimitsOverride atomic.Pointer[handoverLimits]
+
+func currentHandoverLimits() handoverLimits {
+	if l := rtcHandoverLimitsOverride.Load(); l != nil {
+		return *l
+	}
+	return rtcHandoverLimits
+}
 
 // Called after signaling failed. Returns when the connection should stop: at once
 // unless RTP is demonstrably still arriving, otherwise when it is replaced, when
@@ -120,8 +129,9 @@ func holdRTCForHandover(pc *webrtc.PeerConnection, stats *rtcMediaStats, done <-
 	if pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
 		return
 	}
+	limits := currentHandoverLimits()
 	before := stats.ingress.packets.Load()
-	sample := time.NewTimer(rtcHandoverSample)
+	sample := time.NewTimer(limits.sample)
 	defer sample.Stop()
 	select {
 	case <-done:
@@ -133,9 +143,9 @@ func holdRTCForHandover(pc *webrtc.PeerConnection, stats *rtcMediaStats, done <-
 		return
 	}
 	holding()
-	limit := time.NewTimer(rtcHandoverHoldLimit)
+	limit := time.NewTimer(limits.hold)
 	defer limit.Stop()
-	tick := time.NewTicker(max(rtcHandoverQuiet/3, time.Millisecond))
+	tick := time.NewTicker(max(limits.quiet/3, time.Millisecond))
 	defer tick.Stop()
 	quietSince := time.Now()
 	for {
@@ -147,7 +157,7 @@ func holdRTCForHandover(pc *webrtc.PeerConnection, stats *rtcMediaStats, done <-
 		case now := <-tick.C:
 			if n := stats.ingress.packets.Load(); n != last {
 				last, quietSince = n, now
-			} else if now.Sub(quietSince) >= rtcHandoverQuiet {
+			} else if now.Sub(quietSince) >= limits.quiet {
 				return
 			}
 		}

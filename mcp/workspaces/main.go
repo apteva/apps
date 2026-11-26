@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.11.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.11.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -78,7 +78,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
 		"preview_port": intSchema(),
 		"instance_id":  map[string]any{"type": "integer", "description": "Instances host to run on (containers driver). Omit for the default: local Docker for preview workspaces, otherwise Containers' default host."},
-		"driver":       map[string]any{"type": "string", "enum": []string{driverContainers, driverLocal}, "description": "Where the workspace runs. containers: a Docker container (default). local: a folder on the machine running Apteva, commands in the OS sandbox, using the machine's own toolchains; only when the operator enabled it."},
+		"driver":       map[string]any{"type": "string", "enum": []string{driverContainers, driverLocal}, "description": "Where the workspace runs. Omit it to use the default: Docker when the Containers app is installed, otherwise local. containers: a Docker container (needs the Containers app). local: a folder on the machine running Apteva, commands in the OS sandbox, using the machine's own toolchains."},
 	}
 	appCreateProps := make(map[string]any, len(createProps)+8)
 	for key, value := range createProps {
@@ -92,7 +92,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
 	return append(a.previewTools(), []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, on local Docker, an Instances host (instance_id), or as a sandboxed folder on the Apteva machine (driver local). Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, as a sandboxed folder on the Apteva machine (driver local, the default without the Containers app), on local Docker, or on an Instances host (instance_id); Docker and Instances hosts need the Containers app. Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
 		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host or the local driver each command runs on its own, so cd and exported variables do not carry over (use working_directory). The workspace's capabilities.sessions says which.", InputSchema: schemaObject(map[string]any{

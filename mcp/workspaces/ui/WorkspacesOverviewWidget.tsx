@@ -57,6 +57,7 @@ export default function WorkspacesOverviewWidget(props: WidgetHostProps) {
   const activityLimit = intSetting(settings, "activity_limit", full ? 10 : 5, 3, 15);
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState("");
   const live = !props.preview && !!props.projectId;
 
@@ -109,6 +110,15 @@ export default function WorkspacesOverviewWidget(props: WidgetHostProps) {
       .slice(0, maxRows);
   }, [workspaces, show, maxRows, now]);
 
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([list.reload(), showActivity ? activity.reload() : Promise.resolve()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const act = async (workspace: Workspace, action: "extend" | "stop") => {
     setBusy(workspace.id + action);
     setActionError("");
@@ -129,7 +139,7 @@ export default function WorkspacesOverviewWidget(props: WidgetHostProps) {
     return (
       <section className="wsw">
         <style>{widgetCSS}</style>
-        <div className="wsw-empty">Select a project to see its workspaces.</div>
+        <div className="wsw-card wsw-empty">Select a project to see its workspaces.</div>
       </section>
     );
   }
@@ -144,100 +154,98 @@ export default function WorkspacesOverviewWidget(props: WidgetHostProps) {
           <h2><a href={panelLink(props)}>Workspaces</a></h2>
           <p>{show === "attention" ? "Failed, expiring or crashed previews" : "What is running, who owns it, and when it expires"}</p>
         </div>
-        <button type="button" className="wsw-btn" onClick={() => { void list.reload(); void activity.reload(); }} disabled={list.loading} aria-label="Refresh workspaces">
-          {list.loading ? "Refreshing…" : "Refresh"}
+        <button type="button" className="wsw-btn" onClick={() => void refresh()} disabled={refreshing} aria-label="Refresh workspaces">
+          {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </header>
-      <div className="wsw-counts">
+      <div className="wsw-card wsw-counts" aria-label="Workspace counts">
         <Count label="Running" value={counts.running} />
         <Count label="Busy" value={counts.busy} tone={counts.busy ? "wsw-warn" : ""} />
         <Count label="Stopped" value={counts.stopped} />
         <Count label="Failed" value={counts.failed} tone={counts.failed ? "wsw-error" : ""} />
       </div>
       {error && <div className="wsw-banner" role="alert">{error}</div>}
-      <div className="wsw-body">
-        <div className="wsw-section">
-          {rows.length === 0 && !list.loading && (
-            <div className="wsw-empty">
-              <EmptyIcon />
-              <span>{emptyLabel}</span>
-            </div>
-          )}
-          <ul className="wsw-list">
-            {rows.map((workspace) => {
-              const left = timeLeft(workspace.expires_at, now);
-              const running = workspace.lifecycle_status === "running";
-              const previewLive = workspace.preview?.status === "live" && workspace.preview.url;
-              const detail = workspace.status === "failed"
-                ? <span className="wsw-error wsw-trunc">{workspace.last_error || "Failed"}</span>
-                : workspace.current_command
-                  ? <span className="wsw-mono wsw-trunc">{workspace.current_command.display_command}</span>
-                  : workspace.preview?.status === "crashed"
-                    ? <span className="wsw-error wsw-trunc">Preview crashed{workspace.preview.error ? `: ${workspace.preview.error}` : ""}</span>
-                    : <span className="wsw-dim wsw-trunc">{full && workspace.purpose ? workspace.purpose : workspace.status}</span>;
-              return (
-                <li key={workspace.id} className="wsw-row">
+      {rows.length === 0 && list.loaded && !list.error && (
+        <div className="wsw-card wsw-empty">
+          <EmptyIcon />
+          <span>{emptyLabel}</span>
+        </div>
+      )}
+      {rows.length === 0 && !list.loaded && !props.preview && <div className="wsw-card wsw-empty wsw-dim">Loading workspaces…</div>}
+      {rows.length > 0 && (
+        <div className="wsw-cards">
+          {rows.map((workspace) => {
+            const left = timeLeft(workspace.expires_at, now);
+            const running = workspace.lifecycle_status === "running";
+            const previewLive = workspace.preview?.status === "live" && workspace.preview.url;
+            const detail = workspace.status === "failed"
+              ? <span className="wsw-error wsw-trunc">{workspace.last_error || "Failed"}</span>
+              : workspace.current_command
+                ? <span className="wsw-mono wsw-trunc">{workspace.current_command.display_command}</span>
+                : workspace.preview?.status === "crashed"
+                  ? <span className="wsw-error wsw-trunc">Preview crashed{workspace.preview.error ? `: ${workspace.preview.error}` : ""}</span>
+                  : <span className="wsw-dim wsw-trunc">{workspace.purpose || (workspace.status === "busy" ? "Running a command" : workspace.status)}</span>;
+            return (
+              <article key={workspace.id} className="wsw-card wsw-ws-card">
+                <a className="wsw-ws-top" href={panelLink(props, workspace.id)} title={`Open ${workspace.name}`}>
                   <StatusDot status={workspace.status} />
-                  <a className="wsw-main" href={panelLink(props, workspace.id)} title={`Open ${workspace.name}`}>
-                    <span className="wsw-line">
-                      <span className="wsw-name">{workspace.name}</span>
-                      <span className="wsw-muted wsw-trunc">{ownerOf(workspace)} · {workspace.host_label}</span>
-                    </span>
-                    <span className="wsw-line">
-                      {detail}
-                      {full && workspace.branch_label && <span className="wsw-dim wsw-trunc">{workspace.repo_label ? `${workspace.repo_label}@` : ""}{workspace.branch_label}</span>}
-                    </span>
-                  </a>
-                  <span className="wsw-side">
-                    {full && <ActivityBar buckets={workspace.activity_buckets} />}
-                    {previewLive && <a className="wsw-pill wsw-link" href={workspace.preview!.url} target="_blank" rel="noreferrer">Preview</a>}
-                    {running && left.label && <span className={`wsw-pill ${left.soon ? "wsw-warn" : ""}`}>{left.label}</span>}
-                    {running && !props.preview && left.soon && (
-                      <button type="button" className="wsw-btn" disabled={!!busy} onClick={() => void act(workspace, "extend")} aria-label={`Keep ${workspace.name} running for another hour`} title="Set the time left to one hour">
-                        +60m
-                      </button>
-                    )}
-                    {running && !props.preview && full && (
-                      <button type="button" className="wsw-btn" disabled={!!busy} onClick={() => void act(workspace, "stop")} aria-label={`Stop ${workspace.name}`}>
-                        Stop
-                      </button>
-                    )}
+                  <span className="wsw-main">
+                    <span className="wsw-name" style={{ maxWidth: "100%" }}>{workspace.name}</span>
+                    <span className="wsw-muted wsw-trunc">{ownerOf(workspace)} · {workspace.host_label}</span>
                   </span>
+                  {full && <ActivityBar buckets={workspace.activity_buckets} />}
+                </a>
+                <div className="wsw-line">{detail}</div>
+                {full && workspace.branch_label && <div className="wsw-dim wsw-trunc">{workspace.repo_label ? `${workspace.repo_label}@` : ""}{workspace.branch_label}</div>}
+                <div className="wsw-ws-foot">
+                  {previewLive && <a className="wsw-pill wsw-link" href={workspace.preview!.url} target="_blank" rel="noreferrer">Preview</a>}
+                  {running && left.label && <span className={`wsw-pill ${left.soon ? "wsw-warn" : ""}`}>{left.label}</span>}
+                  {running && !props.preview && left.soon && (
+                    <button type="button" className="wsw-btn" disabled={!!busy} onClick={() => void act(workspace, "extend")} aria-label={`Keep ${workspace.name} running for another hour`} title="Set the time left to one hour">
+                      +60m
+                    </button>
+                  )}
+                  {running && !props.preview && full && (
+                    <button type="button" className="wsw-btn" disabled={!!busy} onClick={() => void act(workspace, "stop")} aria-label={`Stop ${workspace.name}`}>
+                      Stop
+                    </button>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+      {showActivity && (
+        <div className="wsw-card">
+          <h3>Recent activity</h3>
+          {lines.length === 0 && (activity.loaded || props.preview) && !activity.error && <div className="wsw-dim">No activity yet.</div>}
+          {lines.length === 0 && !activity.loaded && !props.preview && <div className="wsw-dim">Loading activity…</div>}
+          <ul className="wsw-list">
+            {lines.map((line, index) => {
+              const extra = activityDetail(line);
+              return (
+                <li key={`${line.workspace_id}-${line.created_at}-${index}`}>
+                  <a
+                    className={`wsw-act ${line.severity || ""}`}
+                    href={panelLink(props, line.workspace_id, "activity")}
+                    title={`${line.workspace_name}: ${line.summary} (${line.actor_label || line.actor_kind})`}
+                  >
+                    <span className="wsw-icon"><ActivityIcon category={line.category} /></span>
+                    <span className="wsw-ws">{line.workspace_name}</span>
+                    <span className="wsw-trunc">
+                      <span className="wsw-what">{activitySummary(line)}</span>
+                      {extra && <span className="wsw-dim"> · {extra}</span>}
+                      {full && line.actor_label && <span className="wsw-dim"> · {line.actor_label}</span>}
+                    </span>
+                    <span className="wsw-when">{ago(line.created_at, now)}</span>
+                  </a>
                 </li>
               );
             })}
           </ul>
         </div>
-        {showActivity && (
-          <div className="wsw-section">
-            <h3>Recent activity</h3>
-            {lines.length === 0 && !activity.loading && <div className="wsw-dim">No activity yet.</div>}
-            <ul className="wsw-list">
-              {lines.map((line, index) => {
-                const extra = activityDetail(line);
-                return (
-                  <li key={`${line.workspace_id}-${line.created_at}-${index}`}>
-                    <a
-                      className={`wsw-act ${line.severity || ""}`}
-                      href={panelLink(props, line.workspace_id, "activity")}
-                      title={`${line.workspace_name}: ${line.summary} (${line.actor_label || line.actor_kind})`}
-                    >
-                      <span className="wsw-icon"><ActivityIcon category={line.category} /></span>
-                      <span className="wsw-ws">{line.workspace_name}</span>
-                      <span className="wsw-trunc">
-                        <span className="wsw-what">{activitySummary(line)}</span>
-                        {extra && <span className="wsw-dim"> · {extra}</span>}
-                        {full && line.actor_label && <span className="wsw-dim"> · {line.actor_label}</span>}
-                      </span>
-                      <span className="wsw-when">{ago(line.created_at, now)}</span>
-                    </a>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        )}
-      </div>
+      )}
     </section>
   );
 }

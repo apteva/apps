@@ -1,13 +1,31 @@
 # How to use Workspaces
 
 Workspaces answers where work runs, who owns it, what command is active, and
-when the environment will disappear. Each workspace is one persistent Docker
-container with a persistent PTY shell. It is not a code editor or Git client.
+when the environment will disappear. It is not a code editor or Git client.
+
+## Where a workspace runs
+
+Each workspace has a `driver`, shown on the workspace with its `capabilities`:
+
+- `local`: a folder on the machine running Apteva. Commands run in the OS
+  sandbox (Seatbelt on macOS, bubblewrap on Linux) with the machine's own
+  toolchains (Go, Bun, Python, Node, Git, whatever is installed). No other app
+  is needed. Each command runs on its own, so `cd` and exported variables do
+  not carry over; use `working_directory`. Profiles and `image` do not apply.
+- `containers`: a Docker container with a persistent PTY shell, approved
+  profile images and optional Instances hosts. Needs the Containers app.
+
+Omit `driver` and Workspaces picks: Docker when Containers is installed,
+otherwise `local`. You do not need to install Containers to use Workspaces.
+Only install it when you need Docker images, a persistent shell, Instances
+hosts or test workspaces. If a create fails saying Containers is missing, retry
+with `driver: "local"` instead of installing it.
 
 ## Start a workspace
 
 Use `workspaces_create` with a short recognizable name, a concrete purpose,
-the closest approved profile (`go`, `bun`, or `python`), and a realistic TTL.
+the closest approved profile (`go`, `bun`, or `python`, used by Docker
+workspaces), and a realistic TTL.
 The optional `apteva` profile works only when an operator configured its
 combined development image.
 
@@ -36,13 +54,16 @@ Use `shell_command` only when shell syntax such as pipes, `cd`, or `export`
 is actually required. Never place secrets in commands. Workspaces intentionally
 does not accept arbitrary environment values.
 
-Commands run through one persistent PTY shell inside the workspace container.
+In a Docker workspace, commands run through one persistent PTY shell inside
+the workspace container (`capabilities.sessions` is true).
 Current directory, exported shell variables, functions, aliases, installed
 packages, writable-layer files, `/workspace`, and `/cache` persist across
 commands. Omit `working_directory` to continue from the shell's current
 directory; when supplied, it must remain under `/workspace`. Background services
 also persist while the container runs. Stopping the workspace terminates its
 processes and shell; resume starts a fresh shell in the preserved filesystem.
+In a local workspace, `/workspace` and `/cache` map to folders on the machine
+and each command starts fresh in `working_directory`.
 
 After `workspace_command_start`, call `workspace_command_wait` instead of
 polling. It blocks up to `wait_ms` (default 15 s, max 20 s) and returns the
