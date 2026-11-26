@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.11.3
+version: 0.12.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -53,7 +53,15 @@ description: |
   generic "Operator access is required", keep their content on screen during
   background refreshes, and lay out as separate cards (counts, one card per
   workspace, recent activity; status, running command, output and recent
-  commands for an agent's workspace). Workspaces
+  commands for an agent's workspace).
+  v0.12.0 runs the local driver when Apteva itself runs inside a container,
+  where neither Seatbelt nor bubblewrap can start: each workspace gets its
+  own unprivileged user, folders only it can open, a clean environment, and
+  a process sweep on stop, with the container as the isolation boundary
+  (local_sandbox auto | os | container). bubblewrap is used only after a
+  probe shows it works. File transfers into and out of local workspaces now
+  go through os.Root, so a planted symlink cannot redirect them. Each
+  workspace records its isolation (capabilities.sandbox). Workspaces
   report their capabilities (isolation, hardened, sessions, preview, images).
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -308,7 +316,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.11.3
+    ref: workspaces/v0.12.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health
@@ -358,7 +366,7 @@ config_schema:
     type: boolean
     default: true
     label: Allow sandboxed folders on this machine
-    description: Lets workspaces use the local driver, a folder on the machine running Apteva with commands in the OS sandbox (sandbox-exec on macOS, bubblewrap on Linux). On by default. Commands run as the Apteva user and share its kernel, so turn this off on a shared machine where agents should not run code on the host. Test workspaces always use Docker.
+    description: Lets workspaces use the local driver, a folder on the machine running Apteva with commands in the OS sandbox (sandbox-exec on macOS, bubblewrap on Linux) or, when Apteva runs inside a container without either, as a separate unprivileged user per workspace (see local_sandbox). On by default. Commands run as the Apteva user and share its kernel, so turn this off on a shared machine where agents should not run code on the host. Test workspaces always use Docker.
   - name: default_driver
     type: text
     default: containers
@@ -368,12 +376,17 @@ config_schema:
     type: text
     default: open
     label: Local driver network
-    description: open, or none to limit sandboxed commands to loopback.
+    description: open, or none to limit sandboxed commands to loopback. none needs an OS sandbox; container mode cannot enforce it and refuses new local workspaces while it is set.
+  - name: local_sandbox
+    type: text
+    default: auto
+    label: Local driver isolation
+    description: "auto (default): Seatbelt on macOS, bubblewrap on Linux when a probe shows it works, otherwise container mode if Apteva runs inside a container, otherwise the local driver is unavailable. os: only Seatbelt or bubblewrap. container: run each workspace as its own unprivileged user and rely on the surrounding container; refused outside a container or when Apteva cannot switch users (not root). Container mode does not hide the container's network from commands: they can reach loopback services such as the Apteva API."
   - name: local_root
     type: text
     default: ""
     label: Local driver folder
-    description: Absolute folder for local workspaces. Defaults to ~/apteva-workspaces/install-<id>. Must not contain spaces or sit inside ~/.apteva, ~/.ssh or another folder the sandbox hides.
+    description: Absolute folder for local workspaces. Defaults to ~/apteva-workspaces/install-<id>, or /var/lib/apteva-workspaces/install-<id> in container mode (every parent folder must let other users through). Must not contain spaces or sit inside ~/.apteva, ~/.ssh or another folder the sandbox hides.
   - name: default_cpu
     type: text
     default: "2"

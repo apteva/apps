@@ -15,7 +15,7 @@ const workspaceColumns = `id, project_id, name, purpose, profile, image, workloa
 	repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
 	source_digest, source_manifest_json, source_synced_at, last_error, created_at,
 	updated_at, last_activity_at, expires_at, delete_at, destroyed_at,
-	kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver`
+	kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver, sandbox`
 
 func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 	_, err := db.Exec(`INSERT INTO workspaces (
@@ -27,8 +27,8 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		source_digest, source_manifest_json, source_synced_at,
 		last_error, idempotency_key, created_at, updated_at, last_activity_at,
 		expires_at, delete_at, destroyed_at,
-		kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		kind, network_mode, cache_volume_id, cache_key, results_exported_at, instance_id, driver, sandbox
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.ProjectID, w.Name, w.Purpose, w.Profile, w.Image, w.WorkloadID,
 		w.LifecycleStatus, w.ActivityStatus, w.RuntimeStatus, w.HealthStatus, w.HostLabel,
 		w.NetworkPolicy, w.CPU, w.MemoryMB, w.ConsumerApp, w.ConsumerInstallID,
@@ -37,7 +37,7 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		w.SourceDigest, mustJSON(w.SourceManifest), w.SourceSyncedAt,
 		w.LastError, idempotencyKey, w.CreatedAt, w.UpdatedAt, w.LastActivityAt,
 		w.ExpiresAt, w.DeleteAt, w.DestroyedAt,
-		firstNonEmpty(w.Kind, kindDev), w.NetworkMode, w.CacheVolumeID, w.CacheKey, w.ResultsExportedAt, w.InstanceID, firstNonEmpty(w.Driver, driverContainers))
+		firstNonEmpty(w.Kind, kindDev), w.NetworkMode, w.CacheVolumeID, w.CacheKey, w.ResultsExportedAt, w.InstanceID, firstNonEmpty(w.Driver, driverContainers), w.Sandbox)
 	return err
 }
 
@@ -52,7 +52,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (*Workspace, error) 
 		&w.RepoLabel, &w.BranchLabel, &w.OriginLabel, &w.OriginHref, &w.DirtyState, &w.UnpushedState,
 		&w.SourceDigest, &sourceManifest, &w.SourceSyncedAt,
 		&w.LastError, &w.CreatedAt, &w.UpdatedAt, &w.LastActivityAt, &w.ExpiresAt, &w.DeleteAt, &w.DestroyedAt,
-		&w.Kind, &w.NetworkMode, &w.CacheVolumeID, &w.CacheKey, &w.ResultsExportedAt, &w.InstanceID, &w.Driver,
+		&w.Kind, &w.NetworkMode, &w.CacheVolumeID, &w.CacheKey, &w.ResultsExportedAt, &w.InstanceID, &w.Driver, &w.Sandbox,
 	)
 	if err != nil {
 		return nil, err
@@ -180,7 +180,7 @@ func updateWorkspace(db *sql.DB, id string, fields map[string]any) error {
 		"runtime_status", "health_status", "repo_label", "branch_label", "origin_label",
 		"origin_href", "dirty_state", "unpushed_state", "last_error", "updated_at",
 		"last_activity_at", "expires_at", "delete_at", "destroyed_at", "source_digest",
-		"source_manifest_json", "source_synced_at", "network_mode", "results_exported_at", "instance_id", "host_label",
+		"source_manifest_json", "source_synced_at", "network_mode", "results_exported_at", "instance_id", "host_label", "sandbox",
 	}
 	sets := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+1)

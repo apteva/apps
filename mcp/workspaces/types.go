@@ -34,6 +34,7 @@ type Workspace struct {
 	HostLabel         string       `json:"host_label"`
 	InstanceID        int64        `json:"instance_id"`
 	Driver            string       `json:"driver"`
+	Sandbox           string       `json:"sandbox,omitempty"` // local driver only: seatbelt | bwrap | container
 	Capabilities      Capabilities `json:"capabilities"`
 	NetworkPolicy     string       `json:"network_policy"`
 	CPU               float64      `json:"cpu"`
@@ -150,6 +151,7 @@ type ContainerWorkload struct {
 	CreatedAt        string            `json:"created_at"`
 	UpdatedAt        string            `json:"updated_at"`
 	LastError        string            `json:"last_error"`
+	Sandbox          string            `json:"sandbox,omitempty"` // local driver: seatbelt | bwrap | container
 	WorkingDirectory string            `json:"working_directory"`
 }
 

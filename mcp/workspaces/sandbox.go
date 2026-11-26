@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 )
 
 type sandboxKind string
@@ -21,6 +24,10 @@ const (
 	sandboxNone     sandboxKind = ""
 	sandboxSeatbelt sandboxKind = "seatbelt"
 	sandboxBwrap    sandboxKind = "bwrap"
+	// sandboxContainer runs commands directly, as a separate unprivileged
+	// user per workspace, and treats the surrounding container as the
+	// isolation boundary. Only used inside a container.
+	sandboxContainer sandboxKind = "container"
 )
 
 const seatbeltPath = "/usr/bin/sandbox-exec"
@@ -33,19 +40,158 @@ var secretHomePaths = []string{
 	".git-credentials", "Library/Keychains",
 }
 
-func detectSandbox() sandboxKind {
+// local_sandbox setting values.
+const (
+	sandboxModeAuto      = "auto"
+	sandboxModeOS        = "os"
+	sandboxModeContainer = "container"
+)
+
+// sandboxFacts is what the machine supports, probed once per process.
+type sandboxFacts struct {
+	Seatbelt    bool // sandbox-exec exists (macOS)
+	Bwrap       bool // bwrap starts a sandbox with open network
+	BwrapNoNet  bool // bwrap also starts with --unshare-net
+	InContainer bool // /.dockerenv, /run/.containerenv or $container
+	SetUID      bool // can start a process as another user
+}
+
+var (
+	sandboxFactsOnce   sync.Once
+	sandboxFactsCached sandboxFacts
+	// probeSandboxFacts is replaced in tests.
+	probeSandboxFacts = realSandboxFacts
+)
+
+func currentSandboxFacts() sandboxFacts {
+	sandboxFactsOnce.Do(func() { sandboxFactsCached = probeSandboxFacts() })
+	return sandboxFactsCached
+}
+
+func realSandboxFacts() sandboxFacts {
+	var f sandboxFacts
 	switch runtime.GOOS {
 	case "darwin":
-		if _, err := os.Stat(seatbeltPath); err == nil {
-			return sandboxSeatbelt
-		}
+		_, err := os.Stat(seatbeltPath)
+		f.Seatbelt = err == nil
 	case "linux":
-		if _, err := exec.LookPath("bwrap"); err == nil {
-			return sandboxBwrap
+		if path, err := exec.LookPath("bwrap"); err == nil {
+			base := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--die-with-parent"}
+			f.Bwrap = probeRun(path, append(append([]string{}, base...), "true")...)
+			if f.Bwrap {
+				f.BwrapNoNet = probeRun(path, append(append([]string{}, base...), "--unshare-net", "true")...)
+			}
+		}
+		f.InContainer = insideContainer()
+		f.SetUID = probeSetUID()
+	}
+	return f
+}
+
+func probeRun(name string, args ...string) bool {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		return false
+	}
+}
+
+func insideContainer() bool {
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
 		}
 	}
-	return sandboxNone
+	return os.Getenv("container") != ""
 }
+
+// probeSetUID starts `true` as an unused uid: it works only when Workspaces
+// runs as root (or holds CAP_SETUID and CAP_SETGID).
+func probeSetUID() bool {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		return false
+	}
+	cmd := exec.Command(truePath)
+	cmd.Dir = "/"
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: localUIDBase - 1, Gid: localUIDBase - 1, Groups: []uint32{}}}
+	return cmd.Run() == nil
+}
+
+// detectSandbox is the sandbox auto mode picks with open network.
+func detectSandbox() sandboxKind {
+	kind, _ := resolveSandbox(sandboxModeAuto, "open")
+	return kind
+}
+
+// resolveSandbox picks the sandbox for new local workspaces from the
+// local_sandbox setting and local_network. It never returns sandboxNone
+// without an error: a bare host without an OS sandbox is refused, and
+// container mode never runs on a host.
+func resolveSandbox(mode, network string) (sandboxKind, error) {
+	f := currentSandboxFacts()
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = sandboxModeAuto
+	}
+	osSandbox := func() (sandboxKind, error) {
+		if f.Seatbelt {
+			return sandboxSeatbelt, nil
+		}
+		if f.Bwrap {
+			if network == "none" && !f.BwrapNoNet {
+				return sandboxNone, errors.New("local_network is none, but bubblewrap cannot create a network namespace here")
+			}
+			return sandboxBwrap, nil
+		}
+		return sandboxNone, errors.New("the local driver needs an OS sandbox: sandbox-exec on macOS or a working bubblewrap (bwrap) on Linux")
+	}
+	container := func() (sandboxKind, error) {
+		if !f.InContainer {
+			return sandboxNone, errors.New("local_sandbox is container, but Workspaces is not running inside a container; container mode is refused on a host")
+		}
+		if !f.SetUID {
+			return sandboxNone, errors.New("container mode runs each workspace as its own user, which needs Workspaces to run as root (or with CAP_SETUID and CAP_SETGID)")
+		}
+		if network == "none" {
+			return sandboxNone, errors.New("local_network none cannot be enforced in container mode (no network namespaces); set local_network to open or use the containers driver")
+		}
+		return sandboxContainer, nil
+	}
+	switch mode {
+	case sandboxModeOS:
+		return osSandbox()
+	case sandboxModeContainer:
+		return container()
+	case sandboxModeAuto:
+		kind, err := osSandbox()
+		if err == nil || !f.InContainer {
+			return kind, err
+		}
+		return container()
+	}
+	return sandboxNone, fmt.Errorf("local_sandbox must be %s, %s or %s", sandboxModeAuto, sandboxModeOS, sandboxModeContainer)
+}
+
+// isolationLabel is what workspaces_get and the panel show.
+func isolationLabel(kind sandboxKind) string {
+	switch kind {
+	case sandboxSeatbelt, sandboxBwrap, sandboxContainer:
+		return string(kind)
+	}
+	return ""
+}
+
+// resetSandboxFacts is for tests that swap probeSandboxFacts.
+func resetSandboxFacts() { sandboxFactsOnce = sync.Once{} }
 
 // sandboxArgv wraps argv so it runs inside the sandbox with write access to
 // workloadDir only.
@@ -59,6 +205,9 @@ func sandboxArgv(kind sandboxKind, workloadDir, network, workingDir string, argv
 		return append([]string{seatbeltPath, "-p", seatbeltProfile(workloadDir, home, network), "--"}, argv...), nil
 	case sandboxBwrap:
 		return bwrapArgv(workloadDir, home, network, workingDir, argv), nil
+	case sandboxContainer:
+		// Runs as the workspace's own user (see execStart).
+		return append([]string{}, argv...), nil
 	}
 	return nil, errors.New("no OS sandbox is available for the local driver")
 }

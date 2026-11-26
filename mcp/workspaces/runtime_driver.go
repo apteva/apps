@@ -32,17 +32,25 @@ const (
 // Capabilities says what a workspace's driver supports. Fields are added as
 // optional with a false default, so a new driver only fills them in.
 type Capabilities struct {
-	Isolation string `json:"isolation"` // container | os_sandbox
-	Hardened  bool   `json:"hardened"`  // safe for untrusted code and test workspaces
-	Sessions  bool   `json:"sessions"`  // persistent shell between commands
-	Preview   bool   `json:"preview"`
-	Images    bool   `json:"images"` // runs any container image
+	Isolation string `json:"isolation"` // container | os_sandbox | separate_user
+	// Sandbox is how a local workspace is isolated: seatbelt (macOS),
+	// bwrap (Linux), or container (inside a container, as its own user;
+	// the surrounding container is the boundary).
+	Sandbox  string `json:"sandbox,omitempty"`
+	Hardened bool   `json:"hardened"` // safe for untrusted code and test workspaces
+	Sessions bool   `json:"sessions"` // persistent shell between commands
+	Preview  bool   `json:"preview"`
+	Images   bool   `json:"images"` // runs any container image
 }
 
 func capabilitiesFor(w *Workspace) Capabilities {
 	switch {
 	case w.Driver == driverLocal:
-		return Capabilities{Isolation: "os_sandbox", Preview: true}
+		if w.Sandbox == string(sandboxContainer) {
+			// Not an OS sandbox: a separate user inside Apteva's container.
+			return Capabilities{Isolation: "separate_user", Sandbox: w.Sandbox, Preview: true}
+		}
+		return Capabilities{Isolation: "os_sandbox", Sandbox: w.Sandbox, Preview: true}
 	case w.InstanceID > 0:
 		return Capabilities{Isolation: "container", Hardened: true, Preview: true, Images: true}
 	default:
@@ -107,9 +115,6 @@ func localDriverAvailable(app *sdk.AppCtx) error {
 	if !configBool(app, "local_driver_enabled", true) {
 		return errors.New("the local driver was turned off in the Workspaces settings (local_driver_enabled)")
 	}
-	if detectSandbox() == sandboxNone {
-		return errors.New("the local driver needs an OS sandbox: sandbox-exec on macOS or bubblewrap (bwrap) on Linux")
-	}
 	_, err := localRuntime.get(app)
 	return err
 }
@@ -173,13 +178,26 @@ type localRegistry struct {
 }
 
 func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
+	network := configString(app, "local_network", "open")
+	kind, err := resolveSandbox(configString(app, "local_sandbox", sandboxModeAuto), network)
+	if err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.driver != nil {
+		// Settings can change while running: new workspaces use the current
+		// sandbox; existing ones keep the one recorded when they were made.
+		r.driver.setMode(kind, network)
 		return r.driver, nil
 	}
 	root := configString(app, "local_root", "")
 	home, _ := os.UserHomeDir()
+	if root == "" && kind == sandboxContainer {
+		// Outside /root (mode 0700): each workspace's own user must be able
+		// to reach its folder.
+		root = filepath.Join("/var/lib/apteva-workspaces", "install-"+firstNonEmpty(os.Getenv("APTEVA_INSTALL_ID"), "0"))
+	}
 	if root == "" {
 		// A plain folder in the home directory, outside the hidden folders
 		// the sandbox blocks (the app data dir is under ~/.apteva).
@@ -203,6 +221,32 @@ func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
 	if hidden := rootInsideHidden(root, home); hidden != "" {
 		return nil, fmt.Errorf("local_root %s is inside %s, which sandboxed commands cannot read; choose another folder", root, hidden)
 	}
-	r.driver = newLocalDriver(root, detectSandbox(), configString(app, "local_network", "open"))
+	if kind == sandboxContainer {
+		if err := prepareContainerRoot(root); err != nil {
+			return nil, err
+		}
+	}
+	r.driver = newLocalDriver(root, kind, network)
 	return r.driver, nil
+}
+
+// prepareContainerRoot makes the driver root traversable but not listable
+// (0711), and checks every parent lets other users through, since each
+// workspace runs as its own user.
+func prepareContainerRoot(root string) error {
+	if err := os.Chmod(root, 0o711); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(root); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o001 == 0 {
+			return fmt.Errorf("local_root %s is below %s, which other users cannot enter (mode %o); choose another local_root", root, dir, info.Mode().Perm())
+		}
+		if dir == filepath.Dir(dir) {
+			return nil
+		}
+	}
 }

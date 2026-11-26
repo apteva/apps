@@ -10,7 +10,11 @@ package main
 //	<root>/<workload id>/exec/<id>.json  one command's state, <id>.log its output
 //
 // Commands run as the user running Workspaces, inside the OS sandbox, which
-// lets them write only under the workload folder. "/workspace" and "/cache"
+// lets them write only under the workload folder. In container mode (no OS
+// sandbox inside a container) each workload gets its own unprivileged uid
+// instead: workspace/, cache/ and tmp/ belong to it, everything else under
+// the workload folder stays root-only, and file transfers go through os.Root
+// so a symlink planted by a command cannot redirect them. "/workspace" and "/cache"
 // in arguments, the working directory and environment values are rewritten
 // to the real folders, and the real folders are rewritten back in logs, so
 // agents use the same paths as in a container.
@@ -47,6 +51,8 @@ const (
 	localMaxExpandedBytes = 1024 * 1024 * 1024
 	localMaxArchiveFiles  = 50000
 	localKillGrace        = 3 * time.Second
+	// Container mode gives each workload its own uid (and gid) from here up.
+	localUIDBase = 200000
 )
 
 var (
@@ -61,6 +67,9 @@ type localWorkload struct {
 	Status    string            `json:"status"`
 	Ports     []ContainerPort   `json:"ports"`
 	Env       map[string]string `json:"env"`
+	Sandbox   sandboxKind       `json:"sandbox,omitempty"`
+	Network   string            `json:"network,omitempty"`
+	UID       int               `json:"uid,omitempty"`
 	CreatedAt string            `json:"created_at"`
 	UpdatedAt string            `json:"updated_at"`
 }
@@ -99,6 +108,36 @@ type localDriver struct {
 	mu      sync.Mutex
 	running map[string]*localProc
 	usage   map[string]localUsage
+	allocMu sync.Mutex // serialises uid allocation
+}
+
+// setMode changes the sandbox and network used for new workloads.
+func (d *localDriver) setMode(kind sandboxKind, network string) {
+	if network != "none" {
+		network = "open"
+	}
+	d.mu.Lock()
+	d.sandbox, d.network = kind, network
+	d.mu.Unlock()
+}
+
+func (d *localDriver) mode() (sandboxKind, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sandbox, d.network
+}
+
+// workloadMode is the sandbox a workload was created with; workloads from
+// before 0.12.0 recorded none and use the driver's current one.
+func (d *localDriver) workloadMode(wl *localWorkload) (sandboxKind, string) {
+	kind, network := d.mode()
+	if wl.Sandbox != "" {
+		kind = wl.Sandbox
+	}
+	if wl.Network != "" {
+		network = wl.Network
+	}
+	return kind, network
 }
 
 type localUsage struct {
@@ -187,16 +226,88 @@ func (d *localDriver) run(input map[string]any) (any, error) {
 	if err := remarshal(input["env"], &wl.Env); err != nil {
 		return nil, fmt.Errorf("env: %w", err)
 	}
+	// Commands refuse to start without a sandbox (sandboxArgv).
+	wl.Sandbox, wl.Network = d.mode()
+	wl.CreatedAt, wl.UpdatedAt = nowUTC(), nowUTC()
+	if wl.Sandbox == sandboxContainer {
+		if err := d.createContainerWorkload(wl); err != nil {
+			_ = os.RemoveAll(d.workloadDir(wl.ID))
+			return nil, err
+		}
+		return map[string]any{"workload": d.view(wl)}, nil
+	}
 	for _, dir := range []string{"workspace/.home", "cache", "tmp", "exec"} {
 		if err := os.MkdirAll(filepath.Join(d.workloadDir(wl.ID), dir), 0o755); err != nil {
 			return nil, err
 		}
 	}
-	wl.CreatedAt, wl.UpdatedAt = nowUTC(), nowUTC()
 	if err := d.saveWorkload(wl); err != nil {
 		return nil, err
 	}
 	return map[string]any{"workload": d.view(wl)}, nil
+}
+
+// createContainerWorkload allocates the workload's uid and lays out its
+// folder: the workload folder and exec/ belong to root, workspace/, cache/
+// and tmp/ to the workload's uid, each 0700.
+func (d *localDriver) createContainerWorkload(wl *localWorkload) error {
+	d.allocMu.Lock()
+	defer d.allocMu.Unlock()
+	uid, err := d.nextUID()
+	if err != nil {
+		return err
+	}
+	wl.UID = uid
+	dir := d.workloadDir(wl.ID)
+	if err := os.Mkdir(dir, 0o711); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o711); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(dir, "exec"), 0o700); err != nil {
+		return err
+	}
+	for _, name := range []string{"workspace", "workspace/.home", "cache", "tmp"} {
+		target := filepath.Join(dir, name)
+		if err := os.Mkdir(target, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chown(target, uid, uid); err != nil {
+			return fmt.Errorf("give %s to the workspace user: %w", name, err)
+		}
+		if err := os.Chmod(target, 0o700); err != nil {
+			return err
+		}
+	}
+	// Saved while allocMu is held, so the next allocation sees this uid.
+	return d.saveWorkload(wl)
+}
+
+// nextUID returns one more than the highest uid any workload uses.
+func (d *localDriver) nextUID() (int, error) {
+	entries, err := os.ReadDir(d.root)
+	if err != nil {
+		return 0, err
+	}
+	next := localUIDBase
+	for _, entry := range entries {
+		if !localWorkloadIDRe.MatchString(entry.Name()) {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(d.root, entry.Name(), "workload.json"))
+		if err != nil {
+			continue
+		}
+		var wl localWorkload
+		if json.Unmarshal(raw, &wl) == nil && wl.UID >= next {
+			next = wl.UID + 1
+		}
+	}
+	if next > 2_000_000_000 {
+		return 0, errors.New("no free workspace uid")
+	}
+	return next, nil
 }
 
 func (d *localDriver) view(wl *localWorkload) ContainerWorkload {
@@ -204,6 +315,7 @@ func (d *localDriver) view(wl *localWorkload) ContainerWorkload {
 		ID: wl.ID, Name: wl.Name, Status: wl.Status, DesiredStatus: wl.Status,
 		Ports: wl.Ports, WorkingDirectory: "/workspace", CreatedAt: wl.CreatedAt, UpdatedAt: wl.UpdatedAt,
 		Volumes: []ContainerVolume{{Name: "workspace", MountPath: "/workspace"}, {Name: "cache", MountPath: "/cache"}},
+		Sandbox: isolationLabel(wl.Sandbox),
 	}
 }
 
@@ -256,6 +368,10 @@ func (d *localDriver) stop(input map[string]any) (any, error) {
 		return nil, err
 	}
 	d.killWorkload(wl.ID, "cancelled")
+	if wl.UID > 0 {
+		// Also what escaped its process group (setsid, nohup daemons).
+		killUID(wl.UID)
+	}
 	return d.setStatus(input, "stopped")
 }
 
@@ -265,6 +381,9 @@ func (d *localDriver) destroy(input map[string]any) (any, error) {
 		return nil, errors.New("workload not found")
 	}
 	d.killWorkload(id, "cancelled")
+	if wl, err := d.loadWorkload(input); err == nil && wl.UID > 0 {
+		killUID(wl.UID)
+	}
 	if err := os.RemoveAll(d.workloadDir(id)); err != nil {
 		return nil, err
 	}
@@ -361,7 +480,8 @@ func (d *localDriver) execStart(input map[string]any) (any, error) {
 		}
 		realArgv = append([]string{"/bin/sh", "-c", `umask "$0"; exec "$@"`, umask}, realArgv...)
 	}
-	full, err := sandboxArgv(d.sandbox, d.workloadDir(wl.ID), d.network, realDir, realArgv)
+	kind, network := d.workloadMode(wl)
+	full, err := sandboxArgv(kind, d.workloadDir(wl.ID), network, realDir, realArgv)
 	if err != nil {
 		return nil, err
 	}
@@ -378,12 +498,23 @@ func (d *localDriver) execStart(input map[string]any) (any, error) {
 	}
 	cmd := exec.Command(full[0], full[1:]...)
 	cmd.Dir = realDir
-	cmd.Env = d.commandEnv(wl, paths, env)
+	cmd.Env = d.commandEnv(wl, kind, paths, env)
 	cmd.Stdout, cmd.Stderr = output, output
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if kind == sandboxContainer {
+		if wl.UID < localUIDBase {
+			output.Close()
+			return nil, errors.New("container-mode workload has no uid of its own")
+		}
+		// Drops root's supplementary groups too (empty Groups).
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(wl.UID), Gid: uint32(wl.UID), Groups: []uint32{}}
+	}
 	if err := cmd.Start(); err != nil {
 		output.Close()
+		if kind == sandboxContainer && errors.Is(err, fs.ErrPermission) {
+			return nil, fmt.Errorf("start command as the workspace user: %w (the program or a parent of %s may not be reachable by other users)", err, d.root)
+		}
 		return nil, fmt.Errorf("start command: %w", err)
 	}
 	proc := &localProc{cmd: cmd, output: output}
@@ -559,9 +690,15 @@ func (d *localDriver) execCancel(input map[string]any) (any, error) {
 	return execResponse(state), nil
 }
 
-func (d *localDriver) commandEnv(wl *localWorkload, paths pathMap, extra map[string]string) []string {
+func (d *localDriver) commandEnv(wl *localWorkload, kind sandboxKind, paths pathMap, extra map[string]string) []string {
 	env := map[string]string{"TERM": "dumb"}
-	for _, key := range []string{"PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL"} {
+	inherit := []string{"PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL"}
+	if kind == sandboxContainer {
+		// Not Apteva's own identity: the command runs as the workspace user.
+		inherit = []string{"PATH", "LANG", "LC_ALL"}
+		env["USER"], env["LOGNAME"], env["SHELL"] = "workspace", "workspace", "/bin/sh"
+	}
+	for _, key := range inherit {
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
 		}
@@ -619,21 +756,55 @@ func (d *localDriver) volumeImport(input map[string]any) (any, error) {
 	if err != nil {
 		return nil, errors.New("archive_base64 is not valid base64")
 	}
-	dest := filepath.Join(base, filepath.FromSlash(rel))
-	if err := noSymlinkBetween(base, dest); err != nil {
+	// A clear error for the common case; os.Root below is what enforces it.
+	if err := noSymlinkBetween(base, filepath.Join(base, filepath.FromSlash(rel))); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	root, err := os.OpenRoot(base)
+	if err != nil {
 		return nil, err
 	}
-	if err := extractTarGz(archive, dest); err != nil {
+	defer root.Close()
+	owner := -1
+	if wl.UID > 0 {
+		owner = wl.UID
+	}
+	if err := mkdirAllIn(root, rel, owner); err != nil {
+		return nil, err
+	}
+	if err := extractTarGz(archive, root, rel, owner); err != nil {
 		return nil, err
 	}
 	d.forgetUsage(wl.ID)
 	return map[string]any{"workload_id": wl.ID, "volume": stringIn(input, "volume"), "path": rel, "compressed_bytes": len(archive)}, nil
 }
 
-func extractTarGz(archive []byte, dest string) error {
+// mkdirAllIn creates rel (slash-separated) under root, giving each folder it
+// passes to owner when owner >= 0.
+func mkdirAllIn(root *os.Root, rel string, owner int) error {
+	if rel == "." || rel == "" {
+		return nil
+	}
+	current := ""
+	for _, part := range strings.Split(rel, "/") {
+		current = path.Join(current, part)
+		name := filepath.FromSlash(current)
+		if err := root.Mkdir(name, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if owner >= 0 {
+			if err := root.Lchown(name, owner, owner); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// extractTarGz unpacks archive into destRel under root. Every operation goes
+// through root, so a symlink (even one swapped in while this runs) cannot
+// make it write outside the volume.
+func extractTarGz(archive []byte, root *os.Root, destRel string, owner int) error {
 	if len(archive) == 0 {
 		return errors.New("archive is empty")
 	}
@@ -645,6 +816,12 @@ func extractTarGz(archive []byte, dest string) error {
 	tr := tar.NewReader(gz)
 	var expanded int64
 	files := 0
+	chown := func(name string) error {
+		if owner < 0 {
+			return nil
+		}
+		return root.Lchown(name, owner, owner)
+	}
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -663,38 +840,38 @@ func extractTarGz(archive []byte, dest string) error {
 		if name == "." {
 			continue
 		}
-		target := filepath.Join(dest, filepath.FromSlash(name))
-		if err := noSymlinkBetween(dest, filepath.Dir(target)); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		targetSlash := path.Join(destRel, name)
+		target := filepath.FromSlash(targetSlash)
+		if err := mkdirAllIn(root, path.Dir(targetSlash), owner); err != nil {
 			return err
 		}
 		mode := os.FileMode(header.Mode) & 0o777
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if info, err := os.Lstat(target); err == nil && !info.IsDir() {
-				if err := os.Remove(target); err != nil {
+			if info, err := root.Lstat(target); err == nil && !info.IsDir() {
+				if err := root.Remove(target); err != nil {
 					return err
 				}
 			}
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := mkdirAllIn(root, targetSlash, owner); err != nil {
 				return err
 			}
 			if mode != 0 {
-				_ = os.Chmod(target, mode|0o700)
+				_ = root.Chmod(target, mode|0o700)
 			}
 		case tar.TypeReg, tar.TypeRegA:
 			if expanded += header.Size; header.Size < 0 || expanded > localMaxExpandedBytes {
 				return errors.New("archive exceeds expanded size limit")
 			}
-			if err := removeIfLink(target); err != nil {
-				return err
+			if info, err := root.Lstat(target); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+				if err := root.Remove(target); err != nil {
+					return err
+				}
 			}
 			if mode == 0 {
 				mode = 0o644
 			}
-			file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+			file, err := root.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
 			if err != nil {
 				return err
 			}
@@ -706,28 +883,28 @@ func extractTarGz(archive []byte, dest string) error {
 			if closeErr != nil {
 				return closeErr
 			}
-			_ = os.Chmod(target, mode)
+			_ = root.Chmod(target, mode)
+			if err := chown(target); err != nil {
+				return err
+			}
 		case tar.TypeSymlink:
 			if err := checkArchiveLink(name, header.Linkname, true); err != nil {
 				return err
 			}
-			if err := removeIfLink(target); err != nil {
+			_ = root.Remove(target)
+			if err := root.Symlink(header.Linkname, target); err != nil {
 				return err
 			}
-			_ = os.Remove(target)
-			if err := os.Symlink(header.Linkname, target); err != nil {
+			if err := chown(target); err != nil {
 				return err
 			}
 		case tar.TypeLink:
 			if err := checkArchiveLink(name, header.Linkname, false); err != nil {
 				return err
 			}
-			source := filepath.Join(dest, filepath.FromSlash(path.Clean(header.Linkname)))
-			if err := noSymlinkBetween(dest, source); err != nil {
-				return err
-			}
-			_ = os.Remove(target)
-			if err := os.Link(source, target); err != nil {
+			source := filepath.FromSlash(path.Join(destRel, path.Clean(header.Linkname)))
+			_ = root.Remove(target)
+			if err := root.Link(source, target); err != nil {
 				return err
 			}
 		default:
@@ -749,17 +926,22 @@ func (d *localDriver) volumeExport(input map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	src := filepath.Join(base, filepath.FromSlash(rel))
 	if rel != "." {
 		// The last component may itself be a symlink: it is archived as one.
+		src := filepath.Join(base, filepath.FromSlash(rel))
 		if err := noSymlinkBetween(base, filepath.Dir(src)); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := os.Lstat(src); err != nil {
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if _, err := root.Lstat(filepath.FromSlash(rel)); err != nil {
 		return nil, fmt.Errorf("%s: path not found", rel)
 	}
-	archive, err := packTarGz(base, rel, localMaxArchiveBytes)
+	archive, err := packTarGz(root, rel, localMaxArchiveBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -769,25 +951,37 @@ func (d *localDriver) volumeExport(input map[string]any) (any, error) {
 	}, nil
 }
 
-// packTarGz archives base/rel with entry names like `tar -C base rel`:
+// packTarGz archives rel under root with entry names like `tar -C base rel`:
 // "rel/..." for a path, "./..." for the volume root. Symlinks are archived as
-// links, never followed.
-func packTarGz(base, rel string, maxBytes int) ([]byte, error) {
+// links, never followed, and every read goes through root.
+func packTarGz(root *os.Root, rel string, maxBytes int) ([]byte, error) {
 	var buffer bytes.Buffer
 	gz := gzip.NewWriter(&buffer)
 	tw := tar.NewWriter(gz)
-	root := filepath.Join(base, filepath.FromSlash(rel))
-	err := filepath.WalkDir(root, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	entryName := func(current string, dir bool) string {
+		inner := "."
+		if rel == "." {
+			inner = current
+		} else if current != rel {
+			inner = strings.TrimPrefix(current, rel+"/")
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
+		name := path.Join(rel, inner)
+		if rel == "." {
+			name = "./" + inner
+			if inner == "." {
+				name = "./"
+			}
 		}
+		if dir && !strings.HasSuffix(name, "/") {
+			name += "/"
+		}
+		return name
+	}
+	add := func(current string, info fs.FileInfo) error {
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
-			if link, err = os.Readlink(current); err != nil {
+			var err error
+			if link, err = root.Readlink(filepath.FromSlash(current)); err != nil {
 				return err
 			}
 		}
@@ -795,28 +989,17 @@ func packTarGz(base, rel string, maxBytes int) ([]byte, error) {
 		if err != nil {
 			return nil // sockets and devices are skipped
 		}
-		inner, _ := filepath.Rel(root, current)
-		name := path.Join(rel, filepath.ToSlash(inner))
-		if rel == "." {
-			name = "./" + filepath.ToSlash(inner)
-			if inner == "." {
-				name = "./"
-			}
-		}
-		if info.IsDir() && !strings.HasSuffix(name, "/") {
-			name += "/"
-		}
-		header.Name = name
+		header.Name = entryName(current, info.IsDir())
 		header.Uid, header.Gid, header.Uname, header.Gname = 0, 0, "", ""
 		if err := tw.WriteHeader(header); err != nil {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			file, err := os.Open(current)
+			file, err := root.OpenFile(filepath.FromSlash(current), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(tw, file)
+			_, err = io.Copy(tw, io.LimitReader(file, info.Size()))
 			file.Close()
 			if err != nil {
 				return err
@@ -826,7 +1009,24 @@ func packTarGz(base, rel string, maxBytes int) ([]byte, error) {
 			return fmt.Errorf("archive exceeds compressed size limit of %d bytes", maxBytes)
 		}
 		return nil
-	})
+	}
+	var err error
+	if top, lerr := root.Lstat(filepath.FromSlash(rel)); lerr != nil {
+		err = lerr
+	} else if top.Mode()&fs.ModeSymlink != 0 {
+		err = add(rel, top)
+	} else {
+		err = fs.WalkDir(root.FS(), rel, func(current string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			return add(current, info)
+		})
+	}
 	if err != nil {
 		return nil, err
 	}

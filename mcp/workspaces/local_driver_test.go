@@ -42,7 +42,7 @@ func requireSandbox(t *testing.T) *localDriver {
 	if kind == sandboxNone {
 		t.Skip("no OS sandbox on this machine")
 	}
-	return newLocalDriver(t.TempDir(), kind, "open")
+	return newLocalDriver(testLocalRoot(t, kind), kind, "open")
 }
 
 func localRun(t *testing.T, d *localDriver, input map[string]any) string {

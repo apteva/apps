@@ -1,0 +1,1 @@
+ALTER TABLE workspaces ADD COLUMN sandbox TEXT NOT NULL DEFAULT '';

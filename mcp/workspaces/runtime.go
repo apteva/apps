@@ -183,6 +183,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	// Record where Containers actually placed it (explicit or default host).
 	w.InstanceID = workloadTarget(runOut.Workload)
 	w.HostLabel = hostLabelFor(w.Driver, w.InstanceID)
+	w.Sandbox = runOut.Workload.Sandbox
+	if w.Sandbox == string(sandboxContainer) {
+		w.HostLabel = "This container (own user)"
+	}
 	if sourceArchive != "" {
 		var imported map[string]any
 		if err := runtimeCall(app, "containers_volume_import", map[string]any{
@@ -197,7 +201,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	}
 	updates := map[string]any{
 		"workload_id": w.WorkloadID, "lifecycle_status": statusRunning,
-		"instance_id": w.InstanceID, "host_label": w.HostLabel,
+		"instance_id": w.InstanceID, "host_label": w.HostLabel, "sandbox": w.Sandbox,
 		"runtime_status": firstNonEmpty(runOut.Workload.Status, "running"),
 		"health_status":  runOut.Workload.HealthStatus, "last_error": "", "updated_at": nowUTC(),
 	}

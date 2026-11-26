@@ -37,6 +37,15 @@ func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
 	localDriver := map[string]any{"key": driverLocal, "label": "This machine (sandbox)", "available": true}
 	if err := localDriverAvailable(globalCtx); err != nil {
 		localDriver["available"], localDriver["reason"] = false, err.Error()
+	} else if driver, err := localRuntime.get(globalCtx); err == nil {
+		if kind, _ := driver.mode(); kind == sandboxContainer {
+			localDriver["label"], localDriver["sandbox"] = "This container (own user)", string(kind)
+			if exposed := containerExposures(); len(exposed) > 0 {
+				localDriver["warning"] = "Workspace users can read " + strings.Join(exposed, ", ") + "; make them readable by their owner only (chmod 600) or the data folder 700."
+			}
+		} else {
+			localDriver["sandbox"] = string(kind)
+		}
 	}
 	containersDriver := map[string]any{"key": driverContainers, "label": "Docker container", "available": true}
 	if !containersInstalled(globalCtx) {

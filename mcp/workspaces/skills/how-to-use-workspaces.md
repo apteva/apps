@@ -8,7 +8,9 @@ when the environment will disappear. It is not a code editor or Git client.
 Each workspace has a `driver`, shown on the workspace with its `capabilities`:
 
 - `local`: a folder on the machine running Apteva. Commands run in the OS
-  sandbox (Seatbelt on macOS, bubblewrap on Linux) with the machine's own
+  sandbox (Seatbelt on macOS, bubblewrap on Linux), or, when Apteva itself
+  runs in a container, as the workspace's own unprivileged user
+  (`capabilities.sandbox` says which), with the machine's own
   toolchains (Go, Bun, Python, Node, Git, whatever is installed). No other app
   is needed. Each command runs on its own, so `cd` and exported variables do
   not carry over; use `working_directory`. Profiles and `image` do not apply.

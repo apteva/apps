@@ -17,7 +17,7 @@ func localWorkspaceFixture(t *testing.T, enabled bool) (*App, *sdk.AppCtx, *plat
 		t.Skip("no OS sandbox on this machine")
 	}
 	localRuntime.mu.Lock()
-	localRuntime.driver = newLocalDriver(t.TempDir(), kind, "open")
+	localRuntime.driver = newLocalDriver(testLocalRoot(t, kind), kind, "open")
 	localRuntime.mu.Unlock()
 	t.Cleanup(func() {
 		localRuntime.mu.Lock()
@@ -67,10 +67,10 @@ func TestLocalWorkspaceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Driver != driverLocal || w.HostLabel != "This machine (sandbox)" || w.Image != "" || !strings.HasPrefix(w.WorkloadID, localWorkloadPrefix) {
+	if w.Driver != driverLocal || (w.HostLabel != "This machine (sandbox)" && w.HostLabel != "This container (own user)") || w.Image != "" || !strings.HasPrefix(w.WorkloadID, localWorkloadPrefix) {
 		t.Fatalf("workspace = %+v", w)
 	}
-	if w.Capabilities.Isolation != "os_sandbox" || w.Capabilities.Hardened || w.Capabilities.Sessions {
+	if (w.Capabilities.Isolation != "os_sandbox" && w.Capabilities.Isolation != "separate_user") || w.Capabilities.Hardened || w.Capabilities.Sessions {
 		t.Fatalf("capabilities = %+v", w.Capabilities)
 	}
 
@@ -175,7 +175,7 @@ func TestLocalDriverOnByDefault(t *testing.T) {
 		t.Skip("no OS sandbox on this machine")
 	}
 	localRuntime.mu.Lock()
-	localRuntime.driver = newLocalDriver(t.TempDir(), detectSandbox(), "open")
+	localRuntime.driver = newLocalDriver(testLocalRoot(t, detectSandbox()), detectSandbox(), "open")
 	localRuntime.mu.Unlock()
 	t.Cleanup(func() {
 		localRuntime.mu.Lock()
