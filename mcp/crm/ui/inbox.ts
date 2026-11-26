@@ -18,6 +18,14 @@ export interface InboxItem {
   snippet?: string;
   automated?: boolean;
   last_message_addresses?: MessageAddresses;
+  // All projects (scope=global) rows only.
+  project_id?: string;
+  project_name?: string;
+}
+
+export interface InboxProject {
+  id: string;
+  name: string;
 }
 
 export interface InboxResponse {
@@ -25,6 +33,9 @@ export interface InboxResponse {
   count?: number;
   total?: number;
   offset?: number;
+  // All projects (scope=global) responses only.
+  projects?: InboxProject[];
+  selected_project_id?: string;
 }
 
 // A filtered/paginated queue is not the current conversation. A reply moves
@@ -53,6 +64,8 @@ export interface CRMInboxHostProps {
   installId?: number;
   projectId?: string;
   eventRevision?: number;
+  // "global" on the All projects Home: no projectId, rows from every project.
+  dashboardScope?: "project" | "global";
   widgetSize?: "half" | "full";
   widgetSettings?: Record<string, unknown>;
 }
@@ -97,13 +110,24 @@ export function crmInboxPreferences(settings?: Record<string, unknown>): CRMInbo
   };
 }
 
-export function crmInboxAPIURL(props: CRMInboxHostProps, preferences: CRMInboxPreferences): string {
+export function crmInboxIsGlobal(props: CRMInboxHostProps): boolean {
+  return props.dashboardScope === "global";
+}
+
+// In global scope the request carries scope=global and only the project the
+// viewer picked in the filter; the backend decides which projects are visible.
+export function crmInboxAPIURL(props: CRMInboxHostProps, preferences: CRMInboxPreferences, selectedProject = ""): string {
   const query = new URLSearchParams({
     status: preferences.defaultStatus,
     limit: String(preferences.maxConversations),
   });
   if (props.installId) query.set("install_id", String(props.installId));
-  if (props.projectId) query.set("project_id", props.projectId);
+  if (crmInboxIsGlobal(props)) {
+    query.set("scope", "global");
+    if (selectedProject) query.set("project_id", selectedProject);
+  } else if (props.projectId) {
+    query.set("project_id", props.projectId);
+  }
   if (preferences.defaultChannel !== "all") {
     query.set("filters", JSON.stringify([
       { field: "channel", op: "is", value: preferences.defaultChannel },
@@ -112,15 +136,25 @@ export function crmInboxAPIURL(props: CRMInboxHostProps, preferences: CRMInboxPr
   return `/api/apps/${encodeURIComponent(props.appName || "crm")}/inbox?${query.toString()}`;
 }
 
-export function crmInboxPageLink(props: CRMInboxHostProps, item?: InboxItem): string {
+// Links open the row's own project (global rows carry project_id), else the
+// widget's project.
+export function crmInboxPageLink(props: CRMInboxHostProps, item?: InboxItem, projectId = ""): string {
   const query = new URLSearchParams({ tab: "inbox" });
-  if (props.projectId) query.set("project_id", props.projectId);
+  const project = item?.project_id || projectId || props.projectId;
+  if (project) query.set("project_id", project);
   if (props.installId) query.set("install_id", String(props.installId));
   if (item) {
     query.set("conversation_id", String(item.id));
     if (inboxStatuses.has(item.status as CRMInboxStatus)) query.set("status", item.status);
   }
   return `/apps/${encodeURIComponent(props.appName || "crm")}/page?${query.toString()}`;
+}
+
+// The "View inbox" link needs one project: in global scope only once the
+// viewer picked one in the filter.
+export function crmInboxHeaderLink(props: CRMInboxHostProps, selectedProject = ""): string | null {
+  if (!crmInboxIsGlobal(props)) return crmInboxPageLink(props);
+  return selectedProject ? crmInboxPageLink(props, undefined, selectedProject) : null;
 }
 
 export function crmPanelInitialRoute(search: string): CRMPanelInitialRoute {
