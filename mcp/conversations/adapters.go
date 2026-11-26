@@ -427,6 +427,10 @@ func (a *App) releaseQueuedMessages(chat string) {
 	a.queueReleaseMu.Unlock()
 	// Synchronous delivery re-enters this function, so dispatch after unlocking.
 	for _, r := range releases {
+		// Open chats move the row out of the queue tray and into its place.
+		if r.msg.QueueState != "queued" && a.hub != nil {
+			a.hub.publish(conv.ID, *r.msg)
+		}
 		a.dispatchOrQueue(mountedCtx, "agent-inbound:"+strconv.FormatInt(r.agentID, 10), conv, r.msg)
 	}
 }

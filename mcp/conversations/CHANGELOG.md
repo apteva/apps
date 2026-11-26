@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.35.1 — 2026-11-26
+
+- A queued message now shows where it was sent to the agent, not where it was typed. A message queued while the agent was still working rendered above the reply it had waited for, because that reply was saved after the message was queued (prod: the "instagram reference" message showed above "Done. Server Tycoon…"). A release or steer records the last message shown at that moment (`placed_after`, migration 020), and the transcript places the message right after it. Ids, paging and deliveries are unchanged.
+- A release now reaches open chats and the changes feed straight away. Before, only the creation was logged, and the chat picked up the released state from a later refetch.
+
 ## 0.35.0 — 2026-11-25
 
 - Alert, approval, report, question and form cards are redesigned to read like messages instead of full-width banners. They are capped at message width on desktop and sit on the host theme's card surface, radius and shadow, so they follow all four dashboard themes (terminal/clean × dark/light). A thin colored edge marks severity or a pending decision.

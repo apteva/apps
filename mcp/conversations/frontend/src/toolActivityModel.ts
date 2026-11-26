@@ -62,11 +62,22 @@ export function buildChatTimeline(
     | { kind: "stream"; ts: number; stream: TimelineStream }
     | { kind: "message"; ts: number; message: ChatMessageRow }
     | { kind: "tool"; ts: number; tool: ToolActivity };
+  // A released queued message is shown just after the message that was last
+  // when it reached the agent (placed_after), not when it was typed: the
+  // reply it waited behind was saved later. Anchors may be placed too. Rows
+  // are not cached by id: voice captions split one message into several rows.
+  const byId = new Map<number, ChatMessageRow>();
+  for (const message of messages) if (!byId.has(message.id)) byId.set(message.id, message);
+  const messageTime = (message: ChatMessageRow, depth = 0): number => {
+    const ts = message.presentation_at ?? (Date.parse(message.created_at) || 0);
+    const anchor = message.placed_after ? byId.get(message.placed_after) : undefined;
+    return anchor && depth < 32 ? Math.max(ts, messageTime(anchor, depth + 1) + 1) : ts;
+  };
   const raw: RawItem[] = [
     ...streams.map(stream => ({kind: "stream" as const, ts: stream.startedAt, stream})),
     ...messages.map((message) => ({
       kind: "message" as const,
-      ts: message.presentation_at ?? (Date.parse(message.created_at) || 0),
+      ts: messageTime(message),
       message,
     })),
     ...[...tools].map((tool) => ({ kind: "tool" as const, ts: tool.startedAt, tool })),

@@ -48,6 +48,9 @@ export interface Message {
   queue_behavior?: "queue" | "steer" | "legacy";
   queue_state?: "queued" | "released" | "steered" | "cancelled" | string;
   queue_position?: number;
+  /** Set when a queued message was released or steered: it belongs right
+   * after this message id, not where it was typed. */
+  placed_after?: number;
   created_at: string;
 }
 

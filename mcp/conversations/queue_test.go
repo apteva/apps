@@ -233,3 +233,88 @@ func TestDeliveryConfirmationReleasesAfterFastTurn(t *testing.T) {
 }
 
 func itoa(value int64) string { return fmt.Sprint(value) }
+
+// A queued message is shown where it was released, not where it was typed.
+// Prod: the operator queued a message while the agent was still working; the
+// agent's reply was saved a second later and rendered below the message that
+// had waited for it.
+func TestReleasedQueueMessageIsPlacedAfterTheReply(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	var queued Message
+	if err := json.NewDecoder(postQueueMessage(t, app, conv, `{"content":"also add the reel","client_message_id":"placed-1"}`).Body).Decode(&queued); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", AgentID: 41, Content: "Done."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.ID < queued.ID {
+		t.Fatalf("fixture: reply %d saved before queued %d", reply.ID, queued.ID)
+	}
+	app.streamer.finishResponse(conv.ID, 41)
+	got, err := app.store.GetMessage(queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.QueueState != "" || got.PlacedAfter != reply.ID {
+		t.Fatalf("released row state=%q placed_after=%d, want released after %d", got.QueueState, got.PlacedAfter, reply.ID)
+	}
+	// Releasing again (or any later state change) keeps the first placement.
+	if again, _ := app.store.markQueueState(queued.ID, "released"); again.PlacedAfter != reply.ID {
+		t.Fatalf("placement moved to %d", again.PlacedAfter)
+	}
+	changes, err := app.store.MessageChanges(conv.ID, reply.Revision, 50)
+	if err != nil || len(changes.Messages) == 0 || changes.Messages[len(changes.Messages)-1].ID != queued.ID {
+		t.Fatalf("release not in the changes feed after the reply: %+v err=%v", changes.Messages, err)
+	}
+	page, err := app.store.MessagePage(conv.ID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(page)
+	if !strings.Contains(string(raw), fmt.Sprintf(`"placed_after":%d`, reply.ID)) {
+		t.Fatalf("message page does not carry placed_after: %s", raw)
+	}
+}
+
+// A message sent straight away (nothing running) keeps its own place.
+func TestImmediateMessageHasNoPlacement(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	var sent Message
+	if err := json.NewDecoder(postQueueMessage(t, app, conv, `{"content":"hi","client_message_id":"placed-2"}`).Body).Decode(&sent); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := app.store.GetMessage(sent.ID); got.PlacedAfter != 0 {
+		t.Fatalf("placed_after=%d for an unqueued message", got.PlacedAfter)
+	}
+}
+
+// Steering sends a queued message into the running turn now, so it is placed
+// after the progress the agent showed in the meantime.
+func TestSteeredQueueMessageIsPlacedAfterProgress(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	var queued Message
+	if err := json.NewDecoder(postQueueMessage(t, app, conv, `{"content":"use the blue one","client_message_id":"placed-3"}`).Body).Decode(&queued); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", AgentID: 41, Phase: "progress", Content: "Still checking…"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/message-queue", strings.NewReader(`{"chat_id":"`+conv.ID+`","message_id":`+itoa(queued.ID)+`,"action":"steer"}`))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleMessageQueue(rec, req)
+	var steered Message
+	if err := json.NewDecoder(rec.Body).Decode(&steered); err != nil {
+		t.Fatalf("steer=%d %s", rec.Code, rec.Body.String())
+	}
+	if steered.PlacedAfter != progress.ID {
+		t.Fatalf("steered placed_after=%d want %d", steered.PlacedAfter, progress.ID)
+	}
+}

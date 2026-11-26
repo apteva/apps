@@ -85,3 +85,27 @@ test("conversation activity clears on idle progress frames and authoritative emp
  expect([...applyConversationActivityFrame(active, {chat_id:"chat-1",response_progress:{phase:"idle"}} as any)]).toEqual(["chat-2"]);
  expect([...applyConversationActivityFrame(new Set(["chat-1"]), {snapshot:true,chat_id:"",frames:[]} as any)]).toEqual([]);
 });
+
+// Prod (conversation conv-720295da…, messages 3225–3229): the operator queued a
+// message while the agent was creating todos. The agent's reply was saved a
+// second later, and the queued message was shown above the reply it waited for.
+test("a released queued message is shown after the reply it waited behind", () => {
+  const at = (s: number) => new Date(Date.UTC(2026, 10, 26, 13, 27, s)).toISOString();
+  const row = (id: number, role: "user" | "agent", content: string, s: number, extra = {}) => ({ id, conversation_id:"c", role, content, components:[], created_at:at(s), ...extra });
+  const messages = [
+    row(3225, "agent", "Creating the list…", 16),
+    row(3226, "user", "Also add the reel", 41, { placed_after: 3227 }),
+    row(3227, "agent", "Done. 8 todos.", 42),
+    row(3228, "agent", "Adding a marketing todo…", 49),
+  ];
+  const tools = [
+    { ...base, id:"t1", startedAt:Date.parse(at(20)), finishedAt:Date.parse(at(40)) },
+    { ...base, id:"t2", startedAt:Date.parse(at(50)), finishedAt:Date.parse(at(55)) },
+  ];
+  const order = buildChatTimeline(messages as any, tools).flatMap(item =>
+    item.kind === "message" ? [String(item.message.id)] : item.kind === "tool" ? [item.tool.id] : item.kind === "toolGroup" ? item.tools.map(t => t.id) : []);
+  expect(order).toEqual(["3225", "t1", "3227", "3226", "3228", "t2"]);
+  // Without a placement (or with its anchor not loaded) a row keeps its own time.
+  const unplaced = buildChatTimeline(messages.map(m => ({ ...m, placed_after: m.id === 3226 ? 9999 : undefined })) as any, []);
+  expect(unplaced.flatMap(i => i.kind === "message" ? [i.message.id] : [])).toEqual([3225, 3226, 3227, 3228]);
+});

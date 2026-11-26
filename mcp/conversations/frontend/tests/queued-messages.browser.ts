@@ -69,6 +69,27 @@ test("new queued sends stay beside the composer until automatic release, then ap
  await page.reload();await expect(tray.getByText("Then summarize",{exact:true})).toBeVisible();await expect(page.locator(".chat-transcript").getByText("Check the result",{exact:true})).toHaveCount(1);
 });
 
+test("a released queued message is shown after the reply it waited behind, not where it was typed",async({page,request})=>{
+ await request.post("/reset");await request.post("/seed",{data:{}});await page.goto("/?host=dashboard");
+ await expect(page.locator(".chat-composer-input")).toBeVisible();
+ await request.post("/emit",{data:{chat_id:"chat-operator",agent_id:41,thread_id:"chat-operator",response_progress:{phase:"thinking",run_id:"queue-order",revision:1,after_message_id:2,started_at:new Date().toISOString()}}});
+ const input=page.locator(".chat-composer-input"),tray=page.getByRole("region",{name:"Queued messages"}),transcript=page.locator(".chat-transcript");
+ await input.fill("Also add the reel");await page.getByRole("button",{name:"Send",exact:true}).click();
+ await expect(tray.getByText("Also add the reel",{exact:true})).toBeVisible();
+ const typedAt=Date.now();
+ // The reply the message waited behind is saved after it was typed…
+ await request.post("/append-message",{data:{id:4,conversation_id:"chat-operator",role:"agent",agent_id:41,content:"Done. Eight todos created.",components:[],created_at:new Date(typedAt+1000).toISOString()}});
+ // …and the release places the queued message after it.
+ await request.post("/append-message",{data:{...queued("chat-operator",3,"Also add the reel"),created_at:new Date(typedAt).toISOString(),queue_state:"released",placed_after:4,revision:5,attachments:[]}});
+ await expect(tray).toHaveCount(0);
+ const reply=transcript.getByText("Done. Eight todos created.",{exact:true}),mine=transcript.getByText("Also add the reel",{exact:true});
+ await expect(mine).toHaveCount(1);
+ expect((await mine.boundingBox())!.y).toBeGreaterThan((await reply.boundingBox())!.y);
+ await page.reload();
+ await expect(mine).toBeVisible();
+ expect((await mine.boundingBox())!.y).toBeGreaterThan((await reply.boundingBox())!.y);
+});
+
 test("inline edit cancellation and failed saves keep both drafts; an offline agent cannot be steered",async({page,request})=>{
  await request.post("/reset");await request.post("/append-message",{data:queued("chat-operator")});
  await page.route("**/agents?*",route=>route.fulfill({json:[{id:41,name:"Assistant",status:"stopped",attached:true}]}));

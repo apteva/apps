@@ -95,6 +95,9 @@ type Message struct {
 	QueueBehavior  string         `json:"queue_behavior,omitempty"`
 	QueueState     string         `json:"queue_state,omitempty"`
 	QueuePosition  int64          `json:"queue_position,omitempty"`
+	// PlacedAfter is set when a queued message is released or steered: the
+	// message belongs right after this id in the transcript, not at its own.
+	PlacedAfter int64 `json:"placed_after,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 }
 
@@ -870,7 +873,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 
 const messageCols = `id, conversation_id, role, content, agent_id, user_id, external_sender, thread_id,
 	status, phase, action_status, component_kind, severity, inbox_only, components_json, attachments_json,
-	metadata_json, client_message_id, source_app, callback_tool, queue_behavior, queue_state, queue_position, created_at, revision`
+	metadata_json, client_message_id, source_app, callback_tool, queue_behavior, queue_state, queue_position, created_at, revision, placed_after`
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var m Message
@@ -878,7 +881,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var componentsJSON, attachmentsJSON, metadataJSON, created string
 	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.UserID,
 		&m.ExternalSender, &m.ThreadID, &m.Status, &m.Phase, &m.ActionStatus, &m.ComponentKind, &m.Severity, &inboxOnly,
-		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &m.QueueBehavior, &m.QueueState, &m.QueuePosition, &created, &m.Revision); err != nil {
+		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &m.QueueBehavior, &m.QueueState, &m.QueuePosition, &created, &m.Revision, &m.PlacedAfter); err != nil {
 		return nil, err
 	}
 	m.InboxOnly = inboxOnly != 0
@@ -910,7 +913,33 @@ func (s *store) markQueueState(messageID int64, state string) (*Message, error) 
 	if state != "queued" && state != "released" && state != "steered" && state != "cancelled" {
 		return nil, fmt.Errorf("invalid queue state")
 	}
-	if _, err := s.db.Exec(`UPDATE messages SET queue_state=? WHERE id=? AND role='user'`, state, messageID); err != nil {
+	// A released or steered message reaches the agent now, so it is shown
+	// after everything already visible, not where it was typed: the reply it
+	// waited behind was saved after it was queued. The change is logged so
+	// open chats and the changes feed pick up the new state and place.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE messages SET queue_state=?,
+		placed_after=CASE WHEN ? IN ('released','steered') AND queue_state='queued' THEN COALESCE((
+			SELECT CASE WHEN MAX(o.id)>messages.id THEN MAX(o.id) ELSE 0 END FROM messages o
+			WHERE o.conversation_id=messages.conversation_id AND o.id<>messages.id AND o.queue_state<>'queued'),0)
+		ELSE placed_after END
+		WHERE id=? AND role='user' AND queue_state<>?`, state, state, messageID, state)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		if _, err := tx.Exec(`INSERT INTO message_changes(message_id,conversation_id) SELECT id,conversation_id FROM messages WHERE id=?`, messageID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE messages SET revision=last_insert_rowid() WHERE id=?`, messageID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.GetMessage(messageID)
