@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
@@ -22,6 +23,58 @@ type Target struct {
 	X        int
 	Y        int
 	HasPoint bool
+	// Progress, when set, records how far the upload got so a failure can say
+	// whether the file may already have reached the site.
+	Progress *Progress
+}
+
+// Upload phases, in order. A failure while resolving never touched the page;
+// a failure while assigning may or may not have handed the file to the page
+// (the browser can die after applying the files but before replying).
+const (
+	PhaseStaging   = "staging"   // copying the file to the browser host
+	PhaseResolving = "resolving" // finding the file input on the page
+	PhaseAssigning = "assigning" // handing the file to the page's input
+	PhaseAssigned  = "assigned"  // the page's input holds the file
+)
+
+// Progress is the last phase an upload reached. Safe for concurrent use.
+type Progress struct {
+	mu    sync.Mutex
+	phase string
+}
+
+func (p *Progress) Set(phase string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.phase = phase
+	p.mu.Unlock()
+}
+
+func (p *Progress) Phase() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.phase
+}
+
+// Dispatched reports whether the file reached the site: "false" before the
+// page's input was touched, "unknown" while it was being assigned, "true"
+// once assigned. Empty when no upload ran.
+func Dispatched(phase string) string {
+	switch phase {
+	case PhaseStaging, PhaseResolving:
+		return "false"
+	case PhaseAssigning:
+		return "unknown"
+	case PhaseAssigned:
+		return "true"
+	}
+	return ""
 }
 
 type Result struct {
@@ -43,6 +96,7 @@ func SetFiles(ctx context.Context, target Target, files []string) (Result, error
 	if len(files) == 0 {
 		return Result{}, fmt.Errorf("upload_file requires at least one file")
 	}
+	target.Progress.Set(PhaseResolving)
 	result, err := resolveUploadInput(ctx, target)
 	if err != nil {
 		return Result{}, err
@@ -55,10 +109,11 @@ func SetFiles(ctx context.Context, target Target, files []string) (Result, error
 	if result.backendNodeID != 0 {
 		assign = dom.SetFileInputFiles(files).WithBackendNodeID(result.backendNodeID)
 	}
+	target.Progress.Set(PhaseAssigning)
 	if err := cdputil.Run(ctx, assign); err != nil {
 		return Result{}, err
 	}
-
+	target.Progress.Set(PhaseAssigned)
 	return result, nil
 }
 
@@ -66,6 +121,7 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 	if len(payloads) == 0 {
 		return Result{}, fmt.Errorf("upload_file requires at least one file")
 	}
+	target.Progress.Set(PhaseResolving)
 	result, err := resolveUploadInput(ctx, target)
 	if err != nil {
 		return Result{}, err
@@ -116,6 +172,7 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 		Count int    `json:"count"`
 		Error string `json:"error,omitempty"`
 	}
+	target.Progress.Set(PhaseAssigning)
 	if result.backendNodeID != 0 {
 		err = callOnInput(ctx, result.backendNodeID, assignFunction, filesJSON, &out)
 	} else {
@@ -131,6 +188,7 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 	if !out.OK || out.Count != len(payloads) {
 		return Result{}, fmt.Errorf("upload_file payload assignment failed")
 	}
+	target.Progress.Set(PhaseAssigned)
 	return result, nil
 }
 

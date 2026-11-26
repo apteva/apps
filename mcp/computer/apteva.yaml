@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.16.0
+version: 0.16.1
 description: |
+  v0.16.1 upload_file failures report how far the file got: upload_phase
+  (staging, resolving, assigning) and site_upload_dispatched (false, unknown,
+  true), with a recover hint to check for an existing draft before retrying
+  when the file may already have reached the site. Success returns
+  site_upload_dispatched true.
   v0.16.0 adds computer_use action video_frames: copies frames from a page
   <video> at exact times (at_seconds or every_seconds) and returns them as
   images, even when a popup covers the player. Picks the playing video,
@@ -605,7 +610,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.16.0
+    ref: computer/v0.16.1
     entry: mcp/computer
   port: 8080
   health_check: /health

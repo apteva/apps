@@ -45,6 +45,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/elementread"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
+	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	localbrowser "github.com/apteva/apps/mcp/computer/internal/browser/local"
 	"github.com/apteva/apps/mcp/computer/internal/browser/mobile"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
@@ -66,8 +67,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.16.0
+version: 0.16.1
 description: |
+  v0.16.1 upload_file failures report how far the file got: upload_phase
+  (staging, resolving, assigning) and site_upload_dispatched (false, unknown,
+  true), with a recover hint to check for an existing draft before retrying
+  when the file may already have reached the site. Success returns
+  site_upload_dispatched true.
   v0.16.0 adds computer_use action video_frames: copies frames from a page
   <video> at exact times (at_seconds or every_seconds) and returns them as
   images, even when a popup covers the player. Picks the playing video,
@@ -319,7 +325,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.16.0
+    ref: computer/v0.16.1
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -371,6 +377,9 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
+	// failedUploadPhase is the phase a failing upload_file reached
+	// (fileupload.Phase*); set only while that failure is reported.
+	failedUploadPhase    string
 	diagnostics          bool // page diagnostics recording was requested at open
 	navigationBlocked    bool
 	inputUncertain       bool
@@ -3138,6 +3147,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		uploadCleanup = cleanup
 		defer uploadCleanup()
 	}
+	sess.failedUploadPhase = ""
 	if action == "select_option" && sess.backend != "local" && sess.backend != "browserbase" && sess.backend != "steel" && sess.backend != "browser-engine" {
 		return nil, computerUseFailure("backend_not_supported", id, sess, action,
 			fmt.Sprintf("backend %q does not support select_option yet", sess.backend),
@@ -3216,6 +3226,11 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		screenshotSkipped = true
 	}
 	if err != nil {
+		if action == "upload_file" {
+			if reporter, ok := sess.comp.(backends.UploadPhaseReporter); ok {
+				sess.failedUploadPhase = reporter.LastUploadPhase()
+			}
+		}
 		if out := a.navigationFailure(ctx, id, sess, action, err); out != nil {
 			return out, nil
 		}
@@ -3396,6 +3411,10 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	stableQuietMS := act.QuietMS
 	if stableQuietMS == 0 {
 		stableQuietMS = 1500
+	}
+	if action == "upload_file" && uploadMeta != nil {
+		uploadMeta["upload_phase"] = fileupload.PhaseAssigned
+		uploadMeta["site_upload_dispatched"] = true
 	}
 	for k, v := range uploadMeta {
 		payload[k] = v
@@ -3584,6 +3603,10 @@ func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, a
 	}
 	if cause != nil {
 		extra["error"] = cause.Error()
+	}
+	if sess != nil && action == "upload_file" && sess.failedUploadPhase != "" {
+		extra["upload_phase"] = sess.failedUploadPhase
+		extra["site_upload_dispatched"] = fileupload.Dispatched(sess.failedUploadPhase)
 	}
 	if _, err := a.finalizeSession(ctx, id, sess, "failed", closeReason, "session.closed", extra); err != nil && ctx != nil {
 		ctx.Logger().Warn("persist unhealthy browser session", "session_id", id, "err", err.Error())
@@ -6165,7 +6188,19 @@ func computerUseFailure(code, id string, sess *session, action, message, recover
 	if action == "upload_file" && (code == "invalid_target" || code == "stale_or_mismatched_target") {
 		recover = "Upload was not dispatched. Call computer_use(action=\"screenshot\", include_som=true), then retry action=upload_file using the visible Browse/upload control's fresh label or target_id and som_revision, plus the original source_url/base64/file_path and filename. Optional expected_name/expected_role guard a label/target_id; omit expected_text, expected_effect, and confirm_consequence. Do not click Browse or reuse a broad selector such as button."
 	}
+	var uploadParts []string
+	if action == "upload_file" && sess != nil && sess.failedUploadPhase != "" {
+		dispatched := fileupload.Dispatched(sess.failedUploadPhase)
+		uploadParts = []string{"upload_phase=" + sess.failedUploadPhase, "site_upload_dispatched=" + dispatched}
+		switch dispatched {
+		case "false":
+			recover = "The file never reached the site. " + recover
+		case "unknown", "true":
+			recover = "The file may already have reached the site (site_upload_dispatched=" + dispatched + "). Do not upload again blindly: " + recover + " Then check the site for an existing draft or uploaded file, and retry upload_file only if there is none."
+		}
+	}
 	parts := []string{fmt.Sprintf("%s: %s", code, message)}
+	parts = append(parts, uploadParts...)
 	if id != "" {
 		parts = append(parts, "session_id="+id)
 	}

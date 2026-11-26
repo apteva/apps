@@ -102,6 +102,8 @@ type Options struct {
 }
 
 type Computer struct {
+	// uploadProgress is the phase the latest upload_file reached.
+	uploadProgress   *fileupload.Progress
 	lastNavigation   *computer.NavigationDiagnostics
 	tabManager       *cdptabs.Manager
 	tabTrackers      map[string]*stability.Tracker
@@ -930,11 +932,15 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	return &clone
 }
 
+// LastUploadPhase implements computer.UploadPhaseReporter.
+func (c *Computer) LastUploadPhase() string { return c.uploadProgress.Phase() }
+
 func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
+	c.uploadProgress = &fileupload.Progress{}
 	if c.sessionID == "" {
 		return fileupload.Result{}, fmt.Errorf("browserbase: no active session")
 	}
-	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector}
+	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector, Progress: c.uploadProgress}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -950,6 +956,7 @@ func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error)
 	if payloads, ok := inlineUploadPayloads(action.Files); ok {
 		return fileupload.SetPayloads(ctx, target, payloads)
 	}
+	c.uploadProgress.Set(fileupload.PhaseStaging)
 	remoteFiles := make([]string, 0, len(action.Files))
 	for _, file := range action.Files {
 		remote, err := c.uploadSessionFile(file)

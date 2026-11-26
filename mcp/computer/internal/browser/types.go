@@ -40,6 +40,9 @@ type ElementReadOptions = api.ElementReadOptions
 type VideoFrameOptions = api.VideoFrameOptions
 type VideoFrameResult = api.VideoFrameResult
 type VideoFrameReader = api.VideoFrameReader
+
+// UploadPhaseReporter reports how far the latest upload_file got.
+type UploadPhaseReporter = api.UploadPhaseReporter
 type VideoFrameSkip = api.VideoFrameSkip
 type VideoFrame = api.VideoFrame
 type VideoInfo = api.VideoInfo

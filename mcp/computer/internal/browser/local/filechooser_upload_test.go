@@ -130,8 +130,18 @@ input.onchange=function(){document.querySelector('#status').textContent=this.fil
 		if fmt.Sprint(state) != "[false 0 0]" {
 			t.Fatalf("ambiguous upload dispatched: %v", state)
 		}
-		if _, err := fileupload.SetFiles(c.ctx, fileupload.Target{Selector: "#second"}, []string{path}); err != nil {
+		// The ambiguous selector stopped while resolving: the page was never
+		// touched, so the file did not reach the site.
+		failed := &fileupload.Progress{}
+		if _, err := fileupload.SetFiles(c.ctx, fileupload.Target{Selector: "input[type=file]", Progress: failed}, []string{path}); err == nil || failed.Phase() != fileupload.PhaseResolving || fileupload.Dispatched(failed.Phase()) != "false" {
+			t.Fatalf("rejected upload phase %q: %v", failed.Phase(), err)
+		}
+		done := &fileupload.Progress{}
+		if _, err := fileupload.SetFiles(c.ctx, fileupload.Target{Selector: "#second", Progress: done}, []string{path}); err != nil {
 			t.Fatalf("unique selector rejected: %v", err)
+		}
+		if done.Phase() != fileupload.PhaseAssigned || fileupload.Dispatched(done.Phase()) != "true" {
+			t.Fatalf("successful upload phase %q", done.Phase())
 		}
 	})
 	t.Run("resolved_input_removed_before_assignment", func(t *testing.T) {
