@@ -531,3 +531,11 @@ until a successful explicit read-only navigation or an explicit context reopen
 after inspection. An uncertain upload, Save or input is never replayed; inspect
 its outcome and reopen explicitly before proceeding. `read_only` is an assertion
 about the workflow, never a way to acknowledge an uncertain write.
+
+When `upload_file` fails, the error says how far the file got:
+`upload_phase` (`staging`, `resolving`, `assigning`) and `site_upload_dispatched`.
+`false` means the site never received the file: reopen and retry. `unknown` (the
+browser died while the page's input took the file) or `true` means the site may
+already hold it: reopen the context, look for an existing draft or uploaded file,
+and retry only if there is none. A successful upload returns
+`site_upload_dispatched: true`.

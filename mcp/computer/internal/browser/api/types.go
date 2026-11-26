@@ -562,6 +562,13 @@ type VideoFrameResult struct {
 	RetryAt []float64 `json:"retry_at_seconds,omitempty"`
 }
 
+// UploadPhaseReporter reports the phase the latest upload_file reached
+// (fileupload.Phase*), so a failure can say whether the file may already
+// have reached the site.
+type UploadPhaseReporter interface {
+	LastUploadPhase() string
+}
+
 // VideoFrameReader is implemented by DOM-backed providers. It pauses and
 // mutes the chosen video while copying, then restores its prior state.
 type VideoFrameReader interface {

@@ -71,14 +71,16 @@ type Options struct {
 }
 
 type Computer struct {
-	tabManager  *cdptabs.Manager
-	tabTrackers map[string]*stability.Tracker
-	display     computer.DisplaySize
-	opts        Options
-	allocCtx    context.Context
-	ctx         context.Context
-	cancel      context.CancelFunc
-	allocCancel context.CancelFunc
+	// uploadProgress is the phase the latest upload_file reached.
+	uploadProgress *fileupload.Progress
+	tabManager     *cdptabs.Manager
+	tabTrackers    map[string]*stability.Tracker
+	display        computer.DisplaySize
+	opts           Options
+	allocCtx       context.Context
+	ctx            context.Context
+	cancel         context.CancelFunc
+	allocCancel    context.CancelFunc
 	// proxyActive tracks whether the *current* Chrome process was
 	// launched through ProxyURL. relaunchIfProxyChanged compares
 	// this to the agent's intent on each OpenSession to decide
@@ -1244,8 +1246,12 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	return &clone
 }
 
+// LastUploadPhase implements computer.UploadPhaseReporter.
+func (c *Computer) LastUploadPhase() string { return c.uploadProgress.Phase() }
+
 func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
-	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector}
+	c.uploadProgress = &fileupload.Progress{}
+	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector, Progress: c.uploadProgress}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
