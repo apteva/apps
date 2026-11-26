@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const overviewLimit = 12
@@ -36,6 +38,7 @@ type overviewItem struct {
 	AssignmentID   string         `json:"assignment_id"`
 	AssignmentName string         `json:"assignment_name"`
 	AgentID        int64          `json:"agent_id"`
+	AgentName      string         `json:"agent_name,omitempty"`
 	Version        int            `json:"version"`
 	State          string         `json:"state"`
 	Backend        string         `json:"backend"`
@@ -241,7 +244,13 @@ func (a *App) overview(project string) (*processOverview, error) {
 // merged here. This keeps the read boundary explicit and prevents a global
 // widget from discovering data outside the platform's project projection.
 func (a *App) overviewGlobal(selector string) (*processOverview, error) {
-	api := a.ctx.PlatformAPI()
+	return a.overviewGlobalVia(a.ctx.PlatformAPI(), selector)
+}
+
+// overviewGlobalVia is overviewGlobal with an explicit platform client. The
+// dashboard route passes one carrying the viewer's session, so the project
+// list (and agent names) are the viewer's, not the installation's.
+func (a *App) overviewGlobalVia(api sdk.PlatformClient, selector string) (*processOverview, error) {
 	if api == nil {
 		return nil, errors.New("platform project directory unavailable")
 	}
@@ -351,10 +360,43 @@ func (a *App) overviewGlobal(selector string) (*processOverview, error) {
 	if len(out.LiveSteps) > 24 {
 		out.LiveSteps = out.LiveSteps[:24]
 	}
+	nameOverviewAgents(api, out)
 	if out.Partial {
 		out.Coverage = "Partial overview: " + strings.Join(out.Warnings, " ")
 	}
 	return out, nil
+}
+
+// nameOverviewAgents fills agent_name on the rows a global overview returns,
+// listing each project's agents once. The widget has no project to ask for
+// agents in global scope, so the names travel with the rows. Names are
+// cosmetic: a project whose agents cannot be listed keeps bare ids.
+func nameOverviewAgents(api sdk.PlatformClient, out *processOverview) {
+	names := map[string]map[int64]string{}
+	lookup := func(project string, id int64) string {
+		if project == "" || id <= 0 {
+			return ""
+		}
+		known, ok := names[project]
+		if !ok {
+			known = map[int64]string{}
+			if agents, err := sdk.ListAgentsVia(api, project); err == nil {
+				for _, agent := range agents {
+					known[agent.ID] = agent.Name
+				}
+			}
+			names[project] = known
+		}
+		return known[id]
+	}
+	for _, items := range [][]overviewItem{out.Active, out.Upcoming, out.Recent, out.Attention} {
+		for i := range items {
+			items[i].AgentName = lookup(items[i].ProjectID, items[i].AgentID)
+		}
+	}
+	for i := range out.Assignments {
+		out.Assignments[i].AgentName = lookup(out.Assignments[i].ProjectID, out.Assignments[i].AgentID)
+	}
 }
 func newer(a, b string) bool {
 	ta, _ := time.Parse(time.RFC3339Nano, a)

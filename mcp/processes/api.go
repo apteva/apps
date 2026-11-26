@@ -528,6 +528,26 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project scope mismatch", 403)
 		return
 	}
+	if isOverview {
+		switch strings.TrimSpace(r.URL.Query().Get("scope")) {
+		case "":
+		case "global":
+			if a.ctx.CurrentProject() != "" {
+				http.Error(w, "all projects overview needs a global installation", 400)
+				return
+			}
+			a.handleGlobalOverview(w, r)
+			return
+		default:
+			http.Error(w, "scope must be global when provided", 400)
+			return
+		}
+		// Widgets before 0.25.2 send no scope from All projects.
+		if a.ctx.CurrentProject() == "" && strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")) == "" && r.Method == "GET" {
+			a.handleGlobalOverview(w, r)
+			return
+		}
+	}
 	if project == "" && !isOverview {
 		http.Error(w, "project context required", 403)
 		return

@@ -38,6 +38,7 @@ export type Item = {
   assignment_id?: string;
   assignment_name?: string;
   agent_id?: number;
+  agent_name?: string;
   version?: number;
   state: string;
   backend?: string;
@@ -73,6 +74,7 @@ export type OverviewAssignment = {
   process_name: string;
   name: string;
   agent_id: number;
+  agent_name?: string;
   start: "schedule" | "event" | "manual";
   schedule?: Item["schedule"];
   next_run_at?: string;
@@ -563,6 +565,23 @@ export function assignmentRunState(x: OverviewAssignment): { state: string; labe
   return { state: "waiting", label: x.ongoing_count > 1 ? `${x.ongoing_count} open runs` : "Open run" };
 }
 
+/** How often the All projects widget reloads; it gets no live app events. */
+export const GLOBAL_REFRESH_MS = 15000;
+
+/** Agent names a global overview carries on its rows, keyed by agent id. */
+export function rowAgentNames(data: Data): Record<number, string> {
+  const out: Record<number, string> = {};
+  const rows: Array<{ agent_id?: number; agent_name?: string }> = [
+    ...(data.active || []),
+    ...(data.upcoming || []),
+    ...(data.recent || []),
+    ...(data.attention || []),
+    ...(data.assignments || []),
+  ];
+  for (const x of rows) if (x.agent_id && x.agent_name) out[x.agent_id] = x.agent_name;
+  return out;
+}
+
 export function eventSummary(data: Data) {
   const events = (data.assignments || []).filter((x) => x.start === "event");
   return {
@@ -994,6 +1013,7 @@ function Overview(props: Props) {
     let alive = true;
     const c = new AbortController();
     const q = new URLSearchParams();
+    if (global) q.set("scope", "global");
     if (props.projectId) q.set("project_id", props.projectId);
     if (global && projectFilter) q.set("project_id", projectFilter);
     if (props.installId) q.set("install_id", String(props.installId));
@@ -1009,6 +1029,8 @@ function Overview(props: Props) {
         if (alive) {
           setData(d);
           setError("");
+          // No project to list agents from: names come with the rows.
+          if (global) setNames(rowAgentNames(d));
         }
       })
       .catch((e) => {
@@ -1027,9 +1049,16 @@ function Overview(props: Props) {
     props.eventRevision,
     refresh,
   ]);
+  // All projects gets no live app events: refresh on a timer while visible.
   useEffect(() => {
-    const global = props.dashboardScope === "global";
-    if (!global && !props.projectId) return;
+    if (props.dashboardScope !== "global") return;
+    const timer = setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") setRefresh((n) => n + 1);
+    }, GLOBAL_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [props.dashboardScope]);
+  useEffect(() => {
+    if (props.dashboardScope === "global" || !props.projectId) return;
     let alive = true;
     const c = new AbortController();
     const agentQuery = props.projectId

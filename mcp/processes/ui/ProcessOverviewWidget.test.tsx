@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import Widget, {
   overviewLink,
   assignmentRunState,
+  rowAgentNames,
+  GLOBAL_REFRESH_MS,
   overviewQueue,
   executionStatus,
   currentStepLabel,
@@ -148,6 +150,8 @@ test("global overview loads without a project, labels results and filters by vis
   data.active[0].process_name = "Alpha process";
   data.upcoming[0].project_id = "project-b";
   data.upcoming[0].project_name = "Beta";
+  data.active[0].agent_name = "Alpha writer";
+  data.assignments![0] = { ...data.assignments![0], project_id: "project-a", project_name: "Alpha", agent_name: "Alpha writer" };
   const reads: string[] = [];
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
@@ -165,10 +169,19 @@ test("global overview loads without a project, labels results and filters by vis
   );
   expect(
     reads.some(
-      (url) => url === "/api/apps/processes/processes/overview?install_id=88",
+      (url) => url === "/api/apps/processes/processes/overview?scope=global&install_id=88",
     ),
   ).toBe(true);
+  // No project to list agents from: names come from the rows.
+  expect(reads.some((url) => url.startsWith("/api/agents"))).toBe(false);
   expect(el.textContent).toContain("Alpha");
+  await act(async () => {
+    Array.from(el.querySelectorAll("button")).find((b) => b.textContent === "Assignments")!.click();
+  });
+  const row = el.querySelector(".po-assignment-row")!;
+  expect(row.textContent).toContain("Alpha writer");
+  // Links carry the row's own project, not the (empty) widget project.
+  expect(row.getAttribute("href")).toContain("project_id=project-a");
   expect(el.querySelector('select[aria-label="Filter by project"]')).not.toBeNull();
   await act(async () => {
     const select = el.querySelector<HTMLSelectElement>('select[aria-label="Filter by project"]')!;
@@ -177,7 +190,7 @@ test("global overview loads without a project, labels results and filters by vis
   });
   expect(
     reads.some(
-      (url) => url === "/api/apps/processes/processes/overview?project_id=project-b&install_id=88",
+      (url) => url === "/api/apps/processes/processes/overview?scope=global&project_id=project-b&install_id=88",
     ),
   ).toBe(true);
 });
@@ -353,4 +366,12 @@ test("assignment badge names the open run's real state", () => {
   expect(assignmentRunState({ ...base, ongoing_count: 1, live_run_id: "r", live_run_state: "waiting" })?.label).toBe("Waiting");
   // A 0.25.0 backend sends no state: never claim Running.
   expect(assignmentRunState({ ...base, ongoing_count: 2, live_run_id: "r" })?.label).toBe("2 open runs");
+});
+
+test("global rows name their agents and the widget refreshes itself", () => {
+  const data: Data = structuredClone(overviewFixture);
+  data.active[0].agent_name = "Alpha writer";
+  data.assignments![1] = { ...data.assignments![1], agent_id: 9, agent_name: "Beta triage" };
+  expect(rowAgentNames(data)).toEqual({ 7: "Alpha writer", 9: "Beta triage" });
+  expect(GLOBAL_REFRESH_MS).toBe(15000);
 });

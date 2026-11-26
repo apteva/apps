@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Viewer-scoped All projects widget (0.25.2)
+
+The global overview lists only the viewer's projects, names agents on each
+row, and refreshes on a timer. See `docs-release-0.25.2.md`.
+
 ## Assignment badge follows the run state (0.25.1)
 
 The widget shows Blocked or Waiting instead of Running for open runs that

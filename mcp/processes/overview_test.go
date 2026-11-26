@@ -15,6 +15,7 @@ import (
 func overviewGET(t *testing.T, a *App, path, project string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest("GET", path, nil)
+	r.Header.Set("X-User-ID", "1")
 	if project != "" {
 		r.Header.Set("X-Apteva-Project-ID", project)
 	}

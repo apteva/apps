@@ -18,6 +18,7 @@ type overviewAssignment struct {
 	ProcessName    string                     `json:"process_name"`
 	Name           string                     `json:"name"`
 	AgentID        int64                      `json:"agent_id"`
+	AgentName      string                     `json:"agent_name,omitempty"`
 	Start          string                     `json:"start"` // schedule, event or manual
 	Schedule       *Schedule                  `json:"schedule,omitempty"`
 	NextRunAt      string                     `json:"next_run_at,omitempty"`
