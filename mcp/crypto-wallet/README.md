@@ -10,14 +10,22 @@ service provider (MiCA in the EU, money-transmitter rules in the US).
 
 | | agents (MCP tools) | people (panel) |
 |---|---|---|
-| list wallets, balances, receive address, history | yes | yes |
-| propose a transfer | yes | (approve only) |
-| propose a recipient | yes, waits for approval + delay | add directly |
-| create wallet, change policy, freeze, export key | no | yes |
-| approve or reject | no | yes, in the panel or the Conversations inbox |
+| list wallets, balances, receive address, history, pending approvals | `wallets.read` | yes |
+| propose a transfer | `transfers.propose` | (approve only) |
+| propose a recipient | `recipients.propose`, waits for approval + delay | add directly |
+| approve or reject transfers and recipients | `approvals.decide` | yes |
+| create wallet, change policy, freeze, export key | no tool | yes |
 
-Panel routes require the platform's operator header and the app token; the
-approval callback tool is app-only and accepts calls only from Conversations.
+Each MCP tool requires one of the app's declared permissions, so which agent
+may do what is set with the platform's grants (per install and agent; the
+default effect is allow). A common setup: deny `approvals.decide` by default
+and allow it for the one agent that acts for the treasurer. Decisions record
+the user or agent that made them. Panel routes require the platform's operator
+header and the app token.
+
+When something needs approval the app publishes
+`crypto_wallet.approval.requested`; subscribe to it to notify people. Nothing
+waits on a reply.
 
 ## Policy
 
@@ -25,7 +33,7 @@ Checked in this order, inside one database transaction under a per-wallet lock,
 before anything is signed: frozen, token list, recipient allowlist (and its
 waiting period for agent-proposed addresses), per-transfer cap, rolling 24h cap,
 pending-approval limit, approval threshold. Approved transfers are re-checked
-at approval time. Defaults: $100 per transfer, $250 per 24h, approval above $25,
+at approval time, whoever approves. Defaults: $100 per transfer, $250 per 24h, approval above $25,
 USDC only, 24h delay for agent-proposed recipients. Every policy change is a new
 version; the ledger table is append-only (triggers abort UPDATE and DELETE).
 

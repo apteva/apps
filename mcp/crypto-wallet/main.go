@@ -32,8 +32,7 @@ type App struct {
 	locksMu sync.Mutex
 	locks   map[int64]*sync.Mutex // one per wallet: proposals for a wallet run one at a time
 
-	postApproval  approvalPoster // nil = Conversations inbox_post; tests override
-	syncApprovals bool           // tests: post approval cards inline instead of in a goroutine
+	onEmit func(topic string, data map[string]any) // tests: capture published events
 }
 
 func newApp() *App {
@@ -115,6 +114,9 @@ func (a *App) client(chain *chainInfo) chainClient {
 }
 
 func (a *App) emit(topic string, data map[string]any) {
+	if a.onEmit != nil {
+		a.onEmit(topic, data)
+	}
 	if a.ctx != nil {
 		a.ctx.Emit(topic, data)
 	}

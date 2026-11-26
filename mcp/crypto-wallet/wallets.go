@@ -251,11 +251,11 @@ func (a *App) proposeRecipient(walletID int64, address, label, reason string, ag
 	if err != nil || !created {
 		return r, false, err
 	}
-	a.requestRecipientApproval(r)
+	a.announceRecipientApproval(r)
 	return r, true, nil
 }
 
-func (a *App) decideRecipient(id int64, approve bool, actor, via, note string, userID int64) (*Recipient, error) {
+func (a *App) decideRecipient(id int64, approve bool, actor, via, note string, userID, agentID int64) (*Recipient, error) {
 	now := a.now()
 	var r *Recipient
 	err := a.withTx(func(tx *sql.Tx) error {
@@ -274,12 +274,12 @@ func (a *App) decideRecipient(id int64, approve bool, actor, via, note string, u
 			}
 			status, usable = "approved", ts(now.Add(time.Duration(p.NewRecipientDelayHours)*time.Hour))
 		}
-		if _, err := tx.Exec(`UPDATE allowlist SET status = ?, decided_by = ?, decided_at = ?, usable_after = ? WHERE id = ?`,
-			status, userID, ts(now), usable, id); err != nil {
+		if _, err := tx.Exec(`UPDATE allowlist SET status = ?, decided_by = ?, decided_by_agent = ?, decided_at = ?, usable_after = ? WHERE id = ?`,
+			status, userID, agentID, ts(now), usable, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO approvals (subject, subject_id, decision, decided_by, via, note, created_at)
-			VALUES ('recipient', ?, ?, ?, ?, ?, ?)`, id, decisionWord(approve), userID, via, note, ts(now)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO approvals (subject, subject_id, decision, decided_by, decided_by_agent, via, note, created_at)
+			VALUES ('recipient', ?, ?, ?, ?, ?, ?, ?)`, id, decisionWord(approve), userID, agentID, via, clip(note, 500), ts(now)); err != nil {
 			return err
 		}
 		if err := appendLedger(tx, cur.WalletID, "recipient."+status, actor, 0, map[string]any{"address": cur.Address, "via": via, "usable_after": usable, "note": note}, now); err != nil {

@@ -24,9 +24,11 @@ func schema(required []string, props map[string]any) map[string]any {
 
 var walletIDProp = prop("integer", "Wallet id from crypto_wallet_list.")
 
-// MCPTools: agents can read and propose. Nothing here creates a wallet,
-// changes a policy, approves, freezes or exports a key; those are panel
-// routes that require an authenticated person.
+// MCPTools: read, propose, and decide pending approvals. Which agent may
+// call which tool is the operator's grant on the permission each tool
+// requires (see apteva.yaml provides.permissions); the SDK enforces it
+// before a handler runs. Creating wallets, changing policies, freezing and
+// exporting keys stay panel-only.
 func (a *App) MCPTools() []sdk.Tool {
 	readOnly := map[string]any{"readOnlyHint": true}
 	return []sdk.Tool{
@@ -92,11 +94,35 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx:  a.toolProposalStatus,
 		},
 		{
-			Name:        approvalCallbackTool,
-			Description: "Internal: receives approval decisions from Conversations cards.",
-			InputSchema: schema([]string{"message_id"}, map[string]any{"message_id": prop("integer", ""), "action_id": prop("string", ""), "note": prop("string", "")}),
-			Exposure:    sdk.ToolExposureAppOnly,
-			HandlerCtx:  a.toolApprovalCallback,
+			Name:        "crypto_wallet_approvals_pending",
+			Description: "Transfers and recipients waiting for approval, oldest first. Omit wallet_id for every wallet.",
+			InputSchema: schema(nil, map[string]any{"wallet_id": prop("integer", "Optional wallet id from crypto_wallet_list.")}),
+			Annotations: readOnly,
+			HandlerCtx:  a.toolApprovalsPending,
+		},
+		{
+			Name: "crypto_wallet_proposal_decide",
+			Description: "Approve or reject a transfer waiting for approval. Approving re-checks every rule (freeze, token list, allowlist, caps) and, if they pass, " +
+				"signs and broadcasts it; that cannot be undone. Only decide when the person you work for asked you to.",
+			InputSchema: schema([]string{"proposal_id", "decision"}, map[string]any{
+				"proposal_id": prop("integer", "Proposal id in pending_approval."),
+				"decision":    map[string]any{"type": "string", "enum": []string{"approve", "reject"}},
+				"note":        prop("string", "Why, recorded in the log."),
+			}),
+			Annotations: map[string]any{"destructiveHint": true},
+			HandlerCtx:  a.toolProposalDecide,
+		},
+		{
+			Name: "crypto_wallet_recipient_decide",
+			Description: "Approve or reject an address waiting to join a wallet's allowlist. An approved address proposed by an agent can receive funds only after the " +
+				"policy's waiting period. Only decide when the person you work for asked you to.",
+			InputSchema: schema([]string{"recipient_id", "decision"}, map[string]any{
+				"recipient_id": prop("integer", "Recipient id from crypto_wallet_approvals_pending or crypto_wallet_recipient_propose."),
+				"decision":     map[string]any{"type": "string", "enum": []string{"approve", "reject"}},
+				"note":         prop("string", "Why, recorded in the log."),
+			}),
+			Annotations: map[string]any{"destructiveHint": true},
+			HandlerCtx:  a.toolRecipientDecide,
 		},
 	}
 }
@@ -197,7 +223,7 @@ func (a *App) toolRecipientPropose(ctx context.Context, _ *sdk.AppCtx, args map[
 	if err != nil {
 		return nil, err
 	}
-	msg := "Waiting for a person to approve this recipient."
+	msg := "Waiting for approval in the panel or by an agent allowed to approve."
 	switch {
 	case !created && r.Status == "approved":
 		msg = "Already on the allowlist."
@@ -210,6 +236,67 @@ func (a *App) toolRecipientPropose(ctx context.Context, _ *sdk.AppCtx, args map[
 		msg = "Already waiting for approval."
 	}
 	return map[string]any{"recipient": r, "message": msg}, nil
+}
+
+func (a *App) toolApprovalsPending(_ context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	wallets, err := listWallets(a.db)
+	if err != nil {
+		return nil, err
+	}
+	only := int64Arg(args, "wallet_id")
+	transfers, recipients := []map[string]any{}, []*Recipient{}
+	for _, w := range wallets {
+		if only > 0 && w.ID != only {
+			continue
+		}
+		props, err := listProposals(a.db, w.ID, []string{"pending_approval"}, 100)
+		if err != nil {
+			return nil, err
+		}
+		for i := len(props) - 1; i >= 0; i-- { // listed newest first
+			v := a.proposalView(props[i])
+			v["wallet_name"] = w.Name
+			transfers = append(transfers, v)
+		}
+		rs, err := listRecipients(a.db, w.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rs {
+			if r.Status == "pending" {
+				recipients = append(recipients, r)
+			}
+		}
+	}
+	return map[string]any{"transfers": transfers, "recipients": recipients}, nil
+}
+
+func (a *App) toolProposalDecide(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	approve, err := parseDecision(args)
+	if err != nil {
+		return nil, err
+	}
+	actor, agentID := toolDecider(ctx)
+	bctx, cancel := bg()
+	defer cancel()
+	p, err := a.decideProposal(bctx, int64Arg(args, "proposal_id"), approve, actor, "mcp", strArg(args, "note"), 0, agentID)
+	if err != nil {
+		return nil, err
+	}
+	return a.proposalView(p), nil
+}
+
+func (a *App) toolRecipientDecide(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	approve, err := parseDecision(args)
+	if err != nil {
+		return nil, err
+	}
+	actor, agentID := toolDecider(ctx)
+	r, err := a.decideRecipient(int64Arg(args, "recipient_id"), approve, actor, "mcp", strArg(args, "note"), 0, agentID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"recipient": r}, nil
 }
 
 func (a *App) toolProposalStatus(_ context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -232,7 +319,7 @@ func (a *App) proposalView(p *Proposal) map[string]any {
 	case "refused":
 		out["message"] = "Refused by rule " + p.RefusalRule + ": " + p.RefusalDetail
 	case "pending_approval":
-		out["message"] = "Waiting for a person to approve it. Do not submit it again."
+		out["message"] = "Waiting for approval in the panel or by an agent allowed to approve. Do not submit it again."
 	case "sent":
 		out["message"] = "Broadcast. It confirms within a few seconds on Base; check crypto_wallet_proposal_status."
 	case "confirmed":

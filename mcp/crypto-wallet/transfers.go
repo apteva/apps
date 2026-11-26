@@ -131,11 +131,7 @@ func (a *App) proposeTransfer(ctx context.Context, req transferRequest) (*Propos
 	case "execute":
 		p = a.executeLocked(ctx, w, chain, p)
 	case "needs_approval":
-		if a.syncApprovals {
-			a.requestTransferApproval(w, p)
-		} else {
-			go a.requestTransferApproval(w, p) // posting can be slow; the proposal is already stored
-		}
+		a.announceTransferApproval(w, p)
 	}
 	return p, nil
 }
@@ -143,7 +139,7 @@ func (a *App) proposeTransfer(ctx context.Context, req transferRequest) (*Propos
 // decideProposal records a person's decision. Approval re-runs every rule
 // except the approval threshold, so a freeze or a cap reached in the
 // meantime still stops the transfer.
-func (a *App) decideProposal(ctx context.Context, id int64, approve bool, actor, via, note string, userID int64) (*Proposal, error) {
+func (a *App) decideProposal(ctx context.Context, id int64, approve bool, actor, via, note string, userID, agentID int64) (*Proposal, error) {
 	p, err := getProposal(a.db, id)
 	if err != nil {
 		return nil, err
@@ -170,8 +166,8 @@ func (a *App) decideProposal(ctx context.Context, id int64, approve bool, actor,
 		if cur.State != "pending_approval" {
 			return fmt.Errorf("proposal is already %s", cur.State)
 		}
-		if _, err := tx.Exec(`INSERT INTO approvals (subject, subject_id, decision, decided_by, via, note, created_at)
-			VALUES ('proposal', ?, ?, ?, ?, ?, ?)`, id, decisionWord(approve), userID, via, clip(note, 500), ts(now)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO approvals (subject, subject_id, decision, decided_by, decided_by_agent, via, note, created_at)
+			VALUES ('proposal', ?, ?, ?, ?, ?, ?, ?)`, id, decisionWord(approve), userID, agentID, via, clip(note, 500), ts(now)); err != nil {
 			return err
 		}
 		if !approve {

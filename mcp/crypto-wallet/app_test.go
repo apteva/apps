@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -98,14 +100,17 @@ func (p fixedPrices) USDMicros(_ context.Context, symbol string, amount *big.Int
 	return 0, errors.New("no price")
 }
 
-type card struct{ title, body string }
+type event struct {
+	topic string
+	data  map[string]any
+}
 
 type harness struct {
-	t     *testing.T
-	app   *App
-	chain *fakeChain
-	cards []card
-	clock time.Time
+	t      *testing.T
+	app    *App
+	chain  *fakeChain
+	events []event
+	clock  time.Time
 }
 
 const (
@@ -121,12 +126,19 @@ func newHarness(t *testing.T) *harness {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	schema, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatal("no migrations", err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatal(err)
+	sort.Strings(files)
+	for _, f := range files {
+		schema, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatal(f, err)
+		}
 	}
 	h := &harness{t: t, chain: &fakeChain{chainID: 84532, head: 100, receipts: map[string]*txReceipt{}}, clock: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
 	master, _ := parseMasterKey(base64.StdEncoding.EncodeToString(make([]byte, 32)))
@@ -136,11 +148,7 @@ func newHarness(t *testing.T) *harness {
 	a.prices = fixedPrices{ethUSD: 3000}
 	a.now = func() time.Time { return h.clock }
 	a.clients["base-sepolia"] = h.chain
-	a.syncApprovals = true
-	a.postApproval = func(_, title, body string) (int64, error) {
-		h.cards = append(h.cards, card{title, body})
-		return int64(1000 + len(h.cards)), nil
-	}
+	a.onEmit = func(topic string, data map[string]any) { h.events = append(h.events, event{topic, data}) }
 	h.app = a
 	return h
 }
@@ -168,6 +176,15 @@ func (h *harness) propose(w *Wallet, token, to, amount string) *Proposal {
 		h.t.Fatal(err)
 	}
 	return p
+}
+
+func (h *harness) lastEvent(topic string) map[string]any {
+	for i := len(h.events) - 1; i >= 0; i-- {
+		if h.events[i].topic == topic {
+			return h.events[i].data
+		}
+	}
+	return nil
 }
 
 func agentCtx(agentID int64, toolCall string) context.Context {
@@ -211,11 +228,12 @@ func TestRules(t *testing.T) {
 	if p := h.propose(w, "USDC", alice, "150"); p.RefusalRule != "per_transfer_cap" {
 		t.Fatalf("over per-transfer cap: %s", p.RefusalRule)
 	}
-	if p := h.propose(w, "USDC", alice, "30"); p.State != "pending_approval" || len(h.cards) != 1 {
-		t.Fatalf("above threshold: %s, cards=%d", p.State, len(h.cards))
+	p := h.propose(w, "USDC", alice, "30")
+	if p.State != "pending_approval" {
+		t.Fatalf("above threshold: %s", p.State)
 	}
-	if !strings.Contains(h.cards[0].title, "30 USDC") {
-		t.Fatalf("card title %q", h.cards[0].title)
+	if ev := h.lastEvent("crypto_wallet.approval.requested"); ev == nil || ev["proposal_id"] != p.ID || ev["amount"] != "30" {
+		t.Fatalf("approval.requested event %v", ev)
 	}
 	if _, err := h.app.setFrozen(w.ID, true, "test", "user:7"); err != nil {
 		t.Fatal(err)
@@ -307,7 +325,7 @@ func TestRetriedToolCallDoesNotPayTwice(t *testing.T) {
 	}
 }
 
-func TestApprovalCallbackOnlyFromConversations(t *testing.T) {
+func TestDecideToolsApproveAndRecordTheAgent(t *testing.T) {
 	h := newHarness(t)
 	w := h.wallet()
 	h.allow(w, alice)
@@ -315,39 +333,40 @@ func TestApprovalCallbackOnlyFromConversations(t *testing.T) {
 	if p.State != "pending_approval" {
 		t.Fatal(p.State)
 	}
-	p, _ = getProposal(h.app.db, p.ID)
-	args := map[string]any{"message_id": float64(p.ApprovalMessageID), "action_id": "approve"}
-
-	for name, c := range map[string]*sdk.Caller{
-		"no caller":   nil,
-		"agent":       {AgentID: 42},
-		"other app":   {AppName: "crm", AppInstallID: 9},
-		"spoof agent": {AgentID: 42, AppName: "conversations", AppInstallID: 3},
-	} {
-		ctx := context.Background()
-		if c != nil {
-			ctx = sdk.WithCaller(ctx, c)
-		}
-		if _, err := h.app.toolApprovalCallback(ctx, nil, args); err == nil {
-			t.Fatalf("%s was allowed to approve", name)
-		}
+	out, err := h.app.toolApprovalsPending(context.Background(), nil, map[string]any{})
+	if err != nil || len(out.(map[string]any)["transfers"].([]map[string]any)) != 1 {
+		t.Fatalf("pending list: %v %v", out, err)
+	}
+	if _, err := h.app.toolProposalDecide(agentCtx(43, ""), nil, map[string]any{"proposal_id": float64(p.ID), "decision": "maybe"}); err == nil {
+		t.Fatal("unknown decision accepted")
 	}
 	if len(h.chain.sent) != 0 {
-		t.Fatal("sent before a real approval")
+		t.Fatal("sent before approval")
 	}
-
-	ctx := sdk.WithCaller(context.Background(), &sdk.Caller{AppName: "conversations", AppInstallID: 3})
-	out, err := h.app.toolApprovalCallback(ctx, nil, args)
+	res, err := h.app.toolProposalDecide(agentCtx(43, ""), nil, map[string]any{"proposal_id": float64(p.ID), "decision": "approve", "note": "user asked"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := out.(map[string]any)["proposal"].(*Proposal); got.State != "sent" {
+	if got := res.(map[string]any)["proposal"].(*Proposal); got.State != "sent" || len(h.chain.sent) != 1 {
 		t.Fatalf("after approval: %s %s", got.State, got.Error)
 	}
-	// A second delivery of the same decision is harmless.
-	out, _ = h.app.toolApprovalCallback(ctx, nil, args)
-	if out.(map[string]any)["ok"] != false || len(h.chain.sent) != 1 {
-		t.Fatal("duplicate approval delivery sent again")
+	var agent int64
+	var via string
+	if err := h.app.db.QueryRow(`SELECT decided_by_agent, via FROM approvals WHERE subject = 'proposal' AND subject_id = ?`, p.ID).Scan(&agent, &via); err != nil || agent != 43 || via != "mcp" {
+		t.Fatalf("approval record: agent=%d via=%s %v", agent, via, err)
+	}
+	entries, _ := listLedger(h.app.db, w.ID, 50)
+	found := false
+	for _, e := range entries {
+		if e.Kind == "transfer.approved" && e.Actor == "agent:43" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ledger does not name the approving agent")
+	}
+	if _, err := h.app.toolProposalDecide(agentCtx(43, ""), nil, map[string]any{"proposal_id": float64(p.ID), "decision": "approve"}); err == nil || len(h.chain.sent) != 1 {
+		t.Fatal("a decided proposal was approved twice")
 	}
 }
 
@@ -359,7 +378,7 @@ func TestApprovalRechecksRules(t *testing.T) {
 	if _, err := h.app.setFrozen(w.ID, true, "incident", "user:7"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := h.app.decideProposal(context.Background(), p.ID, true, "user:7", "panel", "", 7)
+	got, err := h.app.decideProposal(context.Background(), p.ID, true, "user:7", "panel", "", 7, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,11 +392,11 @@ func TestRejectedTransferNeverSends(t *testing.T) {
 	w := h.wallet()
 	h.allow(w, alice)
 	p := h.propose(w, "USDC", alice, "40")
-	got, err := h.app.decideProposal(context.Background(), p.ID, false, "user:7", "panel", "no", 7)
+	got, err := h.app.decideProposal(context.Background(), p.ID, false, "user:7", "panel", "no", 7, 0)
 	if err != nil || got.State != "rejected" || len(h.chain.sent) != 0 {
 		t.Fatalf("%v %s", err, got.State)
 	}
-	if _, err := h.app.decideProposal(context.Background(), p.ID, true, "user:7", "panel", "", 7); err == nil {
+	if _, err := h.app.decideProposal(context.Background(), p.ID, true, "user:7", "panel", "", 7, 0); err == nil {
 		t.Fatal("a rejected proposal was approved later")
 	}
 }
@@ -389,14 +408,13 @@ func TestAgentProposedRecipientWaits(t *testing.T) {
 	if err != nil || !created || r.Status != "pending" || r.Address != bob {
 		t.Fatalf("%v %v %+v", err, created, r)
 	}
-	if len(h.cards) != 1 {
-		t.Fatal("no approval card for the recipient")
+	if ev := h.lastEvent("crypto_wallet.approval.requested"); ev == nil || ev["recipient_id"] != r.ID {
+		t.Fatalf("no approval.requested event for the recipient: %v", ev)
 	}
 	if p := h.propose(w, "USDC", bob, "1"); p.RefusalRule != "recipient_not_allowed" {
 		t.Fatal("pending recipient received funds")
 	}
-	ctx := sdk.WithCaller(context.Background(), &sdk.Caller{AppName: "conversations", AppInstallID: 3})
-	if _, err := h.app.toolApprovalCallback(ctx, nil, map[string]any{"message_id": float64(1001), "action_id": "approve"}); err != nil {
+	if _, err := h.app.toolRecipientDecide(agentCtx(43, ""), nil, map[string]any{"recipient_id": float64(r.ID), "decision": "approve"}); err != nil {
 		t.Fatal(err)
 	}
 	if p := h.propose(w, "USDC", bob, "1"); p.RefusalRule != "recipient_cooling_off" {
@@ -583,9 +601,16 @@ func TestManifestAndTools(t *testing.T) {
 			t.Fatalf("route %s collides with the SDK or the manifest prefix", r.Pattern)
 		}
 	}
+	perms := map[string]bool{}
+	for _, p := range m.Provides.ProvidedPermissions {
+		perms[p.Name] = true
+	}
 	declared := map[string]bool{}
-	for _, t := range m.Provides.MCPTools {
-		declared[t.Name] = true
+	for _, spec := range m.Provides.MCPTools {
+		declared[spec.Name] = true
+		if !perms[spec.Requires] {
+			t.Fatalf("tool %s requires %q, which is not a declared permission, so grants cannot gate it", spec.Name, spec.Requires)
+		}
 	}
 	for _, tool := range a.MCPTools() {
 		if tool.Exposure == sdk.ToolExposureAppOnly {
@@ -598,7 +623,7 @@ func TestManifestAndTools(t *testing.T) {
 			t.Fatalf("tool %s missing from apteva.yaml", tool.Name)
 		}
 		delete(declared, tool.Name)
-		for _, forbidden := range []string{"policy", "freeze", "approve", "export", "create"} {
+		for _, forbidden := range []string{"policy", "freeze", "export", "create"} {
 			if strings.Contains(tool.Name, forbidden) {
 				t.Fatalf("agent tool %s looks like a people-only action", tool.Name)
 			}
@@ -608,4 +633,18 @@ func TestManifestAndTools(t *testing.T) {
 		t.Fatalf("manifest declares tools the app does not serve: %v", declared)
 	}
 	_ = fmt.Sprint
+}
+
+// Who may decide is the operator's grant, enforced by the SDK's MCP
+// handler with Caller.Allows(spec.Requires, ...). A deny on
+// approvals.decide must stop exactly the decide tools.
+func TestGrantDenyOnApprovalsDecide(t *testing.T) {
+	m := newApp().Manifest()
+	c := &sdk.Caller{AgentID: 42, DefaultEffect: "allow", Grants: []sdk.Grant{{Effect: "deny", Permission: "approvals.decide"}}, Resources: m.Provides.Resources}
+	for _, spec := range m.Provides.MCPTools {
+		decide := strings.HasSuffix(spec.Name, "_decide")
+		if got := c.Allows(spec.Requires, ""); got == decide {
+			t.Fatalf("%s (requires %s): allowed=%v under a deny on approvals.decide", spec.Name, spec.Requires, got)
+		}
+	}
 }
