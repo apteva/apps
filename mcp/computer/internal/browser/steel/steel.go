@@ -36,6 +36,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/videoframes"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
@@ -1072,6 +1073,14 @@ func (c *Computer) ReadElement(selector string, opts computer.ElementReadOptions
 		return computer.ElementReadResult{}, fmt.Errorf("steel: no active session — call browser_session open first")
 	}
 	return elementread.Run(c.ctx, selector, opts)
+}
+
+// ReadVideoFrames implements computer.VideoFrameReader.
+func (c *Computer) ReadVideoFrames(opts computer.VideoFrameOptions) (computer.VideoFrameResult, error) {
+	if c.ctx == nil {
+		return computer.VideoFrameResult{}, fmt.Errorf("steel: no active session — call browser_session open first")
+	}
+	return videoframes.Run(c.ctx, opts)
 }
 
 // EnablePageDiagnostics implements computer.PageDiagnosticsReporter.
