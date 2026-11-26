@@ -59,9 +59,9 @@ func coachTestRequest(app *App, identity phoneIdentity, action, id string, body 
 	app.applicationUserHTTP(app.handleSoftphoneAction)(w, r)
 	return w
 }
-func coachingFixture(t *testing.T) (*App, callRow, *softphoneHub, *callAudioTap, phonePolicy, <-chan coachingWireFrame, <-chan coachingWireFrame) {
+func coachingFixture(t *testing.T, rtc ...bool) (*App, callRow, *softphoneHub, *callAudioTap, phonePolicy, <-chan coachingWireFrame, <-chan coachingWireFrame) {
 	t.Helper()
-	app, row, tap, policy := listenerFixture(t)
+	app, row, tap, policy := listenerFixture(t, rtc...)
 	policy.Users[3].Coach = true
 	if w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy); w.Code != 200 {
 		t.Fatal(w.Body)

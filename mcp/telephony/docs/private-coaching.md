@@ -27,14 +27,35 @@ received stale coaching is discarded after 200 ms of excess age/residence.
 These are software bounds, not a guarantee of latency across an arbitrary
 network. Unknown initial network delay cannot be inferred from relative clocks.
 
-With WebRTC selected, listening uses two receive-only Opus tracks. Every explicit
-push-to-talk press creates a fresh, send-only Opus peer connection after the
-existing generation has been authorized. The signaling socket carries the SDP,
-PTT start/stop and keepalive controls. Uplink RTP is converted into the existing
-generation-tagged PCM protocol and passes the same ownership, lease and age
-checks. Release, expiry or target replacement closes the uplink; old peer media
-cannot acquire a new talk generation. Starting a talk has an additional bounded
-ICE negotiation step; releasing during that step still stops the microphone.
+With WebRTC selected, listening uses two receive-only Opus tracks. Since 0.31.0,
+joining coaching also prepares one send-only Opus peer connection
+(`coach.webrtc.prepare`), and every push-to-talk press reuses it. A press waits
+only for the server's `coach.started`, with no ICE or DTLS negotiation:
+
+- **Press.** The browser sends `coach.start` while it opens the microphone. The
+  first press of a page opens the microphone first, so a permission prompt never
+  shows the adviser a supervisor who isn't speaking. After `coach.started`, the
+  microphone joins the uplink track.
+- **Release.** The microphone leaves the track and stops at once, then
+  `coach.stop` is sent. The connection stays up.
+- **Between presses** the track carries silence (about 25 kbit/s). This keeps
+  the RTP clock running: a detached track freezes it, and the next press would
+  look seconds late to the server's jitter buffer.
+
+The signaling socket carries the SDP and the PTT start, stop and keepalive
+controls. Uplink RTP is converted into the existing generation-tagged PCM
+protocol and passes the same ownership, lease and age checks. Each frame belongs
+to the press that is live when it plays, but only if its first sample was
+captured after the server accepted that press. The capture time comes from the
+RTP timestamp, so audio from an earlier press is dropped however late it
+arrives; it is never relabeled as the current press.
+
+The prepared connection closes when the listener ends or its lease lapses. The
+server accepts one prepare per second per listener, always with a growing
+connection ID, and only for one send-only audio section. A browser that loses
+the connection prepares a new one on its next press. Tabs that loaded the SDK
+before 0.31.0 still negotiate one connection per press (`coach.webrtc.offer`),
+which closes with its press.
 
 The pinned adviser's transport independently determines private delivery:
 WebSocket retains its APW1 overlay; WebRTC mixes the overlay at half gain with

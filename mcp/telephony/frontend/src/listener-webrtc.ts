@@ -7,9 +7,12 @@ import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferO
 import { loadAudioModules, type AudioModules } from "./audio-assets";
 import { rtcQualityPolicy, RTCQualityPolicy, RTCPathHealth } from "./webrtc-quality";
 import { rtcMediaURL, rtcStatistics } from "./webrtc-audio";
+import { beginCoachTalk } from "./coach-talk";
 
-/** Passive listening has no microphone/transmitter. Each explicit PTT obtains
- * a new authorized generation and a fresh uplink PC, then releases both. */
+/** Passive listening has no microphone/transmitter. Coaching prepares one
+ * send-only uplink PC when it opens. Each push-to-talk obtains a new authorized
+ * generation and connects the microphone into that PC's track; release stops
+ * the microphone at once and leaves the PC up for the next press. */
 export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions):ListenerAudioRuntime {
  return {create(callbacks) {
   const audioOptions={...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...options};
@@ -18,31 +21,79 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
   const receivers:RTCRtpReceiver[]=[];
   let socket:WebSocket|undefined, pc:RTCPeerConnection|undefined, context:AudioContext|undefined, speaker:GainNode|undefined;
   let closed=false, ready=false, connected=false, coaching=false, talkWanted=false, talking=false, generation=0;
-  let mic:MediaStream|undefined, capture:AudioWorkletNode|undefined, micSource:MediaStreamAudioSourceNode|undefined, destination:MediaStreamAudioDestinationNode|undefined;
-  let uplink:RTCPeerConnection|undefined, modules:AudioModules|undefined, captureLoaded=false;
+  let mic:MediaStream|undefined, capture:AudioWorkletNode|undefined, micSource:MediaStreamAudioSourceNode|undefined;
+  let modules:AudioModules|undefined, captureLoaded=false;
+  // The prepared coaching uplink. Its track is a Web Audio destination that
+  // carries silence between presses, which keeps the RTP clock running for the
+  // server's jitter buffer. Chrome sends nothing for a destination with no
+  // active input, or for a detached track, and the clock freezes; so a
+  // zero-valued constant source stays connected.
+  let uplink:RTCPeerConnection|undefined, uplinkOutput:MediaStreamAudioDestinationNode|undefined, uplinkSilence:ConstantSourceNode|undefined, uplinkReady:Promise<void>|undefined, uplinkConnection=0;
+  let uplinkAnswer:((connection:number,sdp:string)=>void)|undefined, uplinkRejected:((connection:number)=>void)|undefined, cancelUplink:(()=>void)|undefined;
   let keepalive:ReturnType<typeof setInterval>|undefined, sampleTimer:ReturnType<typeof setInterval>|undefined;
   let volume=audioOptions.outputVolume??1;
   let config:RTCConfiguration={}, bitrate=32000;
  let ice:RTCICEController|undefined;
  const iceEvents:MediaSessionEvent[]=[];
-  let talkAck:((generation:number,error?:Error)=>void)|undefined, talkAnswer:((sdp:string,generation:number)=>void)|undefined;
-  let cancelStart:(()=>void)|undefined, cancelTalk:(()=>void)|undefined;
+  let talkAck:((generation:number,error?:Error)=>void)|undefined;
+  let cancelStart:(()=>void)|undefined;
   const elements:HTMLAudioElement[]=[];
   const send=(value:unknown)=>{if(socket?.readyState===WebSocket.OPEN && socket.bufferedAmount<65536)socket.send(JSON.stringify(value));else throw new Error("Listener connection unavailable");};
   const ensure=()=>{if(closed)throw new Error("Listening cancelled");};
+  // Release runs synchronously: the microphone leaves the uplink track and
+  // stops before anything is awaited. The prepared PC stays up.
   const stopTalking=()=>{
-   const stopped=++generation;talkWanted=talking=false;talkAck?.(stopped,new Error("Coaching cancelled"));cancelTalk?.();talkAnswer=undefined;
+   const stopped=++generation;talkWanted=talking=false;talkAck?.(stopped,new Error("Coaching cancelled"));
    if(keepalive)clearInterval(keepalive);keepalive=undefined;
-   ice?.remove("coach");
-   if(uplink){uplink.onconnectionstatechange=null;uplink.close();uplink=undefined;}
-   capture?.disconnect();capture=undefined;micSource?.disconnect();micSource=undefined;destination?.disconnect();destination=undefined;
+   capture?.disconnect();capture=undefined;micSource?.disconnect();micSource=undefined;
    mic?.getTracks().forEach(t=>{t.onended=null;t.stop();});mic=undefined;
    if(coaching && ready && socket?.readyState===WebSocket.OPEN)try{send({type:"coach.stop",generation:stopped});}catch{/* socket already closing */}
    callbacks.onTalking?.(false);
   };
+  const dropUplink=(peer:RTCPeerConnection)=>{
+   if(uplink!==peer)return;
+   ice?.remove("coach");peer.onconnectionstatechange=null;peer.close();uplink=undefined;uplinkReady=undefined;
+  };
+  // One send-only PC for the whole coaching session. A press that finds it
+  // failed prepares a new one.
+  const prepareUplink=():Promise<void>=>{
+   if(uplinkReady)return uplinkReady;
+   const connection=++uplinkConnection;
+   const attempt=(async()=>{
+    ensure();if(!context)throw new Error("Coaching session not ready");
+    if(!modules){const loaded=await loadAudioModules(app,true);if(closed){loaded.dispose();throw new Error("Listening cancelled");}modules=loaded;}
+    if(!captureLoaded){await context.audioWorklet.addModule(modules.urls[0]);captureLoaded=true;}
+    ensure();
+    if(!uplinkOutput){
+     uplinkOutput=context.createMediaStreamDestination();uplinkOutput.channelCount=1;
+     uplinkSilence=context.createConstantSource();uplinkSilence.offset.value=0;uplinkSilence.connect(uplinkOutput);uplinkSilence.start();
+    }
+    const peer=new RTCPeerConnection(config);uplink=peer;
+    const live=()=>!closed&&uplink===peer;
+    ice?.register("coach",peer,live,connection);
+    peer.addTransceiver(uplinkOutput.stream.getAudioTracks()[0],{direction:"sendonly",streams:[uplinkOutput.stream],sendEncodings:[{maxBitrate:bitrate}]});
+    await new Promise<void>((resolve,reject)=>{
+     let settled=false;
+     const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timeout);uplinkAnswer=uplinkRejected=cancelUplink=undefined;error?reject(error):resolve();};
+     const timeout=setTimeout(()=>finish(new Error("Coaching WebRTC timed out")),18000);
+     cancelUplink=()=>finish(new Error("Listening cancelled"));
+     uplinkAnswer=(id,sdp)=>{if(id!==connection||!live())return;void peer.setRemoteDescription({type:"answer",sdp}).catch(error=>finish(error));};
+     uplinkRejected=id=>{if(id===connection)finish(new Error("Coaching media unavailable"));};
+     peer.onconnectionstatechange=()=>{
+      if(!live())return;
+      if(peer.connectionState==="connected")finish();
+      if(peer.connectionState==="failed"||peer.connectionState==="closed"){finish(new Error("Coaching media disconnected"));dropUplink(peer);if(talkWanted)stopTalking();}
+     };
+     void offer(peer,live).then(sdp=>{if(live())send({type:"coach.webrtc.prepare",connection,sdp});}).catch(error=>finish(error));
+    });
+   })();
+   uplinkReady=attempt;
+   attempt.catch(()=>{if(uplinkReady===attempt){uplinkReady=undefined;if(uplink)dropUplink(uplink);}});
+   return attempt;
+  };
   const blur=()=>stopTalking(),visibility=()=>{if(document.visibilityState!=="visible")stopTalking();};
   const stop=()=>{
-   if(closed)return;stopTalking();closed=true;ice?.stop();ice=undefined;cancelStart?.();
+   if(closed)return;stopTalking();closed=true;cancelUplink?.();if(uplink)dropUplink(uplink);try{uplinkSilence?.stop();}catch{/* never started */}uplinkSilence=undefined;ice?.stop();ice=undefined;cancelStart?.();
    window.removeEventListener("blur",blur);document.removeEventListener("visibilitychange",visibility);
    if(sampleTimer)clearInterval(sampleTimer);sampleTimer=undefined;
    if(socket){socket.onmessage=socket.onclose=socket.onerror=null;socket.close(1000,"listener_shutdown");}
@@ -112,12 +163,13 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
        if(event.type==="coach.started"){talkAck?.(event.generation);return;}
        if(event.type==="coach.rejected"){talkAck?.(generation,new Error(event.detail||"Coaching unavailable"));return;}
        if(event.type==="coach.stopped" && (event.generation===undefined||event.generation===generation)){stopTalking();return;}
-       if(event.type==="coach.webrtc.answer"){talkAnswer?.(event.sdp,event.generation);return;}
+       if(event.type==="coach.webrtc.answer"){uplinkAnswer?.(event.connection,event.sdp);return;}
+       if(event.type==="coach.webrtc.rejected"){uplinkRejected?.(event.connection);return;}
       };
       socket.onerror=()=>{finish(new Error("Listener connection failed"));if(ready)fail("listener_network_error");};
       socket.onclose=e=>{finish(new Error(e.reason||"Listener disconnected"));if(ready)fail(e.reason||"listener_disconnected");};
      });
-     ensure();if(coaching){window.addEventListener("blur",blur);document.addEventListener("visibilitychange",visibility);}
+     ensure();if(coaching){window.addEventListener("blur",blur);document.addEventListener("visibilitychange",visibility);void prepareUplink().catch(()=>{/* the next press prepares again */});}
      let previous:ReturnType<typeof rtcStatistics>["previous"]|undefined,sampling=false;
      sampleTimer=setInterval(()=>{
       if(closed||!pc||sampling)return;sampling=true;
@@ -134,27 +186,22 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
     ensure();if(!coaching||!ready||!context)throw new Error("Coaching session not ready");if(talkWanted)return;
     talkWanted=true;const gen=++generation,current=()=>!closed&&talkWanted&&generation===gen;
     try{
-     const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(audioOptions)});
-     if(!current()){stream.getTracks().forEach(t=>t.stop());return;}mic=stream;mic.getTracks().forEach(t=>{t.onended=()=>stopTalking();});
-     if(!modules){const loaded=await loadAudioModules(app,true);if(!current()){loaded.dispose();return;}modules=loaded;}
-     if(!captureLoaded){await context.audioWorklet.addModule(modules!.urls[0]);captureLoaded=true;}
-     if(!current())return;
-     await new Promise<void>((resolve,reject)=>{const timeout=setTimeout(()=>{talkAck=undefined;reject(new Error("Coaching activation timed out"));},3000);talkAck=(ack,error)=>{if(error||ack===gen){clearTimeout(timeout);talkAck=undefined;error?reject(error):resolve();}};send({type:"coach.start",generation:gen});});
-     if(!current())return;
-     // Keep the short authority lease alive while the new uplink negotiates.
-     keepalive=setInterval(()=>{if(current())try{send({type:"coach.keepalive",generation:gen});}catch{stopTalking();}},1000);
-     capture=new AudioWorkletNode(context,"softphone-capture",{outputChannelCount:[1],processorOptions:{nativeOutput:true,inputGainDB:audioOptions.inputGainDB,highpassFilter:audioOptions.highpassFilter}});
-     destination=context.createMediaStreamDestination();destination.channelCount=1;micSource=context.createMediaStreamSource(stream);micSource.connect(capture).connect(destination);
-     const peer=new RTCPeerConnection(config);uplink=peer;ice?.register("coach",peer,current,gen);
-     peer.addTransceiver(destination.stream.getAudioTracks()[0],{direction:"sendonly",streams:[destination.stream],sendEncodings:[{maxBitrate:bitrate}]});
-     await new Promise<void>((resolve,reject)=>{
-      let settled=false;const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timeout);cancelTalk=undefined;talkAnswer=undefined;error?reject(error):resolve();};
-      const timeout=setTimeout(()=>finish(new Error("Coaching WebRTC timed out")),18000);cancelTalk=()=>finish(new Error("Coaching cancelled"));
-      talkAnswer=(sdp,ack)=>{if(ack!==gen||!current())return;void peer.setRemoteDescription({type:"answer",sdp}).catch(error=>finish(error));};
-      peer.onconnectionstatechange=()=>{if(!current())return;if(peer.connectionState==="connected")finish();if(peer.connectionState==="failed"||peer.connectionState==="closed"){finish(new Error("Coaching media disconnected"));stopTalking();}};
-      void offer(peer,current).then(sdp=>{if(current())send({type:"coach.webrtc.offer",generation:gen,sdp});}).catch(error=>finish(error));
+     const prepared=prepareUplink();prepared.catch(()=>{/* raised below */});
+     const stream=await beginCoachTalk({
+      openMic:()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(audioOptions)}),
+      requestStart:()=>new Promise<void>((resolve,reject)=>{const timeout=setTimeout(()=>{talkAck=undefined;reject(new Error("Coaching activation timed out"));},3000);talkAck=(ack,error)=>{if(error||ack===gen){clearTimeout(timeout);talkAck=undefined;error?reject(error):resolve();}};send({type:"coach.start",generation:gen});}),
+      current,adopt:value=>{mic=value;value.getTracks().forEach(t=>{t.onended=()=>stopTalking();});},
      });
-     if(current()){talking=true;callbacks.onTalking?.(true);}
+     if(!stream||!current())return;
+     // Keep the short authority lease alive if the uplink is still connecting.
+     keepalive=setInterval(()=>{if(current())try{send({type:"coach.keepalive",generation:gen});}catch{stopTalking();}},1000);
+     await prepared;
+     if(!current()||!uplinkOutput)return;
+     // The microphone enters the uplink only after coach.started: the server
+     // drops audio captured before it accepted this press.
+     capture=new AudioWorkletNode(context,"softphone-capture",{outputChannelCount:[1],processorOptions:{nativeOutput:true,inputGainDB:audioOptions.inputGainDB,highpassFilter:audioOptions.highpassFilter}});
+     micSource=context.createMediaStreamSource(stream);micSource.connect(capture).connect(uplinkOutput);
+     talking=true;callbacks.onTalking?.(true);
     }catch(error){if(current()){stopTalking();throw error;}}
    },
    stopTalking,stop,

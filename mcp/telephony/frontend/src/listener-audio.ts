@@ -4,6 +4,7 @@ import type { MediaTransport } from "./webrtc-audio";
 import type { AppHandle } from "@apteva/web-sdk";
 import { loadAudioAsset, loadAudioModules, type AudioModules } from "./audio-assets";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions, type SoftphoneAudioOptions, PreviewResampler } from "../../ui/softphone-audio";
+import { beginCoachTalk } from "./coach-talk";
 
 export interface ListenerDiagnostics {
   session_events?: import("./media-lease").MediaSessionEvent[];
@@ -195,21 +196,23 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
         talkWanted=true;const generation=++talkGeneration;
         const current=()=>!closed && talkWanted && generation===talkGeneration;
         try {
-          const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints({...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...options})});
-          if(!current()){stream.getTracks().forEach(t=>t.stop());return;}
-          mic=stream;mic.getAudioTracks().forEach(t=>{t.onended=()=>stopTalking();});
           if(!captureLoaded) {
             const loaded = await loadAudioModules(app, true);
             if(!current()){loaded.dispose();return;}audioModules.push(loaded);
             await context.audioWorklet.addModule(loaded.urls[0]);captureLoaded=true;
           }
           if(!current())return;
-          await new Promise<void>((resolve,reject)=>{
-            const timeout=setTimeout(()=>{talkAck=undefined;reject(new Error("Coaching activation timed out"));},3000);
-            talkAck=(ack,error)=>{if(error || ack===generation){clearTimeout(timeout);talkAck=undefined;error?reject(error):resolve();}};
-            socket!.send(JSON.stringify({type:"coach.start",generation}));
+          const stream=await beginCoachTalk({
+            openMic:()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints({...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...options})}),
+            requestStart:()=>new Promise<void>((resolve,reject)=>{
+              const timeout=setTimeout(()=>{talkAck=undefined;reject(new Error("Coaching activation timed out"));},3000);
+              talkAck=(ack,error)=>{if(error || ack===generation){clearTimeout(timeout);talkAck=undefined;error?reject(error):resolve();}};
+              if(socket?.readyState!==WebSocket.OPEN){clearTimeout(timeout);talkAck=undefined;reject(new Error("Listener connection unavailable"));return;}
+              socket.send(JSON.stringify({type:"coach.start",generation}));
+            }),
+            current,adopt:value=>{mic=value;value.getAudioTracks().forEach(t=>{t.onended=()=>stopTalking();});},
           });
-          if(!current())return;
+          if(!stream||!current())return;
           capture=new AudioWorkletNode(context,"softphone-capture",{numberOfInputs:1,outputChannelCount:[1],processorOptions:{inputGainDB:options.inputGainDB??0,highpassFilter:options.highpassFilter!==false}});
           micSource=context.createMediaStreamSource(stream);silent=context.createGain();silent.gain.value=0;micSource.connect(capture).connect(silent).connect(context.destination);
           captureChannel=new MessageChannel();let sequence=0;const resampler=new PreviewResampler();

@@ -35,6 +35,10 @@ type coachingState struct {
 	received, dropped atomic.Int64
 	starts            atomic.Int64
 	expires           atomic.Int64
+	// Unix ms when the server accepted the current press. A reused WebRTC
+	// coaching connection carries every press on one stream; audio captured
+	// before this instant belongs to an earlier press.
+	startedAt atomic.Int64
 	// Unix ms until which the last full target check (taken under the call's
 	// claim lock) authorizes coach audio. Zero means unverified.
 	verifiedUntil atomic.Int64
@@ -173,7 +177,10 @@ func (h *softphoneHub) startCoach(l *callListener, generation uint32) bool {
 	}
 	h.coach = l
 	l.coaching.generation.Store(generation)
+	l.coaching.startedAt.Store(time.Now().UnixMilli())
 	l.coaching.deadline.Store(time.Now().Add(2 * time.Second).UnixMilli())
+	// Stored last: a reader that sees talking also sees this press's generation
+	// and start time.
 	l.coaching.talking.Store(true)
 	l.coaching.starts.Add(1)
 	return true
