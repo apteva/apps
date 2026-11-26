@@ -97,6 +97,7 @@ type actorStep struct {
 	URLFromField       string                `json:"url_from_field,omitempty"`
 	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
 	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
+	VideoFrames        *actorVideoFrames     `json:"video_frames,omitempty"`
 	ReadOnly           bool                  `json:"read_only,omitempty"`
 	ReadRetries        *int                  `json:"read_retries,omitempty"`
 	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
@@ -269,6 +270,10 @@ func (a *App) actorTools() []sdk.Tool {
 		{
 			Name: "actors_run_get", Description: "Get one Actors run. detail=full (default) includes the definition snapshot, input, bounded output, previews, traces and artifacts. detail=summary returns the compact terminal receipt: status, operation, revision, timings, dataset_count, failure/effect evidence and compact read coverage.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "detail": map[string]any{"type": "string", "enum": []string{"full", "summary"}, "default": "full"}}, []string{"id"}), Handler: a.toolActorRunGet,
+		},
+		{
+			Name: "actors_run_frames", Description: "Look at the video frames a run saved with a read_video_frames step. Returns frame times and sizes as text followed by the frames as images, offset/limit at a time (default 6, max 12); pass next_offset for more. Describe what you need from the images in the same turn: they are not kept in conversation history.",
+			InputSchema: schemaObject(map[string]any{"run_id": map[string]any{"type": "integer"}, "offset": map[string]any{"type": "integer", "minimum": 0, "default": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxRunFramesPage, "default": defaultRunFramesPage}}, []string{"run_id"}), Handler: a.toolActorRunFrames,
 		},
 		{
 			Name: "actors_run_cancel", Description: "Request cancellation of a queued or running actor run.",
@@ -739,6 +744,10 @@ func validateActorDefinition(def actorDefinition) error {
 		case "open", "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
 			if err := validateScreenStep(step, true); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
+		case "read_video_frames":
+			if err := validateVideoFramesStep(i, step, def); err != nil {
+				return err
 			}
 		case "wait", "screenshot":
 			if step.Action == "screenshot" && def.PrivateScreen {
