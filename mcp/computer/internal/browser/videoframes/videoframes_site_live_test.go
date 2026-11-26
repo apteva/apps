@@ -4,11 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -30,15 +32,42 @@ func TestVideoFramesSiteLive(t *testing.T) {
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)
 	defer cancelTimeout()
+	if kbps, _ := strconv.Atoi(os.Getenv("VIDEO_FRAMES_THROTTLE_KBPS")); kbps > 0 {
+		// A slow connection leaves most of the reel unbuffered.
+		bps := float64(kbps) * 1000 / 8
+		if err := chromedp.Run(ctx, network.Enable(), chromedp.ActionFunc(func(c context.Context) error {
+			_, err := network.EmulateNetworkConditionsByRule(false, []*network.Conditions{{Latency: 40, DownloadThroughput: bps, UploadThroughput: bps}}).Do(c)
+			return err
+		})); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := chromedp.Run(ctx, chromedp.Navigate(target), chromedp.WaitReady("body")); err != nil {
 		t.Fatal(err)
 	}
-	_ = chromedp.Run(ctx, chromedp.Sleep(4*time.Second))
+	if os.Getenv("VIDEO_FRAMES_PAUSE") == "" {
+		_ = chromedp.Run(ctx, chromedp.Sleep(4*time.Second))
+	}
+	if os.Getenv("VIDEO_FRAMES_PAUSE") != "" {
+		// Reproduce an agent arriving at a reel that is not playing: the
+		// player stops fetching segments while paused.
+		var state string
+		_ = chromedp.Run(ctx, chromedp.Poll(`(()=>{const v=document.querySelector('video'); if(!v||v.readyState<1) return false; v.pause(); return true})()`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(60*time.Second)), chromedp.Sleep(3*time.Second),
+			chromedp.Evaluate(`(()=>{const v=document.querySelector('video'); const b=[]; for(let i=0;i<v.buffered.length;i++) b.push(v.buffered.start(i).toFixed(1)+'-'+v.buffered.end(i).toFixed(1)); return document.visibilityState+' paused='+v.paused+' buffered='+b.join(',')})()`, &state))
+		t.Logf("before: %s", state)
+	}
 	every := 3.0
 	if v := os.Getenv("VIDEO_FRAMES_EVERY"); v != "" {
 		every = 0
 	}
 	opts := computer.VideoFrameOptions{Every: every, MaxFrames: 12, MinHeight: 720, Timeout: 30 * time.Second}
+	if v := os.Getenv("VIDEO_FRAMES_TIMES"); v != "" {
+		opts.Every = 0
+		for _, f := range strings.Split(v, ",") {
+			n, _ := strconv.ParseFloat(f, 64)
+			opts.Times = append(opts.Times, n)
+		}
+	}
 	if every == 0 {
 		opts.Times = []float64{0.5, 5, 10, 15}
 	}

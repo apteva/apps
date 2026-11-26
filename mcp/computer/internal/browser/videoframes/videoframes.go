@@ -33,10 +33,16 @@ const (
 	MaxTimeout       = 30 * time.Second
 	DefaultMaxBytes  = 16 << 20
 	MaxSelectorChars = 1000
-	// A seek gets at most this long, and never more than the time left.
-	seekTimeout = 8 * time.Second
-	pollEvery   = 250 * time.Millisecond
+	pollEvery        = 250 * time.Millisecond
 )
+
+// seekTimeout is the least time a jump gets before it is set aside for the
+// retry pass; with few frames left each gets its share of the remaining
+// budget instead. A variable so tests can shorten it.
+var seekTimeout = 8 * time.Second
+
+// onStall lets tests see a jump being set aside for the retry pass.
+var onStall = func(t float64) {}
 
 // Error carries a stable error_code for computer_use failures.
 type Error struct {
@@ -242,13 +248,16 @@ func Run(ctx context.Context, opts computer.VideoFrameOptions) (result computer.
 	result.Skipped, result.Truncated = skipped, truncated
 	mime := "image/" + opts.Format
 	total := 0
-	var low []int
-	capture := func(t float64) (*computer.VideoFrame, *computer.VideoFrameSkip, error) {
+	// capture copies one frame. left is how many frames still share the
+	// remaining budget: on a slow connection each jump waits for the site to
+	// download that part of the video, so a fixed per-frame limit gives up on
+	// frames that would arrive a few seconds later.
+	capture := func(t float64, left int) (*computer.VideoFrame, *computer.VideoFrameSkip, error) {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return nil, &computer.VideoFrameSkip{RequestedS: t, Reason: "timeout"}, nil
 		}
-		wait := min(seekTimeout, remaining)
+		wait := min(remaining, max(seekTimeout, remaining/time.Duration(max(left, 1))))
 		fctx, cancel := cdputil.Context(ctx, wait+2*time.Second)
 		defer cancel()
 		var fr frameResult
@@ -278,25 +287,68 @@ func Run(ctx context.Context, opts computer.VideoFrameOptions) (result computer.
 			LowResolution: opts.MinHeight > 0 && fr.VH < opts.MinHeight,
 		}, nil, nil
 	}
-	for _, t := range times {
-		frame, skip, err := capture(t)
+	keep := func(frame *computer.VideoFrame) bool {
+		if total+len(frame.Data) > opts.MaxBytes {
+			result.Truncated = true
+			return false
+		}
+		total += len(frame.Data)
+		result.Frames = append(result.Frames, *frame)
+		return true
+	}
+	var stalled []float64
+	for i, t := range times {
+		frame, skip, err := capture(t, len(times)-i)
 		if err != nil {
 			return result, err
 		}
 		if skip != nil {
-			result.Skipped = append(result.Skipped, *skip)
+			if retryable(skip.Reason) {
+				onStall(t)
+				stalled = append(stalled, t)
+			} else {
+				result.Skipped = append(result.Skipped, *skip)
+			}
 			continue
 		}
-		if total+len(frame.Data) > opts.MaxBytes {
-			result.Truncated = true
+		if !keep(frame) {
 			break
 		}
-		total += len(frame.Data)
-		frame.Index = len(result.Frames)
-		if frame.LowResolution {
-			low = append(low, frame.Index)
+	}
+	// A jump that ran out of time usually finds its data on a second try: the
+	// download it started kept going.
+	for i, t := range stalled {
+		var skip *computer.VideoFrameSkip
+		if !result.Truncated {
+			var frame *computer.VideoFrame
+			var err error
+			frame, skip, err = capture(t, len(stalled)-i)
+			if err != nil {
+				return result, err
+			}
+			if skip == nil {
+				if !keep(frame) {
+					skip = &computer.VideoFrameSkip{RequestedS: t, Reason: "max_bytes"}
+				}
+			}
+		} else {
+			skip = &computer.VideoFrameSkip{RequestedS: t, Reason: "max_bytes"}
 		}
-		result.Frames = append(result.Frames, *frame)
+		if skip != nil {
+			result.Skipped = append(result.Skipped, *skip)
+			if retryable(skip.Reason) {
+				result.RetryAt = append(result.RetryAt, t)
+			}
+		}
+	}
+	sort.SliceStable(result.Frames, func(a, b int) bool { return result.Frames[a].RequestedS < result.Frames[b].RequestedS })
+	sort.SliceStable(result.Skipped, func(a, b int) bool { return result.Skipped[a].RequestedS < result.Skipped[b].RequestedS })
+	var low []int
+	for i := range result.Frames {
+		result.Frames[i].Index = i
+		if result.Frames[i].LowResolution {
+			low = append(low, i)
+		}
 	}
 	// Streaming players often start at a low rendition; later frames load a
 	// better one. One retry each, after the rest, usually picks it up.
@@ -305,7 +357,7 @@ func Run(ctx context.Context, opts computer.VideoFrameOptions) (result computer.
 			break
 		}
 		old := result.Frames[i]
-		frame, skip, err := capture(old.RequestedS)
+		frame, skip, err := capture(old.RequestedS, 1)
 		if err != nil || skip != nil || frame.SourceHeight <= old.SourceHeight {
 			continue
 		}
@@ -318,12 +370,18 @@ func Run(ctx context.Context, opts computer.VideoFrameOptions) (result computer.
 	}
 	markDuplicates(result.Frames)
 	if len(result.Frames) == 0 && len(times) > 0 {
-		if len(result.Skipped) > 0 && result.Skipped[len(result.Skipped)-1].Reason != "beyond_duration" {
-			last := result.Skipped[len(result.Skipped)-1]
-			return result, fail(firstNonEmpty(last.Reason, "seek_timeout"), "no frame could be copied: %s", firstNonEmpty(last.Message, last.Reason))
+		for _, skip := range result.Skipped {
+			if skip.Reason != "beyond_duration" {
+				return result, fail(firstNonEmpty(skip.Reason, "seek_timeout"), "no frame could be copied: %s", firstNonEmpty(skip.Message, skip.Reason))
+			}
 		}
 	}
 	return result, nil
+}
+
+// retryable reports whether a skipped time may succeed when asked again.
+func retryable(reason string) bool {
+	return reason == "seek_timeout" || reason == "timeout"
 }
 
 func markDuplicates(frames []computer.VideoFrame) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,15 +26,27 @@ import (
 // frame number in base 4 with wide colour steps, so the browser's slightly
 // different colour conversion cannot shift it: N = r + 4g + 16b (each 0-3).
 func makeCodedVideo(t *testing.T) []byte {
+	return encodeCodedVideo(t, "", nil)
+}
+
+// makeLargeCodedVideo adds light noise so the clip weighs a few hundred KB
+// (a download takes time) and puts the seek index first, so the browser
+// knows the duration before the rest has arrived.
+func makeLargeCodedVideo(t *testing.T) []byte {
+	return encodeCodedVideo(t, ",noise=alls=8:allf=t", []string{"-g", "10", "-cues_to_front", "1", "-reserve_index_space", "4096"})
+}
+
+func encodeCodedVideo(t *testing.T, filter string, extra []string) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not installed")
 	}
 	out := filepath.Join(t.TempDir(), "coded.webm")
-	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-		"-i", `color=c=black:s=320x240:r=10:d=6,format=gbrp,geq=r='32+64*mod(N\,4)':g='32+64*mod(floor(N/4)\,4)':b='32+64*floor(N/16)'`,
-		"-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-b:v", "1M", out)
-	if msg, err := cmd.CombinedOutput(); err != nil {
+	args := []string{"-hide_banner", "-loglevel", "error", "-f", "lavfi",
+		"-i", `color=c=black:s=320x240:r=10:d=6,format=gbrp,geq=r='32+64*mod(N\,4)':g='32+64*mod(floor(N/4)\,4)':b='32+64*floor(N/16)'` + filter,
+		"-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-b:v", "1M"}
+	args = append(append(args, extra...), out)
+	if msg, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
 		t.Skipf("ffmpeg could not encode VP9: %v %s", err, msg)
 	}
 	data, err := os.ReadFile(out)
@@ -74,6 +87,7 @@ func newLiveEnv(t *testing.T) *liveEnv {
 		t.Skip("real Chromium capture is covered outside -short")
 	}
 	video := makeCodedVideo(t)
+	large := makeLargeCodedVideo(t)
 	serveVideo := func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "coded.webm", time.Now(), bytes.NewReader(video))
 	}
@@ -89,6 +103,42 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v.webm", serveVideo)
+	// A slow site: the first response streams the file at a crawl, and a
+	// jump that needs a later byte range waits before any data arrives.
+	mux.HandleFunc("/slow.webm", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if rng := r.Header.Get("Range"); rng != "" && rng != "bytes=0-" {
+			select {
+			case <-time.After(3 * time.Second):
+			case <-r.Context().Done():
+				return
+			}
+			http.ServeContent(w, r, "large.webm", time.Now(), bytes.NewReader(large))
+			return
+		}
+		w.Header().Set("Content-Type", "video/webm")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprint(len(large)))
+		// The first 16 KiB (header, seek index, first frames) at once, then
+		// 8 KiB per 100 ms: the last second is about 4 s away.
+		const head, chunk = 16 << 10, 8 << 10
+		for off := 0; off < len(large); {
+			end := min(off+chunk, len(large))
+			if off == 0 {
+				end = min(head, len(large))
+			}
+			if _, err := w.Write(large[off:end]); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			off = end
+			select {
+			case <-time.After(100 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
 	for path, body := range pages {
 		body := body
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +267,56 @@ func TestVideoFramesLive(t *testing.T) {
 		env.navigate(t, "/foreign")
 		if _, err := Run(env.ctx, computer.VideoFrameOptions{Times: []float64{1}}); code(err) != "frame_capture_blocked" {
 			t.Fatalf("want frame_capture_blocked, got %v", err)
+		}
+	})
+
+	t.Run("slow download: stalled jump is retried, then reported", func(t *testing.T) {
+		old := seekTimeout
+		seekTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { seekTimeout = old })
+		// Insert the video after load: a <video> in the markup holds back the
+		// load event that navigate waits for, so the download would finish
+		// before Run starts.
+		slowVideo := func(t *testing.T, run int) {
+			env.navigate(t, "/none")
+			html := fmt.Sprintf(`<video id="v" src="/slow.webm?run=%d" preload="auto" muted playsinline></video>`, run)
+			if err := chromedp.Run(env.ctx, chromedp.Evaluate(`document.body.innerHTML = `+strconv.Quote(html), nil),
+				chromedp.Poll(`document.getElementById('v').readyState >= 1`, nil, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+				t.Fatal(err)
+			}
+			var info string
+			_ = chromedp.Run(env.ctx, chromedp.Evaluate(`(()=>{const v=document.getElementById('v'); const b=v.buffered; return 'dur='+v.duration+' buffered_end='+(b.length?b.end(b.length-1):0)+' ready='+v.readyState})()`, &info))
+			t.Logf("at metadata: %s", info)
+		}
+		var stalls []float64
+		onStall = func(at float64) { stalls = append(stalls, at) }
+		t.Cleanup(func() { onStall = func(float64) {} })
+		slowVideo(t, 1)
+		res, err := Run(env.ctx, computer.VideoFrameOptions{Times: []float64{5.5, 0.5, 1}, Timeout: 6 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("frames %s skipped %+v retry %v", describe(res.Frames), res.Skipped, res.RetryAt)
+		if len(stalls) != 1 || stalls[0] != 5.5 {
+			t.Fatalf("the 5.5 s jump should stall on the first pass, stalls %v", stalls)
+		}
+		if len(res.Frames) != 3 || len(res.RetryAt) != 0 {
+			t.Fatalf("the stalled 5.5 s frame must come back on the retry pass: %d frames, retry %v", len(res.Frames), res.RetryAt)
+		}
+		for i, want := range []int{5, 10, 55} {
+			if res.Frames[i].Index != i || frameNumber(t, res.Frames[i]) != want {
+				t.Fatalf("frames must be in time order: %s", describe(res.Frames))
+			}
+		}
+
+		slowVideo(t, 2)
+		res, err = Run(env.ctx, computer.VideoFrameOptions{Times: []float64{0.5, 5.5}, Timeout: 1500 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("short budget: frames %s skipped %+v retry %v", describe(res.Frames), res.Skipped, res.RetryAt)
+		if len(res.RetryAt) == 0 || res.RetryAt[len(res.RetryAt)-1] != 5.5 {
+			t.Fatalf("a frame still loading when time ran out must be listed for retry: %+v", res.RetryAt)
 		}
 	})
 

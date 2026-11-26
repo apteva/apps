@@ -557,6 +557,9 @@ type VideoFrameResult struct {
 	Frames    []VideoFrame     `json:"frames"`
 	Skipped   []VideoFrameSkip `json:"skipped"`
 	Truncated bool             `json:"truncated"`
+	// RetryAt lists skipped times worth asking for again: they ran out of
+	// time while the site was still loading that part of the video.
+	RetryAt []float64 `json:"retry_at_seconds,omitempty"`
 }
 
 // VideoFrameReader is implemented by DOM-backed providers. It pauses and

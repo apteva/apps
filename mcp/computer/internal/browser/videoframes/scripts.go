@@ -112,14 +112,24 @@ const captureFunction = `async function(a){
     setTimeout(() => fin(false), ms);
   });
   const deadline = Date.now() + a.seekTimeoutMs;
-  if (Math.abs(v.currentTime - a.t) > 0.0005 || v.readyState < 2) {
-    const seeked = once('seeked', a.seekTimeoutMs);
-    v.currentTime = a.t;
-    const ok = await seeked;
-    if (!ok && v.seeking) return { code: 'seek_timeout', message: 'the jump to ' + a.t + 's did not finish' };
+  // Some site players move the position themselves while data loads (a
+  // jump to 6 s can land at 8.5 s), so check where it landed and jump again.
+  const offBy = () => Math.abs(v.currentTime - a.t);
+  for (let attempt = 0; ; attempt++) {
+    if (offBy() > 0.0005 || v.readyState < 2) {
+      const left = deadline - Date.now();
+      if (left <= 0) return { code: 'seek_timeout', message: 'the jump to ' + a.t + 's did not finish' };
+      const seeked = once('seeked', left);
+      v.currentTime = a.t;
+      const ok = await seeked;
+      if (!ok && v.seeking) return { code: 'seek_timeout', message: 'the jump to ' + a.t + 's did not finish' };
+    }
+    while (v.readyState < 2 && Date.now() < deadline) await sleep(50);
+    if (v.readyState < 2) return { code: 'seek_timeout', message: 'no frame data at ' + a.t + 's' };
+    if (!v.paused) v.pause();
+    if (offBy() <= 0.25) break;
+    if (attempt >= 2) return { code: 'seek_timeout', message: 'the page kept moving the video away from ' + a.t + 's (it landed at ' + v.currentTime.toFixed(2) + 's)' };
   }
-  while (v.readyState < 2 && Date.now() < deadline) await sleep(50);
-  if (v.readyState < 2) return { code: 'seek_timeout', message: 'no frame data at ' + a.t + 's' };
   // requestVideoFrameCallback can be throttled in background tabs; never
   // rely on it alone.
   await new Promise((res) => {

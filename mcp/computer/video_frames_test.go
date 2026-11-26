@@ -139,6 +139,30 @@ func TestVideoFramesErrors(t *testing.T) {
 	}
 }
 
+func TestVideoFramesRetryHint(t *testing.T) {
+	comp := newVideoComp()
+	comp.res.Skipped = append(comp.res.Skipped, backends.VideoFrameSkip{RequestedS: 9, Reason: "seek_timeout"})
+	comp.res.RetryAt = []float64{9}
+	app := appWithSession("br_vid", comp, "local")
+	ctx := testkit.NewAppCtx(t, "apteva.yaml")
+	out, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_vid", "action": "video_frames", "at_seconds": []any{0, 2, 9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(sdk.MCPResult)
+	retry, _ := res.StructuredContent["retry_at_seconds"].([]any)
+	next, _ := res.StructuredContent["next_step"].(string)
+	if len(retry) != 1 || retry[0] != float64(9) || !strings.Contains(next, "retry_at_seconds") {
+		t.Fatalf("retry hint: %#v", res.StructuredContent)
+	}
+	// An all-timeout failure tells the agent a retry is cheap.
+	comp.err = &videoframes.Error{Code: "timeout", Message: "no frame could be copied: timeout"}
+	out, _ = app.toolComputerUse(ctx, map[string]any{"session_id": "br_vid", "action": "video_frames", "every_seconds": 3})
+	if next, _ := out.(sdk.MCPResult).StructuredContent["next_step"].(string); !strings.Contains(next, "again") {
+		t.Fatalf("timeout next_step: %q", next)
+	}
+}
+
 func TestVideoFramesIsReadOnlyAfterFailedNavigation(t *testing.T) {
 	if navigationMayWrite("video_frames") {
 		t.Fatal("video_frames must stay allowed after a failed navigation")
@@ -153,4 +177,3 @@ func TestVideoFramesCapability(t *testing.T) {
 		t.Fatal("only frame readers list video_frames")
 	}
 }
-

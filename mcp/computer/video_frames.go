@@ -121,7 +121,8 @@ func videoFramesFailure(id string, sess *session, err *videoframes.Error) sdk.MC
 		"drm_protected":           "This video is encrypted; its frames cannot be copied. Use action=screenshot instead.",
 		"live_stream_unsupported": "Live streams have no fixed timeline; use action=screenshot to sample what is shown.",
 		"frame_capture_blocked":   "The site does not allow copying this video's frames. Use action=screenshot instead.",
-		"seek_timeout":            "Retry with fewer frames or a larger timeout_ms.",
+		"seek_timeout":            "The site is still downloading the video. Call video_frames again with the same times: what it already loaded is kept, so a retry is usually fast. A larger timeout_ms (up to 30000) also helps.",
+		"timeout":                 "The site is still downloading the video. Call video_frames again with the same times: what it already loaded is kept, so a retry is usually fast. A larger timeout_ms (up to 30000) also helps.",
 		"video_detached":          "The page replaced the video. Take a screenshot, then retry.",
 	}[err.Code]
 	result := map[string]any{
@@ -201,6 +202,10 @@ func (a *App) computerUseVideoFrames(ctx *sdk.AppCtx, id string, sess *session, 
 	}
 	if url := currentURL(sess.comp); url != "" {
 		summary["current_url"] = url
+	}
+	if len(res.RetryAt) > 0 {
+		summary["retry_at_seconds"] = res.RetryAt
+		summary["next_step"] = "Some frames ran out of time while the site was still downloading the video. Call video_frames again with at_seconds set to retry_at_seconds; a retry is usually fast."
 	}
 	if images == "inline" {
 		return summary, nil
