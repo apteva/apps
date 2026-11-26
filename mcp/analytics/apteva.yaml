@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.18.2
+version: 0.18.3
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -134,6 +134,11 @@ description: |
   browsers (navigator.webdriver, headless Chrome), waits until a
   prerendered page is actually opened, and keeps the first queued time of
   a delivery that fails more than once, so its age stays correct.
+
+  v0.18.3 records the visitor country for website events. /collect takes
+  the ISO code Apteva Server resolves from the visitor IP (X-Apteva-Country,
+  when the server GeoIP lookup is on) and stores it as country; the IP is
+  not kept. Sites need no change.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
@@ -471,7 +476,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.18.2
+    ref: analytics/v0.18.3
     entry: mcp/analytics
   port: 8080
   health_check: /health

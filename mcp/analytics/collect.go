@@ -263,6 +263,12 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 			event = "page_view"
 		}
 		props := collectProps(q)
+		// The platform resolves the visitor's country from their IP and
+		// replaces any caller-sent X-Apteva-Country on public routes, so it
+		// wins over a country the page reports. The IP itself is not kept.
+		if country := platformCountry(r); country != "" {
+			props["country"] = country
+		}
 		propsJSON := "{}"
 		if b, err := json.Marshal(props); err == nil {
 			propsJSON = string(b)
@@ -309,6 +315,16 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Apa", "dropped")
 	}
 	writePixel(w)
+}
+
+// platformCountry returns the ISO 3166-1 alpha-2 code Apteva Server adds as
+// X-Apteva-Country when its GeoIP lookup is enabled, or "".
+func platformCountry(r *http.Request) string {
+	code := strings.ToUpper(strings.TrimSpace(r.Header.Get("X-Apteva-Country")))
+	if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+		return ""
+	}
+	return code
 }
 
 func canonicalOrigin(raw string) string {

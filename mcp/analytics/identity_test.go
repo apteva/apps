@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
@@ -251,6 +252,51 @@ func TestCollectAttributionLinkedUserAndRetries(t *testing.T) {
 	for _, r := range rows {
 		if r.TS < before-maxRetryAge.Milliseconds()-1000 {
 			t.Fatalf("event dated beyond retry window: %d", r.TS)
+		}
+	}
+}
+
+func TestCollectStoresPlatformCountry(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
+	old := globalCtx
+	globalCtx = ctx
+	defer func() { globalCtx = old }()
+	wk, err := createWriteKey(ctx.AppDB(), "site", "p1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		eid, header, param, extra, want string
+	}{
+		{"c1", "fr", "", "", "FR"},                   // platform value, normalised
+		{"c2", "DE", "US", `{"country":"GB"}`, "DE"}, // platform wins over page-reported values
+		{"c3", "", "US", "", "US"},                   // no GeoIP on the server: keep the page value
+		{"c4", "Z1", "", "", ""},                     // malformed header ignored
+		{"c5", "", "", "", ""},                       // nothing known
+	}
+	for _, c := range cases {
+		q := url.Values{"k": {wk.Key}, "eid": {c.eid}}
+		if c.param != "" {
+			q.Set("country", c.param)
+		}
+		if c.extra != "" {
+			q.Set("p", c.extra)
+		}
+		r := httptest.NewRequest("GET", "/collect?"+q.Encode(), nil)
+		if c.header != "" {
+			r.Header.Set("X-Apteva-Country", c.header)
+		}
+		rr := httptest.NewRecorder()
+		(&App{}).handleCollect(rr, r)
+		if rr.Header().Get("X-Apa") != "ok" {
+			t.Fatalf("%s: %v", c.eid, rr.Header())
+		}
+		var got sql.NullString
+		if err := ctx.AppDB().QueryRow(`SELECT json_extract(props,'$.country') FROM events e JOIN ingest_receipts r ON r.event_id=e.id WHERE r.delivery_id=?`, c.eid).Scan(&got); err != nil {
+			t.Fatal(c.eid, err)
+		}
+		if got.String != c.want {
+			t.Errorf("%s: country=%q, want %q", c.eid, got.String, c.want)
 		}
 	}
 }
