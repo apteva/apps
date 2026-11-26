@@ -139,8 +139,34 @@ export function crmInboxContactLabel(item: InboxItem): string {
   return item.contact_name?.trim() || item.contact_email?.trim() || item.contact_phone?.trim() || `Contact #${item.contact_id}`;
 }
 
+function collapseSpace(value?: string): string {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
+// Email activity bodies start with the subject ("Subject\n\nbody"), so the
+// snippet repeats it. The preview is the body after the subject; it is empty
+// when the message has nothing beyond its subject.
 export function crmInboxPreview(item: InboxItem): string {
-  return item.snippet?.trim() || item.subject?.trim() || "Conversation";
+  const subject = collapseSpace(item.subject);
+  let snippet = collapseSpace(item.snippet);
+  if (subject && snippet) {
+    const lowerSnippet = snippet.toLowerCase();
+    const lowerSubject = subject.toLowerCase();
+    if (lowerSnippet.startsWith(lowerSubject)) {
+      snippet = snippet.slice(subject.length).replace(/^[\s·:|\-–—]+/, "");
+    } else if (snippet.endsWith("…") && lowerSubject.startsWith(lowerSnippet.slice(0, -1).trimEnd())) {
+      snippet = ""; // a long subject truncated into the snippet
+    }
+  }
+  return snippet;
+}
+
+// One-line row summary: "Subject · body", or whichever part exists.
+export function crmInboxSummary(item: InboxItem): string {
+  const subject = collapseSpace(item.subject);
+  const preview = crmInboxPreview(item);
+  if (subject && preview) return `${subject} · ${preview}`;
+  return subject || preview || "Conversation";
 }
 
 export function crmInboxRelativeTime(value: string, now = Date.now()): string {

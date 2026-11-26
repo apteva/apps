@@ -6,7 +6,7 @@ import {
   crmInboxContactLabel,
   crmInboxPageLink,
   crmInboxPreferences,
-  crmInboxPreview,
+  crmInboxSummary,
   crmInboxRelativeTime,
   type CRMInboxHostProps,
   type InboxItem,
@@ -61,9 +61,9 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
       setTotal(typeof response.total === "number" ? response.total : (response.inbox || []).length);
     } catch (cause) {
       if (controller.signal.aborted || request.current !== controller) return;
+      // Keep the last rows on a failed refresh; the error shows above them.
       setError((cause as Error).message);
-      setItems([]);
-      setTotal(0);
+      setItems(previous => previous ?? []);
     }
   }, [props.appName, props.installId, props.projectId, preferences]);
 
@@ -108,15 +108,22 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
         <a href={crmInboxPageLink(props)} className="shrink-0 pt-0.5 text-[11px] text-text-muted hover:text-text">View inbox →</a>
       </header>
 
-      {error ? (
-        <div className="flex min-h-28 flex-1 flex-col items-start justify-center gap-2 p-4" role="alert">
+      {error && items !== null && items.length > 0 && (
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-2" role="alert">
+          <p className="truncate text-[11px] text-red" title={error}>Couldn't refresh: {error}</p>
+          <button type="button" onClick={() => void load()} className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-text-muted hover:bg-bg-hover">Retry</button>
+        </div>
+      )}
+
+      {error && !(items && items.length > 0) ? (
+        <div className="flex flex-1 flex-col items-start justify-center gap-2 p-4" style={{ minHeight: 112 }} role="alert">
           <p className="text-xs text-red">{error}</p>
           <button type="button" onClick={() => void load()} className="rounded border border-border px-2 py-1 text-[10px] text-text-muted hover:bg-bg-hover">Retry</button>
         </div>
       ) : items === null ? (
-        <p className="flex min-h-28 flex-1 items-center p-4 text-xs text-text-dim">Loading customer inbox…</p>
+        <p className="flex flex-1 items-center p-4 text-xs text-text-dim" style={{ minHeight: 112 }}>Loading customer inbox…</p>
       ) : items.length === 0 ? (
-        <div className="flex min-h-28 flex-1 flex-col justify-center p-4">
+        <div className="flex flex-1 flex-col justify-center p-4" style={{ minHeight: 112 }}>
           <p className="text-xs font-semibold text-text">Inbox clear</p>
           <p className="mt-1 text-[11px] text-text-dim">New matching conversations will appear here.</p>
         </div>
@@ -144,9 +151,7 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
                 {item.automated && (
                   <span className="shrink-0 rounded border border-border bg-bg-input px-1.5 py-0.5 text-[8px] font-bold uppercase text-text-dim">Automated</span>
                 )}
-                <p className="truncate text-[11px] text-text-muted">
-                  {item.subject ? `${item.subject} · ` : ""}{crmInboxPreview(item)}
-                </p>
+                <p className="truncate text-[11px] text-text-muted">{crmInboxSummary(item)}</p>
               </div>
               <p className="mt-1 truncate text-[10px] text-text-dim" title={`Latest message · ${messageRecipientSummary(item.last_message_addresses)}`}>
                 Latest · {messageRecipientSummary(item.last_message_addresses)}

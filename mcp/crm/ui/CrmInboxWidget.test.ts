@@ -5,6 +5,7 @@ import {
   crmInboxPageLink,
   crmInboxPreferences,
   crmInboxPreview,
+  crmInboxSummary,
   crmInboxRelativeTime,
   crmPanelInitialRoute,
   type InboxItem,
@@ -59,5 +60,21 @@ describe("CRM inbox widget contract", () => {
     expect(crmInboxContactLabel(item)).toBe("Maria Gomez");
     expect(crmInboxPreview(item)).toBe("Can you send the updated proposal?");
     expect(crmInboxRelativeTime(item.last_activity_at, Date.parse("2026-09-21T10:04:30Z"))).toBe("4m");
+  });
+
+  test("does not repeat the email subject stored at the start of the body", () => {
+    const email = { ...item, subject: "¡Corre que acaba! Asisa 20% menos", snippet: "¡Corre que acaba! Asisa 20% menos\n\nhttps://asisa.example/offer" };
+    expect(crmInboxPreview(email)).toBe("https://asisa.example/offer");
+    expect(crmInboxSummary(email)).toBe("¡Corre que acaba! Asisa 20% menos · https://asisa.example/offer");
+    // Subject only, no body.
+    expect(crmInboxSummary({ ...item, snippet: "Renewal" })).toBe("Renewal");
+    expect(crmInboxSummary({ ...item, snippet: "" })).toBe("Renewal");
+    // A long subject cut off inside the 160-char snippet.
+    const long = "A".repeat(170);
+    expect(crmInboxSummary({ ...item, subject: long, snippet: `${"A".repeat(160)}…` })).toBe(long);
+    // Body that does not start with the subject (SMS, older rows) is kept whole.
+    expect(crmInboxSummary(item)).toBe("Renewal · Can you send the updated proposal?");
+    expect(crmInboxSummary({ ...item, subject: "", snippet: "Hi there" })).toBe("Hi there");
+    expect(crmInboxSummary({ ...item, subject: "", snippet: "" })).toBe("Conversation");
   });
 });
