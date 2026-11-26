@@ -20,7 +20,7 @@ type videoFramesFake struct {
 	calls    []map[string]any
 	retryAt  []float64
 	lowRes   []float64 // times decoded at 288x512 on the first call only
-	actions  []string // session capability actions; nil means not reported
+	actions  []string  // session capability actions; nil means not reported
 	frameFor func(t float64) string
 }
 

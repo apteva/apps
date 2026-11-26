@@ -1,5 +1,7 @@
 # Actors
 
+Actors v0.11.0 waits for read views to show rows or their verified empty state before judging them, and lets configuration clicks confirm what they open and retry once. See [Settled views and confirmed configuration clicks](#settled-views-and-confirmed-configuration-clicks-v0110).
+
 Actors v0.10.0 adds `read_video_frames`: a read-only step that saves frames of a video on the current page at exact times or a fixed interval, and `actors_run_frames`, which hands those frames to an agent as images. See [Video frames](#video-frames-v0100).
 
 Actors v0.7.0 adds guarded Android native field reads, verified replacement and explicit clearing, alongside the existing iOS native guards. The shared [Instagram example](examples/instagram.md) provides both platform variants. This release retains confirmed upload receipts and adds the reviewed media-example guard regressions from the other Actors work.
@@ -658,3 +660,34 @@ calling agent: a JSON text block (frame times, sizes, `content_index` of each
 image, `next_offset`) followed by up to 12 image blocks (default 6). Images are
 not kept in conversation history, so describe what you need from them in the
 same turn and pass `next_offset` for the rest.
+
+## Settled views and confirmed configuration clicks (v0.11.0)
+
+`inspect_views` now judges a collection page only once it shows item rows
+(with `ready_selector`) or its verified empty state (`empty_selector` +
+`empty_text_pattern`), polling within the view's `timeout_ms`. Before, a
+`ready_selector` that matched page chrome let the engine read a list that had
+not rendered yet and stop with "empty collection has no verified empty-state
+marker". A list that never renders now fails with "view did not finish
+loading: no item rows and no verified empty-state marker", so a view that
+failed to load is distinguishable from a verified empty one. The duplicate
+guard is unchanged: absence is never inferred without the empty-state marker.
+
+A `click` with `expected_effect: "open_configuration"` can name what it
+opens:
+
+```json
+{"action": "click", "expected_effect": "open_configuration",
+ "locator": {"selector": "button.add-item"},
+ "opens": {"conditions": [{"type": "selector_present", "selector": ".item-picker .confirm"}],
+           "match": "all", "timeout_ms": 8000}}
+```
+
+The engine clicks, then waits for `opens.conditions` (same shape as
+`wait_for`). If they are not met it checks once more briefly, so a late dialog
+is not closed by clicking its backdrop, and clicks a second time only if the
+page URL has not changed. If the configuration still has not opened, the step
+fails with "configuration did not open after 2 clicks" before any later step
+runs. `opens` is rejected with `once_key`, `confirm_consequence`,
+`effect_phase` or any other `expected_effect`: only clicks that merely open
+configuration are repeated.

@@ -98,6 +98,7 @@ type actorStep struct {
 	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
 	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
 	VideoFrames        *actorVideoFrames     `json:"video_frames,omitempty"`
+	Opens              *actorClickOpens      `json:"opens,omitempty"`
 	ReadOnly           bool                  `json:"read_only,omitempty"`
 	ReadRetries        *int                  `json:"read_retries,omitempty"`
 	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
@@ -489,6 +490,9 @@ func validateActorDefinition(def actorDefinition) error {
 			return fmt.Errorf("steps[%d] target_id, expected_name and expected_role are scroll-only fields", i)
 		}
 		if err := validateEffectPhase(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
+		if err := validateClickOpens(step); err != nil {
 			return fmt.Errorf("steps[%d]: %w", i, err)
 		}
 		if step.OnceScope != "" && (step.OnceKey == "" || (step.Action != "click" && step.Action != "click_verified") || strings.TrimSpace(step.OnceScope) != step.OnceScope || len(step.OnceScope) > 100) {

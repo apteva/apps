@@ -340,8 +340,14 @@ func verifyReadIdentity(c actorReadViews, root *html.Node, base string) (string,
 	}
 	return got, nil
 }
-func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.Node, error) {
-	until := time.Now().Add(time.Duration(c.TimeoutMS) * time.Millisecond)
+
+// readViewDOM polls the page until it is settled. With collection set, settled
+// means the view shows item rows (with its ready selector) or its verified
+// empty state: a ready selector alone often matches page chrome that renders
+// before the list, and reading then proves neither presence nor absence.
+func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView, collection bool) (*html.Node, error) {
+	timeout := time.Duration(c.TimeoutMS) * time.Millisecond
+	until := time.Now().Add(timeout)
 	for {
 		if err := e.checkpoint(); err != nil {
 			return nil, err
@@ -375,8 +381,15 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 		// Empty collections often omit the populated table/list shell entirely.
 		// Accept only an explicit verified empty state with no item rows, and
 		// retain the same URL, identity, error, loading and filter guards.
-		verifiedEmpty := readVerifiedEmpty(root, v) && !readHas(root, v.Items)
-		if (readHas(root, v.ReadySelector) || verifiedEmpty) && !readHas(root, v.LoadingSelector) {
+		hasItems := readHas(root, v.Items)
+		verifiedEmpty := readVerifiedEmpty(root, v) && !hasItems
+		shell := readHas(root, v.ReadySelector)
+		loading := readHas(root, v.LoadingSelector)
+		ready := shell || verifiedEmpty
+		if collection {
+			ready = (shell && hasItems) || verifiedEmpty
+		}
+		if ready && !loading {
 			token, err := verifyReadIdentity(c, root, e.currentURL)
 			if err != nil {
 				return nil, err
@@ -388,6 +401,10 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 			return root, nil
 		}
 		if time.Now().After(until) {
+			if collection && shell && !loading {
+				// Not a verified empty view: the list never rendered.
+				return nil, fmt.Errorf("view did not finish loading: no item rows and no verified empty-state marker after %s; coverage incomplete", timeout)
+			}
 			return nil, errors.New("view not ready or still loading; coverage incomplete")
 		}
 		if err := e.readPause(500); err != nil {
@@ -521,7 +538,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		}
 		entry.EmptySelector = ""
 		entry.Verification = nil
-		root, err = e.readViewDOM(c, entry)
+		root, err = e.readViewDOM(c, entry, false)
 		if err != nil {
 			return err
 		}
@@ -567,7 +584,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 	pendingNextSignature := ""
 	var pendingNextDeadline time.Time
 	if e.readResume != nil && e.readResume.ResumeNext {
-		root, err = e.readViewDOM(c, v)
+		root, err = e.readViewDOM(c, v, true)
 		if err != nil {
 			return err
 		}
@@ -589,7 +606,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		if e.pageCount >= e.maxPages {
 			return fmt.Errorf("%w: global page limit; more results may remain", errReadCollectionBound)
 		}
-		root, err = e.readViewDOM(c, v)
+		root, err = e.readViewDOM(c, v, true)
 		if err != nil {
 			return err
 		}
