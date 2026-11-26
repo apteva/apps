@@ -30,6 +30,9 @@
  *                             short-lived _apa URL parameter the receiving tag
  *                             removes from the address bar.
  *
+ * Automated browsers (navigator.webdriver, headless Chrome) send nothing, and
+ * a prerendered page sends nothing until the visitor actually opens it.
+ *
  * apa.visitorId() returns the anonymous visitor ID and apa.attribution() the
  * current touches. Linking a visitor to a signed-in user happens server-side
  * (analytics_identify); the browser never asserts who the user is.
@@ -57,6 +60,21 @@
       return null;
     })();
   if (!self) return;
+
+  // Automated browsers (WebDriver, Puppeteer, Playwright, headless Chrome)
+  // are not visitors. The API stays callable so site code never breaks.
+  var ua0 = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  if ((typeof navigator !== "undefined" && navigator.webdriver) || /HeadlessChrome|PhantomJS/.test(ua0)) {
+    window.apa = function () {};
+    window.apa.loaded = true;
+    window.apa.visitorId = function () {
+      return "";
+    };
+    window.apa.attribution = function () {
+      return {};
+    };
+    return;
+  }
 
   function attr(name) {
     return self.getAttribute(name) || "";
@@ -307,19 +325,21 @@
 
   // ─── delivery + retry queue ─────────────────────────────────────────
   var QUEUE_MAX = 50;
-  function enqueue(url) {
+  function enqueue(url, at) {
     if (!persist) return;
     var q = loadJSON("apa_queue_v1");
     if (!Array.isArray(q)) q = [];
-    q.push({ u: url, t: Date.now() });
+    q.push({ u: url, t: at });
     save("apa_queue_v1", JSON.stringify(q.slice(-QUEUE_MAX)));
   }
   function deliver(url, queuedAt) {
     // A retried event carries its age so the server can date it correctly
     // without trusting the device clock.
     var target = queuedAt ? url + "&age=" + Math.max(0, Date.now() - queuedAt) : url;
+    // A retry that fails again keeps its original time, so its age and
+    // its one-day expiry still count from the first attempt.
     function failed() {
-      enqueue(url);
+      enqueue(url, queuedAt || Date.now());
     }
     function fallback() {
       try {
@@ -359,10 +379,37 @@
     };
   }
 
+  // A prerendered page (speculation rules) may never be seen, so nothing is
+  // sent until it is activated. Events made meanwhile wait, in order.
+  var waiting = null;
+  if (document && document.prerendering && document.addEventListener) {
+    waiting = [];
+    document.addEventListener(
+      "prerenderingchange",
+      function () {
+        var w = waiting;
+        waiting = null;
+        for (var i = 0; i < w.length; i++) w[i]();
+      },
+      { once: true },
+    );
+  }
+  function whenActive(fn) {
+    if (waiting) waiting.push(fn);
+    else fn();
+  }
+
   // loc pins the page a deferred event belongs to; it defaults to the current one.
   function send(event, props, loc) {
     if (!key) return;
     loc = loc || here();
+    if (waiting) {
+      var pinned = loc;
+      waiting.push(function () {
+        send(event, props, pinned);
+      });
+      return;
+    }
     var params = {
       k: key,
       e: event || "page_view",
@@ -445,7 +492,7 @@
   // for document.title to catch up. The URL is captured at the route change;
   // a newer route change or page exit sends the pending one immediately.
   send("page_view");
-  flushQueue();
+  whenActive(flushQueue);
   window.addEventListener("online", flushQueue);
   var lastPath = location.pathname + location.search;
   var pendingPV = null,

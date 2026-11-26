@@ -276,6 +276,8 @@ type TagOptions = {
   now?: number;
   reject?: boolean;
   window?: any;
+  navigator?: Record<string, unknown>;
+  prerendering?: boolean;
 };
 function runConfiguredTag(o: TagOptions = {}) {
   const storage = o.storage ?? new Map<string, string>();
@@ -283,7 +285,7 @@ function runConfiguredTag(o: TagOptions = {}) {
   const images: any[] = [];
   const replaced: string[] = [];
   const clickListeners: ((e: any) => void)[] = [];
-  const now = o.now ?? 1_000_000;
+  const clock = { now: o.now ?? 1_000_000 };
   const location: any = {
     origin: "https://example.com",
     host: "example.com",
@@ -302,7 +304,12 @@ function runConfiguredTag(o: TagOptions = {}) {
     title: "Landing",
     referrer: o.referrer ?? "",
     cookie: "",
-    addEventListener: (_: string, fn: (e: any) => void) => clickListeners.push(fn),
+    prerendering: o.prerendering ?? false,
+    listeners: {} as Record<string, () => void>,
+    addEventListener(name: string, fn: (e: any) => void) {
+      if (name === "click") clickListeners.push(fn);
+      else document.listeners[name] = fn;
+    },
   };
   const history: any = {
     state: null,
@@ -324,11 +331,11 @@ function runConfiguredTag(o: TagOptions = {}) {
       removeItem: (k: string) => storage.delete(k),
     },
     location,
-    navigator: { userAgent: "test", language: "en" },
+    navigator: { userAgent: "test", language: "en", ...o.navigator },
     history,
     screen: { width: 100, height: 100 },
     URL,
-    Date: { now: () => now },
+    Date: { now: () => clock.now },
     Math,
     Number,
     setTimeout: () => 0,
@@ -347,7 +354,7 @@ function runConfiguredTag(o: TagOptions = {}) {
     console,
   });
   const props = (i: number) => JSON.parse(new URL(fetched[i]).searchParams.get("p")!);
-  return { storage, fetched, images, replaced, clickListeners, document, window, props };
+  return { storage, fetched, images, replaced, clickListeners, document, window, props, clock };
 }
 describe("tracking tag acquisition attribution", () => {
   test("keeps the first touch and updates the latest; direct visits change nothing", () => {
@@ -441,6 +448,21 @@ describe("tracking tag consent, identity and delivery", () => {
     expect(retried.searchParams.get("age")).toBe("60000");
     expect(storage.get("apa_queue_v1")).toBe("[]");
   });
+  test("a retry that fails again keeps its first queued time", async () => {
+    const storage = new Map<string, string>([
+      ["apa_queue_v1", JSON.stringify([{ u: "https://analytics.test/collect?k=x&eid=e1", t: 1_000_000 }])],
+    ]);
+    const t = runConfiguredTag({ storage, reject: true, now: 1_060_000 });
+    await Promise.resolve();
+    for (const img of t.images) img.onerror();
+    const queue = JSON.parse(storage.get("apa_queue_v1")!);
+    const retried = queue.find((q: any) => q.u.includes("eid=e1"));
+    expect(retried.t).toBe(1_000_000);
+    expect(retried.u).not.toContain("age=");
+    const next = runConfiguredTag({ storage, now: 1_120_000 });
+    const again = next.fetched.find((u) => u.includes("eid=e1"))!;
+    expect(new URL(again).searchParams.get("age")).toBe("120000");
+  });
   test("queued deliveries older than a day are dropped", () => {
     const storage = new Map<string, string>([
       ["apa_queue_v1", JSON.stringify([{ u: "https://analytics.test/collect?k=x&eid=old", t: 0 }])],
@@ -503,5 +525,34 @@ describe("tracking tag cross-domain handoff", () => {
       expect(t.props(0).visitor_id).not.toBe("s_visitorabc");
       expect(t.replaced).toEqual(["/landing"]);
     }
+  });
+});
+
+describe("tracking tag automation and prerendering", () => {
+  test("automated browsers send nothing but keep a callable API", () => {
+    for (const navigator of [{ webdriver: true }, { userAgent: "Mozilla/5.0 HeadlessChrome/131.0" }]) {
+      const t = runConfiguredTag({ navigator });
+      t.window.apa("signup", { plan: "pro" });
+      expect(t.fetched).toHaveLength(0);
+      expect(t.storage.size).toBe(0);
+      expect(t.window.apa.loaded).toBe(true);
+      expect(t.window.apa.visitorId()).toBe("");
+    }
+  });
+  test("a prerendered page sends nothing until it is activated, then sends in order", () => {
+    const storage = new Map<string, string>([
+      ["apa_queue_v1", JSON.stringify([{ u: "https://analytics.test/collect?k=x&eid=q1", t: 999_000 }])],
+    ]);
+    const t = runConfiguredTag({ storage, prerendering: true });
+    t.window.apa("signup", { plan: "pro" });
+    expect(t.fetched).toHaveLength(0);
+    t.clock.now = 1_005_000;
+    t.document.prerendering = false;
+    t.document.listeners.prerenderingchange();
+    // Page view first, then the queued retry, then the event made while waiting.
+    const sent = t.fetched.map((u) => new URL(u).searchParams);
+    expect(sent.map((q) => q.get("e") ?? q.get("eid"))).toEqual(["page_view", "q1", "signup"]);
+    // The visit's session starts when the visitor actually arrives.
+    expect(JSON.parse(storage.get("apa_session_v2")!).last).toBe(1_005_000);
   });
 });

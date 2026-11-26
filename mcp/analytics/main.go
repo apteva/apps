@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.18.1
+version: 0.18.2
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -99,6 +99,11 @@ description: |
   record (capture off, topic filtered, sampled out) are no longer stored,
   and one install-wide worker deletes processed inbox rows after seven
   days in indexed batches, including rows with no project.
+
+  v0.18.2 tightens website tracking. tag.js sends nothing from automated
+  browsers (navigator.webdriver, headless Chrome), waits until a
+  prerendered page is actually opened, and keeps the first queued time of
+  a delivery that fails more than once, so its age stays correct.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [project, global]
@@ -428,7 +433,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.18.1
+    ref: analytics/v0.18.2
     entry: mcp/analytics
   port: 8080
   health_check: /health
