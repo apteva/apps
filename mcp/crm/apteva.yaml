@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.33
+version: 0.10.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -208,9 +208,10 @@ provides:
   ui_components:
     - name: customer-inbox
       label: Customer inbox
-      description: Open and pending customer conversations, ordered by latest activity, with contact, channel, priority, subject, and message preview.
+      description: Open and pending customer conversations, ordered by latest activity, with contact, channel, priority, subject, and message preview. On All projects it lists every project's conversations with a project filter.
       entry: /ui/CrmInboxWidget.mjs
       slots: [dashboard.home]
+      dashboard_scopes: [project, global]
       suggested: true
       visibility: project
       supported_sizes: [half, full]
@@ -518,7 +519,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.33
+    ref: crm/v0.10.0
     entry: mcp/crm
   port: 8080
   health_check: /health

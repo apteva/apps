@@ -2831,6 +2831,9 @@ type inboxRow struct {
 	Snippet              string            `json:"snippet,omitempty"`
 	Automated            bool              `json:"automated,omitempty"`
 	LastMessageAddresses *MessageAddresses `json:"last_message_addresses,omitempty"`
+	// Set only on the All projects (scope=global) inbox.
+	ProjectID   string `json:"project_id,omitempty"`
+	ProjectName string `json:"project_name,omitempty"`
 }
 
 // dbInboxConversations returns conversations across all contacts for the
@@ -2838,14 +2841,31 @@ type inboxRow struct {
 // status. Each row carries the contact summary, a last-message snippet,
 // and whether the contact is tagged automated.
 func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, filters []inboxFilter) ([]*inboxRow, int, error) {
+	rows, total, err := dbInboxConversationsAcross(db, []string{pid}, status, limit, offset, filters)
+	for _, row := range rows {
+		row.ProjectID = "" // the project inbox response carries no project per row
+	}
+	return rows, total, err
+}
+
+// dbInboxConversationsAcross runs the inbox query over several projects at
+// once: one WHERE project_id IN (...), one sort order, one offset, so paging
+// has no duplicates or gaps across projects. Rows carry their project_id.
+func dbInboxConversationsAcross(db *sql.DB, pids []string, status string, limit, offset int, filters []inboxFilter) ([]*inboxRow, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	where := "cc.project_id = ? AND c.deleted_at IS NULL"
-	args := []any{pid}
+	if len(pids) == 0 {
+		return []*inboxRow{}, 0, nil
+	}
+	where := "cc.project_id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(pids)), ",") + ") AND c.deleted_at IS NULL"
+	args := make([]any, 0, len(pids))
+	for _, pid := range pids {
+		args = append(args, pid)
+	}
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "", "open":
 		where += " AND COALESCE(cc.status,'open') = 'open'"
@@ -2876,7 +2896,7 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 	}
 	args = append(args, limit, offset)
 	rows, err := db.Query(
-		`SELECT cc.id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''), COALESCE(c.primary_phone,''),
+		`SELECT cc.id, cc.project_id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''), COALESCE(c.primary_phone,''),
 				cc.channel, COALESCE(cc.subject,''), COALESCE(cc.status,'open'),
 				COALESCE(cc.priority,'normal'), cc.last_activity_at,
 				COALESCE((SELECT a.body FROM contact_activities a
@@ -2905,7 +2925,7 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 		r := &inboxRow{}
 		var autom int
 		var latest, channels string
-		if err := rows.Scan(&r.ID, &r.ContactID, &r.ContactName, &r.ContactEmail,
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.ContactID, &r.ContactName, &r.ContactEmail,
 			&r.ContactPhone, &r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
 			&r.Snippet, &autom, &latest, &channels); err != nil {
 			return nil, 0, err
@@ -3672,6 +3692,11 @@ func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "" && scope != "global" {
+		httpErr(w, http.StatusBadRequest, "scope must be global when provided")
+		return
+	}
 	args := map[string]any{}
 	if s := r.URL.Query().Get("status"); s != "" {
 		args["status"] = s
@@ -3700,6 +3725,10 @@ func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
 		}
 		args["filters"] = filters
 	}
+	if scope == "global" {
+		a.handleHTTPGlobalInbox(w, r, args)
+		return
+	}
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid
 	}
@@ -3709,6 +3738,94 @@ func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, out)
+}
+
+type inboxProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// inboxRequestUser is the signed-in user the platform proxy stamped on the
+// request; 0 when there is none.
+func inboxRequestUser(r *http.Request) int64 {
+	raw := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	if raw == "" {
+		raw = strings.TrimSpace(r.Header.Get("X-Apteva-User-ID"))
+	}
+	id, _ := strconv.ParseInt(raw, 10, 64)
+	return id
+}
+
+// Delegated application users carry issuer markers the platform signs.
+func inboxRequestDelegated(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("X-Apteva-Issuer-App")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Apteva-Issuer-Install-ID")) != ""
+}
+
+// handleHTTPGlobalInbox is the All projects Home view of the inbox: the same
+// rows across every project the platform lists for this install, in one
+// query. The project set always comes from the platform, never the browser;
+// a selected project_id must be in it. Actions stay project-scoped.
+func (a *App) handleHTTPGlobalInbox(w http.ResponseWriter, r *http.Request, args map[string]any) {
+	if inboxRequestDelegated(r) {
+		httpErr(w, http.StatusForbidden, "the All projects inbox is unavailable to delegated application users")
+		return
+	}
+	if inboxRequestUser(r) <= 0 {
+		httpErr(w, http.StatusUnauthorized, "authenticated user required")
+		return
+	}
+	ctx := globalCtx.WithUserSession(r)
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		httpErr(w, http.StatusServiceUnavailable, "platform unavailable")
+		return
+	}
+	projects, err := ctx.PlatformAPI().ListProjects()
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "unable to list projects")
+		return
+	}
+	names := map[string]string{}
+	ids := []string{}
+	list := []inboxProject{}
+	for _, project := range projects {
+		id := strings.TrimSpace(project.ID)
+		if id == "" {
+			continue
+		}
+		if _, seen := names[id]; seen {
+			continue
+		}
+		names[id] = project.Name
+		ids = append(ids, id)
+		list = append(list, inboxProject{ID: id, Name: project.Name})
+	}
+	selected := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if selected != "" {
+		if _, ok := names[selected]; !ok {
+			httpErr(w, http.StatusForbidden, "project is not visible to this user")
+			return
+		}
+		ids = []string{selected}
+	}
+	filters, err := inboxFiltersFromArgs(args)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset := intArg(args, "offset", 0)
+	items, total, err := dbInboxConversationsAcross(ctx.AppDB(), ids, strArg(args, "status"), intArg(args, "limit", 50), offset, filters)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for _, item := range items {
+		item.ProjectName = names[item.ProjectID]
+	}
+	httpJSON(w, map[string]any{
+		"inbox": items, "count": len(items), "total": total, "offset": offset,
+		"projects": list, "selected_project_id": selected,
+	})
 }
 
 // handleHTTPRoutingRules — GET /routing-rules (list) / POST (create).

@@ -4,12 +4,15 @@ import { channelPresentation, channelThemeCSS } from "./channels";
 import {
   crmInboxAPIURL,
   crmInboxContactLabel,
+  crmInboxHeaderLink,
+  crmInboxIsGlobal,
   crmInboxPageLink,
   crmInboxPreferences,
   crmInboxSummary,
   crmInboxRelativeTime,
   type CRMInboxHostProps,
   type InboxItem,
+  type InboxProject,
   type InboxResponse,
 } from "./inbox";
 
@@ -41,22 +44,30 @@ async function readJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// Global scope gets no live app events, so it polls on its own.
+const projectRefreshMs = 60000;
+const globalRefreshMs = 15000;
+
 export default function CrmInboxWidget(props: CRMInboxHostProps) {
+  const global = crmInboxIsGlobal(props);
   const preferences = useMemo(() => crmInboxPreferences(props.widgetSettings), [props.widgetSettings]);
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState("");
+  const [projects, setProjects] = useState<InboxProject[]>([]);
+  const [selectedProject, setSelectedProject] = useState("");
   const request = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
-    if (!props.projectId) return;
+    if (!global && !props.projectId) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     setError("");
     try {
-      const response = await readJSON<InboxResponse>(crmInboxAPIURL(props, preferences), controller.signal);
+      const response = await readJSON<InboxResponse>(crmInboxAPIURL(props, preferences, global ? selectedProject : ""), controller.signal);
       if (request.current !== controller) return;
+      if (global) setProjects(response.projects || []);
       setItems(response.inbox || []);
       setTotal(typeof response.total === "number" ? response.total : (response.inbox || []).length);
     } catch (cause) {
@@ -65,7 +76,7 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
       setError((cause as Error).message);
       setItems(previous => previous ?? []);
     }
-  }, [props.appName, props.installId, props.projectId, preferences]);
+  }, [global, selectedProject, props.appName, props.installId, props.projectId, preferences]);
 
   useEffect(() => {
     void load();
@@ -73,11 +84,13 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
   }, [load, props.eventRevision]);
 
   useEffect(() => {
-    const refresh = window.setInterval(() => void load(), 60000);
+    const refresh = window.setInterval(() => void load(), global ? globalRefreshMs : projectRefreshMs);
     return () => window.clearInterval(refresh);
-  }, [load]);
+  }, [load, global]);
 
-  if (!props.projectId) {
+  const headerLink = crmInboxHeaderLink(props, selectedProject);
+
+  if (!global && !props.projectId) {
     return (
       <section className="flex h-full min-h-0 items-center justify-center rounded-lg border border-border bg-bg-card p-5 text-center">
         <div>
@@ -103,9 +116,24 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
           </div>
           <p className="mt-0.5 text-[11px] text-text-dim">
             {preferences.defaultStatus === "all" ? "Recent" : preferences.defaultStatus === "pending" ? "Pending" : "Open"} customer conversations
+            {global && !selectedProject ? " across projects" : ""}
           </p>
         </div>
-        <a href={crmInboxPageLink(props)} className="shrink-0 pt-0.5 text-[11px] text-text-muted hover:text-text">View inbox →</a>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          {global && projects.length > 1 && (
+            <select
+              aria-label="Project"
+              value={selectedProject}
+              onChange={event => { setSelectedProject(event.target.value); setItems(null); }}
+              className="rounded border border-border bg-bg-input px-1.5 py-0.5 text-[11px] text-text"
+              style={{ maxWidth: 160 }}
+            >
+              <option value="">All projects</option>
+              {projects.map(project => <option key={project.id} value={project.id}>{project.name || project.id}</option>)}
+            </select>
+          )}
+          {headerLink && <a href={headerLink} className="text-[11px] text-text-muted hover:text-text">View inbox →</a>}
+        </div>
       </header>
 
       {error && items !== null && items.length > 0 && (
@@ -137,6 +165,11 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span className="truncate text-xs font-semibold text-text">{crmInboxContactLabel(item)}</span>
+                {global && item.project_name && (
+                  <span className="shrink-0 truncate rounded border border-border bg-bg-input px-1.5 py-0.5 text-[10px] text-text-muted" style={{ maxWidth: "40%" }} title={item.project_name}>
+                    {item.project_name}
+                  </span>
+                )}
                 {(item.channels || [item.channel]).map(channel => <span key={channel} className="shrink-0 rounded px-1.5 py-0.5 text-[8px] font-bold" style={channelPresentation[channel] ? {color: channelPresentation[channel].color, backgroundColor: channelPresentation[channel].backgroundColor} : undefined}>
                   {channelPresentation[channel]?.icon} {channelPresentation[channel]?.label || channelLabel(channel)}
                 </span>)}
@@ -158,8 +191,8 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
               </p>
             </a>
           ))}
-          {total > items.length && (
-            <a href={crmInboxPageLink(props)} className="block px-4 py-2.5 text-center text-[10px] text-text-muted hover:bg-bg-hover hover:text-text">
+          {total > items.length && headerLink && (
+            <a href={headerLink} className="block px-4 py-2.5 text-center text-[10px] text-text-muted hover:bg-bg-hover hover:text-text">
               {total - items.length} more conversation{total - items.length === 1 ? "" : "s"} →
             </a>
           )}

@@ -1,4 +1,16 @@
-# CRM v0.9.33
+# CRM v0.10.0
+
+Release `crm/v0.10.0`: the Customer inbox widget works on the All projects
+Home (`dashboard_scopes: [project, global]`). In global scope it calls
+`GET /inbox?scope=global`, which lists the projects the platform returns for
+this install (`ListProjects` with the viewer's session), runs one query across
+them (`project_id IN (...)`, one sort order and offset), and returns
+`projects` for the filter plus `project_id`/`project_name` on each row. A
+selected `project_id` outside that list is 403; delegated application users
+are 403; requests without a user are 401; any other `scope` is 400. The
+project-scoped response is unchanged. The widget shows a project filter and
+each row's project, links rows to their own project, and polls every 15 s
+since global scope has no live app events.
 
 Release `crm/v0.9.33`: Customer inbox widget fixes. Email rows no longer show
 the subject twice (activity bodies start with the subject, so the preview now
