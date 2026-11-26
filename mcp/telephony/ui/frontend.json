@@ -1,9 +1,9 @@
 {
   "schema": "apteva-app-frontend/v1",
   "app": "telephony",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "client": {
-    "path": "/ui/frontend/client-e64e6766ff979163.mjs",
-    "sha256": "e64e6766ff979163ba0e446ae0d07d55a21e269177e18f20b3b50926a40262af"
+    "path": "/ui/frontend/client-f72c27b08ac9f4ba.mjs",
+    "sha256": "f72c27b08ac9f4ba3ff911dffcbb51fae1aaaca7ba0fdcc2839803ffc01702c5"
   }
 }
