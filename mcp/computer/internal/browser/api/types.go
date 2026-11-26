@@ -483,6 +483,88 @@ type ElementReader interface {
 	ReadElement(selector string, opts ElementReadOptions) (ElementReadResult, error)
 }
 
+// VideoFrameOptions selects one page <video> and the times to copy frames
+// from. Exactly one of Times or Every is set; the caller validates bounds.
+type VideoFrameOptions struct {
+	Selector   string
+	VideoIndex *int
+	Times      []float64
+	Every      float64
+	Start      float64
+	End        *float64
+	MaxFrames  int
+	MaxEdge    int
+	Format     string // "jpeg" or "png"
+	Quality    int    // 1-100, jpeg only
+	MinHeight  int
+	MaxBytes   int
+	Timeout    time.Duration
+}
+
+// VideoFrame is one copied frame. Data holds the encoded image bytes.
+type VideoFrame struct {
+	Index         int     `json:"index"`
+	RequestedS    float64 `json:"requested_s"`
+	ActualS       float64 `json:"actual_s"`
+	Width         int     `json:"width"`
+	Height        int     `json:"height"`
+	SourceWidth   int     `json:"source_width"`
+	SourceHeight  int     `json:"source_height"`
+	MIMEType      string  `json:"mime_type"`
+	SHA256        string  `json:"sha256"`
+	DuplicateOf   *int    `json:"duplicate_of"`
+	LowResolution bool    `json:"low_resolution"`
+	Retried       bool    `json:"retried,omitempty"`
+	Data          []byte  `json:"-"`
+}
+
+// VideoFrameSkip is a requested time that produced no frame.
+type VideoFrameSkip struct {
+	RequestedS float64 `json:"requested_s"`
+	Reason     string  `json:"reason"`
+	Message    string  `json:"message,omitempty"`
+}
+
+// VideoCandidate describes one page video for selection and ambiguity reports.
+type VideoCandidate struct {
+	Index       int     `json:"index"`
+	OnScreenW   int     `json:"on_screen_width"`
+	OnScreenH   int     `json:"on_screen_height"`
+	VisibleArea int     `json:"visible_area"`
+	VideoWidth  int     `json:"video_width"`
+	VideoHeight int     `json:"video_height"`
+	Duration    float64 `json:"duration"`
+	Live        bool    `json:"live,omitempty"`
+	DRM         bool    `json:"drm,omitempty"`
+	Playing     bool    `json:"playing"`
+	ReadyState  int     `json:"ready_state"`
+	Source      string  `json:"source"`
+	InFrame     bool    `json:"in_frame,omitempty"`
+	NearbyText  string  `json:"nearby_text,omitempty"`
+}
+
+// VideoInfo describes the chosen video and whether its playback state was
+// put back after copying.
+type VideoInfo struct {
+	VideoCandidate
+	SelectorUsed  string `json:"selector_used,omitempty"`
+	Restored      bool   `json:"restored"`
+	RestoreReason string `json:"restore_reason,omitempty"`
+}
+
+type VideoFrameResult struct {
+	Video     VideoInfo        `json:"video"`
+	Frames    []VideoFrame     `json:"frames"`
+	Skipped   []VideoFrameSkip `json:"skipped"`
+	Truncated bool             `json:"truncated"`
+}
+
+// VideoFrameReader is implemented by DOM-backed providers. It pauses and
+// mutes the chosen video while copying, then restores its prior state.
+type VideoFrameReader interface {
+	ReadVideoFrames(opts VideoFrameOptions) (VideoFrameResult, error)
+}
+
 // PageRequestDiagnostic is a failed request or an HTTP response >= 400.
 // It deliberately carries no query string, fragment, headers, or body so
 // tokens in URLs cannot leak through diagnostics.

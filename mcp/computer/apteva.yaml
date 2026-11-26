@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.15.0
+version: 0.16.0
 description: |
+  v0.16.0 adds computer_use action video_frames: copies frames from a page
+  <video> at exact times (at_seconds or every_seconds) and returns them as
+  images, even when a popup covers the player. Picks the playing video,
+  reports ambiguous_video with candidates, restores playback afterwards.
   v0.15.0 adds Android selection with Mobile 0.8.0: row-scoped selectors
   (ROW >> PART), native_checked guards, native_select (taps only when needed,
   confirms the state) and native_scroll_to (swipes a list, never taps).
@@ -599,7 +603,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.15.0
+    ref: feat/computer-video-frames
     entry: mcp/computer
   port: 8080
   health_check: /health

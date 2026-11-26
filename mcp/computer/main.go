@@ -66,8 +66,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.15.0
+version: 0.16.0
 description: |
+  v0.16.0 adds computer_use action video_frames: copies frames from a page
+  <video> at exact times (at_seconds or every_seconds) and returns them as
+  images, even when a popup covers the player. Picks the playing video,
+  reports ambiguous_video with candidates, restores playback afterwards.
   v0.15.0 adds Android selection with Mobile 0.8.0: row-scoped selectors
   (ROW >> PART), native_checked guards, native_select (taps only when needed,
   confirms the state) and native_scroll_to (swipes a list, never taps).
@@ -313,7 +317,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.15.0
+    ref: feat/computer-video-frames
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -785,8 +789,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For action=scroll, inspect returned scroll_regions BEFORE execution. If more than one region can move in the requested direction, target_id is REQUIRED: copy the intended returned ID, never guess scroll_document. Pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"For explicitly read-only navigation, set read_only=true to allow one bounded Browserbase fresh-page retry on transient network failure. Never use it to replay or recover an uncertain write. Navigation failures return structured diagnostics and block subsequent writes until a successful read-only navigation or an explicit context reopen after inspection. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. For action=screenshot OMIT observation; use annotate and include_som. Use compact=true for iterative observations, and observation=som_delta only for NON-screenshot post-action refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal, read_element. " +
+				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. For action=screenshot OMIT observation; use annotate and include_som. Use compact=true for iterative observations, and observation=som_delta only for NON-screenshot post-action refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal, read_element, video_frames. " +
 				"Use action=read_element with selector to read an element's text, value, and visibility without changing the page (all=true returns up to 20 matches); sensitive inputs such as password fields never return a value. Page errors are read with browser_diagnostics on sessions opened with diagnostics=true. " +
+				"To see what a video on the page shows, use action=video_frames with at_seconds (exact times) or every_seconds: it copies frames from the page's <video> at those times and returns them as images, even when a popup covers the player. Describe the frames right away; they are not kept in history. If it reports ambiguous_video, pass video_index from the listed candidates. " +
 				"Scroll regions include bounded content_hints naming controls in each panel, including below the viewport; use those hints to choose which panel to scroll. Snapshots include checked (true/false), indeterminate for mixed checkboxes, and current_value for ordinary form fields including time inputs. Use these values to verify configuration without repeating input; password values are omitted. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
@@ -802,7 +807,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_swipes":       map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "native_scroll_to: swipe limit (default 8)."},
 				"session_id":       map[string]any{"type": "string"},
 				"read_only":        map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
-				"action":           map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "native_select", "native_scroll_to", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal", "read_element"}},
+				"action":           map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "native_select", "native_scroll_to", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal", "read_element", "video_frames"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -814,7 +819,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"label":               map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
 				"target_id":           map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
 				"som_revision":        map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
-				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, set_temporal, or read_element. For upload_file it must match exactly one element; prefer a fresh label/target_id. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, set_temporal, read_element, or video_frames (must match exactly one <video>). For upload_file it must match exactly one element; prefer a fresh label/target_id. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"at_seconds":          map[string]any{"type": "array", "items": map[string]any{"type": "number", "minimum": 0}, "minItems": 1, "maxItems": 24, "description": "For video_frames: exact times in seconds to copy frames from. Not with every_seconds."},
+				"every_seconds":       map[string]any{"type": "number", "minimum": 0.04, "description": "For video_frames: copy a frame every N seconds from start_seconds to end_seconds, capped by max_frames."},
+				"start_seconds":       map[string]any{"type": "number", "minimum": 0, "description": "For video_frames with every_seconds. Default 0."},
+				"end_seconds":         map[string]any{"type": "number", "minimum": 0, "description": "For video_frames with every_seconds. Default: the end of the video."},
+				"max_frames":          map[string]any{"type": "integer", "minimum": 1, "maximum": 24, "description": "For video_frames. Default 12; extra times are reported with truncated=true."},
+				"max_edge":            map[string]any{"type": "integer", "minimum": 64, "maximum": 1920, "description": "For video_frames: longest side of each frame in pixels. Default 1024; never enlarged."},
+				"format":              map[string]any{"type": "string", "enum": []string{"jpeg", "png"}, "description": "For video_frames. Default jpeg (recommended: frames stay alongside the text summary)."},
+				"quality":             map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "For video_frames with format=jpeg. Default 80."},
+				"min_height":          map[string]any{"type": "integer", "minimum": 0, "description": "For video_frames: frames decoded below this height get one retry and are flagged low_resolution."},
+				"images":              map[string]any{"type": "string", "enum": []string{"mcp", "inline"}, "description": "For video_frames. mcp (default, for agents) returns image blocks; inline (for apps) returns base64 in the JSON, capped at 4 MiB."},
+				"video_index":         map[string]any{"type": "integer", "minimum": 0, "description": "For video_frames: pick a video by its index from the candidates an ambiguous_video error lists. Not with selector."},
 				"all":                 map[string]any{"type": "boolean", "description": "For read_element: return up to 20 matching elements instead of only the first. count always reports the total number of matches."},
 				"include_hidden":      map[string]any{"type": "boolean", "description": "For read_element: count and read hidden matches too. Defaults true so hidden status markers can be read; false counts visible matches only."},
 				"expected_text":       map[string]any{"type": "string", "description": "For click/double_click only; omit for upload_file (use expected_name with a fresh label/target_id instead). The intended exact accessible name is verified atomically at dispatch time along with loading/disabled state. Always pass it for clicks that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
@@ -854,7 +870,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				}, "required": []string{"type"}}},
 				"match":       map[string]any{"type": "string", "enum": []string{"any", "all"}, "description": "For wait_for with multiple conditions. Defaults any."},
 				"quiet_ms":    map[string]any{"type": "integer", "minimum": 100, "maximum": 10000, "description": "For wait_for, optional time the outcome must remain matched. For wait_for_stable, required page-wide quiet interval; default 1500 ms."},
-				"timeout_ms":  map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For wait_for/wait_for_stable, maximum wait. Timeout is returned as structured timed_out=true, not failure of a prior action."},
+				"timeout_ms":  map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For video_frames, total time budget (default 20000). For wait_for/wait_for_stable, maximum wait. Timeout is returned as structured timed_out=true, not failure of a prior action."},
 				"compact":     map[string]any{"type": "boolean", "description": "Use true for iterative screenshot/semantic observations: target metadata appears once, deltas can reference added_ids/changed_ids, revealed/safety IDs reference those targets, and target arrays have a 64 KiB budget with explicit truncation/coverage flags. Omit for the legacy response shape."},
 				"observation": map[string]any{"type": "string", "enum": []string{"none", "som_delta", "screenshot"}, "description": "For non-screenshot actions only. NEVER pass observation with action=screenshot; omit it and use annotate/include_som. Final observation after an action or batch. som_delta refreshes semantic targets without returning image bytes. Batch defaults screenshot; scroll and waits default som_delta; other actions default none."},
 				"annotate":    map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
@@ -2980,6 +2996,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	if action == "read_element" {
 		return a.computerUseReadElement(ctx, id, sess, args)
+	}
+	if action == "video_frames" {
+		return a.computerUseVideoFrames(ctx, id, sess, args)
 	}
 	if action == "batch" {
 		return a.toolComputerUseBatchLocked(ctx, id, sess, args)

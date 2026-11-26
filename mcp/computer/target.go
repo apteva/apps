@@ -149,6 +149,9 @@ func capabilitiesFor(backend string, comp backends.Computer) api.Capabilities {
 	if _, ok := comp.(api.DOMExtractor); ok {
 		observations = append(observations, "dom")
 	}
+	if _, ok := comp.(api.VideoFrameReader); ok {
+		actions = append(actions, "video_frames")
+	}
 	return api.Capabilities{TargetKind: "browser", CoordinateSpace: "viewport_pixels", Actions: actions, Observations: observations, Context: api.ContextCapabilities{Reuse: backend != "service", Persistence: backend != "service", Isolation: backend != "service"}}
 }
 func targetFor(backend string, comp backends.Computer) *api.SessionTarget {

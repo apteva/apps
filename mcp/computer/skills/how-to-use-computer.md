@@ -229,6 +229,33 @@ duplicate embeds caused by treating “no error text” as “nothing happened.�
   rewriting `?screen=x` to `?screen=x#/x`) succeeds; navigating to the current
   document reports `reloaded: true`.
 
+## See what a video shows (video_frames)
+
+Text observations describe a page, not what a video shows. To look at a video
+(a reel, a product demo, a recording), copy its frames:
+
+`computer_use(action="video_frames", session_id, every_seconds=3)` or
+`at_seconds=[0.5, 5, 12]`.
+
+- Frames come back as images after a JSON summary (`frames[i].actual_s`,
+  `width`/`height`, `duplicate_of`, `low_resolution`). Describe them right
+  away: images are shown once and not kept in conversation history.
+- It works with a popup over the player and needs no seek bar: frames are
+  read inside the page at the video's own resolution (`max_edge`, default
+  1024). It sends no input; the video is paused and muted while copying and
+  its time, speed, mute and play state are restored (`video.restored`).
+- Up to 24 frames per call (`max_frames`, default 12). Times past the end are
+  listed under `skipped`; extra times set `truncated: true`.
+- Several videos on the page (reel feeds preload the next ones): the playing
+  video is preferred. If it still can't tell, it fails with `ambiguous_video`
+  and lists `candidates` with `nearby_text`; retry with `video_index`.
+- `min_height=720` retries frames decoded at a low streaming quality once.
+- Unsupported: videos inside cross-origin iframes (YouTube embeds), DRM
+  (`drm_protected`), live streams, and sites that forbid copying frames
+  (`frame_capture_blocked`). Fall back to `action=screenshot` for those.
+- Keep the default `format=jpeg` and `images=mcp`. `images=inline` returns
+  base64 inside the JSON (capped at 4 MiB) and is meant for app callers.
+
 ## Present one persistent browser view
 
 Opening or driving a browser does not create an attachment automatically.
