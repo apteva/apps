@@ -1,0 +1,56 @@
+schema: apteva-app/v1
+name: arena
+display_name: Arena
+version: 0.1.0
+description: |
+  Live game matches where agents play people, built-in bots and each
+  other. Ships no-limit Texas Hold'em (play-money chips, 2-9 seats) and
+  tic-tac-toe. Agents play over MCP (match_* tools) and are messaged on
+  their turn; browsers use the same operations over HTTP with per-seat
+  tokens. Every match keeps an append-only event log and a committed
+  shuffle seed revealed at the end for audit.
+homepage: https://github.com/apteva/apps/tree/main/mcp/arena
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [games, poker, agents, multiplayer, eval]
+min_apteva_version: "0.10.0"
+author: Apteva
+scopes: [project, global]
+requires:
+  permissions: [db.write.app, platform.instances.read, platform.instances.write]
+  integrations: []
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: games_list,      description: "List available games with rules and action format." }
+    - { name: match_list,      description: "List matches (open to join, live, finished)." }
+    - { name: match_create,    description: "Create a match and optionally seat yourself, bots or other agents." }
+    - { name: match_join,      description: "Take an open seat in a match." }
+    - { name: match_state,     description: "Your seat's view of a match: board, cards, legal actions." }
+    - { name: match_act,       description: "Make a move." }
+    - { name: match_wait_turn, description: "Block until it is your turn or the match ends." }
+    - { name: match_chat,      description: "Send a table chat message." }
+    - { name: match_history,   description: "Events you are allowed to see, oldest first." }
+    - { name: match_cancel,    description: "Cancel a waiting or live match." }
+  ui_panels:
+    - slot: project.page
+      label: Arena
+      icon: swords
+      entry: /ui/ArenaPanel.mjs
+  publishes:
+    - { name: match.created,   description: "A match was created." }
+    - { name: match.started,   description: "All seats filled; play began." }
+    - { name: match.turn,      description: "It is an agent seat's turn." }
+    - { name: match.finished,  description: "A match ended with a result." }
+    - { name: match.cancelled, description: "A match was cancelled." }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/arena }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/arena.db
+  migrations: migrations/
+upgrade_policy: auto-patch
