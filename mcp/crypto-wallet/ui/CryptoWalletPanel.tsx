@@ -138,7 +138,7 @@ export default function CryptoWalletPanel({ projectId, installId }: NativePanelP
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-lg font-semibold text-text">Crypto Wallet</div>
-          <div className="text-xs text-text-muted">Company funds only. Agents propose; people create wallets, set policies and approve.</div>
+          <div className="text-xs text-text-muted">Company funds only. People create wallets and set policies; approvals happen here or by agents granted approvals.decide.</div>
         </div>
         {overview.master_key_configured ? <Button tone="primary" onClick={() => setCreating((v) => !v)}>New wallet</Button> : null}
       </div>
@@ -394,7 +394,7 @@ function PolicyForm({ wallet, policy, busy, api, act }: { wallet: Wallet; policy
       <div className="grid grid-cols-2 gap-3">
         <Field label="Per-transfer cap (USD)" hint="Any single transfer above this is refused."><input className={inputCls} value={perTx} onChange={(e) => setPerTx(e.target.value)} inputMode="decimal" /></Field>
         <Field label="Rolling 24-hour cap (USD)" hint="Refused once the last 24 hours would pass this."><input className={inputCls} value={daily} onChange={(e) => setDaily(e.target.value)} inputMode="decimal" /></Field>
-        <Field label="Approval above (USD)" hint="Larger transfers wait for a person."><input className={inputCls} value={approval} onChange={(e) => setApproval(e.target.value)} inputMode="decimal" /></Field>
+        <Field label="Approval above (USD)" hint="Larger transfers wait for approval, here or by an agent granted approvals.decide."><input className={inputCls} value={approval} onChange={(e) => setApproval(e.target.value)} inputMode="decimal" /></Field>
         <Field label="New-recipient waiting period (hours)" hint="Applies to addresses agents propose."><input className={inputCls} value={delay} onChange={(e) => setDelay(e.target.value)} inputMode="numeric" /></Field>
       </div>
       <div className="flex flex-col gap-1">

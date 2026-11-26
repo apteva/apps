@@ -2,17 +2,18 @@ schema: apteva-app/v1
 
 name: crypto-wallet
 display_name: Crypto Wallet
-version: 0.1.0
+version: 0.1.1
 description: |
   On-chain wallets for your own company's funds, spent by agents under rules
   they cannot change. Keys are generated and held by the app, encrypted with a
   master key kept outside its database. Every outgoing transfer passes per-
   transfer and rolling 24-hour caps, a recipient allowlist and a token list
-  before anything is signed; transfers above the approval threshold wait for a
-  person, in the Conversations inbox or the panel. Agents can read balances and
-  propose transfers or new recipients; only people can create wallets, change
-  policies, approve, freeze or export keys. v0.1 supports ETH and USDC on Base
-  and Base Sepolia. Not for holding other people's money.
+  before anything is signed; transfers above the approval threshold wait for
+  approval in the panel or from an agent granted approvals.decide. Agents read
+  balances and propose transfers or new recipients; what each agent may do is
+  set with grants on the app's permissions. Only people create wallets, change
+  policies, freeze or export keys. ETH and USDC on Base and Base Sepolia. Not
+  for holding other people's money.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/crypto-wallet
@@ -27,35 +28,57 @@ requires:
   permissions:
     - db.write.app
     - net.egress                 # chain RPC endpoints and the ETH/USD price
-    - platform.apps.call         # approval cards in Conversations
-  apps:
-    - name: conversations
-      version: ">=0.9.0"
-      reason: transfers above the approval threshold are approved from the inbox
-      optional: true             # without it, approvals happen in the panel only
 
 provides:
   http_routes:
     - prefix: /api/
+  permissions:
+    - name: wallets.read
+      description: See wallets, balances, receive addresses, history, proposal status and pending approvals.
+    - name: transfers.propose
+      description: Propose transfers. Small ones within policy are sent at once; larger ones wait for approval.
+    - name: recipients.propose
+      description: Ask for an address to be added to a wallet's allowlist.
+    - name: approvals.decide
+      description: Approve or reject pending transfers and recipients. Approved transfers are signed and sent if the policy still allows them.
   mcp_tools:
     - name: crypto_wallet_list
       description: List the wallets agents may use, with chain, address and frozen state.
+      requires: wallets.read
     - name: crypto_wallet_balance
       description: ETH and USDC balances of a wallet, with USD values.
+      requires: wallets.read
     - name: crypto_wallet_receive_address
       description: The address a payer should send funds to.
+      requires: wallets.read
     - name: crypto_wallet_history
       description: Recent proposals and on-chain transactions for a wallet.
+      requires: wallets.read
     - name: crypto_wallet_transfer_propose
-      description: Propose a transfer; it is signed, sent for approval, or refused with the rule that refused it.
+      description: Propose a transfer; it is signed, left waiting for approval, or refused with the rule that refused it.
+      requires: transfers.propose
     - name: crypto_wallet_recipient_propose
-      description: Ask a person to add an address to a wallet's allowlist.
+      description: Ask for an address to be added to a wallet's allowlist.
+      requires: recipients.propose
     - name: crypto_wallet_proposal_status
-      description: Status of a transfer or recipient proposal.
+      description: Status of a transfer proposal.
+      requires: wallets.read
+    - name: crypto_wallet_approvals_pending
+      description: Transfers and recipients waiting for approval.
+      requires: wallets.read
+    - name: crypto_wallet_proposal_decide
+      description: Approve or reject a pending transfer; approval re-checks the policy, then signs and sends.
+      requires: approvals.decide
+    - name: crypto_wallet_recipient_decide
+      description: Approve or reject a pending allowlist address.
+      requires: approvals.decide
   publishes:
     - name: crypto_wallet.created
       description: A person created a wallet.
       payload: {wallet_id: integer, chain: string, address: string}
+    - name: crypto_wallet.approval.requested
+      description: A transfer or recipient is waiting for approval. Subscribe to notify people; nothing waits on a reply.
+      payload: {kind: string, wallet_id: integer, proposal_id: integer, recipient_id: integer, amount: string, token: string, to: string, address: string, requested_by: string}
     - name: crypto_wallet.transfer.sent
       description: A transfer was signed and broadcast.
       payload: {wallet_id: integer, proposal_id: integer, tx_hash: string, token: string, amount: string, to: string}
@@ -79,7 +102,7 @@ provides:
       body_file: skills/how-to-use-crypto-wallet.md
       description: |
         How agents use Crypto Wallet: read balances, propose transfers and
-        recipients, and what each refusal means. Triggers on: "crypto",
+        recipients, decide pending approvals, and what each refusal means. Triggers on: "crypto",
         "USDC", "pay in crypto", "send ETH", "wallet address", "on-chain".
       metadata:
         category: finance

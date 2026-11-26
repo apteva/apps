@@ -333,7 +333,7 @@ func (a *App) httpDecideRecipient(r *http.Request, userID int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.decideRecipient(id, approve, userActor(userID), "panel", strArg(body, "note"), userID)
+	return a.decideRecipient(id, approve, userActor(userID), "panel", strArg(body, "note"), userID, 0)
 }
 
 func (a *App) httpRemoveRecipient(r *http.Request, userID int64) (any, error) {
@@ -359,5 +359,5 @@ func (a *App) httpDecideProposal(r *http.Request, userID int64) (any, error) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	return a.decideProposal(ctx, id, approve, userActor(userID), "panel", strArg(body, "note"), userID)
+	return a.decideProposal(ctx, id, approve, userActor(userID), "panel", strArg(body, "note"), userID, 0)
 }
