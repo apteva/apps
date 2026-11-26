@@ -8,6 +8,8 @@ description: |
   <video> at exact times (at_seconds or every_seconds) and returns them as
   images, even when a popup covers the player. Picks the playing video,
   reports ambiguous_video with candidates, restores playback afterwards.
+  Waits out slow downloads, retries stalled jumps and lists any still
+  loading in retry_at_seconds; never labels a frame with the wrong time.
   v0.15.0 adds Android selection with Mobile 0.8.0: row-scoped selectors
   (ROW >> PART), native_checked guards, native_select (taps only when needed,
   confirms the state) and native_scroll_to (swipes a list, never taps).
@@ -603,7 +605,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: feat/computer-video-frames
+    ref: computer/v0.16.0
     entry: mcp/computer
   port: 8080
   health_check: /health
