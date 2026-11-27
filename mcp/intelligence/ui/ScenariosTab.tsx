@@ -165,6 +165,7 @@ function ScenarioView({ r, api, post, setError, openQuestion }: { r: ScenarioRes
 
 function ReportView({ rep }: { rep: Report }) {
   const maxChange = Math.max(0.001, ...rep.one_at_a_time.map(o => o.max_abs_impact_change));
+  const topN = Math.min(5, rep.ranges.filter(r => r.base_impact > 0).length);
   return <div className="space-y-3">
     <div className="text-xs text-text-muted">Assumption and sensitivity report · {rep.draws} draws, seed {rep.seed}{rep.generated_at ? ` · ${when(rep.generated_at)}` : ""}{rep.graph_matches_run === false ? " · graph changed since the run" : ""}.
       {" "}{Object.entries(rep.classification_counts || {}).map(([k, v]) => `${v} ${k}`).join(", ")}</div>
@@ -195,7 +196,7 @@ function ReportView({ rep }: { rep: Report }) {
         <span className="w-28 text-text-dim tabular-nums">{String(o.base)} → {String(o.low)}{o.kind !== "switch" ? ` / ${String(o.high)}` : ""}</span>
         <div className="flex-1 h-2 rounded bg-bg-input"><div className="h-2 rounded" style={{ width: `${(o.max_abs_impact_change / maxChange) * 100}%`, background: "var(--color-warn)" }} /></div>
         <span className="tabular-nums w-12 text-right">{o.max_abs_impact_change.toFixed(3)}</span>
-        <span className="w-32 text-right text-text-dim">top 5 kept {Math.min(o.top5_overlap_low, o.top5_overlap_high)}/5</span>
+        <span className="w-32 text-right text-text-dim">{topN > 0 ? `top ${topN} kept ${Math.min(o.top5_overlap_low, o.top5_overlap_high)}/${topN}` : ""}</span>
       </div>)}</div>
     </Section>
     <Section title="Assumptions" hint="Every number the propagation uses. None was estimated from data.">
