@@ -166,11 +166,11 @@ func dbCreateConfiguration(db *sql.DB, pid string, apiID, sourceID int64, name s
 	}
 	id, _ := res.LastInsertId()
 	if sourceID != 0 {
-		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage)
- SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, id, pid, sourceID)
+		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage,websocket_json)
+ SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage,websocket_json FROM api_configuration_routes WHERE project_id=? AND configuration_id=?`, id, pid, sourceID)
 	} else {
-		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage)
- SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage FROM api_routes WHERE project_id=? AND api_id=?`, id, pid, apiID)
+		_, err = tx.Exec(`INSERT INTO api_configuration_routes(project_id,api_id,configuration_id,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage,websocket_json)
+ SELECT project_id,api_id,?,method,path_pattern,target_kind,target_ref,target_path,events_json,auth_json,cors_json,timeout_ms,enabled,priority,created_at,updated_at,target_stage,websocket_json FROM api_routes WHERE project_id=? AND api_id=?`, id, pid, apiID)
 	}
 	if err != nil {
 		return nil, err

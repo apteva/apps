@@ -17,6 +17,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/gorilla/websocket"
 )
 
 func (a *App) handleAPIs(w http.ResponseWriter, r *http.Request) {
@@ -231,10 +232,14 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	rawW := w
+	releaseSlot := func() {}
 	if a.requestSlots != nil {
 		select {
 		case a.requestSlots <- struct{}{}:
-			defer func() { <-a.requestSlots }()
+			var once sync.Once
+			releaseSlot = func() { once.Do(func() { <-a.requestSlots }) }
+			defer releaseSlot()
 		default:
 			httpErr(w, 429, "gateway concurrency limit reached")
 			return
@@ -301,6 +306,47 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	logRow.RouteID = route.ID
 	logRow.TargetKind = route.TargetKind
 	logRow.TargetRef = route.TargetRef
+	wsCfg, wsErr := parseWebSocketConfig(route.WebSocketJSON)
+	if wsErr != nil {
+		logRow.StatusCode = http.StatusBadGateway
+		logRow.Error = safeUpstreamError(wsErr)
+		httpErr(w, http.StatusBadGateway, "invalid websocket configuration")
+		return
+	}
+	wsMode := false
+	var ticket *wsTicket
+	if !preflight && websocket.IsWebSocketUpgrade(r) {
+		if !wsCfg.Enabled {
+			logRow.StatusCode = http.StatusBadRequest
+			logRow.Error = "websocket not enabled on route"
+			httpErr(w, http.StatusBadRequest, "this route does not accept WebSocket connections")
+			return
+		}
+		wsMode = true
+		query, qErr := url.ParseQuery(r.URL.RawQuery)
+		if qErr != nil {
+			logRow.StatusCode = http.StatusBadRequest
+			httpErr(w, http.StatusBadRequest, "invalid request query")
+			return
+		}
+		if _, ok := query["api_key"]; ok {
+			logRow.StatusCode = http.StatusBadRequest
+			logRow.Error = "api key in websocket url"
+			httpErr(w, http.StatusBadRequest, "API keys are not accepted in WebSocket URLs; send X-API-Key or connect with a ticket")
+			return
+		}
+		if raw := strings.TrimSpace(query.Get("ticket")); raw != "" || len(query["ticket"]) > 0 {
+			t, ok := a.wsTickets.consume(raw, pid, api.ID, time.Now())
+			if !ok || len(query["ticket"]) > 1 {
+				logRow.StatusCode = http.StatusUnauthorized
+				logRow.AuthKind = "api_key"
+				logRow.Error = "invalid or expired websocket ticket"
+				httpErr(w, http.StatusUnauthorized, "invalid or expired websocket ticket")
+				return
+			}
+			ticket = &t
+		}
+	}
 	corsWriter, handled, err := prepareGatewayCORS(w, r, api, route, requestMethod, preflight)
 	if err != nil {
 		logRow.StatusCode = http.StatusForbidden
@@ -313,12 +359,18 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w = corsWriter
-	if route.TargetKind != "app_events" {
+	if route.TargetKind != "app_events" && !wsMode {
 		ctx, cancel := context.WithTimeoutCause(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond, errGatewayDeadline)
 		defer cancel()
 		r = r.WithContext(ctx)
 	}
-	authCtx, err := a.authorizeRequest(r, api, route)
+	authorize := a.authorizeRequest
+	if wsMode {
+		authorize = func(r *http.Request, api *API, route *APIRoute) (authContext, error) {
+			return a.authorizeWebSocket(r, api, route, ticket)
+		}
+	}
+	authCtx, err := authorize(r, api, route)
 	logRow.AuthKind = authCtx.Kind
 	logRow.Subject = authCtx.Subject
 	if err != nil {
@@ -337,7 +389,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Request-ID", logRow.RequestID)
-	if route.TargetKind == "app_events" {
+	if route.TargetKind == "app_events" || wsMode {
 		// Share the mutation lock with revocation so a stream cannot register
 		// after the mutation canceled its older credentials/configuration.
 		a.mutationMu.Lock()
@@ -360,15 +412,20 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 			logRow.StatusCode = 503
 			return
 		}
-		verified, authErr := a.authorizeRequest(r, freshAPI, freshRoute)
+		verified, authErr := authorize(r, freshAPI, freshRoute)
 		if authErr != nil {
 			a.mutationMu.Unlock()
 			a.writeAuthorizationError(w, r, authErr, &logRow, start)
 			return
 		}
-		streamCtx, done, registerErr := a.streams.register(r.Context(), pid, api.ID, route.ID, verified.KeyID, verified.ExpiresAt)
+		kind, perKey := streamKindSSE, 0
+		if wsMode {
+			kind, perKey = streamKindWebSocket, wsCfg.MaxConnectionsPerKey
+		}
+		streamCtx, done, registerErr := a.streams.registerKind(r.Context(), kind, pid, api.ID, route.ID, verified.KeyID, verified.ExpiresAt, perKey)
 		a.mutationMu.Unlock()
 		if registerErr != nil {
+			logRow.Error = registerErr.Error()
 			httpErr(w, 429, registerErr.Error())
 			logRow.StatusCode = 429
 			return
@@ -388,7 +445,11 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		route = resolved
 		logRow.TargetRef = route.TargetRef
 		logRow.TargetStage = route.TargetStage
-		status, err = a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
+		if wsMode {
+			status, err = a.serveWebSocket(rawW, r, route, publicPath, authCtx, wsCfg, &logRow, releaseSlot)
+		} else {
+			status, err = a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
+		}
 	}
 	logRow.StatusCode = status
 	if err != nil {
@@ -515,6 +576,8 @@ func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, ro
 		return a.dispatchHTTP(w, r.WithContext(ctx), route, publicPath)
 	case "app":
 		return a.dispatchApp(w, r.WithContext(ctx), route, publicPath)
+	case "ws_ticket":
+		return a.dispatchWSTicket(w, api, auth)
 	default:
 		httpErr(w, http.StatusBadGateway, "unsupported target kind")
 		return http.StatusBadGateway, errors.New("unsupported target kind")

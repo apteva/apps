@@ -28,6 +28,7 @@ type App struct {
 	maintenanceDone   chan struct{}
 	requestSlots      chan struct{}
 	throttles         throttleRegistry
+	wsTickets         wsTicketStore
 }
 
 func (a *App) Manifest() sdk.Manifest {

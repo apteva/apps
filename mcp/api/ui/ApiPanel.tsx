@@ -37,6 +37,7 @@ interface APIRoute {
   target_ref: string;
   target_path?: string;
   events_json?: string;
+  websocket_json?: string;
   auth_json?: string;
   cors_json?: string;
   timeout_ms: number;
@@ -515,6 +516,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
   const [eventMatchValue, setEventMatchValue] = useState("");
   const [eventResource, setEventResource] = useState("");
   const [coalesceMS, setCoalesceMS] = useState("200");
+  const [webSocket, setWebSocket] = useState(false);
 
   const publicBase = api.hostname ? `https://${api.hostname}` : `/api/apps/api/gw/${api.slug}?${new URLSearchParams({project_id: projectId, install_id: String(installId)})}`;
 
@@ -537,6 +539,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
               output: { type: "invalidate", resource: eventResource.trim() },
               coalesce_ms: Number(coalesceMS),
             } : {},
+            ...(targetKind === "app" && webSocket ? { websocket: true } : {}),
             enabled: true,
           });
           if (!saved) return;
@@ -544,13 +547,19 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
           setTargetPath("");
         }}
       >
-        <Field label="Method"><select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)} disabled={targetKind === "app_events"}>{["GET", "POST", "PUT", "PATCH", "DELETE", "ANY"].map((m) => <option key={m}>{m}</option>)}</select></Field>
+        <Field label="Method"><select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)} disabled={targetKind === "app_events" || targetKind === "ws_ticket" || webSocket}>{["GET", "POST", "PUT", "PATCH", "DELETE", "ANY"].map((m) => <option key={m}>{m}</option>)}</select></Field>
         <Field label="Path"><input className={inputCls} value={path} onChange={(e) => setPath(e.target.value)} placeholder="/v1/items" /></Field>
-        <Field label="Target"><select className={inputCls} value={targetKind} onChange={(e) => { const kind = e.target.value; setTargetKind(kind); if (kind === "app_events") { setMethod("GET"); setAuth("api_key"); setTargetPath(""); } }}>{["http", "function", "app", "app_events"].map((k) => <option key={k}>{k}</option>)}</select></Field>
+        <Field label="Target"><select className={inputCls} value={targetKind} onChange={(e) => { const kind = e.target.value; setTargetKind(kind); if (kind === "app_events") { setMethod("GET"); setAuth("api_key"); setTargetPath(""); } if (kind === "ws_ticket") { setMethod("POST"); setTargetRef("gateway"); setTargetPath(""); } if (kind !== "app") setWebSocket(false); }}>{["http", "function", "app", "app_events", "ws_ticket"].map((k) => <option key={k}>{k}</option>)}</select></Field>
         <Field label={targetKind === "app_events" ? "Source app" : "Ref"}><input className={inputCls} value={targetRef} onChange={(e) => setTargetRef(e.target.value)} placeholder={targetKind === "http" ? "https://..." : targetKind === "function" ? "function-name" : targetKind === "app_events" ? "tables" : "app-name"} /></Field>
         <Field label="Target path"><input className={inputCls} value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder={targetKind === "app_events" ? "not used" : "/upstream"} disabled={targetKind === "app_events"} /></Field>
         <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{(targetKind === "app_events" ? ["default", "api_key", "auth_jwt", "authorizer", "any_of"] : ["default", "public", "api_key", "auth_jwt", "authorizer", "any_of"]).map((k) => <option key={k}>{k}</option>)}</select></Field>
         {(auth === "authorizer" || auth === "auth_jwt" || auth === "api_key" || auth === "any_of") && <div className="lg:col-span-6"><AuthorizerFields kind={auth} value={authorizer} onChange={setAuthorizer} /></div>}
+        {targetKind === "app" && (
+          <label className="lg:col-span-6 flex items-center gap-2 text-xs text-text-muted">
+            <input type="checkbox" checked={webSocket} onChange={(e) => { setWebSocket(e.target.checked); if (e.target.checked) setMethod("GET"); }} />
+            Accept WebSocket connections (authenticated routes only; browsers connect with a ticket from a ws_ticket route)
+          </label>
+        )}
         {targetKind === "app_events" && (
           <div className="lg:col-span-6 grid grid-cols-1 lg:grid-cols-4 gap-2 border border-border rounded p-3">
             <Field label="Topics (comma separated)"><input className={inputCls} value={eventTopics} onChange={(e) => setEventTopics(e.target.value)} placeholder="row.inserted, row.updated" /></Field>
@@ -569,7 +578,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
         rows={routes.map((r) => [
           r.method,
           r.path_pattern,
-          `${r.target_kind}:${r.target_ref}${r.target_path ? r.target_path : ""}${eventsSummary(r.events_json)}`,
+          `${r.target_kind}:${r.target_ref}${r.target_path ? r.target_path : ""}${eventsSummary(r.events_json)}${webSocketSummary(r.websocket_json)}`,
           parseAuthKind(r.auth_json) || "default",
           r.enabled ? "enabled" : "disabled",
           <button type="button" className="text-red-300 hover:underline" disabled={busy} onClick={() => onDelete(r.id)}>Delete</button>,
@@ -669,6 +678,10 @@ function eventsSummary(s?: string): string {
   const obj = parseJSON(s);
   const topics = Array.isArray(obj.topics) ? obj.topics.filter((topic): topic is string => typeof topic === "string") : [];
   return topics.length ? ` [${topics.join(", ")}]` : "";
+}
+
+function webSocketSummary(s?: string): string {
+  return parseJSON(s).enabled === true ? " [websocket]" : "";
 }
 
 function date(s?: string): string {

@@ -4,6 +4,7 @@ go 1.25.1
 
 require (
 	github.com/apteva/app-sdk v0.118.0
+	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.50.0
 )
 

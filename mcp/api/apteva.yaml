@@ -2,8 +2,20 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.15.0
+version: 0.16.0
 description: |
+  v0.16.0 WebSocket pass-through. A GET app route can accept WebSocket
+  connections (route setting websocket). The upgrade is checked like any
+  request: API key and scope, rate limit (one connection = one request) and
+  CORS origin. Frames are copied both ways unchanged; the app receives the
+  verified caller in X-Apteva-Gateway-* headers. Browsers connect with a
+  single-use ticket minted by a POST ws_ticket route and valid 60 s; API keys
+  in WebSocket URLs are refused. Route limits: connections per key, maximum
+  duration, idle timeout, message size and bytes per second. Revoking a key
+  closes its open connections at once (code 4001). Upstream close codes and
+  reasons are relayed unchanged. Request logs keep one row per connection
+  with bytes in/out and the close code and reason, never frame content.
+
   v0.15.0 Function routes take an optional Functions stage, templatable with
   {{stage.name}} / {{stage.vars.<key>}}, so each API stage runs its own
   Functions stage of one stable function. It is resolved per request and sent
@@ -130,7 +142,7 @@ provides:
     - name: api_delete
       description: "Delete an API, routes, keys, and logs."
     - name: api_route_add
-      description: "Add or update a route. target_kind may be function, app, http, or app_events. app_events routes support exact/bounded-in matching and projections only from explicitly constrained data fields. Function routes take an optional stage (Functions stage, templatable with {{stage.name}} / {{stage.vars.<key>}})."
+      description: "Add or update a route. target_kind may be function, app, http, app_events, or ws_ticket. GET app routes take websocket (true or limits) to accept WebSocket connections; ws_ticket routes (POST, target_ref gateway) mint single-use 60 s WebSocket tickets for the calling API key. app_events routes support exact/bounded-in matching and projections only from explicitly constrained data fields. Function routes take an optional stage (Functions stage, templatable with {{stage.name}} / {{stage.vars.<key>}})."
     - name: api_route_list
       description: "List routes for an API."
     - name: api_route_delete
@@ -191,7 +203,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.15.0
+    ref: api/v0.16.0
     entry: mcp/api
   port: 8080
   health_check: /health

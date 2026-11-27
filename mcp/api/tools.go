@@ -54,7 +54,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, nil), Handler: a.toolAPIDelete},
 		{
 			Name:        "api_route_add",
-			Description: "Add or update a route. target_kind is function, app, http, or app_events. For app_events, target_ref is the source app and events must contain topics, optional exact or bounded-in data.* match fields, a safe output object with optional constrained $data.* projections, and optional coalesce_ms.",
+			Description: "Add or update a route. target_kind is function, app, http, app_events, or ws_ticket. For app_events, target_ref is the source app and events must contain topics, optional exact or bounded-in data.* match fields, a safe output object with optional constrained $data.* projections, and optional coalesce_ms. websocket (GET app routes only) lets clients open a WebSocket to the app path through the gateway; authenticated routes only. Browsers connect with ?ticket= from a POST ws_ticket route (target_ref \"gateway\"), which mints a single-use ticket for the calling API key valid 60 s; API keys in WebSocket URLs are refused.",
 			InputSchema: schemaObject(map[string]any{
 				"project_id":   map[string]any{"type": "string"},
 				"api_id":       map[string]any{"type": "integer"},
@@ -66,11 +66,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_path":  map[string]any{"type": "string"},
 				"stage":        map[string]any{"type": "string", "description": "Function routes only: the Functions stage to invoke (Functions 1.23.0+), e.g. \"{{stage.vars.functions_stage}}\". Resolved per stage-served request; unknown or paused stages are refused by Functions. Empty runs the active version."},
 				"events":       map[string]any{"type": "object"},
-				"auth":         authPolicySchema(),
-				"cors":         corsPolicySchema(),
-				"timeout_ms":   map[string]any{"type": "integer", "description": "Total upstream budget in milliseconds, including queueing, preparation, execution and response transfer (default 30000, maximum 300000)."},
-				"priority":     map[string]any{"type": "integer"},
-				"enabled":      map[string]any{"type": "boolean"},
+				"websocket": map[string]any{
+					"description": "true, or an object with enabled, max_connections_per_key (default 4), max_duration_seconds (default 3600), idle_timeout_seconds (default 300), max_message_bytes (default 4194304), bytes_per_second (0 = unlimited). Gateway close codes: 4001 credential revoked, 4002 max duration, 4003 idle timeout, 4004 credential expired, 1009 message too big, 1012 route changed. Upstream close codes are relayed unchanged.",
+					"oneOf":       []any{map[string]any{"type": "boolean"}, map[string]any{"type": "object"}},
+				},
+				"auth":       authPolicySchema(),
+				"cors":       corsPolicySchema(),
+				"timeout_ms": map[string]any{"type": "integer", "description": "Total upstream budget in milliseconds, including queueing, preparation, execution and response transfer (default 30000, maximum 300000)."},
+				"priority":   map[string]any{"type": "integer"},
+				"enabled":    map[string]any{"type": "boolean"},
 			}, []string{"method", "path_pattern", "target_kind", "target_ref"}),
 			Handler: a.toolRouteAdd,
 		},
@@ -307,6 +311,10 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	wsJSON, err := webSocketArg(args)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := parseEffectiveCORSPolicy(api.CORSJSON, corsJSON); err != nil {
 		return nil, err
 	}
@@ -359,6 +367,7 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		TargetPath:  stringArg(args, "target_path", ""),
 		TargetStage: stringArg(args, "stage", ""),
 		EventsJSON:  eventsJSON,
+		WebSocket:   wsJSON,
 		AuthJSON:    authJSON,
 		CORSJSON:    corsJSON,
 		TimeoutMS:   timeout,
@@ -517,6 +526,7 @@ func (a *App) toolKeyRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ok, err := dbRevokeAPIKey(ctx.AppDB(), pid, id)
 	if err == nil {
 		a.streams.cancelMatching(pid, 0, 0, id)
+		a.wsTickets.revokeKey(pid, id)
 		a.forgetThrottle(id)
 	}
 	return map[string]any{"revoked": ok}, err
@@ -543,6 +553,7 @@ func (a *App) toolKeyRevokeBySubject(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	for _, id := range ids {
 		a.streams.cancelMatching(pid, 0, 0, id)
+		a.wsTickets.revokeKey(pid, id)
 		a.forgetThrottle(id)
 	}
 	return map[string]any{"revoked": len(ids), "key_ids": ids}, nil

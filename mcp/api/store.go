@@ -52,13 +52,16 @@ type APIRoute struct {
 	// It may reference {{stage.name}} / {{stage.vars.<key>}}.
 	TargetStage string `json:"target_stage,omitempty"`
 	EventsJSON  string `json:"events_json,omitempty"`
-	AuthJSON    string `json:"auth_json,omitempty"`
-	CORSJSON    string `json:"cors_json,omitempty"`
-	TimeoutMS   int    `json:"timeout_ms"`
-	Enabled     bool   `json:"enabled"`
-	Priority    int    `json:"priority"`
-	CreatedAt   string `json:"created_at,omitempty"`
-	UpdatedAt   string `json:"updated_at,omitempty"`
+	// WebSocketJSON holds the route's WebSocket settings (0.16.0); "{}" means
+	// upgrades are refused.
+	WebSocketJSON string `json:"websocket_json,omitempty"`
+	AuthJSON      string `json:"auth_json,omitempty"`
+	CORSJSON      string `json:"cors_json,omitempty"`
+	TimeoutMS     int    `json:"timeout_ms"`
+	Enabled       bool   `json:"enabled"`
+	Priority      int    `json:"priority"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
 type APIKey struct {
@@ -116,7 +119,13 @@ type RequestLog struct {
 	RequestID       string `json:"request_id,omitempty"`
 	StageID         int64  `json:"stage_id,omitempty"`
 	ConfigurationID int64  `json:"configuration_id,omitempty"`
-	CreatedAt       string `json:"created_at,omitempty"`
+	// WebSocket connections log once, at close (0.16.0).
+	OpenedAt    string `json:"opened_at,omitempty"`
+	BytesIn     int64  `json:"bytes_in,omitempty"`
+	BytesOut    int64  `json:"bytes_out,omitempty"`
+	CloseCode   int    `json:"close_code,omitempty"`
+	CloseReason string `json:"close_reason,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
 }
 
 type apiInput struct {
@@ -142,6 +151,7 @@ type routeInput struct {
 	TargetPath  string
 	TargetStage string
 	EventsJSON  string
+	WebSocket   string
 	AuthJSON    string
 	CORSJSON    string
 	TimeoutMS   int
@@ -247,10 +257,10 @@ func normalizePathPattern(s string) (string, error) {
 
 func normalizeTargetKind(s string) (string, error) {
 	switch strings.TrimSpace(s) {
-	case "function", "app", "http", "app_events":
+	case "function", "app", "http", "app_events", "ws_ticket":
 		return strings.TrimSpace(s), nil
 	default:
-		return "", errors.New("target_kind must be function, app, http, or app_events")
+		return "", errors.New("target_kind must be function, app, http, app_events, or ws_ticket")
 	}
 }
 
@@ -264,6 +274,9 @@ func validateTarget(kind, ref string) error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return errors.New("http target_ref must be an absolute http(s) URL")
 		}
+	}
+	if kind == "ws_ticket" && ref != wsTicketTargetRef {
+		return errors.New(`ws_ticket target_ref must be "gateway"`)
 	}
 	if (kind == "app_events" || kind == "app") && (!slugRe.MatchString(ref) || strings.HasSuffix(ref, "-")) {
 		return errors.New("target_ref must be an app name")
@@ -528,14 +541,14 @@ func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 }
 
 const routeCols = `id, project_id, api_id, method, path_pattern, target_kind, target_ref,
-	target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage`
+	target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage, websocket_json`
 
 func scanRoute(row interface{ Scan(dest ...any) error }) (*APIRoute, error) {
 	var r APIRoute
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.APIID, &r.Method, &r.PathPattern, &r.TargetKind,
 		&r.TargetRef, &r.TargetPath, &r.EventsJSON, &r.AuthJSON, &r.CORSJSON, &r.TimeoutMS, &enabled,
-		&r.Priority, &r.CreatedAt, &r.UpdatedAt, &r.TargetStage); err != nil {
+		&r.Priority, &r.CreatedAt, &r.UpdatedAt, &r.TargetStage, &r.WebSocketJSON); err != nil {
 		return nil, err
 	}
 	r.Enabled = enabled != 0
@@ -577,6 +590,13 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	} else {
 		in.EventsJSON = "{}"
 	}
+	if kind == "ws_ticket" && method != "POST" {
+		return nil, "", errors.New("ws_ticket routes must use POST")
+	}
+	wsJSON, err := normalizeWebSocketSetting(kind, method, in.WebSocket)
+	if err != nil {
+		return nil, "", err
+	}
 	if in.TimeoutMS == 0 {
 		in.TimeoutMS = 30000
 	}
@@ -603,10 +623,10 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	}
 	if existing != nil {
 		_, err = db.Exec(`UPDATE api_routes SET target_kind=?, target_ref=?, target_path=?, events_json=?,
-			auth_json=?, cors_json=?, timeout_ms=?, enabled=?, priority=?, updated_at=?, target_stage=?
+			auth_json=?, cors_json=?, timeout_ms=?, enabled=?, priority=?, updated_at=?, target_stage=?, websocket_json=?
 			WHERE id=? AND project_id=?`,
 			kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath), defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON),
-			defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, in.TargetStage, existing.ID, in.ProjectID)
+			defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, in.TargetStage, wsJSON, existing.ID, in.ProjectID)
 		if err != nil {
 			return nil, "", err
 		}
@@ -615,14 +635,14 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 		return r, "updated", err
 	}
 	res, err := db.Exec(`INSERT INTO api_routes
-		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at, target_stage, websocket_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
  ON CONFLICT(project_id,api_id,method,path_pattern) DO UPDATE SET
  target_kind=excluded.target_kind,target_ref=excluded.target_ref,target_path=excluded.target_path,
  events_json=excluded.events_json,auth_json=excluded.auth_json,cors_json=excluded.cors_json,
- timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,priority=excluded.priority,updated_at=excluded.updated_at,target_stage=excluded.target_stage`,
+ timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,priority=excluded.priority,updated_at=excluded.updated_at,target_stage=excluded.target_stage,websocket_json=excluded.websocket_json`,
 		in.ProjectID, in.APIID, method, pattern, kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath),
-		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now, in.TargetStage)
+		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now, in.TargetStage, wsJSON)
 	if err != nil {
 		return nil, "", err
 	}
@@ -883,6 +903,19 @@ func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (*APIKey,
 		prefix = plain[:18]
 	}
 	row := db.QueryRow(`SELECT `+apiKeyColumns+`, key_hash FROM api_keys WHERE project_id=? AND api_id=? AND key_prefix=? AND status='active'`, pid, apiID, prefix)
+	return loadActiveAPIKey(db, row, func(want string) bool {
+		return subtle.ConstantTimeCompare([]byte(hashAPIKey(plain)), []byte(want)) == 1
+	})
+}
+
+// dbGetActiveAPIKeyByID re-validates a credential already proven once, such
+// as the key behind a WebSocket ticket. Revoked or expired keys are not ok.
+func dbGetActiveAPIKeyByID(db *sql.DB, pid string, apiID, id int64) (*APIKey, bool, error) {
+	row := db.QueryRow(`SELECT `+apiKeyColumns+`, key_hash FROM api_keys WHERE project_id=? AND api_id=? AND id=? AND status='active'`, pid, apiID, id)
+	return loadActiveAPIKey(db, row, func(string) bool { return true })
+}
+
+func loadActiveAPIKey(db *sql.DB, row *sql.Row, matches func(hash string) bool) (*APIKey, bool, error) {
 	var k APIKey
 	var claimsJSON, scopesJSON, metadataJSON, want string
 	if err := row.Scan(&k.ID, &k.ProjectID, &k.APIID, &k.Name, &k.KeyPrefix, &k.Status,
@@ -894,7 +927,7 @@ func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (*APIKey,
 		}
 		return nil, false, err
 	}
-	if subtle.ConstantTimeCompare([]byte(hashAPIKey(plain)), []byte(want)) != 1 {
+	if !matches(want) {
 		return nil, false, nil
 	}
 	if k.ExpiresAt != "" {
@@ -991,7 +1024,8 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 		limit = 100
 	}
 	query := `SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
-		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at, target_stage
+		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at, target_stage,
+		bytes_in, bytes_out, close_code, close_reason, opened_at
 		FROM api_request_logs WHERE project_id=? AND api_id=?`
 	args := []any{pid, apiID}
 	if beforeID > 0 {
@@ -1009,7 +1043,8 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 	for rows.Next() {
 		var l RequestLog
 		if err := rows.Scan(&l.ID, &l.ProjectID, &l.APIID, &l.RouteID, &l.Hostname, &l.Method, &l.Path,
-			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt, &l.TargetStage); err != nil {
+			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt, &l.TargetStage,
+			&l.BytesIn, &l.BytesOut, &l.CloseCode, &l.CloseReason, &l.OpenedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)
