@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.38.0 — 2026-11-27
+
+- `conversations_send` now files alerts and reports too: `kind=alert` (`text`, `severity`) and `kind=report` (`title`, `summary`, optional `sections` and `period`). They are stored and shown exactly like before, with the same rules: no cards in public conversations, and a refusal of a plain reply from main now points to `kind=alert`/`kind=report`. A model that picks the one send tool can always file a card, so a tool budget that leaves out the separate alert or report tool no longer turns a card into plain text (prod Messaging Agent, 2026-11-27).
+- `conversations_alert` and `conversations_report` stay as aliases of those kinds, with one-line descriptions.
+- `conversations_send`'s description is about 1 KB instead of 3.2 KB, and the whole tool about 4.5 KB instead of 6.1 KB, despite the new fields. The send, alert and report tools together went from 8.5 KB to 5.1 KB. Pacing, components and app views are taught by the using-conversations skill and the conversation thread directive, which already carried them. The reply-suggestion example stays in the description: main answers its first operator chat and has no thread directive, and without it gpt-6.2-sol stopped suggesting next steps there (scenario 21).
+- `topic` on `conversations_send` and `conversations_request_approval`: main can name the work topic instead of a `conversation_id`. The conversation with that title is reused, or created for an alert, report or approval (a plain reply never creates one). A conversation thread may omit `conversation_id`: it can only post in its own conversation.
+- Tools that are rarely needed carry the generic `_meta` hint `io.apteva/autoload: "named"`: `create`, `list`, `history`, `keep_thread` and the two aliases. A host that supports it loads them only when the instructions or a skill name them. Hosts that do not know the hint list them as before.
+- Conversation threads no longer preload the alert and report tools; `conversations_send` covers both.
+- An alert or report send never streams its text into a reply bubble.
+- New tier-3 scenario 31: an email-triage agent whose main thread answers an operator chat files scheduled findings as an alert card and the daily summary as a report card.
+- Tier-3 scenario 21 (coding suggested reply) is reliable again. Its directive now asks, in plain words, for the next step as a suggested reply after an investigation; nothing names the component, so the shipped guidance still has to teach it. Suggestions are optional in the guidance, and gpt-6.2-sol no longer volunteers one here: unprompted, 0.37.0 and this version both went 0 for 6 on 2026-11-27, on the old and new local Core alike. The unprompted variant is now scenario 32, opt-in with `APTEVA_RUN_CONVERSATIONS_UNPROMPTED_SUGGESTION_TIER3=1`, for measuring that rate. Its token budget is 750K: the full flow takes about 510K with kimi-k3.1-pro. Its directive also says to work only on what the user asks: kimi-k3.1-pro once fixed the repository in its startup turn, before any message.
+- Tier-3 scenario 14 matches its markers in any case: kimi-k3.1-pro began a correct report with "Ownership-reviewed:".
+
 ## 0.37.0 — 2026-11-27
 
 - When the model writes several tool calls in one response, a call it has finished writing now shows as "Ready" until it runs, while the call still being written shows "Writing". Before, only the call being written had a row: a finished call vanished when the model moved on and came back when the whole response ended. A grouped row reads, for example, "1 writing · 1 ready".

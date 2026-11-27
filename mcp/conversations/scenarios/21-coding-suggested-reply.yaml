@@ -1,5 +1,5 @@
 name: conversations-coding-suggested-reply
-description: Natural code investigation, independently chosen next-message suggestion, explicit acceptance, verified fix and regression test.
+description: Code investigation with a next-step suggestion the operator asked for, explicit acceptance, verified fix and regression test.
 timeout: 12m
 max_iterations: 100
 setup:
@@ -12,16 +12,26 @@ setup:
         trusted_local_execution: "true"
   agents: 1
   driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_CodingSuggestedReply$", "-v", "-count=1", "-timeout=11m", "."]
+# The directive asks for a next step in plain words. Suggestions are optional
+# in the shipped guidance, so a model left to its own judgement adds one only
+# some of the time (scenario 32 measures that). The shipped guidance still has
+# to teach how a suggestion is attached: nothing here names the component.
 directive: |
   You are a concise coding assistant. Use Code to inspect and edit the isolated
   test repository and Conversations to reply to the user. Use Bun for JavaScript
   checks. Local command execution is enabled for this disposable Code install;
   use repos_run_command with runtime=local when running repository tests.
   Do not contact external services or modify any other repository.
+  Work only on what the user asks in the conversation; until then, do nothing.
+  When you finish an investigation or review, offer the most useful next step
+  as a suggested reply the user can send. Offer none for greetings or when the
+  user is done.
 budget:
-  total_tokens: 500000
+  # The whole flow (investigation, accepted fix, regression test, closing)
+  # takes 300-390K tokens with gpt-6.2-sol and 440-510K with kimi-k3.1-pro.
+  total_tokens: 750000
 trajectory_assert:
   # How the model reads files is its choice: gpt-6.2-sol uses repos_run_command
-  # (cat), gpt-6.1-sol used code_read_file. The driver checks the outcome.
-  - tool_called: repos_run_command
+  # (cat) or code_read_file from run to run. The driver checks the outcome.
+  - tool_called: repos_run_command|code_read_file
   - tool_called: conversations_send

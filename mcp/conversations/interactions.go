@@ -85,7 +85,7 @@ func normalizeInteractions(components []Component, now time.Time) error {
 			continue
 		}
 		if c.Name == "approval-card" || c.Name == "report-card" || c.Name == "alert-card" {
-			return errors.New("use existing typed-card tools for approval, report and alert lifecycle")
+			return errors.New("approval, report and alert cards are not interactive components: use conversations_request_approval or conversations_send kind=report/alert")
 		}
 		if x.Status != "" || x.ActionID != "" || x.Values != nil || x.ResolvedBy != 0 || x.ResolvedAt != "" {
 			return errors.New("interaction state is server-owned")
@@ -441,8 +441,27 @@ func (a *App) componentActionHTTP(w http.ResponseWriter, r *http.Request, m *Mes
 
 // Expose a concrete bounded schema so models can produce components without a
 // second discovery/tool step. Other named widgets use the same field contract.
+// Descriptions stay short: the using-conversations skill and the conversation
+// thread directive teach how and when to use each widget.
 func componentsSchema() map[string]any {
-	field := schemaObject(map[string]any{"id": map[string]any{"type": "string"}, "label": map[string]any{"type": "string"}, "type": map[string]any{"type": "string", "enum": []string{"text", "textarea", "choice", "multichoice"}}, "required": map[string]any{"type": "boolean"}, "allow_custom": map[string]any{"type": "boolean", "description": "Allow free text for a single choice field only."}, "options": map[string]any{"type": "array", "items": schemaObject(map[string]any{"id": map[string]any{"type": "string"}, "label": map[string]any{"type": "string"}}, []string{"id", "label"})}}, []string{"id", "label", "type"})
-	action := schemaObject(map[string]any{"id": map[string]any{"type": "string"}, "label": map[string]any{"type": "string"}, "style": map[string]any{"type": "string", "enum": []string{"primary", "secondary", "danger"}}, "cancel": map[string]any{"type": "boolean"}}, []string{"id", "label"})
-	return map[string]any{"type": "array", "maxItems": 20, "items": schemaObject(map[string]any{"id": map[string]any{"type": "string"}, "version": map[string]any{"type": "integer", "enum": []int{1}}, "app": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "resource": schemaObject(map[string]any{"app_install_id": map[string]any{"type": "integer", "minimum": 1}, "resource_type": map[string]any{"type": "string"}, "resource_id": map[string]any{"type": "string"}}, []string{"app_install_id", "resource_type", "resource_id"}), "props": map[string]any{"type": "object", "description": "Display properties such as title and body. question-card/form-card use interaction fields. reply-suggestions has props={items:[{id,text}]} with exactly one 1-500 character next-message suggestion and no interaction; attach only to a non-empty final reply."}, "interaction": schemaObject(map[string]any{"blocking": map[string]any{"type": "boolean", "default": false}, "inbox": map[string]any{"type": "boolean", "default": true}, "expires_at": map[string]any{"type": "string", "description": "Optional future RFC3339 expiry."}, "fields": map[string]any{"type": "array", "maxItems": 12, "items": field}, "actions": map[string]any{"type": "array", "maxItems": 8, "items": action}}, nil)}, []string{"app", "name", "props"})}
+	str := map[string]any{"type": "string"}
+	option := schemaObject(map[string]any{"id": str, "label": str}, []string{"id", "label"})
+	field := schemaObject(map[string]any{"id": str, "label": str,
+		"type":     map[string]any{"type": "string", "enum": []string{"text", "textarea", "choice", "multichoice"}},
+		"required": map[string]any{"type": "boolean"}, "allow_custom": map[string]any{"type": "boolean"},
+		"options": map[string]any{"type": "array", "items": option}}, []string{"id", "label", "type"})
+	action := schemaObject(map[string]any{"id": str, "label": str,
+		"style":  map[string]any{"type": "string", "enum": []string{"primary", "secondary", "danger"}},
+		"cancel": map[string]any{"type": "boolean"}}, []string{"id", "label"})
+	interaction := schemaObject(map[string]any{"blocking": map[string]any{"type": "boolean"}, "inbox": map[string]any{"type": "boolean"},
+		"expires_at": map[string]any{"type": "string", "description": "RFC3339"},
+		"fields":     map[string]any{"type": "array", "items": field},
+		"actions":    map[string]any{"type": "array", "items": action}}, nil)
+	resource := schemaObject(map[string]any{"app_install_id": map[string]any{"type": "integer"}, "resource_type": str, "resource_id": str},
+		[]string{"app_install_id", "resource_type", "resource_id"})
+	resource["description"] = "The producer's locator, copied unchanged."
+	return map[string]any{"type": "array", "description": "Widgets: question-card/form-card with interaction, reply-suggestions props={items:[{id,text}]} on a final reply, or an app resource view.",
+		"items": schemaObject(map[string]any{"id": str, "app": str, "name": str, "resource": resource,
+			"props": map[string]any{"type": "object", "description": "Display props such as title and body."}, "interaction": interaction},
+			[]string{"app", "name", "props"})}
 }

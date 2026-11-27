@@ -1001,15 +1001,16 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	if got, want := strings.Join(ensure.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
 		t.Fatalf("conversation tool preload=%q want=%q", got, want)
 	}
-	if !slices.Contains(ensure.Tools, "conversations_report") {
-		t.Fatal("conversation profile is missing its report capability")
+	if !slices.Contains(ensure.Tools, "conversations_send") {
+		t.Fatal("conversation profile is missing send, which also files reports and alerts")
 	}
-	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_inbox_post"} {
+	// Reports and alerts are send kinds; their legacy aliases load only when named.
+	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_inbox_post", "conversations_report", "conversations_alert"} {
 		if slices.Contains(ensure.Tools, forbidden) {
 			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, ensure.Tools)
 		}
 	}
-	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, report, approve, or alert against another conversation id", "Do not grant the child Conversations tools", "A [chat soft break] is an advisory user event", "Use conversations_report"} {
+	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, report, approve, or alert against another conversation id", "Do not grant the child Conversations tools", "A [chat soft break] is an advisory user event", "conversations_send kind=report"} {
 		if !strings.Contains(ensure.DirectiveSuffix, required) {
 			t.Fatalf("conversation directive missing %q: %s", required, ensure.DirectiveSuffix)
 		}
@@ -1463,7 +1464,7 @@ func TestCreateListAlertFlow(t *testing.T) {
 	// Omitting the conversation is an error that teaches the flow.
 	if _, err := app.toolAlert(from, ctx, map[string]any{
 		"text": "disk almost full", "severity": "warn",
-	}); err == nil || !strings.Contains(err.Error(), "conversations_create") {
+	}); err == nil || !strings.Contains(err.Error(), "topic") {
 		t.Fatalf("err = %v, want teaching error", err)
 	}
 
@@ -2012,7 +2013,7 @@ func TestInboxPostFromAgentIsRefused(t *testing.T) {
 		"kind": "alert", "severity": "error",
 		"title": "Backup failed", "body": "rsync exit 23 on build-server",
 	})
-	if err == nil || !strings.Contains(err.Error(), "conversations_create") {
+	if err == nil || !strings.Contains(err.Error(), "conversations_send kind=alert") {
 		t.Fatalf("err = %v, want refusal teaching the agent tools", err)
 	}
 }

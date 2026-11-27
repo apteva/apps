@@ -17,10 +17,19 @@ import (
 	"time"
 )
 
-// No user prompt or scenario directive mentions suggestions or supplies their
-// wording/schema. Only the shipped Conversations guidance teaches this feature.
-// Acceptance must produce working code, not just a plausible-sounding prompt.
-func TestScenario_CodingSuggestedReply(t *testing.T) {
+// No user prompt mentions suggestions or supplies their wording or schema.
+// Scenario 21's directive asks in plain words for a next step after an
+// investigation; scenario 32 runs the same driver without that line, to
+// measure how often a model volunteers one. Either way only the shipped
+// Conversations guidance teaches how a suggestion is attached. Acceptance
+// must produce working code, not just a plausible-sounding prompt.
+func TestScenario_CodingSuggestedReply(t *testing.T) { runCodingSuggestedReply(t) }
+
+// TestScenario_CodingUnpromptedSuggestion is scenario 32: the same workflow,
+// where the directive does not ask for a next step.
+func TestScenario_CodingUnpromptedSuggestion(t *testing.T) { runCodingSuggestedReply(t) }
+
+func runCodingSuggestedReply(t *testing.T) {
 	c := newScenarioClient(t)
 	agent, _ := c.ensureAgent()
 	if c.installs["code"] == 0 {
@@ -260,5 +269,5 @@ test("independent shipping policy", () => {
 	if reply := waitFinal(end.ID); suggestion(reply) != "" {
 		t.Fatal("routine closure should not generate more suggested work")
 	}
-	t.Log("natural coding task generated one relevant next step; no work before explicit acceptance; accepted exact suggestion produced a verified fix and a regression test that catches the original bug; greeting and closure omitted suggestions")
+	t.Log("coding investigation generated one relevant next step; no work before explicit acceptance; accepted exact suggestion produced a verified fix and a regression test that catches the original bug; greeting and closure omitted suggestions")
 }

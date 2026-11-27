@@ -225,9 +225,16 @@ GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
 
 This installs Code as a disposable test peer and seeds a small shipping-cost
 repository with an exact-threshold bug and passing tests that miss that boundary.
-The user asks only for an investigation; neither the prompt nor scenario directive
-mentions suggestions, their schema, or desired wording. The shipped Conversations
-guidance must lead the agent to attach one useful next message itself. The driver
+The user asks only for an investigation. The scenario directive asks in plain
+words for "the most useful next step as a suggested reply" after an
+investigation, as an operator who wants suggestions would; nothing names the
+component, its schema or the wording. The shipped Conversations guidance must
+teach how the suggestion is attached. (Until 2026-11-27 the directive did not ask
+at all. Suggestions are optional in the guidance, so the scenario passed only when
+the model volunteered one, about half the time or less; that unprompted variant
+is now scenario 32, opt-in with
+`APTEVA_RUN_CONVERSATIONS_UNPROMPTED_SUGGESTION_TIER3=1`, for measuring the rate
+after a guidance change.) The driver
 checks an explicit relevance rubric (a shipping/boundary fix plus regression
 coverage), durable history, unchanged source and a quiet window before acceptance.
 It then sends the exact generated text without extra instructions. Independent
@@ -458,3 +465,72 @@ produced no suggested reply), then its driver passed on rerun; its
 with `repos_run_command`. `go test -race ./...` passes; it caught a timing flaw
 in 0.34.4's `TestAnsweredFormShowsMainWorkInTheConversation` (events dated
 before the answer opened the response), fixed in the test.
+
+## One send tool for replies, alerts and reports (0.38.0)
+
+`conversations_send` takes `kind=message|alert|report` and an optional `topic`;
+`conversations_alert` and `conversations_report` are aliases. Go coverage:
+`send_kinds_test.go` (kinds, topic reuse/creation, a conversation thread's own
+conversation, public refusals, aliases, no reply streaming for cards, the
+`io.apteva/autoload: "named"` hints, and a size budget for `send`).
+
+Scenarios 06, 08, 24 and 27 now assert `tool_called_with: conversations_send`
+with `args: {kind: alert}` / `{kind: report}`. Scenario 31 is new:
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.2-sol \
+  scenarios/31-scheduled-triage-files-cards.yaml
+```
+
+An email-triage agent (directive modeled on the prod Messaging Agent) whose
+main thread already answers an operator chat gets an hourly check and a daily
+summary as scheduler events. It must file an alert card and a report card, not
+plain messages. 0.37.0 passes its driver too, on today's local Core and on the
+Core from before the tool-selection fixes: the prod failure came from a tool
+selection that dropped the alert/report tools after restarts, which a fresh
+scenario does not reproduce. The scenario guards the card path; the merge
+removes the separate tools that selection could drop.
+
+### Results on the model-driven-tools Core (2026-11-27)
+
+Local Core with model-driven tool loading (apteva/core `feat/model-driven-tools`
+plus `fix/turn-waits-for-tools`): every tool goes to the model while the catalog
+fits 30K schema tokens. Each run waited for 4 GiB of free disk and was retried
+once if it failed on a full disk; no retry was needed.
+
+kimi-k3.1-pro (opencode-go), full suite on the same Core: every scenario
+passed on its first run except 14 and 21. In 14 Kimi filed the right report in
+the right conversation, but its summary began "Ownership-reviewed:", and the
+driver matched its markers case-sensitively; they now match in any case, and 14
+passed twice after that. In 21 Kimi's startup turn fixed the repository before
+any user message: the directive now says to work only on what the user asks.
+With that line, 21 passed 3 of 3 with kimi-k3.1-pro (16 iterations, 471–480K
+tokens) and 2 of 2 with gpt-6.2-sol (15 iterations, 381K tokens).
+
+gpt-6.2-sol, full suite (17, 22 and 32 are opt-in): every scenario passed. 23 failed
+once because the model repeated the `LAUNCH_DONE` token in an acknowledgement
+(the driver counts messages containing it) and passed on rerun; 25 and 26
+passed once Playwright was reinstalled in the worktree root.
+
+Twelve key scenarios, one run each, 0.37.0 against this version on the same
+Core. Both versions passed all of them except 21 (see below):
+
+| | Iterations | Tokens | Card scenarios 06/07/08/24/31 |
+|---|---|---|---|
+| gpt-6.2-sol | 71 → 68 | 1,257K → 1,174K (−6.6%) | 566K → 483K (−14.6%) |
+| kimi-k3.1-pro (opencode-go) | 84 → 77 | 1,649K → 1,484K (−10.0%) | 710K → 643K (−9.4%) |
+
+The alert and report flows (06, 08) take 3 iterations instead of 4 with Sol:
+main posts by `topic` and no longer calls `conversations_create` first.
+
+Scenario 21 failed on both versions, both Cores and both models before its
+directive asked for a next step: the diagnosis was right every time and no
+suggestion was attached. Unprompted (now scenario 32), gpt-6.2-sol went 0 for 6
+with 0.37.0 (3 runs on the old local Core, 3 on the new one) and 0 for 6 with
+this version (2 on the old Core, 4 on the new one, 2 of them forced into search
+mode with `APTEVA_DIRECT_TOOL_TOKENS=4000`). Neither the Core nor the shorter
+`send` description explains it; the scenario was written against gpt-6.1-sol. With the directive line, on the
+local dev Core (`dev-build/turn-waits-20261127`), 21 passed 5 of 5 with
+gpt-6.2-sol (12–13 iterations, 304–331K tokens) and its driver passed 5 of 5 with
+kimi-k3.1-pro (15–17 iterations, 446–509K tokens). The first Kimi run went over
+the old 500K budget, which is now 750K.

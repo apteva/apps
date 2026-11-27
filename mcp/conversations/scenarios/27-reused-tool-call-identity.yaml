@@ -16,6 +16,10 @@ budget:
   total_tokens: 800000
 trajectory_assert:
   - tool_called: conversations_send
-  - tool_called: conversations_report
-  - tool_called: conversations_alert
+  - tool_called_with:
+      tool: conversations_send
+      args: {kind: report}
+  - tool_called_with:
+      tool: conversations_send
+      args: {kind: alert}
   - tool_called: conversations_request_approval

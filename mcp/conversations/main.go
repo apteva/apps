@@ -37,6 +37,7 @@ var manifestYAML string
 
 type App struct {
 	attachmentMu     sync.Mutex
+	topicMu          sync.Mutex // serializes find-or-create of a topic conversation
 	queueReleaseMu   sync.Mutex // serializes releaseQueuedMessages decisions
 	asyncDelivery    bool
 	deliveryWorker   *deliveryWorker
@@ -202,6 +203,29 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{{Event: sdk.AgentEventLifecycleEvent, Handler: a.handleApprovalLifecycle}}
 }
 
+// sendKindMessage is send's default kind: an ordinary chat reply. Alerts and
+// reports use the stored component kinds of the same name.
+const sendKindMessage = "message"
+
+// loadWhenNamed is a generic host hint: load this tool for a model only when
+// the agent's instructions, the request or a skill name it, not by topical
+// relevance. Hosts that do not know the hint list the tool as usual.
+var loadWhenNamed = map[string]any{"io.apteva/autoload": "named"}
+
+// sendToolDescription is deliberately short. Pacing, components, resource
+// views and suggestions are taught by the using-conversations skill and the
+// conversation thread directive; repeating them here crowded other tools out
+// of the model's tool budget.
+const sendToolDescription = "Post a chat reply, an alert card or a report card to a conversation. kind=message (default) is a reply from the thread that owns the conversation. " +
+	"Main replies only in the conversation it answers, or acknowledges its own resolved approval with phase=acknowledgement and approval_message_id; " +
+	"elsewhere main posts cards, not replies. kind=alert (text, severity) and kind=report (title, summary, optional sections and period) " +
+	"file Inbox cards in the operator conversation that owns the work. Without a conversation_id, main sets topic to reuse or create that work conversation. " +
+	"Phases: an acknowledgement alone before work tools, progress only during long work, then one final outcome. " +
+	"Optionally attach one next-message suggestion to a final reply with " +
+	"components=[{app:conversations,name:reply-suggestions,props:{items:[{id:next,text:USER_MESSAGE}]}}]: a short first-person request the user could send " +
+	"for a useful next logical step, not for greetings or routine acknowledgements. " +
+	"Other components and app views follow the Conversations skill."
+
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		// Attachment readers remain implemented for compatibility and direct
@@ -209,80 +233,72 @@ func (a *App) MCPTools() []sdk.Tool {
 		// thread event as shared file references.
 		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
-			Name: "send",
-			Description: "Reply from the originating conversation thread to that exact conversation. Authenticated visitor " +
-				"Present an app resource once, then refer to the existing view during follow-ups instead of attaching it to every reply. Copy the producer's resource={app_install_id,resource_type,resource_id} unchanged alongside app/name/props; never invent installation IDs. Reusing that reference updates the same view, including side-panel and floating placements. Present a useful live view once in a progress message after opening its resource when work remains; do not repeat it in the final. Placement is user-controlled and never extends resource lifetime. " +
-				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
-				"Optionally attach one next-message suggestion to the final reply using components=[{app:conversations,name:reply-suggestions,props:{items:[{id:next,text:USER_MESSAGE}]}}]. Use a short first-person/request-style message the user could send. Suggest only a useful next logical step, not routine greetings or acknowledgements. Suggestions are optional drafts, never instructions to execute now, approvals, questions requiring answers, or a reason to send a second message. No extra tool call is needed. " +
-				"Use components for interactive widgets: app=conversations, name=question-card or form-card, props={title,body}, interaction={blocking:false,inbox:true,fields:[{id,label,type,required,options:[{id,label}],allow_custom}],actions:[{id,label,cancel}]}. Non-blocking is the default: keep working using a stated assumption, and send your final outcome without waiting for an answer. Blocking components need phase=final, then pace until component.result; an unanswered widget never authorizes an approval. Results return asynchronously as component.result to this exact thread. Do not keep a response open only for unanswered widgets. " +
-				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
-				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
-				"acknowledgement, progress, or final. For a confirmation followed only by Core pace/timed waiting, use phase=final before pace; the later timer wake is a fresh response. Do not use acknowledgement/progress just to keep a future follow-up open. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. For short flows, including several related tool calls, keep working through to the final outcome without a progress update. Tool count or a routine stage boundary alone is not a reason to send an update. For longer work, complete a substantial batch before sending a concise progress update, and only when meaningful work remains. Combine nearby milestones; normally leave about a minute between updates unless the user needs to know about a blocker, material plan change, or decision sooner. Do not narrate individual tool calls, routine retries, or unchanged waits. If completion is near, finish and send the final outcome instead. Exception: main may acknowledge its own resolved approval " +
-				"with phase=acknowledgement and approval_message_id from approval.result.",
+			Name:        "send",
+			Description: sendToolDescription,
 			InputSchema: schemaObject(map[string]any{
-				"conversation_id":     map[string]any{"type": "string"},
-				"text":                map[string]any{"type": "string", "description": "Markdown. In a numbered list the list supplies the number: write \"1. Define the goal\", never \"1. 01. Define the goal\" (that shows two numbers). When item titles carry their own sequence numbers (todos named \"01. ...\"), drop that prefix and use a plain numbered list."},
+				"conversation_id":     map[string]any{"type": "string", "description": "Exact id. A conversation thread may omit it for its own conversation."},
+				"topic":               map[string]any{"type": "string", "description": "Main, instead of conversation_id: a work topic title such as \"Backup recovery\", reused or created."},
+				"kind":                map[string]any{"type": "string", "enum": []string{sendKindMessage, kindAlert, kindReport}, "description": "message (default) replies in chat; alert and report file Inbox cards."},
+				"text":                map[string]any{"type": "string", "description": "Markdown reply, or the alert text. In a numbered list the list supplies the number: write \"1. Define the goal\", never \"1. 01. Define the goal\". When item titles carry their own sequence numbers, drop that prefix and use a plain numbered list."},
+				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}, "description": "message only. final (default) ends the visible response, also before pace; acknowledgement/progress mean work remains now."},
+				"severity":            map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}, "description": "alert: error breaks things, warn degrades, info (default) informs."},
+				"title":               map[string]any{"type": "string", "description": "report: a headline naming the outcome."},
+				"summary":             map[string]any{"type": "string", "description": "report: one or two plain sentences (about 25 words) for the Inbox preview."},
+				"sections":            map[string]any{"type": "array", "items": schemaObject(map[string]any{"title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}}, nil), "description": "report: optional details in short paragraphs, bullets or labeled links."},
+				"period":              map[string]any{"type": "string", "description": "report: the time window covered."},
 				"idempotency_key":     map[string]any{"type": "string"},
-				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}, "description": "final completes the current visible response without cancelling future work. Use final for a confirmation followed only by pace/timed waiting; acknowledgement/progress mean work remains now."},
-				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Resolved approval being acknowledged by its originating main thread."},
+				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Main's own resolved approval being acknowledged."},
 				"components":          componentsSchema(),
-				"attachments":         map[string]any{"type": "array", "items": sdk.FileReferencePassthroughSchema("Optional image or file handles produced by the platform. Pass the complete _file handle unchanged; Conversations stores it and presents it to authorized viewers.")},
-			}, []string{"conversation_id"}),
+				"attachments":         map[string]any{"type": "array", "items": sdk.FileReferencePassthroughSchema("Image or file handle from the platform. Pass the complete _file handle unchanged.")},
+			}, nil),
 			HandlerCtx: a.toolSend,
 		},
 		{
 			Name: "request_approval",
 			Meta: map[string]any{"io.apteva/wakeOnResult": true},
-			Description: "Ask the operator to approve gated work owned by main or by the originating conversation " +
-				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
-				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
-				"asking thread as approval.result. The card itself asks the question: call this directly, without a separate conversations_send announcing the approval. " +
-				"Keep the approval in the operator conversation that owns the work. Main preserves the originating conversation_id on escalations and delegated results. For autonomous work, search for a relevant operator conversation first and create a topic only when none fits. " +
-				"Omit actions for Approve/Deny defaults. Custom actions require id and label (not value); style is optional.",
+			Description: "Ask the operator to approve gated work before doing it. The card asks the question, so do not announce it " +
+				"with a separate send. The verdict returns to the asking thread as approval.result. Use the conversation that " +
+				"owns the work, or topic from main. Omit actions for Approve/Deny.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
+				"topic":           map[string]any{"type": "string", "description": "Main only, instead of conversation_id: the work topic title. Reuses or creates that conversation."},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
 				"actions":         approvalActionsSchema(),
-			}, []string{"conversation_id", "title"}),
+			}, []string{"title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
+		// Aliases of send kind=report/alert, kept while agents, directives and
+		// saved tool selections still name them. Hosts load them only when named.
 		{
-			Name: "report",
-			Description: "File a substantive report in the operator conversation that owns the work. " +
-				"Conversation threads report into their own exact conversation_id. Main preserves the originating conversation_id " +
-				"from delegated work or escalations. For autonomous work, search for a relevant existing conversation first; " +
-				"create a meaningful work topic only when none fits. Generic workers report results to their parent. " +
-				"Name what happened in the title, such as 'Help center update published'. " +
-				"Use summary as the Inbox preview: one or two plain-text sentences about the outcome. Aim for 25 words. " +
-				"When using sections, write one sentence about the current state. Keep incident causes, recovery steps, " +
-				"measurements, and verification details in optional sections ({title, body}). Use short paragraphs or bullets " +
-				"and labeled Markdown links in section bodies. Use period when the report covers a meaningful time window.",
+			Name:        "report",
+			Meta:        loadWhenNamed,
+			Description: "Alias of conversations_send kind=report. Prefer conversations_send.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
-				"title":           map[string]any{"type": "string", "description": "A short headline that names the outcome."},
-				"summary":         map[string]any{"type": "string", "description": "One or two plain-text sentences with the outcome and its impact. Aim for 25 words. Leave supporting details to the sections."},
-				"period":          map[string]any{"type": "string", "description": "The reporting window, when it adds context."},
-				"sections":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Optional supporting details. Use a short title and a body with short paragraphs, bullets, or labeled Markdown links."},
-			}, []string{"conversation_id", "title", "summary"}),
+				"topic":           map[string]any{"type": "string"},
+				"title":           map[string]any{"type": "string"},
+				"summary":         map[string]any{"type": "string"},
+				"period":          map[string]any{"type": "string"},
+				"sections":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+			}, []string{"title", "summary"}),
 			HandlerCtx: a.toolReport,
 		},
 		{
-			Name: "alert",
-			Description: "Raise a global alert from main, or a conversation-local urgent alert from the originating " +
-				"conversation thread using its exact id. Generic workers report problems to their parent. Alerts are " +
-				"severity-ranked in the inbox. Use the conversation that owns the work; main preserves the originating conversation_id " +
-				"and searches relevant existing topics before creating a conversation for autonomous work. Set severity explicitly: error for failures, warn for degraded operation, " +
-				"and info for advisories. Omitting severity creates an info alert.",
+			Name:        "alert",
+			Meta:        loadWhenNamed,
+			Description: "Alias of conversations_send kind=alert. Prefer conversations_send.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
+				"topic":           map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
-				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}, "description": "Use error for failures, warn for degradation, and info for advisories. Omission defaults to info."},
-			}, []string{"conversation_id", "text"}),
+				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}},
+			}, []string{"text"}),
 			HandlerCtx: a.toolAlert,
 		},
 		{
 			Name: "create",
+			Meta: loadWhenNamed,
 			Description: "Main-thread conversation management only. Reuse the originating conversation or search existing work topics first. " +
 				"Create a conversation only for work with no relevant existing conversation. Name the work, such as " +
 				"\"November content plan\" or \"Backup recovery\". Title-idempotent: if you already have a conversation " +
@@ -296,6 +312,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "list",
+			Meta: loadWhenNamed,
 			Description: "Main-thread conversation management only. List conversations this agent participates in. " +
 				"Use a known originating conversation_id directly; otherwise search for the work topic before creating a conversation. " +
 				"Discovery does not grant ownership of their Core threads: never update, rename, kill or replace them. " +
@@ -309,6 +326,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "history",
+			Meta: loadWhenNamed,
 			Description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation " +
 				"thread may read only its own exact conversation; generic workers are not granted this tool.",
 			InputSchema: schemaObject(map[string]any{
@@ -320,6 +338,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "keep_thread",
+			Meta: loadWhenNamed,
 			Description: "Answer a [conversation idle check] from a conversation thread that still has ongoing timed work " +
 				"(a scheduled follow-up, a running job, a watched condition). Keeps this thread awake for another idle period. " +
 				"Only the conversation's own thread may call it; do nothing when no timed work remains.",
@@ -333,9 +352,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:     "inbox_post",
 			Exposure: sdk.ToolExposureAppOnly,
 			Description: "INTERNAL sibling-app entry point (CallAppResult) — not for agents; agent calls are " +
-				"refused. Agents raise items with conversations_alert, conversations_report, or " +
-				"conversations_request_approval into a conversation (conversations_list to find one, " +
-				"conversations_create to make one). With callback_tool set, inbox actions call back into the " +
+				"refused. Agents raise items with conversations_send kind=alert or kind=report, or " +
+				"conversations_request_approval, into a conversation (an exact conversation_id, or topic from main). With callback_tool set, inbox actions call back into the " +
 				"posting app. Pass conversation_id to keep the item in the existing operator conversation that owns " +
 				"the work in the authenticated project. Calls without conversation context use the legacy app inbox conversation.",
 			InputSchema: schemaObject(map[string]any{
@@ -432,21 +450,70 @@ func (a *App) requireGlobalCaller(from *callIdentity, tool string) error {
 // one.
 func requireOperatorAudience(conv *Conversation, kind string) error {
 	if conv.Audience == "public" {
-		return fmt.Errorf("%s refused: %q is a public (visitor) conversation — send an escalation to parent/main, which raises the %s in an operator conversation and references conversation %s; this bound thread must reply to the visitor using conversations_send only",
+		return fmt.Errorf("%s refused: %q is a public (visitor) conversation — send an escalation to parent/main, which raises the %s in an operator conversation and references conversation %s; this bound thread must reply to the visitor using conversations_send kind=message only",
 			kind, conv.Title, kind, conv.ID)
 	}
 	return nil
 }
 
-// requireConversationArg reads the mandatory conversation_id. The
-// item tools have no fallback bucket — an agent must say where the
-// item lives, and the error teaches the flow when it doesn't.
-func (a *App) requireConversationArg(from *callIdentity, args map[string]any) (*Conversation, error) {
-	conversationID := strings.TrimSpace(stringArg(args, "conversation_id"))
-	if conversationID == "" {
-		return nil, errors.New("conversation_id required — find a conversation with conversations_list (query filters by title) or create a topical one with conversations_create")
+// resolveDestination finds the conversation an item is posted to. An exact
+// conversation_id always wins. A bound conversation thread can only post in its
+// own conversation, so it may omit the id. Any other caller names the work
+// topic instead, and the conversation with that title is reused, or created
+// when create is set. Plain replies never create one: a new conversation has
+// no thread waiting for a reply.
+func (a *App) resolveDestination(from *callIdentity, args map[string]any, create bool) (*Conversation, error) {
+	if id := strings.TrimSpace(stringArg(args, "conversation_id")); id != "" {
+		return a.requireParticipant(from, id)
 	}
-	return a.requireParticipant(from, conversationID)
+	bound, err := a.boundConversation(from)
+	if err != nil {
+		return nil, err
+	}
+	if bound != nil {
+		return a.requireParticipant(from, bound.ID)
+	}
+	topic := strings.TrimSpace(stringArg(args, "topic"))
+	if topic == "" {
+		return nil, errors.New("conversation_id or topic required: use the originating conversation_id, or pass topic (a work topic title such as \"Backup recovery\") to reuse or create that conversation")
+	}
+	conv, _, err := a.topicConversation(from, topic, "topic", create)
+	return conv, err
+}
+
+// topicConversation returns the caller's conversation titled title, creating
+// it when none exists and create is set. Titles are idempotent per agent; the
+// lock keeps two parallel calls for a new topic from creating it twice.
+func (a *App) topicConversation(from *callIdentity, title, tool string, create bool) (*Conversation, bool, error) {
+	if err := requireCallerProject(from, tool); err != nil {
+		return nil, false, err
+	}
+	if err := a.requireGlobalCaller(from, tool); err != nil {
+		return nil, false, err
+	}
+	a.topicMu.Lock()
+	defer a.topicMu.Unlock()
+	existing, err := a.store.FindAgentConversationByTitle(from.ProjectID, from.AgentID, title)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		conv, err := a.requireParticipant(from, existing.ID)
+		return conv, false, err
+	}
+	if !create {
+		return nil, false, fmt.Errorf("no conversation titled %q: a reply goes to an existing conversation; post kind=alert or kind=report by topic instead", title)
+	}
+	conv, err := a.store.CreateConversation(CreateConversationInput{
+		ProjectID:   from.ProjectID,
+		LeadAgentID: from.AgentID,
+		Title:       title,
+		Origin:      "agent",
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return conv, true, nil
 }
 
 // requireParticipant loads the conversation and verifies the calling
@@ -490,7 +557,6 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	conversationID, _ := args["conversation_id"].(string)
 	text, _ := args["text"].(string)
 	phase := strings.TrimSpace(stringArg(args, "phase"))
 	if phase == "" {
@@ -501,9 +567,25 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	default:
 		return nil, fmt.Errorf("invalid phase %q", phase)
 	}
-	conv, err := a.requireParticipant(from, conversationID)
+	kind := strings.ToLower(strings.TrimSpace(stringArg(args, "kind")))
+	if kind == "" {
+		kind = sendKindMessage
+	}
+	if kind != sendKindMessage && kind != kindAlert && kind != kindReport {
+		return nil, fmt.Errorf("invalid kind %q: use message, alert or report", kind)
+	}
+	conv, err := a.resolveDestination(from, args, kind != sendKindMessage)
 	if err != nil {
 		return nil, err
+	}
+	if kind != sendKindMessage {
+		if presentArg(args["components"]) || presentArg(args["attachments"]) {
+			return nil, fmt.Errorf("components and attachments belong to kind=message; a %s card carries only its own fields", kind)
+		}
+		if kind == kindAlert {
+			return a.postAlert(app, from, conv, args)
+		}
+		return a.postReport(app, from, conv, args)
 	}
 	clientID := strings.TrimSpace(stringArg(args, "idempotency_key"))
 	if from.ThreadID == mainThreadID {
@@ -516,7 +598,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 			if phase != "acknowledgement" || err != nil || approval.ComponentKind != kindApproval ||
 				approval.ConversationID != conv.ID || approval.AgentID != from.AgentID || approval.ThreadID != mainThreadID ||
 				(approval.ActionStatus == "" || approval.ActionStatus == "pending") {
-				return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread; main may only acknowledge its own resolved approval with phase=acknowledgement and approval_message_id")
+				return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread; from main, post kind=alert or kind=report here, or acknowledge your own resolved approval with phase=acknowledgement and approval_message_id")
 			}
 			// An event retry or a second tool call must not duplicate the receipt.
 			clientID = fmt.Sprintf("approval:%d:acknowledgement", approvalID)
@@ -605,7 +687,7 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if body == "" {
 		body = title
 	}
-	conv, err := a.requireConversationArg(from, args)
+	conv, err := a.resolveDestination(from, args, true)
 	if err != nil {
 		return nil, err
 	}
@@ -635,22 +717,41 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	return map[string]any{"message_id": msg.ID, "status": "pending", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
+// toolReport and toolAlert are the legacy names of send kind=report/alert.
 func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.requireConversationArg(from, args)
+	conv, err := a.resolveDestination(from, args, true)
 	if err != nil {
 		return nil, err
 	}
+	return a.postReport(app, from, conv, args)
+}
+
+func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	from, err := requireAgentCaller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conv, err := a.resolveDestination(from, args, true)
+	if err != nil {
+		return nil, err
+	}
+	return a.postAlert(app, from, conv, args)
+}
+
+// postReport files a report card. A model that writes the summary as text is
+// understood rather than refused.
+func (a *App) postReport(app *sdk.AppCtx, from *callIdentity, conv *Conversation, args map[string]any) (any, error) {
 	if err := requireOperatorAudience(conv, "report"); err != nil {
 		return nil, err
 	}
 	title := strings.TrimSpace(stringArg(args, "title"))
-	summary := strings.TrimSpace(stringArg(args, "summary"))
+	summary := firstNonEmptyString(strings.TrimSpace(stringArg(args, "summary")), strings.TrimSpace(stringArg(args, "text")))
 	if title == "" || summary == "" {
-		return nil, errors.New("title and summary required")
+		return nil, errors.New("a report needs title and summary")
 	}
 	sections, err := genericObjectsArg(args, "sections", 50)
 	if err != nil {
@@ -662,29 +763,24 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindReport,
 		Components:    []Component{reportCard(title, summary, stringArg(args, "period"), sections)},
+		ClientID:      strings.TrimSpace(stringArg(args, "idempotency_key")),
 		toolCallID:    from.ToolCallID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"message_id": msg.ID, "status": "sent", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
+	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "kind": kindReport, "status": "sent",
+		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
-func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	from, err := requireAgentCaller(ctx)
-	if err != nil {
-		return nil, err
-	}
-	conv, err := a.requireConversationArg(from, args)
-	if err != nil {
-		return nil, err
-	}
+// postAlert files an alert card. Severity defaults to info.
+func (a *App) postAlert(app *sdk.AppCtx, from *callIdentity, conv *Conversation, args map[string]any) (any, error) {
 	if err := requireOperatorAudience(conv, "alert"); err != nil {
 		return nil, err
 	}
-	text := strings.TrimSpace(stringArg(args, "text"))
+	text := firstNonEmptyString(strings.TrimSpace(stringArg(args, "text")), strings.TrimSpace(stringArg(args, "summary")))
 	if text == "" {
-		return nil, errors.New("text required")
+		return nil, errors.New("an alert needs text")
 	}
 	severity := stringArg(args, "severity")
 	switch severity {
@@ -692,19 +788,21 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	case "":
 		severity = "info"
 	default:
-		return nil, fmt.Errorf("invalid severity %q", severity)
+		return nil, fmt.Errorf("invalid severity %q: use info, warn or error", severity)
 	}
 	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindAlert, Severity: severity,
 		Components: []Component{alertCard(text, severity)},
+		ClientID:   strings.TrimSpace(stringArg(args, "idempotency_key")),
 		toolCallID: from.ToolCallID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"message_id": msg.ID, "inserted": inserted, "duplicate_suppressed": !inserted}, nil
+	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "kind": kindAlert, "severity": severity,
+		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
 // toolCreate is title-idempotent per agent. The model chooses a meaningful
@@ -714,31 +812,15 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	if err := requireCallerProject(from, "conversations_create"); err != nil {
-		return nil, err
-	}
-	if err := a.requireGlobalCaller(from, "conversations_create"); err != nil {
-		return nil, err
-	}
 	title := strings.TrimSpace(stringArg(args, "title"))
 	if title == "" {
 		return nil, errors.New("title required")
 	}
-	if existing, err := a.store.FindAgentConversationByTitle(from.ProjectID, from.AgentID, title); err != nil {
-		return nil, err
-	} else if existing != nil {
-		return map[string]any{"conversation_id": existing.ID, "title": existing.Title, "created": false}, nil
-	}
-	conv, err := a.store.CreateConversation(CreateConversationInput{
-		ProjectID:   from.ProjectID,
-		LeadAgentID: from.AgentID,
-		Title:       title,
-		Origin:      "agent",
-	})
+	conv, created, err := a.topicConversation(from, title, "conversations_create", true)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"conversation_id": conv.ID, "title": conv.Title, "created": true}, nil
+	return map[string]any{"conversation_id": conv.ID, "title": conv.Title, "created": created}, nil
 }
 
 func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -785,6 +867,15 @@ func (a *App) toolHistory(ctx context.Context, _ *sdk.AppCtx, args map[string]an
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+
+// presentArg reports whether a tool argument carries a value; models often
+// send empty arrays for optional fields they do not use.
+func presentArg(v any) bool {
+	if list, ok := v.([]any); ok {
+		return len(list) > 0
+	}
+	return v != nil
+}
 
 func stringArg(args map[string]any, key string) string {
 	value, _ := args[key].(string)

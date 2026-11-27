@@ -99,8 +99,7 @@ var legacyThreadPlatforms sync.Map
 var conversationThreadTools = []string{
 	"send", "spawn", "pace",
 	"conversations_send", "conversations_history",
-	"conversations_request_approval", "conversations_alert", "conversations_report",
-	"conversations_keep_thread",
+	"conversations_request_approval", "conversations_keep_thread",
 }
 
 // conversationThreadDirective is the suffix core appends to the agent's
@@ -108,7 +107,7 @@ var conversationThreadTools = []string{
 func conversationThreadDirective(conv *Conversation) string {
 	var b strings.Builder
 	inboxGuidance := " Keep reports, alerts, approvals, questions and forms about this work in this same conversation." +
-		" Use conversations_report for a substantive report in this operator conversation."
+		" File a substantive report here with conversations_send kind=report, and an urgent problem with kind=alert."
 	if conv.Audience == "public" {
 		inboxGuidance = " This is a public conversation. Escalate internal reports, alerts and approval requests to parent/main" +
 			" with the originating conversation_id. Main finds the relevant operator conversation for internal items and returns the outcome here."

@@ -24,6 +24,15 @@ type flatStringParser struct {
 	// the first chunks, long before the remaining arguments.
 	reason     string
 	reasonSeen bool
+	// kind is conversations_send's card kind. Alert and report sends file a
+	// card, so their text never streams as a reply.
+	kind string
+}
+
+// card reports whether the streamed send is an alert or report card rather
+// than a chat reply.
+func (p *flatStringParser) card() bool {
+	return p.kind != "" && p.kind != sendKindMessage
 }
 
 func (p *flatStringParser) consume(raw string) {
@@ -63,6 +72,9 @@ func (p *flatStringParser) consume(raw string) {
 				if p.key == "text" {
 					p.textComplete = true
 				}
+				if p.key == "kind" {
+					p.kind = strings.ToLower(strings.TrimSpace(p.token.String()))
+				}
 				if p.key == "_reason" && !p.reasonSeen {
 					p.reason = p.token.String()
 					p.reasonSeen = true
@@ -101,7 +113,7 @@ func (p *flatStringParser) consume(raw string) {
 			value = raw[p.pos : p.pos+1]
 			p.pos++
 		}
-		if p.isKey || (p.depth == 1 && (p.key == "conversation_id" || p.key == "_reason")) {
+		if p.isKey || (p.depth == 1 && (p.key == "conversation_id" || p.key == "_reason" || p.key == "kind")) {
 			p.token.WriteString(value)
 		}
 		if !p.isKey && p.depth == 1 && p.key == "text" {

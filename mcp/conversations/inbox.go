@@ -435,7 +435,7 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	// fallback bucket to route into anymore, and silently picking a
 	// conversation for the agent would reintroduce one.
 	if caller != nil && caller.AgentID != 0 {
-		return nil, errors.New("inbox_post is the sibling-app surface — agents raise items with conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one)")
+		return nil, errors.New("inbox_post is the sibling-app surface — agents raise items with conversations_send kind=alert or kind=report, or conversations_request_approval, into a conversation (an exact conversation_id, or topic from main)")
 	}
 
 	// App identity is stamped by the authenticated app-to-app bridge. Never

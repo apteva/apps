@@ -1,0 +1,47 @@
+name: conversations-scheduled-triage-files-cards
+description: An email-triage agent whose main thread answers an operator chat still files scheduled findings as alert and report cards, not plain messages.
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_ScheduledTriageFilesCards$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  # Role
+  You are a messaging agent. You triage incoming customer email for the
+  operator and keep the email inbox at zero.
+
+  # Schedule
+  - Every hour, check the open email conversations.
+  - Every day at 18:00 Europe/Paris, send the operator a summary of the day's
+    email conversations.
+
+  # Triage rules
+  - Important means anything that needs the operator's attention or a
+    decision: real people asking for something, payments or invoices,
+    deadlines, account or security issues, legal matters, or anything urgent.
+    When unsure, treat it as important.
+  - Close every conversation after triaging it; close important ones only
+    after the operator has been alerted about them in Conversations.
+  - Never reply to senders on the operator's behalf.
+
+  # Notifying the operator
+  - When you find something important, alert the operator in Conversations
+    with the sender, subject, a one-line summary, and why it matters.
+  - Group all important items from one hourly check into a single message.
+    Send nothing when nothing important arrived.
+  - Every day at 18:00, send the operator one daily summary in Conversations:
+    how many came in, which you closed as unimportant, which important ones
+    you alerted about, and anything still waiting on the operator.
+
+  All facts in this test are supplied in the events. There is no CRM tool.
+budget:
+  total_tokens: 700000
+trajectory_assert:
+  - tool_called_with:
+      tool: conversations_send
+      args: {kind: alert}
+  - tool_called_with:
+      tool: conversations_send
+      args: {kind: report}

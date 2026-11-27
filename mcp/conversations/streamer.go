@@ -371,7 +371,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	}
 	st.buf.WriteString(chunk)
 	st.parser.consume(st.buf.String())
-	if (s.resolve != nil && !st.parser.destinationSeen) || (st.parser.destinationSeen && st.parser.destination != conversationID) {
+	if (s.resolve != nil && !st.parser.destinationSeen) || (st.parser.destinationSeen && st.parser.destination != conversationID) || st.parser.card() {
 		s.mu.Unlock()
 		return
 	}
@@ -824,6 +824,7 @@ func decodeSendArgs(raw json.RawMessage, conversationID string) (string, bool) {
 	var args struct {
 		ConversationID string `json:"conversation_id"`
 		Channel        string `json:"channel"`
+		Kind           string `json:"kind"`
 		Text           string `json:"text"`
 	}
 	decode := func(data []byte) bool { return json.Unmarshal(data, &args) == nil }
@@ -840,6 +841,9 @@ func decodeSendArgs(raw json.RawMessage, conversationID string) (string, bool) {
 	}
 	if args.Channel != "" && args.Channel != "apteva" && args.Channel != "chat" && args.Channel != "current" {
 		return "", false
+	}
+	if kind := strings.ToLower(strings.TrimSpace(args.Kind)); kind != "" && kind != sendKindMessage {
+		return "", false // alert and report sends file a card, not a reply
 	}
 	return args.Text, args.Text != ""
 }

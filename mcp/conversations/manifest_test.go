@@ -252,7 +252,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.37.0"
+	const releaseVersion = "0.38.0"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -292,10 +292,13 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 	wants := map[string][]string{
-		"send":             {"originating conversation thread", "generic workers report to their parent", "For short flows", "meaningful", "Do not narrate individual tool calls"},
-		"request_approval": {"owned by main or by the originating conversation", "Generic workers report"},
-		"report":           {"operator conversation that owns the work", "own exact conversation_id", "Generic workers report results"},
-		"alert":            {"global alert from main", "conversation-local urgent alert", "Generic workers report"},
+		// send stays short; pacing and worker rules live in the skill below.
+		"send": {"from the thread that owns the conversation", "main posts cards, not replies", "operator conversation that owns the work", "acknowledgement alone", "one final outcome",
+			// Main answers its first operator chat and learns suggestions only here.
+			"reply-suggestions"},
+		"request_approval": {"conversation that owns the work", "topic from main"},
+		"report":           {"Alias of conversations_send kind=report"},
+		"alert":            {"Alias of conversations_send kind=alert"},
 		"create":           {"Main-thread conversation management only", "generic workers do not create"},
 		"list":             {"Main-thread conversation management only", "generic workers report"},
 		"history":          {"conversation thread may read only its own exact conversation", "generic workers are not granted"},

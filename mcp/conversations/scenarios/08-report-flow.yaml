@@ -15,4 +15,6 @@ directive: |
 budget:
   total_tokens: 500000
 trajectory_assert:
-  - tool_called: conversations_report
+  - tool_called_with:
+      tool: conversations_send
+      args: {kind: report}
