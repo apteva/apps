@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import { StatusDot } from "@apteva/ui-kit";
 
 interface Props { projectId: string; installId?: number; appName?: string }
-interface Device { id: string; name: string; platform: string; physical: boolean; driver: string; state: string; hint?: string; capabilities: string[] }
+interface Health { battery_level?: number; battery_temp_c?: number; charging?: boolean; wifi_enabled?: boolean; wifi_connected?: boolean; signal_level?: number; screen_on?: boolean; free_storage_bytes?: number; error?: string; alerts: string[] }
+interface Device { id: string; name: string; platform: string; physical: boolean; driver: string; state: string; hint?: string; capabilities: string[]; health?: Health; last_seen_at?: string }
 interface Session { id: string; device_id: string; device: Device; status: string; mode: string; expires_at: number; error?: string }
+type Call = (tool: string, args?: Record<string, unknown>, signal?: AbortSignal) => Promise<any>;
 interface Result { index: number; action: string; label?: string; status: string; error?: string; artifact_id?: string }
 interface Run { id: string; name: string; device_id: string; build_ref?: string; status: string; failure_kind?: string; error?: string; created_at: number; results: Result[]; recording_id?: string }
 interface Marker { name: string; at_ms: number }
@@ -43,6 +45,7 @@ export default function MobilePanel({ projectId }: Props) {
   const [mode, setMode] = useState("screen");
   const [image, setImage] = useState("");
   const [live, setLive] = useState(false);
+  const [view, setView] = useState<"video" | "screenshots">("video");
   const [source, setSource] = useState("");
   const [url, setURL] = useState("");
   const [text, setText] = useState("");
@@ -120,6 +123,8 @@ export default function MobilePanel({ projectId }: Props) {
   const working = recordings.some(r => r.status === "recording" || r.status === "processing");
   const video = recordings.find(r => r.id === selectedRecording);
   const caps = device?.capabilities || session?.device.capabilities || [];
+  const videoCapable = !!session && session.device.platform === "android" && session.device.driver === "adb" && typeof VideoDecoder !== "undefined";
+  const showVideo = videoCapable && view === "video";
   const canSetPower = active && session?.device.capabilities.includes("keep_awake");
   const powerAlways = power?.scope === "always";
   const powerEnabled = power?.keep_awake ?? power?.keep_awake_while_charging ?? false;
@@ -161,7 +166,7 @@ export default function MobilePanel({ projectId }: Props) {
   }, [call, sessionID]);
 
   useEffect(() => {
-    if (!live || !active || busy || tab !== "devices") return;
+    if (!live || !active || busy || tab !== "devices" || showVideo) return;
     const abort = new AbortController(); let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try { await observe(false, abort.signal); }
@@ -170,7 +175,7 @@ export default function MobilePanel({ projectId }: Props) {
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [live, active, busy, tab, observe]);
+  }, [live, active, busy, tab, observe, showVideo]);
 
   async function perform(fn: () => Promise<void>) {
     if (busy) return;
@@ -180,7 +185,7 @@ export default function MobilePanel({ projectId }: Props) {
   }
   async function act(action: string, args: Record<string, unknown> = {}) {
     await call("mobile_action", { ...args, session_id: sessionID, action });
-    await observe();
+    if (!showVideo) await observe();
   }
   async function open() {
     if (device?.driver === "xctest" && device.physical) {
@@ -208,7 +213,7 @@ export default function MobilePanel({ projectId }: Props) {
   function selectDevice(id: string) {
     setPendingConnection(false);
     setSelected(id);
-    const existing = sessions.find(s => s.device_id === id && ["active", "cleanup_failed"].includes(s.status));
+    const existing = sessions.find(s => s.device_id === id && ["active", "paused", "cleanup_failed"].includes(s.status));
     setSessionID(existing?.id || ""); setImage(""); setSource(""); setLive(existing?.status === "active");
     if (devices.find(d => d.id === id)?.driver !== "appium") setMode("screen");
   }
@@ -277,12 +282,13 @@ export default function MobilePanel({ projectId }: Props) {
               <Status value={d.state} />
             </div>
             <div className="text-xs text-text-muted mt-1">{d.platform === "ios" ? "iOS" : "Android"} · {d.physical ? "Physical" : "Virtual"} · {d.driver === "adb" ? "ADB" : d.driver === "xctest" ? "Native iOS" : "Appium"}</div>
+            {d.health && <HealthLine health={d.health} />}
             {d.hint && <p className="text-xs text-warn mt-1">{d.hint}</p>}
           </button>)}
 
-          {sessions.some(s => s.status === "active" || s.status === "cleanup_failed") && <>
+          {sessions.some(s => ["active", "paused", "cleanup_failed"].includes(s.status)) && <>
             <div className={`${sectionTitleClass} p-3 border-b border-border`}>Sessions</div>
-            {sessions.filter(s => s.status === "active" || s.status === "cleanup_failed").map(s => <button
+            {sessions.filter(s => ["active", "paused", "cleanup_failed"].includes(s.status)).map(s => <button
               type="button"
               key={s.id}
               aria-pressed={sessionID === s.id}
@@ -290,7 +296,7 @@ export default function MobilePanel({ projectId }: Props) {
               onClick={() => { setSessionID(s.id); setSelected(s.device_id); setImage(""); setSource(""); setLive(s.status === "active"); }}
             >
               <div className="text-sm text-text font-medium truncate">{s.device.name}</div>
-              <div className="text-xs text-text-muted mt-1">{s.mode} · {s.status === "cleanup_failed" ? "Needs cleanup" : `Expires ${new Date(s.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}</div>
+              <div className="text-xs text-text-muted mt-1">{s.mode} · {s.status === "cleanup_failed" ? "Needs cleanup" : s.status === "paused" ? "Phone disconnected" : `Expires ${new Date(s.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}</div>
             </button>)}
           </>}
         </div>
@@ -305,26 +311,33 @@ export default function MobilePanel({ projectId }: Props) {
               <p className="text-xs text-text-dim mt-1">{active ? `${session?.mode === "structured" ? "Structured" : "Screen"} session · Click to tap, drag to swipe` : "Open an exclusive session to control this device."}</p>
             </div>
             <Status value={active ? "active" : session?.status || device?.state || "offline"} />
+            {(session?.device.health || device?.health) && <div className="w-full"><HealthLine health={(device?.health || session?.device.health)!} detailed /></div>}
             {active && <>
               <button type="button" className={buttonClass} disabled={busy} onClick={() => void perform(async () => { await call("mobile_session", { action: "renew", session_id: sessionID }); })}>Extend session</button>
-              <button type="button" className={dangerButtonClass} disabled={busy} onClick={() => void perform(async () => { await call("mobile_session", { action: "close", session_id: sessionID }); setSessionID(""); setImage(""); setLive(false); })}>Close session</button>
+              <button type="button" className={buttonClass} disabled={busy} onClick={() => void perform(async () => { await call("mobile_session", { action: "close", session_id: sessionID }); setSessionID(""); setImage(""); setLive(false); })}>Close session</button>
             </>}
+            {(active || session?.status === "paused") && <button type="button" className={dangerButtonClass} title="End the session now, cancelling the current action" onClick={() => void (async () => {
+              // Stop never waits for busy: it is how a running action is interrupted.
+              setError("");
+              try { await call("mobile_session", { action: "stop", session_id: sessionID, reason: "Stopped from the Mobile panel" }); setSessionID(""); setImage(""); setLive(false); setNotice("Session stopped."); await refresh(); }
+              catch (e) { setError((e as Error).message); }
+            })()}>Stop now</button>}
           </header>
 
           {!active ? <div className="flex-1 overflow-auto p-6">
             <div className="max-w-lg space-y-4">
               <div>
-                <h2 className="text-sm font-medium text-text">{session?.status === "cleanup_failed" ? "Device needs cleanup" : "Start a session"}</h2>
-                <p className="text-sm text-text-muted mt-2">{session?.error || "Reserve this device to navigate websites, interact with apps, and inspect its screen."}</p>
+                <h2 className="text-sm font-medium text-text">{session?.status === "cleanup_failed" ? "Device needs cleanup" : session?.status === "paused" ? "Phone disconnected" : "Start a session"}</h2>
+                <p className="text-sm text-text-muted mt-2">{session?.status === "paused" ? "The session is paused and keeps this phone. It resumes when the phone reconnects, or ends after the offline grace period." : session?.error || "Reserve this device to navigate websites, interact with apps, and inspect its screen."}</p>
               </div>
-              <label className={labelClass}>Interaction mode
+              {session?.status !== "paused" && <><label className={labelClass}>Interaction mode
                 <select className={inputClass} value={mode} onChange={e => setMode(e.target.value)}>
                   <option value="screen">Screen — taps and gestures</option>
                   <option value="structured" disabled={device?.driver !== "appium"}>Structured — browser elements</option>
                 </select>
               </label>
               <button type="button" className={primaryButtonClass} disabled={busy || !device || !["ready", "configured"].includes(device.state)} onClick={() => void perform(open)}>{busy ? "Opening…" : "Open session"}</button>
-              <p className="text-xs text-text-dim">Sessions are exclusive. Closing a session preserves app data.</p>
+              <p className="text-xs text-text-dim">Sessions are exclusive. Closing a session preserves app data.</p></>}
             </div>
           </div> : <>
             <form className="shrink-0 px-4 py-3 border-b border-border flex items-center gap-2" onSubmit={e => { e.preventDefault(); void perform(() => act("navigate", { url })); }}>
@@ -336,11 +349,16 @@ export default function MobilePanel({ projectId }: Props) {
                 <div className="flex items-center gap-2 text-xs mb-4">
                   <h2 className={sectionTitleClass}>Screen</h2>
                   <StatusDot variant={live ? "live" : "muted"}>{live ? "Live" : "Paused"}</StatusDot>
-                  <span className="text-text-dim">Screenshot polling</span>
+                  {videoCapable && <select className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs text-text" aria-label="Screen view" value={view} onChange={e => setView(e.target.value as "video" | "screenshots")}>
+                    <option value="video">Live video</option>
+                    <option value="screenshots">Screenshots</option>
+                  </select>}
+                  {!showVideo && <span className="text-text-dim">Screenshot polling</span>}
                   <button type="button" className={`${buttonClass} ml-auto`} onClick={() => setLive(!live)}>{live ? "Pause" : "Resume"}</button>
                 </div>
                 <div className="flex-1 flex items-center justify-center">
-                  {image ? <img
+                  {showVideo ? (live ? <LiveVideo key={sessionID} sessionID={sessionID} call={call} label={`Screen of ${session?.device.name}`} onUnavailable={message => { setView("screenshots"); setNotice(`Live video unavailable: ${message} Showing screenshots.`); }} /> : <p className="py-12 text-sm text-text-muted">Video paused.</p>)
+                  : image ? <img
                     src={image}
                     alt={`Screen of ${session?.device.name}`}
                     className="block border border-border rounded select-none"
@@ -700,7 +718,156 @@ const sectionTitleClass = "text-xs uppercase tracking-wide text-text-dim";
 function Status({ value }: { value: string }) {
   const tone = ["ready", "active", "passed"].includes(value) ? "bg-success/10 text-success"
     : ["configured", "running", "queued", "recording", "processing"].includes(value) ? "bg-info/10 text-info"
-    : ["cleanup_failed", "unauthorized", "setup_required"].includes(value) ? "bg-warn/10 text-warn"
-    : ["failed", "timed_out", "interrupted"].includes(value) ? "bg-error/10 text-error" : "bg-bg-hover text-text-dim";
+    : ["cleanup_failed", "unauthorized", "setup_required", "paused"].includes(value) ? "bg-warn/10 text-warn"
+    : ["failed", "timed_out", "interrupted", "device_lost", "stopped"].includes(value) ? "bg-error/10 text-error" : "bg-bg-hover text-text-dim";
   return <span className={`inline-flex px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap ${tone}`}>{value.replaceAll("_", " ")}</span>;
+}
+
+const alertText: Record<string, string> = { hot: "Hot", low_battery: "Low battery", wifi_down: "Wi-Fi down", low_storage: "Low storage", health_check_failed: "Health check failed" };
+
+function HealthLine({ health, detailed = false }: { health: Health; detailed?: boolean }) {
+  const parts: string[] = [];
+  if (health.battery_level !== undefined) parts.push(`Battery ${health.battery_level}%${health.charging ? " charging" : ""}`);
+  if (health.battery_temp_c !== undefined) parts.push(`${health.battery_temp_c.toFixed(1)} °C`);
+  if (detailed && health.wifi_enabled !== undefined) parts.push(health.wifi_connected ? "Wi-Fi connected" : health.wifi_enabled ? "Wi-Fi not connected" : "Wi-Fi off");
+  if (detailed && health.signal_level !== undefined) parts.push(`Signal ${health.signal_level}/4`);
+  if (detailed && health.free_storage_bytes !== undefined) parts.push(`${(health.free_storage_bytes / (1 << 30)).toFixed(1)} GB free`);
+  return <p className="text-xs text-text-dim mt-1" aria-label="Phone health">
+    {parts.join(" · ")}
+    {health.alerts.map(a => <span key={a} className="ml-2 text-warn">{alertText[a] || a.replaceAll("_", " ")}</span>)}
+  </p>;
+}
+
+// LiveVideo plays a session's H.264 stream with WebCodecs and sends touches
+// back on the same socket. Frames carry scrcpy's 12-byte header: bit 63 marks
+// session metadata, bit 62 codec config (SPS/PPS), bit 61 a key frame.
+function LiveVideo({ sessionID, call, label, onUnavailable }: { sessionID: string; call: Call; label: string; onUnavailable: (message: string) => void }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const socket = useRef<WebSocket | null>(null);
+  const down = useRef(false);
+  const [state, setState] = useState<"connecting" | "live" | "reconnecting">("connecting");
+  const [inputError, setInputError] = useState("");
+  const unavailable = useRef(onUnavailable);
+  unavailable.current = onUnavailable;
+
+  useEffect(() => {
+    let closed = false, token = "", attempt = 0, needKey = true, codec = "";
+    let decoder: VideoDecoder | null = null, config: Uint8Array | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const send = (m: object) => { if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(m)); };
+    const reset = () => { if (decoder && decoder.state !== "closed") decoder.close(); decoder = null; codec = ""; needKey = true; };
+    const draw = (frame: VideoFrame) => {
+      const c = canvas.current;
+      if (c) {
+        if (c.width !== frame.displayWidth || c.height !== frame.displayHeight) { c.width = frame.displayWidth; c.height = frame.displayHeight; }
+        c.getContext("2d")?.drawImage(frame, 0, 0);
+      }
+      frame.close();
+      setState("live");
+    };
+    const packet = (bytes: Uint8Array) => {
+      if (bytes.length < 12) return;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const hi = view.getUint32(0);
+      if (hi & 0x80000000) { reset(); return; } // new encoder session (rotation, restart)
+      const payload = bytes.subarray(12);
+      if (hi & 0x40000000) {
+        config = payload.slice();
+        const next = avcCodec(config);
+        if (next && next !== codec) {
+          reset(); codec = next;
+          decoder = new VideoDecoder({ output: draw, error: () => { reset(); send({ type: "keyframe" }); } });
+          decoder.configure({ codec, optimizeForLatency: true });
+        }
+        return;
+      }
+      const key = (hi & 0x20000000) !== 0;
+      if (!decoder || decoder.state !== "configured") return;
+      if (decoder.decodeQueueSize > 8) { needKey = true; send({ type: "keyframe" }); }
+      if (needKey && !key) return;
+      const data = key && config ? concat(config, payload) : payload;
+      const pts = (hi & 0x1fffffff) * 4294967296 + view.getUint32(4);
+      decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data }));
+      needKey = false;
+    };
+    const ticket = async () => {
+      try { return await call("mobile_stream", { session_id: sessionID, mode: "video", ...(token ? { token } : {}) }); }
+      catch (e) {
+        if (token && (e as { code?: string }).code === "not_found") { token = ""; return call("mobile_stream", { session_id: sessionID, mode: "video" }); }
+        throw e;
+      }
+    };
+    const connect = async () => {
+      let t: any;
+      try { t = await ticket(); }
+      catch (e) {
+        if (closed) return;
+        const code = (e as { code?: string }).code;
+        if (code === "unsupported" || code === "setup_required" || code === "invalid_argument") { unavailable.current((e as Error).message); return; }
+        setState("reconnecting"); retry = setTimeout(connect, Math.min(10000, 500 * 2 ** attempt++)); return;
+      }
+      if (closed) return;
+      token = t.token;
+      const ws = new WebSocket(new URL(t.url, window.location.href).href.replace(/^http/, "ws"));
+      ws.binaryType = "arraybuffer";
+      socket.current = ws;
+      ws.onopen = () => { attempt = 0; };
+      ws.onmessage = ev => {
+        if (typeof ev.data === "string") {
+          try { const m = JSON.parse(ev.data); if (m.type === "error") setInputError(m.error); } catch { /* ignore */ }
+          return;
+        }
+        packet(new Uint8Array(ev.data as ArrayBuffer));
+      };
+      ws.onclose = () => {
+        if (socket.current === ws) socket.current = null;
+        reset();
+        if (closed) return;
+        setState("reconnecting");
+        retry = setTimeout(connect, Math.min(10000, 500 * 2 ** attempt++));
+      };
+    };
+    void connect();
+    // Tokens last five minutes; renew well before, so the viewer is never dropped.
+    const renew = setInterval(() => { if (token) void call("mobile_stream", { session_id: sessionID, mode: "video", token }).catch(() => {}); }, 120000);
+    return () => { closed = true; clearTimeout(retry); clearInterval(renew); socket.current?.close(); socket.current = null; reset(); };
+  }, [sessionID, call]);
+
+  const touch = (action: "down" | "move" | "up", e: PointerEvent<HTMLCanvasElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: "touch", action, x, y, pointer: 0 }));
+  };
+  return <div className="flex flex-col items-center gap-2">
+    <canvas
+      ref={canvas}
+      role="img"
+      aria-label={label}
+      className="block border border-border rounded select-none bg-bg"
+      style={{ maxHeight: "min(55vh, 640px)", maxWidth: "100%", width: "auto", height: "auto", touchAction: "none", cursor: "crosshair", minWidth: 120, minHeight: 200 }}
+      onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId); down.current = true; setInputError(""); touch("down", e); }}
+      onPointerMove={e => { if (down.current) touch("move", e); }}
+      onPointerUp={e => { if (!down.current) return; down.current = false; touch("up", e); }}
+      onPointerCancel={e => { if (!down.current) return; down.current = false; touch("up", e); }}
+    />
+    <p className="text-xs text-text-dim" role="status">{state === "live" ? "Live video · touch and drag on the screen" : state === "reconnecting" ? "Reconnecting…" : "Starting live video…"}</p>
+    {inputError && <p className="text-xs text-error" role="alert">{inputError}</p>}
+  </div>;
+}
+
+function concat(a: Uint8Array, b: Uint8Array) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a); out.set(b, a.length);
+  return out;
+}
+
+// avcCodec builds the WebCodecs codec string ("avc1.PPCCLL") from the SPS.
+export function avcCodec(config: Uint8Array): string {
+  for (let i = 0; i + 4 < config.length; i++) {
+    if (config[i] === 0 && config[i + 1] === 0 && config[i + 2] === 1 && (config[i + 3] & 0x1f) === 7) {
+      const hex = (n: number) => n.toString(16).padStart(2, "0");
+      return `avc1.${hex(config[i + 4])}${hex(config[i + 5] ?? 0)}${hex(config[i + 6] ?? 0)}`;
+    }
+  }
+  return "";
 }

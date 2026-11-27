@@ -37,6 +37,11 @@ type engine struct {
 	recWG         sync.WaitGroup
 	exporting     int
 	lastPrune     time.Time
+
+	ops     *opRegistry
+	events  *eventJournal
+	health  *healthMonitor
+	streams *streamHub
 }
 
 func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
@@ -68,13 +73,16 @@ func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
 		return nil, errors.New("ios_driver must be native or appium")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &engine{db: db, drivers: d, backend: d, recordBackend: d, dataDir: dataDir, ctx: ctx, cancel: cancel, gates: map[string]*deviceGate{}, runs: map[string]context.CancelFunc{}, recorders: map[string]*activeRecording{}}
+	e := &engine{db: db, drivers: d, backend: d, recordBackend: d, dataDir: dataDir, ctx: ctx, cancel: cancel, gates: map[string]*deviceGate{}, runs: map[string]context.CancelFunc{}, recorders: map[string]*activeRecording{}, ops: newOpRegistry(), events: newEventJournal()}
+	e.health = newHealthMonitor(e)
+	e.streams = newStreamHub(e)
 	// Driver sessions may outlive the sidecar. Recover them under the same
 	// host-wide hardware lock before permitting another session on that phone.
 	if err := e.recover(); err != nil {
 		cancel()
 		return nil, err
 	}
+	e.health.start()
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
@@ -192,7 +200,13 @@ func (e *engine) reap() {
 	}
 }
 func (e *engine) finishLocked(ctx context.Context, s Session, g *deviceGate, status string) error {
-	if s.Status != "active" && s.Status != "opening" && s.Status != "cleanup_failed" {
+	return e.finishWait(ctx, s, g, status, 3*time.Minute, "", "")
+}
+
+// finishWait ends a lease. recordingWait bounds how long an active capture
+// may take to finalise; an emergency stop passes a short wait.
+func (e *engine) finishWait(ctx context.Context, s Session, g *deviceGate, status string, recordingWait time.Duration, stopReason, stoppedBy string) error {
+	if s.Status != "active" && s.Status != "opening" && s.Status != "paused" && s.Status != "cleanup_failed" {
 		return nil
 	}
 	if g.file == nil {
@@ -211,7 +225,9 @@ func (e *engine) finishLocked(ctx context.Context, s Session, g *deviceGate, sta
 	}
 	// Captures are finished first: some need the driver session to collect
 	// the video, and none may outlive the lease.
-	e.stopSessionRecordings(s.ID, 3*time.Minute)
+	e.ops.cancelAll(s.ID)
+	e.streams.end(s.ID, status)
+	e.stopSessionRecordings(s.ID, recordingWait)
 	if err := e.backend.Close(ctx, s); err != nil {
 		_, dbErr := e.db.Exec(`UPDATE mobile_sessions SET status='cleanup_failed',error=? WHERE id=?`, "Device cleanup failed; retrying before reuse", s.ID)
 		if dbErr != nil {
@@ -222,6 +238,7 @@ func (e *engine) finishLocked(ctx context.Context, s Session, g *deviceGate, sta
 	if _, err := e.db.Exec(`UPDATE mobile_sessions SET status=?,error='' WHERE id=?`, status, s.ID); err != nil {
 		return err
 	}
+	e.recordEnd(s, status, stopReason, stoppedBy)
 	unlockDevice(g.file)
 	g.file = nil
 	g.sessionID = ""
@@ -232,24 +249,30 @@ const sessionColumns = "id,project_id,device_id,device_json,mode,status,provider
 
 type scanner interface{ Scan(...any) error }
 
+// sessionSelect joins the durable end-of-session record kept beside each row.
+const sessionSelect = `SELECT s.id,s.project_id,s.device_id,s.device_json,s.mode,s.status,s.provider_id,s.created_at,s.expires_at,s.error,COALESCE(m.caller_ref,''),m.ended_at,COALESCE(m.end_reason,''),COALESCE(m.stop_reason,''),COALESCE(m.stopped_by,''),m.paused_at FROM mobile_sessions s LEFT JOIN mobile_session_meta m ON m.session_id=s.id`
+
+// leaseStatuses own their phone: no other session may open on it.
+const leaseStatuses = `('opening','active','paused','cleanup_failed')`
+
 func scanSession(row scanner) (Session, error) {
 	var s Session
 	var device string
-	err := row.Scan(&s.ID, &s.ProjectID, &s.DeviceID, &device, &s.Mode, &s.Status, &s.ProviderID, &s.CreatedAt, &s.ExpiresAt, &s.Error)
+	err := row.Scan(&s.ID, &s.ProjectID, &s.DeviceID, &device, &s.Mode, &s.Status, &s.ProviderID, &s.CreatedAt, &s.ExpiresAt, &s.Error, &s.CallerRef, &s.EndedAt, &s.EndReason, &s.StopReason, &s.StoppedBy, &s.PausedAt)
 	if err == nil {
 		err = json.Unmarshal([]byte(device), &s.Device)
 	}
 	return s, err
 }
 func (e *engine) session(pid, id string) (Session, error) {
-	s, err := scanSession(e.db.QueryRow(`SELECT `+sessionColumns+` FROM mobile_sessions WHERE project_id=? AND id=?`, pid, id))
+	s, err := scanSession(e.db.QueryRow(sessionSelect+` WHERE s.project_id=? AND s.id=?`, pid, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, problem("not_found", "session not found")
 	}
 	return s, err
 }
 func (e *engine) allActive() ([]Session, error) {
-	return e.querySessions(`SELECT ` + sessionColumns + ` FROM mobile_sessions WHERE status IN ('opening','active','cleanup_failed')`)
+	return e.querySessions(sessionSelect + ` WHERE s.status IN ` + leaseStatuses)
 }
 func (e *engine) querySessions(query string, args ...any) ([]Session, error) {
 	rows, err := e.db.Query(query, args...)
@@ -287,6 +310,10 @@ func (e *engine) open(ctx context.Context, pid string, args map[string]any) (Ses
 	if mode != "screen" && mode != "structured" {
 		return Session{}, problem("invalid_argument", "mode must be screen or structured")
 	}
+	callerRef := str(args, "caller_ref")
+	if len(callerRef) > 200 {
+		return Session{}, problem("invalid_argument", "caller_ref must be at most 200 characters")
+	}
 	devices, _, err := e.drivers.devices(ctx)
 	if err != nil {
 		return Session{}, err
@@ -312,7 +339,7 @@ func (e *engine) open(ctx context.Context, pid string, args map[string]any) (Ses
 		selected = &copy
 		// With a selector, try each matching idle device instead of failing on
 		// the first busy phone. A named device always fails explicitly.
-		s, err := e.openDevice(ctx, pid, *selected, mode, t)
+		s, err := e.openDevice(ctx, pid, *selected, mode, t, callerRef)
 		if err == nil {
 			return s, nil
 		}
@@ -325,7 +352,7 @@ func (e *engine) open(ctx context.Context, pid string, args map[string]any) (Ses
 	}
 	return Session{}, problem("device_unavailable", "no matching device; inspect mobile_devices for setup diagnostics")
 }
-func (e *engine) openDevice(ctx context.Context, pid string, d Device, mode string, t int) (Session, error) {
+func (e *engine) openDevice(ctx context.Context, pid string, d Device, mode string, t int, callerRef string) (Session, error) {
 	g := e.gate(d.ID)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -346,7 +373,7 @@ func (e *engine) openDevice(ctx context.Context, pid string, d Device, mode stri
 	if err != nil {
 		return Session{}, err
 	}
-	s := Session{ID: id("ses_"), ProjectID: pid, DeviceID: d.ID, Device: d, Mode: mode, Status: "opening", CreatedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + int64(t)}
+	s := Session{ID: id("ses_"), ProjectID: pid, DeviceID: d.ID, Device: d, Mode: mode, Status: "opening", CreatedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + int64(t), CallerRef: callerRef}
 	_, err = e.db.Exec(`INSERT INTO mobile_sessions (`+sessionColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)`, s.ID, pid, d.ID, jsonText(d), mode, s.Status, "", s.CreatedAt, s.ExpiresAt, "")
 	if err != nil {
 		unlockDevice(f)
@@ -354,6 +381,13 @@ func (e *engine) openDevice(ctx context.Context, pid string, d Device, mode stri
 	}
 	g.file = f
 	g.sessionID = s.ID
+	if _, err = e.db.Exec(`INSERT OR REPLACE INTO mobile_session_meta(session_id,caller_ref) VALUES (?,?)`, s.ID, callerRef); err != nil {
+		_, _ = e.db.Exec(`UPDATE mobile_sessions SET status='failed',error=? WHERE id=?`, err.Error(), s.ID)
+		unlockDevice(g.file)
+		g.file = nil
+		g.sessionID = ""
+		return Session{}, err
+	}
 	provider, openErr := e.backend.Open(ctx, d, mode)
 	if openErr != nil {
 		// A timed-out Appium session creation has an unknown outcome: preserve
@@ -379,15 +413,19 @@ func (e *engine) openDevice(ctx context.Context, pid string, d Device, mode stri
 		_ = e.finishLocked(context.Background(), s, g, "failed")
 		return Session{}, err
 	}
+	e.events.add(pid, "mobile.session.started", sessionEventData(s))
 	return s, nil
 }
 func (e *engine) sessionForDevice(device string) (Session, error) {
-	return scanSession(e.db.QueryRow(`SELECT `+sessionColumns+` FROM mobile_sessions WHERE device_id=? AND status IN ('opening','active','cleanup_failed')`, device))
+	return scanSession(e.db.QueryRow(sessionSelect+` WHERE s.device_id=? AND s.status IN `+leaseStatuses, device))
 }
 func (e *engine) withSession(ctx context.Context, pid, sid string, fn func(context.Context, Session) (any, error)) (any, error) {
 	s, err := e.session(pid, sid)
 	if err != nil {
 		return nil, err
+	}
+	if e.ops.isStopping(sid) {
+		return nil, problem("session_inactive", "session is stopping")
 	}
 	g := e.gate(s.DeviceID)
 	g.mu.Lock()
@@ -395,6 +433,13 @@ func (e *engine) withSession(ctx context.Context, pid, sid string, fn func(conte
 	s, err = e.session(pid, sid)
 	if err != nil {
 		return nil, err
+	}
+	// Re-check under the lock: a stop may have been requested while waiting.
+	if e.ops.isStopping(sid) {
+		return nil, problem("session_inactive", "session is stopping")
+	}
+	if s.Status == "paused" {
+		return nil, problem("device_unavailable", "the phone is offline; the session is paused until it reconnects")
 	}
 	if s.Status != "active" {
 		return nil, problem("session_inactive", "session is "+s.Status)
@@ -408,6 +453,7 @@ func (e *engine) withSession(ctx context.Context, pid, sid string, fn func(conte
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	defer e.ops.track(s.ID, cancel)()
 	value, err := fn(ctx, s)
 	if err != nil && s.Device.Driver == "appium" && (ctx.Err() != nil || errorCode(err) == "infrastructure_error") {
 		// A lost response does not establish that the remote command stopped.
@@ -432,7 +478,21 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 	e.opWG.Add(1)
 	e.mu.Unlock()
 	defer e.opWG.Done()
+	started := time.Now()
+	v, err := e.executeTool(ctx, pid, tool, args)
+	e.recordAction(pid, tool, args, started, err)
+	return v, err
+}
+
+func (e *engine) executeTool(ctx context.Context, pid, tool string, args map[string]any) (any, error) {
 	switch tool {
+	case "mobile_events_fetch":
+		since, _ := number(args["since"])
+		limit := integer(args, "limit", 500)
+		if limit < 1 || limit > 1000 {
+			limit = 500
+		}
+		return e.events.fetch(pid, str(args, "boot"), int64(since), limit), nil
 	case "mobile_power":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
 			if s.Device.Driver == driverXCTest && e.activeForSession(s.ID) != nil {
@@ -460,7 +520,26 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 					d.State = "busy"
 				}
 			}
+			e.health.decorate(&d)
 			out = append(out, d)
+		}
+		// A phone that dropped off USB is gone from adb's list; its paused
+		// session still owns it, so keep showing it as offline.
+		if paused, err := e.querySessions(sessionSelect+` WHERE s.status='paused'`); err == nil {
+			listed := map[string]bool{}
+			for _, d := range out {
+				listed[d.ID] = true
+			}
+			for _, s := range paused {
+				if listed[s.DeviceID] || (str(args, "platform") != "" && s.Device.Platform != str(args, "platform")) {
+					continue
+				}
+				d := s.Device
+				d.State, d.Hint = "offline", "Reconnect the phone; its session is paused."
+				e.health.decorate(&d)
+				out = append(out, d)
+				listed[d.ID] = true
+			}
 		}
 		return map[string]any{"devices": out, "diagnostics": hints}, nil
 	case "mobile_session":
@@ -469,7 +548,7 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 			s, err := e.open(ctx, pid, args)
 			return map[string]any{"session": s}, err
 		case "list":
-			sessions, err := e.querySessions(`SELECT `+sessionColumns+` FROM mobile_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 100`, pid)
+			sessions, err := e.querySessions(sessionSelect+` WHERE s.project_id=? ORDER BY s.created_at DESC LIMIT 100`, pid)
 			return map[string]any{"sessions": sessions}, err
 		case "get":
 			s, err := e.session(pid, str(args, "session_id"))
@@ -501,6 +580,8 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 			}
 			s, err = e.session(pid, s.ID)
 			return map[string]any{"session": s}, err
+		case "stop":
+			return e.stop(ctx, pid, args)
 		case "recover":
 			if !boolean(args, "confirm") {
 				return nil, problem("invalid_argument", "recover requires confirm=true after manually stopping the orphaned Appium session")
@@ -539,7 +620,7 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 			s, err = e.session(pid, s.ID)
 			return map[string]any{"session": s}, err
 		default:
-			return nil, problem("invalid_argument", "session action must be open, list, get, renew, close or recover")
+			return nil, problem("invalid_argument", "session action must be open, list, get, renew, close, stop or recover")
 		}
 	case "mobile_observe":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
@@ -572,15 +653,28 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 					return nil, problem("invalid_state", "stop recording before secure input")
 				}
 			}
+			if str(args, "action") == "wait_for" {
+				return e.waitFor(ctx, s, args)
+			}
 			return e.backend.Action(ctx, s, str(args, "action"), args)
 		})
 	case "mobile_app":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
 			return e.backend.App(ctx, s, str(args, "action"), args)
 		})
+	case "mobile_device":
+		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
+			return e.deviceTool(ctx, s, args)
+		})
 	case "mobile_stream":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
-			return map[string]any{"session_id": s.ID, "mode": "poll", "interval_ms": 1500, "screenshot_tool": "mobile_observe"}, nil
+			switch str(args, "mode") {
+			case "", "poll":
+				return map[string]any{"session_id": s.ID, "mode": "poll", "interval_ms": 1500, "screenshot_tool": "mobile_observe"}, nil
+			case "video":
+				return e.streams.issue(s, args)
+			}
+			return nil, problem("invalid_argument", "mode must be poll or video")
 		})
 	case "mobile_record":
 		return e.recordTool(ctx, pid, args)

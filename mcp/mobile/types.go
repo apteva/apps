@@ -24,6 +24,9 @@ type Device struct {
 	State        string   `json:"state"`
 	Capabilities []string `json:"capabilities"`
 	Hint         string   `json:"hint,omitempty"`
+	// Android ADB phones: latest health snapshot and when adb last saw them.
+	Health     *DeviceHealth `json:"health,omitempty"`
+	LastSeenAt string        `json:"last_seen_at,omitempty"`
 }
 
 type Session struct {
@@ -37,6 +40,13 @@ type Session struct {
 	CreatedAt  int64  `json:"created_at"`
 	ExpiresAt  int64  `json:"expires_at"`
 	Error      string `json:"error,omitempty"`
+	// Durable end-of-session record (mobile_session_meta).
+	CallerRef  string `json:"caller_ref,omitempty"`
+	EndedAt    *int64 `json:"ended_at,omitempty"`
+	EndReason  string `json:"end_reason,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	StoppedBy  string `json:"stopped_by,omitempty"`
+	PausedAt   *int64 `json:"paused_at,omitempty"`
 }
 
 type Observation struct {
@@ -125,6 +135,8 @@ func number(v any) (float64, bool) {
 	case float64:
 		return n, !math.IsNaN(n) && !math.IsInf(n, 0)
 	case int:
+		return float64(n), true
+	case int64:
 		return float64(n), true
 	case json.Number:
 		f, e := n.Float64()

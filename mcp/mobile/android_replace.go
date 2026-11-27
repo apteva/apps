@@ -18,8 +18,8 @@ func (d *drivers) adbReplaceText(ctx context.Context, s Session, args map[string
 		return nil, problem("invalid_argument", "replacement requires the expected package, resource ID and current text")
 	}
 	for _, r := range text {
-		if r < 32 || r > 126 || r == '%' {
-			return nil, problem("unsupported", "ADB replacement supports printable ASCII excluding percent; use Appium for other text")
+		if r < 32 && r != '\t' {
+			return nil, problem("invalid_argument", "replacement text cannot contain control characters")
 		}
 	}
 	obs, err := d.Observe(ctx, s, true)
@@ -28,6 +28,14 @@ func (d *drivers) adbReplaceText(ctx context.Context, s Session, args map[string
 	}
 	if err = matchAndroidFocusedFieldDetails(obs.Source, pkg, resource, current, kind, bounds); err != nil {
 		return nil, err
+	}
+	if !asciiInput(text) {
+		// Unicode and % cannot be typed by `input text`; set the field's
+		// value through accessibility instead. Verification is unchanged.
+		if err = d.adbSetText(ctx, s.Device.UDID, text); err != nil {
+			return nil, problem("infrastructure_error", "Android text replacement failed; inspect the field before retrying")
+		}
+		return d.verifyReplacement(ctx, s, pkg, resource, text, kind, bounds)
 	}
 	commands := [][]string{{"input", "keycombination", "113", "29"}, {"input", "keyevent", "67"}}
 	if text != "" {
@@ -42,7 +50,11 @@ func (d *drivers) adbReplaceText(ctx context.Context, s Session, args map[string
 			return nil, problem("infrastructure_error", "Android rejected text replacement; inspect the field before retrying")
 		}
 	}
-	obs, err = d.Observe(ctx, s, true)
+	return d.verifyReplacement(ctx, s, pkg, resource, text, kind, bounds)
+}
+
+func (d *drivers) verifyReplacement(ctx context.Context, s Session, pkg, resource, text, kind, bounds string) (any, error) {
+	obs, err := d.Observe(ctx, s, true)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +62,17 @@ func (d *drivers) adbReplaceText(ctx context.Context, s Session, args map[string
 		return nil, problem("verification_failed", "Android replacement was dispatched but the resulting field value was not confirmed")
 	}
 	return map[string]any{"ok": true, "replaced": true, "verified": true}, nil
+}
+
+// editableClass accepts EditText and the framework's EditText subclasses
+// (AutoCompleteTextView backs most search boxes).
+func editableClass(class string) bool {
+	for _, suffix := range []string{"EditText", "AutoCompleteTextView", "SearchView$SearchAutoComplete"} {
+		if strings.HasSuffix(class, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchAndroidFocusedField(source, pkg, resource, value string) error {
@@ -87,7 +110,7 @@ func matchAndroidFocusedFieldDetails(source, pkg, resource, value, kind, bounds 
 				return problem("invalid_state", "unexpected foreground app")
 			}
 			if a["focused"] == "true" {
-				if a["package"] != pkg || a["resource-id"] != resource || a["text"] != value || (kind != "" && a["class"] != kind) || (bounds != "" && a["bounds"] != bounds) || a["password"] == "true" || a["enabled"] != "true" || a["visible-to-user"] == "false" || !strings.HasSuffix(a["class"], "EditText") {
+				if a["package"] != pkg || a["resource-id"] != resource || a["text"] != value || (kind != "" && a["class"] != kind) || (bounds != "" && a["bounds"] != bounds) || a["password"] == "true" || a["enabled"] != "true" || a["visible-to-user"] == "false" || !editableClass(a["class"]) {
 					return problem("invalid_state", "focused Android field does not match the expected regular text field")
 				}
 				matches++
