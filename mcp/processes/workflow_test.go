@@ -332,10 +332,11 @@ func TestWorkflowCancellationAndLifecycle(t *testing.T) {
 	if e := a.stepLifecycle(event, lifecycle); e == nil {
 		t.Fatal("wrong project lifecycle accepted")
 	}
-	if _, e := a.cancelWorkflow(p.ProjectID, "agent:8:t", p.ID, r.ID, "stop"); e == nil {
-		t.Fatal("non-coordinator cancelled")
+	if _, e := a.cancelWorkflow("other", "agent:8:t", p.ID, r.ID, "stop"); e == nil {
+		t.Fatal("agent from another project cancelled")
 	}
-	if _, e := a.cancelWorkflow(p.ProjectID, "agent:7:t", p.ID, r.ID, "stop"); e != nil {
+	// Not the coordinator (7): any agent in the project may cancel.
+	if _, e := a.cancelWorkflow(p.ProjectID, "agent:8:t", p.ID, r.ID, "stop"); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := a.stepAction(p.ProjectID, "agent:8:t", p.ID, r.ID, s.ID, "step_update", map[string]any{"state": "completed", "output": "late"}); e == nil {

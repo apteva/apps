@@ -2,6 +2,11 @@
 
 Per-release notes, moved out of the README and the agent skill. Release docs: `docs-release-*.md`.
 
+## Any project agent can cancel runs (0.26.0)
+
+`run_cancel` works for any agent in the project and for single-agent runs.
+See `docs-release-0.26.0.md`.
+
 ## Project colours on All projects rows (0.25.3)
 
 Rows show a project colour dot and name. See `docs-release-0.25.3.md`.

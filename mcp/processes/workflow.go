@@ -1242,12 +1242,9 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 	if e != nil {
 		return nil, e
 	}
-	if !r.Workflow {
-		return nil, errors.New("use run_update for a single-agent run")
-	}
-	if actor != "operator" && !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", r.Binding.OwnerAgentID)) {
-		return nil, errors.New("only the coordinator or project operator can cancel a run")
-	}
+	// Any agent in the run's project may cancel it, as any may start one;
+	// getRun already scoped the run to this project. Finer access belongs in
+	// platform grants, not a Processes-specific rule.
 	if strings.TrimSpace(reason) == "" || len(reason) > 16000 {
 		return nil, errors.New("cancellation needs a reason (max 16 KB)")
 	}
@@ -1256,6 +1253,14 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 			return nil, errors.New("terminal run is immutable")
 		}
 		return r, nil
+	}
+	if !r.Workflow {
+		// A single-agent run has no steps to stop; terminal state alone ends
+		// it and queues worker cleanup, exactly as the owner's run_update does.
+		if _, e = a.db.Exec(`UPDATE process_runs SET state='cancelled',error=?,current_step='Cancelled' WHERE id=? AND state NOT IN ('completed','failed','cancelled')`, reason, run); e != nil {
+			return nil, e
+		}
+		return a.getRun(project, process, run)
 	}
 	tx, e := a.db.Begin()
 	if e != nil {

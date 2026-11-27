@@ -238,7 +238,7 @@ cannot bypass a structured workflow: its outcome derives from its steps.
 
 Processes is the sole execution and history system. The Runs panel shows
 executors, dependencies, outputs, and step delivery details. It also
-lets the coordinator/operator call `run_cancel` with a reason.
+lets any agent in the project, or the operator, call `run_cancel` with a reason.
 Cancellation stops future handoffs and queues worker termination in the same
 transaction. An independent cleanup worker stops all recorded run workers through
 Core, including pending wake timers and descendants, retrying with bounded

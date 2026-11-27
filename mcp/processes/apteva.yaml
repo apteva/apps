@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.25.3
+version: 0.26.0
 description: Create and run company procedures. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -93,7 +93,7 @@ provides:
     - { name: step_get, description: "Read the assigned step, frozen policy and one exact dependency manifest; reuse retained context on later reads." }
     - { name: step_update, description: Save step progress or output; receive a compact acknowledgement and follow done and next_action. }
     - { name: run_advance, description: Release one eligible step in a step-by-step run as operator or coordinator. }
-    - { name: run_cancel, description: Cancel a structured run and reliably stop its workers as coordinator or operator. }
+    - { name: run_cancel, description: Cancel any run in the project (structured or single-agent) with a reason and reliably stop its workers. }
     - { name: trigger_sources, description: "Configure, preview and inspect assignment event triggers." }
     - { name: triggers, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_get, description: "Configure, preview and inspect assignment event triggers." }
@@ -144,7 +144,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.25.3
+    ref: processes/v0.26.0
     entry: mcp/processes
   port: 8080
   health_check: /health
