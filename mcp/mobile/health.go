@@ -37,6 +37,7 @@ const (
 type phoneState struct {
 	online       bool
 	adbState     string
+	transport    string // adb transport_id; a new one means the phone re-attached
 	lastSeen     time.Time
 	offlineSince time.Time
 	health       *DeviceHealth
@@ -88,14 +89,23 @@ func (m *healthMonitor) start() {
 	}()
 }
 
-func parseADBDevices(out string) map[string]string {
-	found := map[string]string{}
+type adbListing struct{ state, transport string }
+
+// parseADBDevices reads "adb devices -l": serial, state and transport_id.
+func parseADBDevices(out string) map[string]adbListing {
+	found := map[string]adbListing{}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 || f[0] == "List" || strings.HasPrefix(f[0], "*") {
 			continue
 		}
-		found[f[0]] = f[1]
+		l := adbListing{state: f[1]}
+		for _, kv := range f[2:] {
+			if t, ok := strings.CutPrefix(kv, "transport_id:"); ok {
+				l.transport = t
+			}
+		}
+		found[f[0]] = l
 	}
 	return found
 }
@@ -104,7 +114,7 @@ func parseADBDevices(out string) map[string]string {
 func (m *healthMonitor) scan() {
 	ctx, cancel := context.WithTimeout(m.e.ctx, 5*time.Second)
 	defer cancel()
-	out, err := m.e.drivers.command(ctx, "adb", "devices")
+	out, err := m.e.drivers.command(ctx, "adb", "devices", "-l")
 	if err != nil {
 		return // adb itself unavailable: not evidence that phones left
 	}
@@ -112,16 +122,27 @@ func (m *healthMonitor) scan() {
 	now := time.Now()
 	var wentOffline, cameBack []string
 	m.mu.Lock()
-	for serial, state := range found {
+	for serial, listing := range found {
 		p := m.phones[serial]
 		if p == nil {
 			p = &phoneState{}
 			m.phones[serial] = p
 		}
+		state := listing.state
 		p.adbState = state
 		online := state == "device"
 		if online {
 			p.lastSeen = now
+		}
+		// A new transport id while online means the phone left and came back
+		// between two checks: handle it as a drop so sessions and streams
+		// reconnect instead of keeping dead adb connections.
+		if m.primed && online && p.online && listing.transport != "" && p.transport != "" && listing.transport != p.transport {
+			wentOffline = append(wentOffline, serial)
+			cameBack = append(cameBack, serial)
+		}
+		if listing.transport != "" {
+			p.transport = listing.transport
 		}
 		if m.primed && online && !p.online {
 			cameBack = append(cameBack, serial)

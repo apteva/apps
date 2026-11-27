@@ -455,6 +455,10 @@ func (e *engine) withSession(ctx context.Context, pid, sid string, fn func(conte
 	defer cancel()
 	defer e.ops.track(s.ID, cancel)()
 	value, err := fn(ctx, s)
+	if err != nil && e.ops.isStopping(s.ID) {
+		// The caller asked for this: it is not a phone or host failure.
+		return nil, problem("session_stopped", "the session was stopped while this action ran")
+	}
 	if err != nil && s.Device.Driver == "appium" && (ctx.Err() != nil || errorCode(err) == "infrastructure_error") {
 		// A lost response does not establish that the remote command stopped.
 		// End the driver session before permitting further control.

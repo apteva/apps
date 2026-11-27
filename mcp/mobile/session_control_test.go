@@ -45,8 +45,8 @@ func TestStopCancelsRunningActionWithoutWaitingForLock(t *testing.T) {
 	}
 	select {
 	case err := <-actionDone:
-		if err == nil {
-			t.Fatal("cancelled action reported success")
+		if errorCode(err) != "session_stopped" {
+			t.Fatalf("stopped action reported %v (%s)", err, errorCode(err))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("running action was not cancelled")
