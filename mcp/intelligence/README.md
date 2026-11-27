@@ -154,11 +154,62 @@ Evaluation produces scores, never trades or decisions about individuals.
 
 ## Scenarios
 
-`scenario_run` applies the shocks you state to a chosen time. They propagate
-through typed relationships using explicit rules (factor and direction). Each
-link is weighted by its evidence status. The output is labelled
-`hypothetical`, shows every assumption chain, and lists the open questions
-exposed to the shocks. Links with no rule are reported, not guessed.
+Scenarios are conditional what-ifs, not forecasts. `scenario_run` applies the
+shocks you state and propagates them through typed relationships using
+explicit rules (factor and direction). Results are relative exposure scores,
+never probabilities, and forecasts are shown unchanged.
+
+**What each link rests on.** Every relationship has a `causal_basis` that
+grades what its sources say, not whether the relation is causal:
+
+| causal_basis | Meaning | Carries a shock |
+|---|---|---|
+| `mechanism` | a source says how the effect passes | yes |
+| `asserted` | a source states the relation without how | yes |
+| `assumed` | an operator assumption (status `assumed`) | yes, unless `skip_assumed` |
+| `co_occurrence` | the entities are only mentioned together | only with `include_weak` |
+| ungraded | not graded yet | only with `include_weak` |
+| `unsupported` | the sources do not support it | never |
+
+Extraction now asks for a basis per link. `relationships_grade` grades older
+links with the configured LLM by reading their headlines, and
+`relationship_assert` takes `causal_basis` for operator-graded links.
+Repeated extractions of the same (from, type, to) are merged into one link,
+with every source counted. Each exposure lists its path, and each link on it
+shows its basis, status, number of sources and evidence ids. Exposures that
+rest on assumed, weak or single-source links are flagged.
+
+**Reproducible runs.** A run only sees links recorded by `known_at` and
+valid at `as_of`. For a past `as_of`, `known_at` defaults to `as_of`, so no
+hindsight. The run stores its full spec and a SHA-256 hash of the exact
+graph it used. `scenario_replay` re-runs the spec and reports whether the
+graph and the exposures are the same. Regrading a link the run used shows up
+as a changed graph.
+
+**Assumption and sensitivity report.** `scenario_sensitivity` stores a report
+on the scenario with these parts:
+
+- Every assumption, each marked as a heuristic not estimated from data.
+- One-at-a-time changes. Each factor and weight is halved and raised by half,
+  depth moves ±1, and each switch is flipped. The table shows the largest
+  change in any exposure and how much of the top 5 survives.
+- Seeded Monte Carlo. All factors and weights are scaled by U(0.5, 1.5) at
+  once, giving per-entity 5th, 50th and 95th percentiles, P(exposed) and
+  P(top 5).
+- Single-link fragility. Each link on the path to a top exposure is removed
+  in turn. Exposures that vanish when one single-source link goes are
+  labelled `fragile`, ones that swing under the draws `sensitive`, and the
+  rest `robust to these assumptions`.
+
+**Historical shock test.** `scenario_history_test` replays past events. Each
+event is an entity named in a claim at time t, shocked through the links
+known at t. Market questions linked to entities by t are grouped as direct,
+exposed or other. The test compares their absolute price moves over the
+window after t, with the window before t as a placebo. Intervals are
+event-clustered bootstrap intervals. A verdict needs at least 30 exposed
+observations over 10 events. The result is an association, not causation.
+If exposed questions also moved more before the events, the verdict is
+`confounded`.
 
 ## Scope
 

@@ -362,65 +362,7 @@ function EntityView({ id, api, setError, select, openQuestion }: { id: number; a
   </div>;
 }
 
-// ─── Scenarios ─────────────────────────────────────────────────────
-
-interface Exposure { entity_id: number; entity: string; kind: string; impact: number; depth: number; relies_on_assumed_links: boolean; chain: Record<string, unknown>[] }
-interface ScenarioResult { id: number; name: string; note: string; exposed_entities: Exposure[]; exposed_questions: { question_id: number; question: string; impact: number; via_entity: string; current_forecast?: number }[];
-  unsupported_shocks: { entity_id: number; reason: string }[]; unruled_links: { type: string; links: number }[] }
-
-export function ScenariosTab({ api, post, setError, openQuestion }: { api: Api; post: Post; setError: SetError; openQuestion: (id: number) => void }) {
-  const [entity, setEntity] = useState("");
-  const [description, setDescription] = useState("");
-  const [severity, setSeverity] = useState(1);
-  const [skipAssumed, setSkipAssumed] = useState(false);
-  const [result, setResult] = useState<ScenarioResult | null>(null);
-  const [running, setRunning] = useState(false);
-  const history = useLoad(() => api<{ scenarios: { id: number; name: string; created_at: string; result: ScenarioResult }[] }>("/scenarios", { limit: "10" }), [api], setError);
-  const run = async () => {
-    setRunning(true);
-    try {
-      const r = await post<ScenarioResult>("/scenario-run", { name: `${entity}: ${description}`, shocks: [{ entity, description, severity }], skip_assumed: skipAssumed });
-      setResult(r); history.reload();
-    } catch (e) { setError((e as Error).message); } finally { setRunning(false); }
-  };
-  return <div className="space-y-4">
-    <div className={`${card} p-3 space-y-2`}>
-      <div><div className="font-semibold">Scenario</div><div className="text-xs text-text-muted">Hypothetical. Propagates a stated shock through recorded relationships; results are exposure scores, not forecasts.</div></div>
-      <div className="grid gap-2" style={{ gridTemplateColumns: "minmax(160px,1fr) minmax(200px,2fr) 140px auto" }}>
-        <input className={input} placeholder="Entity name (e.g. Port of Rotterdam)" value={entity} onChange={e => setEntity(e.target.value)} />
-        <input className={input} placeholder="Shock (e.g. closed for 5 days)" value={description} onChange={e => setDescription(e.target.value)} />
-        <label className="text-xs text-text-dim">Severity {severity.toFixed(2)}<input type="range" min="0.1" max="1" step="0.05" value={severity} onChange={e => setSeverity(+e.target.value)} className="block w-full" /></label>
-        <button className={btn} onClick={run} disabled={running || !entity || !description}>{running ? "Running…" : "Run"}</button>
-      </div>
-      <label className="text-xs text-text-muted flex gap-2 items-center"><input type="checkbox" checked={skipAssumed} onChange={e => setSkipAssumed(e.target.checked)} /> Ignore operator-assumed links</label>
-    </div>
-    {result && <ScenarioView r={result} openQuestion={openQuestion} />}
-    <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Recent scenarios</div>
-      {(history.data?.scenarios || []).length === 0 ? <Empty>No scenarios run yet.</Empty> :
-        history.data!.scenarios.map(s => <button key={s.id} onClick={() => setResult({ ...s.result, id: s.id, name: s.name })} className="block w-full text-left px-3 py-1.5 border-b border-border hover:bg-bg-hover text-sm">
-          {s.name} <span className="text-xs text-text-dim">{when(s.created_at)} · {s.result.exposed_entities?.length || 0} exposed</span></button>)}
-    </section>
-  </div>;
-}
-
-function ScenarioView({ r, openQuestion }: { r: ScenarioResult; openQuestion: (id: number) => void }) {
-  return <div className="space-y-3">
-    <div className="text-xs" style={{ color: "var(--color-warn)" }}>{r.note}</div>
-    {r.unsupported_shocks.length > 0 && <div className={`${card} p-3 text-sm text-text-muted`}>{r.unsupported_shocks.map(u => <div key={u.entity_id}>{u.reason}</div>)}</div>}
-    <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Exposed entities</div>
-      {r.exposed_entities.length === 0 ? <Empty>No exposure reached through recorded relationships.</Empty> : r.exposed_entities.map(e => <div key={e.entity_id} className="px-3 py-2 border-b border-border">
-        <div className="flex gap-2 items-center text-sm"><span className="flex-1">{e.entity} <span className="text-xs text-text-dim">{e.kind}</span></span>
-          {e.relies_on_assumed_links && <Badge tone="warn">via assumption</Badge>}
-          <div className="w-24 h-2 rounded bg-bg-input"><div className="h-2 rounded" style={{ width: `${Math.round(e.impact * 100)}%`, background: "var(--accent)" }} /></div>
-          <span className="tabular-nums text-xs w-10 text-right">{e.impact.toFixed(2)}</span></div>
-        <div className="text-xs text-text-dim mt-1">{e.chain.slice(1).map((c, i) => <span key={i}>{i > 0 && " → "}{String(c.from)} <i>{String(c.type)}</i> {String(c.to)} [{String(c.status)}]</span>)}</div>
-      </div>)}
-    </section>
-    {r.exposed_questions.length > 0 && <section className={card}><div className="px-3 py-2 border-b border-border font-semibold text-sm">Open questions touched</div>
-      {r.exposed_questions.map(q => <button key={q.question_id} onClick={() => openQuestion(q.question_id)} className="block w-full text-left px-3 py-1.5 border-b border-border hover:bg-bg-hover text-sm">
-        {q.question} <span className="text-xs text-text-dim">via {q.via_entity} · exposure {q.impact.toFixed(2)} · forecast {pct(q.current_forecast)}</span></button>)}</section>}
-  </div>;
-}
+// Scenarios live in ScenariosTab.tsx.
 
 // ─── Ledger ────────────────────────────────────────────────────────
 

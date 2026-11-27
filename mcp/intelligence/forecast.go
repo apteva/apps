@@ -254,7 +254,8 @@ Rules: never create entities for private individuals. People may appear only as 
 Only state what the headline itself reports. Reply with JSON only:
 {"items":[{"evidence_id":id,"entities":[{"name":"...","kind":"organization|facility|place|region|commodity|product|technology|market|institution|infrastructure|event|indicator|public_role|concept"}],
 "claims":[{"subject":"entity name","predicate":"short verb phrase","object":"entity name or text","value":number|null,"unit":""}],
-"relationships":[{"from":"entity name","type":"supplies|depends_on|located_in|part_of|operates|regulates|affects|produces|uses|competes_with|owns","to":"entity name"}]}]}`
+"relationships":[{"from":"entity name","type":"supplies|depends_on|located_in|part_of|operates|regulates|affects|produces|uses|competes_with|owns","to":"entity name","basis":"mechanism|asserted|co_occurrence"}]}]}
+Relationship basis: mechanism = the headline says how one affects the other (e.g. "port closure halts X's exports to Y"); asserted = it states the relation without how; co_occurrence = the two only appear together and no relation is stated. Prefer co_occurrence when unsure.`
 
 // extractClaims runs the LLM over evidence not yet extracted (cursor =
 // last evidence id). Extracted relationships are recorded as "reported",
@@ -305,7 +306,7 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 					Subject, Predicate, Object, Unit string
 					Value                            *float64
 				}
-				Relationships []struct{ From, Type, To string }
+				Relationships []struct{ From, Type, To, Basis string }
 			} `json:"items"`
 		}
 		if err := decodeLLMJSON(reply, &parsed); err != nil {
@@ -351,8 +352,16 @@ func extractClaims(env *ingestEnv, batches int) (map[string]int, error) {
 					continue
 				}
 				conf := 0.5
+				cb := strings.ToLower(strings.TrimSpace(r.Basis))
+				if cb != cbMechanism && cb != cbAsserted && cb != cbCooccurrence {
+					cb = "" // left for relationships_grade
+				}
+				gradedBy := ""
+				if cb != "" {
+					gradedBy = extractor
+				}
 				if _, err := assertRelationship(env.db, env.pid, Relationship{From: *from, To: *to, Type: r.Type, Status: "reported", Confidence: &conf,
-					EvidenceIDs: []int64{it.EvidenceID}, Note: extractor}); err == nil {
+					EvidenceIDs: []int64{it.EvidenceID}, Note: extractor, CausalBasis: cb, GradedBy: gradedBy}); err == nil {
 					counts["relationships"]++
 				}
 			}

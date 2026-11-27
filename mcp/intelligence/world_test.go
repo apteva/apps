@@ -425,7 +425,7 @@ func TestScenarioPropagatesWithAssumptionChain(t *testing.T) {
 	plant, _, _ := upsertWorldEntity(db, "p", WorldEntity{Name: "Chip plant", Kind: "facility"})
 	maker, _, _ := upsertWorldEntity(db, "p", WorldEntity{Name: "Carmaker", Kind: "organization"})
 	ev, _ := recordEvidence(db, Evidence{Title: "Plant ships via Rotterdam", Source: "s"}, "p")
-	if _, err := assertRelationship(db, "p", Relationship{From: plant.ID, Type: "depends_on", To: port.ID, Status: "reported", EvidenceIDs: []int64{ev["id"].(int64)}}); err != nil {
+	if _, err := assertRelationship(db, "p", Relationship{From: plant.ID, Type: "depends_on", To: port.ID, Status: "reported", EvidenceIDs: []int64{ev["id"].(int64)}, CausalBasis: "mechanism"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := assertRelationship(db, "p", Relationship{From: plant.ID, Type: "supplies", To: maker.ID, Status: "assumed"}); err != nil {
@@ -437,10 +437,13 @@ func TestScenarioPropagatesWithAssumptionChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	exp := res["exposed_entities"].([]exposure)
+	if len(exp) == 2 && (exp[0].Chain[1].CausalBasis != "mechanism" || exp[0].Chain[1].NSources != 1 || exp[1].Chain[2].CausalBasis != "assumed") {
+		t.Fatalf("chain must carry causal basis and sources: %+v", exp)
+	}
 	if len(exp) != 2 || exp[0].Entity != "Chip plant" || exp[1].Entity != "Carmaker" || !exp[1].Assumed || len(exp[1].Chain) != 3 {
 		t.Fatalf("propagation: %+v", exp)
 	}
-	// plant: 1 * 0.8 (depends_on) * 0.8 (reported) = 0.64; maker: 0.64 * 0.7 * 0.5 (assumed) = 0.224
+	// plant: 1 * 0.8 (depends_on) * 0.8 (reported) * 1 (mechanism) = 0.64; maker: 0.64 * 0.7 * 0.5 (assumed) = 0.224
 	if exp[0].Impact != 0.64 || exp[1].Impact != 0.224 {
 		t.Fatalf("impacts: %v %v", exp[0].Impact, exp[1].Impact)
 	}
