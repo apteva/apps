@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: notes
 display_name: Notes
-version: 0.2.0
+version: 0.3.0
 description: |
   Simple searchable notes for Apteva agents and human teams. Capture
   customer ideas, meeting notes, research snippets, decisions, and
-  follow-ups with lightweight kinds, tags, source metadata, and a
-  practical project page.
+  follow-ups in your own folders, with lightweight kinds, tags, source
+  metadata, and an Apple Notes style project page.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/notes
@@ -27,12 +27,16 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: notes_create, description: "Create a note. Args: title, body?, kind?, tags?, source?, metadata?." }
+    - { name: notes_create, description: "Create a note. Args: title, body?, folder_id? or folder? (name), kind?, tags?, source?, metadata?." }
     - { name: notes_get, description: "Fetch one note by id. Args: id." }
-    - { name: notes_update, description: "Patch a note. Args: id, title?, body?, kind?, tags?, source?, metadata?." }
+    - { name: notes_update, description: "Patch a note. Args: id, title?, body?, folder_id? or folder? (name), kind?, tags?, source?, metadata?." }
     - { name: notes_append, description: "Append text to a note body. Args: id, text." }
-    - { name: notes_search, description: "Search/list notes. Args: q?, kind?, tag?, status?, limit?." }
+    - { name: notes_search, description: "Search/list notes. Args: q?, folder_id?, kind?, tag?, status?, limit?." }
     - { name: notes_archive, description: "Archive a note. Args: id." }
+    - { name: notes_folders_list, description: "List note folders with note counts." }
+    - { name: notes_folder_create, description: "Create a note folder. Args: name." }
+    - { name: notes_folder_rename, description: "Rename a note folder. Args: id, name." }
+    - { name: notes_folder_delete, description: "Delete a note folder; its notes are kept. Args: id." }
   ui_panels:
     - slot: project.page
       label: Notes

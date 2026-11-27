@@ -20,7 +20,19 @@ interface Note {
   created_at: string;
   updated_at: string;
   archived_at?: string;
+  folder_id?: number;
 }
+
+interface Folder {
+  id: number;
+  name: string;
+  note_count: number;
+}
+
+// Sidebar selection: "all", "archived", or "f:<folder id>".
+type FolderKey = string;
+const folderKey = (id: number) => `f:${id}`;
+const folderIdOf = (key: FolderKey) => (key.startsWith("f:") ? Number(key.slice(2)) : 0);
 
 // What the editor is showing. `token` identifies one editing session so a
 // slow POST for a new note still lands on the right draft after the user has
@@ -30,6 +42,7 @@ interface Draft {
   id: number;
   title: string;
   body: string;
+  folderId: number;
   kind: string;
   tags: string;
   source: string;
@@ -42,18 +55,6 @@ type SaveState = "idle" | "pending" | "saving" | "saved" | "error";
 
 const API = "/api/apps/notes";
 const KINDS = ["note", "customer_idea", "meeting_note", "research", "decision", "follow_up", "spec_draft"];
-const FOLDER_LABELS: Record<string, string> = {
-  all: "All Notes",
-  note: "Notes",
-  customer_idea: "Customer Ideas",
-  meeting_note: "Meeting Notes",
-  research: "Research",
-  decision: "Decisions",
-  follow_up: "Follow-ups",
-  spec_draft: "Spec Drafts",
-  archived: "Archived",
-};
-const FOLDERS = ["all", ...KINDS, "archived"];
 
 // Panel widths (container, not viewport: the panel can be narrow on desktop too).
 const NARROW = 720;
@@ -78,12 +79,13 @@ const C = {
   error: "var(--error, #ef4444)",
 };
 
-const emptyDraft = (token: number, kind = "note"): Draft => ({
+const emptyDraft = (token: number, folderId = 0): Draft => ({
   token,
   id: 0,
   title: "",
   body: "",
-  kind,
+  folderId,
+  kind: "note",
   tags: "",
   source: "manual",
   archived: false,
@@ -97,7 +99,10 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
   const bodyRef = useRef<HTMLTextAreaElement>(null);
 
   const [width, setWidth] = useState(1200);
-  const [folder, setFolder] = useState("all");
+  const [folder, setFolder] = useState<FolderKey>("all");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeNotes, setActiveNotes] = useState<Note[]>([]);
   const [archivedNotes, setArchivedNotes] = useState<Note[]>([]);
@@ -166,7 +171,18 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     }
   }, [fetchNotes]);
 
-  useEffect(() => { loadActive(); }, [loadActive]);
+  const loadFolders = useCallback(async () => {
+    try {
+      const res = await fetch(url("/folders"), { credentials: "same-origin" });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const data = await res.json();
+      setFolders(data.folders ?? []);
+    } catch (e) {
+      setLoadError((e as Error).message);
+    }
+  }, [url]);
+
+  useEffect(() => { loadActive(); loadFolders(); loadArchived(); }, [loadActive, loadFolders, loadArchived]);
   useEffect(() => { if (folder === "archived") loadArchived(); }, [folder, loadArchived]);
 
   // Server-side search (title, body, tags) once the user types a query.
@@ -178,7 +194,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     }
     const handle = setTimeout(async () => {
       const params: Record<string, string> = { q, status: folder === "archived" ? "archived" : "active" };
-      if (KINDS.includes(folder)) params.kind = folder;
+      if (folderIdOf(folder)) params.folder_id = String(folderIdOf(folder));
       try {
         setSearchResults(await fetchNotes(params));
       } catch (e) {
@@ -192,12 +208,16 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     if (searchResults) return searchResults;
     if (folder === "archived") return archivedNotes;
     if (folder === "all") return activeNotes;
-    return activeNotes.filter((n) => n.kind === folder);
+    const fid = folderIdOf(folder);
+    return activeNotes.filter((n) => (n.folder_id ?? 0) === fid);
   }, [searchResults, folder, archivedNotes, activeNotes]);
 
   const counts = useMemo(() => {
     const out: Record<string, number> = { all: activeNotes.length };
-    for (const n of activeNotes) out[n.kind] = (out[n.kind] ?? 0) + 1;
+    for (const n of activeNotes) {
+      const k = folderKey(n.folder_id ?? 0);
+      out[k] = (out[k] ?? 0) + 1;
+    }
     return out;
   }, [activeNotes]);
 
@@ -216,6 +236,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     const payload = {
       title,
       body: snap.body,
+      folder_id: snap.folderId || 0,
       kind: snap.kind || "note",
       source: snap.source || "manual",
       tags: splitTags(snap.tags),
@@ -291,6 +312,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
       id: note.id,
       title: note.title,
       body: note.body,
+      folderId: note.folder_id ?? 0,
       kind: note.kind || "note",
       tags: Array.isArray(note.tags) ? note.tags.join(", ") : "",
       source: note.source || "manual",
@@ -307,10 +329,10 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
 
   const newNote = useCallback(() => {
     flush();
-    const kind = KINDS.includes(folder) ? folder : "note";
+    const fid = folderIdOf(folder);
     if (folder === "archived") setFolder("all");
     setQuery("");
-    const next = emptyDraft(nextTokenRef.current++, kind);
+    const next = emptyDraft(nextTokenRef.current++, fid);
     draftRef.current = next;
     setDraft(next);
     setSaveState("idle");
@@ -342,7 +364,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
       }
       setActiveNotes((list) => list.filter((n) => n.id !== id));
       setSearchResults((list) => (list ? list.filter((n) => n.id !== id) : list));
-      setArchivedNotes([]);
+      loadArchived();
     }
     draftRef.current = null;
     setDraft(null);
@@ -377,8 +399,13 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [newNote]);
 
-  const chooseFolder = (f: string) => {
+  const chooseFolder = (f: FolderKey) => {
+    if (f === "new") {
+      setDialog({ mode: "create" });
+      return;
+    }
     flush();
+    setMenuOpen(false);
     setFolder(f);
     setQuery("");
     if (!narrow) {
@@ -387,12 +414,60 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  // --- folders ----------------------------------------------------------------
+
+  const folderName = (key: FolderKey) => {
+    if (key === "all") return "All Notes";
+    if (key === "archived") return "Archived";
+    return folders.find((f) => f.id === folderIdOf(key))?.name ?? "Folder";
+  };
+
+  const folderRequest = async (path: string, method: string, body?: unknown) => {
+    const res = await fetch(url(path), {
+      method,
+      credentials: "same-origin",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error((await res.text()).trim() || `HTTP ${res.status}`);
+    return res.json();
+  };
+
+  const submitDialog = async (value: string) => {
+    if (!dialog) return;
+    if (dialog.mode === "create") {
+      const data = await folderRequest("/folders", "POST", { name: value });
+      await loadFolders();
+      setDialog(null);
+      if (data.folder?.id) chooseFolder(folderKey(data.folder.id));
+    } else if (dialog.mode === "rename") {
+      await folderRequest(`/folders/${dialog.folder.id}`, "PATCH", { name: value });
+      await loadFolders();
+      setDialog(null);
+    } else {
+      await flush();
+      await folderRequest(`/folders/${dialog.folder.id}`, "DELETE");
+      const gone = dialog.folder.id;
+      const unfile = (list: Note[]) => list.map((n) => ((n.folder_id ?? 0) === gone ? { ...n, folder_id: 0 } : n));
+      setActiveNotes(unfile);
+      setArchivedNotes(unfile);
+      setDraft((d) => (d && d.folderId === gone ? { ...d, folderId: 0 } : d));
+      if (draftRef.current?.folderId === gone) draftRef.current = { ...draftRef.current, folderId: 0 };
+      await loadFolders();
+      setDialog(null);
+      chooseFolder("all");
+    }
+  };
+
+  const currentFolder = folders.find((f) => f.id === folderIdOf(folder)) ?? null;
+  const showArchived = archivedNotes.length > 0 || folder === "archived";
+  const folderKeys: FolderKey[] = ["all", ...folders.map((f) => folderKey(f.id)), ...(showArchived ? ["archived"] : [])];
+
   // --- render -----------------------------------------------------------------
 
   const folderList = (
-    <nav style={{ width: 220, flexShrink: 0, borderRight: `1px solid ${C.border}`, background: C.subtle, overflowY: "auto", padding: "14px 8px" }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: C.dim, padding: "0 10px 6px", letterSpacing: 0.3 }}>FOLDERS</div>
-      {FOLDERS.map((f) => {
+    <nav style={{ width: 220, flexShrink: 0, borderRight: `1px solid ${C.border}`, background: C.subtle, overflowY: "auto", padding: "12px 8px" }}>
+      {folderKeys.map((f) => {
         const active = f === folder;
         return (
           <button
@@ -414,16 +489,24 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
             }}
           >
             <span style={{ color: C.accent, display: "inline-flex" }}>{f === "archived" ? <ArchiveIcon size={15} /> : <FolderIcon />}</span>
-            <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{FOLDER_LABELS[f]}</span>
+            <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{folderName(f)}</span>
             {f !== "archived" && <span style={{ color: C.dim, fontSize: 12 }}>{counts[f] ?? 0}</span>}
           </button>
         );
       })}
+      <button
+        type="button"
+        onClick={() => setDialog({ mode: "create" })}
+        style={{ ...resetButton, width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", marginTop: 6, borderRadius: 7, fontSize: 13, color: C.muted }}
+      >
+        <span style={{ color: C.accent, display: "inline-flex" }}><PlusIcon /></span>
+        New Folder
+      </button>
     </nav>
   );
 
   const groups = groupByDate(visibleNotes);
-  const listHeaderTitle = FOLDER_LABELS[folder];
+  const listHeaderTitle = folderName(folder);
 
   const list = (
     <section
@@ -452,11 +535,23 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
                 onChange={(e) => chooseFolder(e.target.value)}
                 style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", fontSize: 16 }}
               >
-                {FOLDERS.map((f) => (
-                  <option key={f} value={f}>{FOLDER_LABELS[f]}{f !== "archived" ? ` (${counts[f] ?? 0})` : ""}</option>
+                {folderKeys.map((f) => (
+                  <option key={f} value={f}>{folderName(f)}{f !== "archived" ? ` (${counts[f] ?? 0})` : ""}</option>
                 ))}
+                <option value="new">New Folder…</option>
               </select>
             </label>
+          )}
+          {currentFolder && (
+            <div style={{ position: "relative" }}>
+              <IconButton label="Folder options" onClick={() => setMenuOpen((v) => !v)} active={menuOpen}><MoreIcon /></IconButton>
+              {menuOpen && (
+                <div style={{ position: "absolute", right: 0, top: 36, zIndex: 20, minWidth: 170, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.35)" }}>
+                  <MenuItem onClick={() => { setMenuOpen(false); setDialog({ mode: "rename", folder: currentFolder }); }}>Rename Folder</MenuItem>
+                  <MenuItem danger onClick={() => { setMenuOpen(false); setDialog({ mode: "delete", folder: currentFolder }); }}>Delete Folder</MenuItem>
+                </div>
+              )}
+            </div>
           )}
           {!narrow && (
             <IconButton label="New note" onClick={newNote}><ComposeIcon /></IconButton>
@@ -528,13 +623,13 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
       <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 4, padding: narrow ? "8px 8px" : "8px 14px", minHeight: 44, borderBottom: narrow ? "none" : `1px solid ${C.border}` }}>
         {narrow && (
           <button type="button" onClick={backToList} style={{ ...resetButton, display: "flex", alignItems: "center", gap: 2, color: C.accent, fontSize: 16, padding: "6px 4px" }}>
-            <ChevronLeft /> {FOLDER_LABELS[folder]}
+            <ChevronLeft /> {folderName(folder)}
           </button>
         )}
         <div style={{ flex: 1 }} />
         {draft && <SaveBadge state={saveState} error={saveError} />}
         {draft && !draft.archived && (
-          <IconButton label="Details: kind and tags" onClick={() => setShowInfo((v) => !v)} active={showInfo}><TagIcon /></IconButton>
+          <IconButton label="Details: folder, kind and tags" onClick={() => setShowInfo((v) => !v)} active={showInfo}><TagIcon /></IconButton>
         )}
         {draft && !draft.archived && (
           <IconButton label="Archive note" onClick={archiveCurrent}><ArchiveIcon /></IconButton>
@@ -550,7 +645,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
           }}
         >
           <div
-            style={{ maxWidth: 760, margin: "0 auto", padding: narrow ? "4px 18px 120px" : "14px 36px 160px" }}
+            style={{ padding: narrow ? "4px 18px 120px" : "14px 28px 160px" }}
             onClick={(e) => {
               if (e.target === e.currentTarget) bodyRef.current?.focus();
             }}
@@ -567,6 +662,17 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
 
             {showInfo && !draft.archived && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", background: C.subtle, border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.muted }}>
+                  Folder
+                  <select
+                    value={String(draft.folderId)}
+                    onChange={(e) => edit({ folderId: Number(e.target.value) })}
+                    style={{ background: C.input, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 6px", fontSize: narrow ? 16 : 13, fontFamily: FONT }}
+                  >
+                    <option value="0">No folder</option>
+                    {folders.map((f) => <option key={f.id} value={String(f.id)}>{f.name}</option>)}
+                  </select>
+                </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.muted }}>
                   Kind
                   <select
@@ -655,7 +761,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
   return (
     <div
       ref={rootRef}
-      style={{ height: "100%", minHeight: 0, display: "flex", background: C.bg, color: C.text, fontFamily: FONT, WebkitFontSmoothing: "antialiased", overflow: "hidden" }}
+      style={{ position: "relative", height: "100%", minHeight: 0, display: "flex", background: C.bg, color: C.text, fontFamily: FONT, WebkitFontSmoothing: "antialiased", overflow: "hidden" }}
     >
       {narrow ? (
         mobileView === "editor" && draft ? editor : list
@@ -666,6 +772,7 @@ export default function NotesPanel({ projectId }: NativePanelProps) {
           {editor}
         </>
       )}
+      {dialog && <FolderDialog state={dialog} onCancel={() => setDialog(null)} onSubmit={submitDialog} narrow={narrow} />}
     </div>
   );
 }
@@ -715,6 +822,86 @@ function EmptyList({ query, folder, onNew }: { query: string; folder: string; on
         </button>
       )}
     </div>
+  );
+}
+
+type DialogState =
+  | { mode: "create" }
+  | { mode: "rename"; folder: Folder }
+  | { mode: "delete"; folder: Folder };
+
+function FolderDialog({ state, onCancel, onSubmit, narrow }: { state: DialogState; onCancel: () => void; onSubmit: (value: string) => Promise<void>; narrow: boolean }) {
+  const [value, setValue] = useState(state.mode === "rename" ? state.folder.name : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const isDelete = state.mode === "delete";
+  const title = state.mode === "create" ? "New Folder" : state.mode === "rename" ? "Rename Folder" : `Delete "${state.folder.name}"?`;
+  const submit = async () => {
+    if (!isDelete && !value.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onSubmit(value.trim());
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{ position: "absolute", inset: 0, zIndex: 50, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <form
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
+        onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+        style={{ width: "100%", maxWidth: 340, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, boxShadow: "0 16px 48px rgba(0,0,0,0.5)" }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>{title}</div>
+        {isDelete ? (
+          <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.5 }}>
+            The folder is removed. Its notes are kept and stay under All Notes.
+          </div>
+        ) : (
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Folder name"
+            maxLength={80}
+            style={{ width: "100%", boxSizing: "border-box", marginTop: 6, background: C.input, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: narrow ? 16 : 14, outline: "none", fontFamily: FONT }}
+          />
+        )}
+        {error && <div style={{ marginTop: 8, fontSize: 12, color: C.error }}>{error}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+          <button type="button" onClick={onCancel} style={{ ...resetButton, padding: "7px 12px", borderRadius: 8, fontSize: 13, color: C.text, background: C.hover }}>
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy || (!isDelete && !value.trim())}
+            style={{ ...resetButton, padding: "7px 12px", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#fff", background: isDelete ? C.error : C.accent, opacity: busy || (!isDelete && !value.trim()) ? 0.5 : 1 }}
+          >
+            {isDelete ? "Delete" : state.mode === "create" ? "Create" : "Save"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MenuItem({ children, onClick, danger }: { children: ReactNode; onClick: () => void; danger?: boolean }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ ...resetButton, display: "block", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 7, fontSize: 13, color: danger ? C.error : C.text, background: hover ? C.hover : "transparent" }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -823,6 +1010,25 @@ function TagIcon({ size = 19 }: { size?: number }) {
     <svg {...svgProps(size)}>
       <path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z" />
       <circle cx="7.5" cy="7.5" r="1.2" />
+    </svg>
+  );
+}
+
+function PlusIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg {...svgProps(size)}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function MoreIcon({ size = 19 }: { size?: number }) {
+  return (
+    <svg {...svgProps(size)}>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="8" cy="12" r="0.6" fill="currentColor" />
+      <circle cx="12" cy="12" r="0.6" fill="currentColor" />
+      <circle cx="16" cy="12" r="0.6" fill="currentColor" />
     </svg>
   );
 }

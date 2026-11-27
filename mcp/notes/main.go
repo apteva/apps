@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: notes
 display_name: Notes
-version: 0.2.0
+version: 0.3.0
 description: Simple searchable notes for Apteva agents and human teams.
 author: Apteva
 icon: /ui/icon.svg
@@ -36,6 +36,10 @@ provides:
     - { name: notes_append,  description: "Append text to a note body." }
     - { name: notes_search,  description: "Search/list notes." }
     - { name: notes_archive, description: "Archive a note." }
+    - { name: notes_folders_list,  description: "List note folders." }
+    - { name: notes_folder_create, description: "Create a note folder." }
+    - { name: notes_folder_rename, description: "Rename a note folder." }
+    - { name: notes_folder_delete, description: "Delete a note folder (notes are kept)." }
   ui_panels:
     - slot: project.page
       label: Notes
@@ -90,21 +94,29 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/notes", Handler: a.handleNotes},
 		{Pattern: "/notes/", Handler: a.handleNoteItem},
+		{Pattern: "/folders", Handler: a.handleFolders},
+		{Pattern: "/folders/", Handler: a.handleFolderItem},
 	}
 }
 
 func (a *App) MCPTools() []sdk.Tool {
+	return append(a.noteTools(), a.folderTools()...)
+}
+
+func (a *App) noteTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "notes_create",
-			Description: "Create a note. Args: title (required), body?, kind? (default note), tags? (array), source? (manual|agent|import or any string), metadata? (object).",
+			Description: "Create a note. Args: title (required), body?, folder_id? or folder? (folder name; created if missing), kind? (default note), tags? (array), source? (manual|agent|import or any string), metadata? (object).",
 			InputSchema: schemaObject(map[string]any{
-				"title":    sString(),
-				"body":     sString(),
-				"kind":     sString(),
-				"tags":     sArray("string"),
-				"source":   sString(),
-				"metadata": map[string]any{"type": "object"},
+				"title":     sString(),
+				"body":      sString(),
+				"folder_id": sInteger(),
+				"folder":    sString(),
+				"kind":      sString(),
+				"tags":      sArray("string"),
+				"source":    sString(),
+				"metadata":  map[string]any{"type": "object"},
 			}, []string{"title"}),
 			Handler: a.toolCreate,
 		},
@@ -116,15 +128,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "notes_update",
-			Description: "Patch a note. Args: id, title?, body?, kind?, tags?, source?, metadata?.",
+			Description: "Patch a note. Args: id, title?, body?, folder_id? (0 = no folder) or folder? (name; created if missing), kind?, tags?, source?, metadata?.",
 			InputSchema: schemaObject(map[string]any{
-				"id":       sInteger(),
-				"title":    sString(),
-				"body":     sString(),
-				"kind":     sString(),
-				"tags":     sArray("string"),
-				"source":   sString(),
-				"metadata": map[string]any{"type": "object"},
+				"id":        sInteger(),
+				"title":     sString(),
+				"body":      sString(),
+				"folder_id": sInteger(),
+				"folder":    sString(),
+				"kind":      sString(),
+				"tags":      sArray("string"),
+				"source":    sString(),
+				"metadata":  map[string]any{"type": "object"},
 			}, []string{"id"}),
 			Handler: a.toolUpdate,
 		},
@@ -136,13 +150,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "notes_search",
-			Description: "Search/list notes. Args: q?, kind?, tag?, status? (active|archived|all), limit?.",
+			Description: "Search/list notes. Args: q?, folder_id?, kind?, tag?, status? (active|archived|all), limit?.",
 			InputSchema: schemaObject(map[string]any{
-				"q":      sString(),
-				"kind":   sString(),
-				"tag":    sString(),
-				"status": sString(),
-				"limit":  sInteger(),
+				"q":         sString(),
+				"folder_id": sInteger(),
+				"kind":      sString(),
+				"tag":       sString(),
+				"status":    sString(),
+				"limit":     sInteger(),
 			}, nil),
 			Handler: a.toolSearch,
 		},
@@ -160,6 +175,7 @@ type Note struct {
 	ProjectID    string          `json:"project_id,omitempty"`
 	Title        string          `json:"title"`
 	Body         string          `json:"body"`
+	FolderID     int64           `json:"folder_id"`
 	Kind         string          `json:"kind"`
 	Status       string          `json:"status"`
 	Source       string          `json:"source"`
@@ -175,6 +191,7 @@ type Note struct {
 type notePatch struct {
 	Title        *string
 	Body         *string
+	FolderID     *int64
 	Kind         *string
 	Source       *string
 	TagsJSON     *string
@@ -183,11 +200,12 @@ type notePatch struct {
 }
 
 type noteFilter struct {
-	Q      string
-	Kind   string
-	Tag    string
-	Status string
-	Limit  int
+	FolderID *int64 // nil = any folder; 0 = no folder
+	Q        string
+	Kind     string
+	Tag      string
+	Status   string
+	Limit    int
 }
 
 // --- HTTP handlers ----------------------------------------------------------
@@ -197,11 +215,12 @@ func (a *App) handleNotes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		filter := noteFilter{
-			Q:      strings.TrimSpace(r.URL.Query().Get("q")),
-			Kind:   strings.TrimSpace(r.URL.Query().Get("kind")),
-			Tag:    strings.TrimSpace(r.URL.Query().Get("tag")),
-			Status: strings.TrimSpace(r.URL.Query().Get("status")),
-			Limit:  intQuery(r, "limit", 100),
+			Q:        strings.TrimSpace(r.URL.Query().Get("q")),
+			FolderID: folderQuery(r),
+			Kind:     strings.TrimSpace(r.URL.Query().Get("kind")),
+			Tag:      strings.TrimSpace(r.URL.Query().Get("tag")),
+			Status:   strings.TrimSpace(r.URL.Query().Get("status")),
+			Limit:    intQuery(r, "limit", 100),
 		}
 		notes, err := listNotes(ctx.AppDB(), ctx.CurrentProject(), filter)
 		if err != nil {
@@ -333,11 +352,12 @@ func (a *App) toolAppend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	notes, err := listNotes(ctx.AppDB(), ctx.CurrentProject(), noteFilter{
-		Q:      stringArg(args, "q"),
-		Kind:   stringArg(args, "kind"),
-		Tag:    stringArg(args, "tag"),
-		Status: stringArg(args, "status"),
-		Limit:  intArg(args, "limit", 50),
+		Q:        stringArg(args, "q"),
+		FolderID: optionalFolderID(args),
+		Kind:     stringArg(args, "kind"),
+		Tag:      stringArg(args, "tag"),
+		Status:   stringArg(args, "status"),
+		Limit:    intArg(args, "limit", 50),
 	})
 	if err != nil {
 		return nil, err
@@ -372,12 +392,16 @@ func createNoteFromArgs(db *sql.DB, projectID string, args map[string]any) (*Not
 	if err != nil {
 		return nil, err
 	}
+	folderID, _, err := resolveFolderArg(db, projectID, args)
+	if err != nil {
+		return nil, err
+	}
 	now := nowUTC()
 	res, err := db.Exec(`
 		INSERT INTO notes
-			(project_id, title, body, kind, status, source, tags_json, metadata_json, created_by, updated_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
-		projectID, title, body, kind, source, tags, meta, stringArg(args, "created_by"), stringArg(args, "updated_by"), now, now)
+			(project_id, title, body, folder_id, kind, status, source, tags_json, metadata_json, created_by, updated_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, title, body, folderID, kind, source, tags, meta, stringArg(args, "created_by"), stringArg(args, "updated_by"), now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -400,6 +424,11 @@ func updateNoteFromArgs(db *sql.DB, projectID string, args map[string]any) (*Not
 	}
 	if s, ok := stringPtrArg(args, "body"); ok {
 		patch.Body = s
+	}
+	if folderID, ok, err := resolveFolderArg(db, projectID, args); err != nil {
+		return nil, err
+	} else if ok {
+		patch.FolderID = &folderID
 	}
 	if s, ok := stringPtrArg(args, "kind"); ok {
 		kind := cleanToken(*s, "note")
@@ -442,7 +471,7 @@ func getNoteRequired(db *sql.DB, projectID string, id int64) (*Note, error) {
 
 func getNote(db *sql.DB, projectID string, id int64) (*Note, error) {
 	row := db.QueryRow(`
-		SELECT id, project_id, title, body, kind, status, source, tags_json, metadata_json,
+		SELECT id, project_id, title, body, folder_id, kind, status, source, tags_json, metadata_json,
 		       created_by, updated_by, created_at, updated_at, COALESCE(archived_at, '')
 		FROM notes
 		WHERE id = ? AND project_id = ?`,
@@ -465,6 +494,10 @@ func listNotes(db *sql.DB, projectID string, f noteFilter) ([]*Note, error) {
 		where = append(where, "status = ?")
 		args = append(args, status)
 	}
+	if f.FolderID != nil {
+		where = append(where, "folder_id = ?")
+		args = append(args, *f.FolderID)
+	}
 	if f.Kind != "" {
 		where = append(where, "kind = ?")
 		args = append(args, f.Kind)
@@ -480,7 +513,7 @@ func listNotes(db *sql.DB, projectID string, f noteFilter) ([]*Note, error) {
 	}
 	args = append(args, limit)
 	rows, err := db.Query(`
-		SELECT id, project_id, title, body, kind, status, source, tags_json, metadata_json,
+		SELECT id, project_id, title, body, folder_id, kind, status, source, tags_json, metadata_json,
 		       created_by, updated_by, created_at, updated_at, COALESCE(archived_at, '')
 		FROM notes
 		WHERE `+strings.Join(where, " AND ")+`
@@ -513,6 +546,9 @@ func updateNote(db *sql.DB, projectID string, id int64, p notePatch) (*Note, err
 	}
 	if p.Body != nil {
 		add("body = ?", *p.Body)
+	}
+	if p.FolderID != nil {
+		add("folder_id = ?", *p.FolderID)
 	}
 	if p.Kind != nil {
 		add("kind = ?", *p.Kind)
@@ -587,7 +623,7 @@ type scanner interface {
 func scanNote(s scanner) (*Note, error) {
 	var n Note
 	var tags, meta string
-	err := s.Scan(&n.ID, &n.ProjectID, &n.Title, &n.Body, &n.Kind, &n.Status, &n.Source,
+	err := s.Scan(&n.ID, &n.ProjectID, &n.Title, &n.Body, &n.FolderID, &n.Kind, &n.Status, &n.Source,
 		&tags, &meta, &n.CreatedBy, &n.UpdatedBy, &n.CreatedAt, &n.UpdatedAt, &n.ArchivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -760,6 +796,27 @@ func intQuery(r *http.Request, key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// folderQuery reads ?folder_id= (absent = any folder, 0 = no folder).
+func folderQuery(r *http.Request) *int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("folder_id"))
+	if raw == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
+func optionalFolderID(args map[string]any) *int64 {
+	if v, ok := args["folder_id"]; !ok || v == nil {
+		return nil
+	}
+	n := int64Arg(args, "folder_id")
+	return &n
 }
 
 func firstPart(parts []string) string {
