@@ -74,6 +74,11 @@ func (d *drivers) recordCapabilities(v Device) []string {
 	if audio {
 		out = append(out, "record_audio")
 	}
+	if v.Platform == "android" && v.Driver == "adb" {
+		if _, _, err := scrcpyServer(context.Background()); err == nil {
+			out = append(out, "video")
+		}
+	}
 	return out
 }
 

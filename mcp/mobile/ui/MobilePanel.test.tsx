@@ -32,6 +32,7 @@ beforeEach(()=>{
      return json({session:currentSession});
     }
     if(a.action==="close"){currentSession=null;return json({session:{id:"session-1",status:"closed"}});}
+    if(a.action==="stop"){currentSession=null;return json({stopped:[{id:"session-1",status:"stopped"}],count:1});}
     break;
    case "mobile_power":
     if(a.action==="status"&&powerReadError)return json({error:powerReadError,code:"device_unavailable"},409);
@@ -131,4 +132,26 @@ test("a blocked iPhone read can be retried without automatically changing its pr
  powerReadError="";await click("Refresh power");expect(powerToggle().disabled).toBe(false);
  expect(container.textContent).not.toContain("Turn off Low Power Mode");
  expect(requests.filter(r=>r.tool==="mobile_power"&&r.args.action==="set")).toHaveLength(0);
+});
+
+test("Stop now ends the session immediately, even while an action is running",async()=>{
+ android();await render();await click("Open session");
+ const original=globalThis.fetch;let release:()=>void=()=>{};
+ globalThis.fetch=(async(input:any,init:any)=>{const req=JSON.parse(init.body);if(req.tool==="mobile_action"){requests.push(req);return new Promise<Response>(r=>{release=()=>r(json({ok:true}));});}return original(input,init);}) as typeof fetch;
+ act(()=>{button("Home").click();});
+ await click("Stop now");
+ expect(requests).toContainEqual({tool:"mobile_session",args:{action:"stop",session_id:"session-1",reason:"Stopped from the Mobile panel"}});
+ expect(container.textContent).toContain("Session stopped.");
+ await act(async()=>{release();});
+});
+test("device health and alerts are shown",async()=>{
+ android();targetPhone={...targetPhone,health:{battery_level:12,battery_temp_c:43.1,charging:false,wifi_enabled:true,wifi_connected:false,alerts:["hot","low_battery","wifi_down"]}} as any;
+ await render();
+ expect(container.textContent).toContain("Battery 12%");expect(container.textContent).toContain("43.1 °C");
+ expect(container.textContent).toContain("Low battery");expect(container.textContent).toContain("Wi-Fi not connected");
+});
+test("avcCodec reads profile and level from the SPS",async()=>{
+ const {avcCodec}=await import("./MobilePanel");
+ expect(avcCodec(new Uint8Array([0,0,0,1,0x67,0x42,0xc0,0x28,0xab,0,0,0,1,0x68,0xce]))).toBe("avc1.42c028");
+ expect(avcCodec(new Uint8Array([1,2,3]))).toBe("");
 });

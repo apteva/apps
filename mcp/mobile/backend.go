@@ -34,6 +34,15 @@ type runnerConfig struct {
 	ArtifactDir   string
 	LockDir       string
 	ToolDir       string
+	// Zero disables the loops (tests). Sidecar and runner set 3 s / 10 s.
+	PresenceInterval time.Duration
+	HealthInterval   time.Duration
+	// OfflineGrace is how long a paused session waits for its phone.
+	OfflineGrace time.Duration
+	// StreamViewers caps concurrent live-video viewers per session.
+	StreamViewers int
+	// BlockedKeycodes are Android keycodes mobile_action(key) refuses.
+	BlockedKeycodes map[int]bool
 }
 
 // Device commands never run in a host shell. ADB's *remote* shell still
@@ -212,7 +221,7 @@ func capabilities(driver string) []string {
 	case "adb":
 		// selection_state: UI source carries checkable/checked/selected/scrollable
 		// on both the bundled collector and the uiautomator dump fallback.
-		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text", "selection_state")
+		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text", "selection_state", "long_press", "drag", "keycode", "wait_for", "health", "baseline")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:
@@ -457,10 +466,16 @@ func (d *drivers) Action(ctx context.Context, s Session, action string, args map
 		}
 	}
 	if s.Device.Driver == "adb" {
+		if v, handled, err := d.adbInputExtra(ctx, s, action, args); handled {
+			return v, err
+		}
 		return d.adbAction(ctx, s, action, args)
 	}
 	if s.Device.Driver == driverXCTest {
 		return d.xctestAction(ctx, s, action, args)
+	}
+	if v, handled, err := d.appiumInputExtra(ctx, s, action, args); handled {
+		return v, err
 	}
 	switch action {
 	case "navigate":
@@ -628,7 +643,7 @@ func (d *drivers) adbAction(ctx context.Context, s Session, action string, args 
 		}
 		for _, r := range text {
 			if r < 32 || r > 126 || r == '%' {
-				return nil, problem("unsupported", "ADB text supports printable ASCII excluding %. Use Appium for Unicode or percent signs.")
+				return nil, problem("unsupported", "ADB typing supports printable ASCII excluding %. For other text use replace=true (verified set-text, any Unicode) or Appium.")
 			}
 		}
 		command = []string{"input", "text", strings.ReplaceAll(text, " ", "%s")}
@@ -640,7 +655,7 @@ func (d *drivers) adbAction(ctx context.Context, s Session, action string, args 
 		}
 		command = []string{"input", "keyevent", code}
 	default:
-		return nil, problem("unsupported", "this action requires Appium; ADB supports navigate, tap, swipe, text and key")
+		return nil, problem("unsupported", "unsupported action; ADB supports navigate, tap, swipe, long_press, drag, text, key and wait_for")
 	}
 	out, e := d.shell(ctx, serial, command...)
 	if e != nil {

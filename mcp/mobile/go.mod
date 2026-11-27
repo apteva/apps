@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/apteva/app-sdk v0.115.2
 	github.com/creack/pty v1.1.24
+	github.com/gorilla/websocket v1.5.3
 	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0
 )

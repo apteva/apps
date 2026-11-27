@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.0 — 2026-11-27
+
+- Stop: `mobile_session action=stop` (session_id, device_id or all=true, with
+  an optional reason) cancels the running action without waiting for the phone
+  lock, kills half-done input on the phone and cancels any held touch, ends
+  streams and recordings, and records `ended_at`, `end_reason`, `stop_reason`
+  and `stopped_by`. Nothing new runs on a stopping session.
+- Events on the app bus: `mobile.session.started`, `mobile.session.ended`
+  (duration and end reason), `mobile.device.online`/`offline`, and
+  `mobile.action.performed` when `action_events=all`. Optional `caller_ref` on
+  open is copied onto the session's events. Text is reported as a length,
+  secrets as `[secret]`; no screens or elements.
+- Health: every 10 s per Android phone (battery, temperature, charging,
+  thermal, Wi-Fi, signal, screen, free storage, uptime) with alerts, shown in
+  `mobile_devices` with `last_seen_at`. A phone that drops off is detected
+  within ~3 s; its session is paused (it keeps the phone), adb reconnect is
+  retried with backoff, and the session resumes when the phone returns, or
+  ends as `device_lost` after `offline_grace_seconds`.
+- Runner: token-protected `GET /v1/health` with versions, phones, sessions
+  and streams; the open `/health` stays minimal.
+- Live video: `mobile_stream mode=video` returns a WebSocket URL with a
+  5-minute renewable token. H.264 from scrcpy-server (default 1280 px, 4 Mbps),
+  frames with scrcpy's 12-byte header, a key frame for each new viewer, slow
+  viewers skip to the next key frame, touch/key/text input on the same socket
+  with one event per gesture. The panel plays it with WebCodecs.
+- Input: `long_press`, `drag` (paths), any Android keycode with an operator
+  block-list (`blocked_keycodes`, default power/sleep), Unicode `replace` via
+  accessibility set-text, and `wait_for` (text or element).
+- `mobile_device`: `baseline_capture`, `clean` (confirm=true) and
+  `verify_clean` for shared phones. Clean uninstalls apps added since the
+  baseline, clears the clipboard, deletes downloads and screenshots newer than
+  the baseline (older files stay) and closes apps. No factory reset.
+
 ## 0.8.0 — 2026-11-18
 
 - Report Android selection state in UI source: the bundled collector now writes
