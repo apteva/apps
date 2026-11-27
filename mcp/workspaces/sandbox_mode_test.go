@@ -144,3 +144,29 @@ func TestReadableByOthersNeedsEveryParentEnterable(t *testing.T) {
 	}
 	_ = open
 }
+
+func TestMkdirAllTraversableOpensOnlyCreatedFolders(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "apteva-workspaces", "install-7")
+	if err := mkdirAllTraversable(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Dir(root), root} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o711 {
+			t.Fatalf("%s mode = %o, want 711", dir, got)
+		}
+	}
+	if info, _ := os.Stat(base); info.Mode().Perm() != 0o700 {
+		t.Fatalf("existing parent changed to %o", info.Mode().Perm())
+	}
+	if err := mkdirAllTraversable(root); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+}

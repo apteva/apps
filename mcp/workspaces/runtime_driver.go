@@ -212,7 +212,11 @@ func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
 	if strings.ContainsAny(root, " \t\n'\"\\$`") {
 		return nil, fmt.Errorf("local driver root %q must not contain spaces, quotes or shell characters; set local_root", root)
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	mkdir := func(dir string) error { return os.MkdirAll(dir, 0o700) }
+	if kind == sandboxContainer {
+		mkdir = mkdirAllTraversable
+	}
+	if err := mkdir(root); err != nil {
 		return nil, err
 	}
 	if real, err := filepath.EvalSymlinks(root); err == nil {
@@ -228,6 +232,34 @@ func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
 	}
 	r.driver = newLocalDriver(root, kind, network)
 	return r.driver, nil
+}
+
+// mkdirAllTraversable creates dir and any missing parents as 0711, so each
+// workspace's own user can pass through folders the driver created (such as
+// /var/lib/apteva-workspaces on a fresh container). Folders that already
+// exist keep their mode; prepareContainerRoot reports any that block.
+func mkdirAllTraversable(dir string) error {
+	var missing []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, d)
+		if d == filepath.Dir(d) {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o711); err != nil {
+		return err
+	}
+	for _, d := range missing {
+		if err := os.Chmod(d, 0o711); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // prepareContainerRoot makes the driver root traversable but not listable
