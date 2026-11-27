@@ -27,6 +27,7 @@ interface Tenant {
   status: string;
   last_error: string;
   access?: Access;
+  device?: { managed_by: string; device_ref: string; session_id?: string; online: boolean };
   created_at: string;
   released_at?: string;
   due_at?: string;
@@ -59,6 +60,7 @@ interface Pool {
   key: string;
   name: string;
   platform: string;
+  managed_by?: string;
   execution_enabled: boolean;
   counts: Record<string, number>;
 }
@@ -66,7 +68,10 @@ interface Pool {
 interface Machine {
   id: number;
   pool_key: string;
-  instance_id: number;
+  instance_id?: number;
+  device_ref?: string;
+  device_session?: string;
+  managed_by?: string;
   name: string;
   state: string;
   state_reason: string;
@@ -156,6 +161,7 @@ function tone(status: string): string {
     case "suspended":
     case "waiting":
     case "waiting_for_machine":
+    case "degraded":
     case "maintenance":
     case "queued":
       return "bg-warn/15 text-warn";
@@ -259,10 +265,11 @@ export default function HostingPanel(_props: NativePanelProps) {
   const [notice, setNotice] = useState("");
   const [confirm, setConfirm] = useState<null | { title: string; expect: string; detail: string; run: () => Promise<void> }>(null);
   const [createForm, setCreateForm] = useState({ external_ref: "", profile: "", owner_email: "", ssh_keys: "" });
-  const [machineForm, setMachineForm] = useState({ pool_key: "", instance_id: "", serial: "", management_user: "" });
+  const [machineForm, setMachineForm] = useState({ pool_key: "", instance_id: "", device_ref: "", serial: "", management_user: "" });
   const [poolForm, setPoolForm] = useState({ key: "", name: "", platform: "macos" });
 
   const selected = useMemo(() => tenants.find((t) => t.id === selectedId) || null, [tenants, selectedId]);
+  const phonePool = !!pools.find((p) => p.key === (machineForm.pool_key || pools[0]?.key))?.managed_by;
 
   const load = useCallback(async () => {
     try {
@@ -453,6 +460,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                     {selected.default_hostname && (<><dt className="text-text-dim">Hostname</dt><dd className="font-mono">{selected.default_hostname}</dd></>)}
                     {selected.machine_id ? (<><dt className="text-text-dim">Machine</dt><dd>#{selected.machine_id}</dd></>) : null}
                     {selected.instance_id ? (<><dt className="text-text-dim">Instance</dt><dd>#{selected.instance_id}</dd></>) : null}
+                    {selected.device && (<><dt className="text-text-dim">Phone</dt><dd className="font-mono break-all">{selected.device.device_ref} · {selected.device.online ? "online" : "offline"}{selected.device.session_id ? ` · session ${selected.device.session_id}` : " · no session"}</dd></>)}
                     {selected.access && (<><dt className="text-text-dim">SSH</dt><dd className="font-mono break-all">{selected.access.issue ? <span className="text-red">{selected.access.issue}</span> : selected.access.granted ? selected.access.ssh_command : "access removed"}</dd></>)}
                     <dt className="text-text-dim">Created</dt><dd>{fmtDate(selected.created_at)}</dd>
                     {selected.released_at && (<><dt className="text-text-dim">Released</dt><dd>{fmtDate(selected.released_at)}</dd></>)}
@@ -460,23 +468,28 @@ export default function HostingPanel(_props: NativePanelProps) {
                   {selected.last_error && <p className="text-xs text-red break-all">{selected.last_error}</p>}
                   {selected.status !== "released" && (
                     <div className="flex flex-wrap gap-2">
-                      {selected.status === "active" && (
+                      {(selected.status === "active" || selected.status === "degraded") && (
                         <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_suspend", "Suspending")}>Suspend</button>
                       )}
                       {selected.status === "suspended" && (
                         <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_resume", "Resuming")}>Resume</button>
                       )}
-                      {selected.status === "active" && (
+                      {selected.status === "active" && !selected.device && (
                         <button type="button" className={btn} disabled={!!busy} onClick={() => tenantAction(selected, "hosting_tenant_restart", "Restarting")}>Restart</button>
                       )}
-                      {selected.backend === "machine_pool" && selected.status === "active" && (
+                      {selected.device && (selected.status === "active" || selected.status === "degraded") && (
+                        <button type="button" className={btnDanger} disabled={!!busy}
+                          onClick={() => ask("Swap phone", selected.slug, "Moves the tenant to a free phone in the same pool. The customer gets a new session; the old phone is quarantined for cleaning.",
+                            () => tenantAction(selected, "hosting_tenant_swap", "Swap started", { confirm: selected.id, reason: "swapped from panel" }))}>Swap phone</button>
+                      )}
+                      {selected.backend === "machine_pool" && selected.status === "active" && !selected.device && (
                         <button type="button" className={btnDanger} disabled={!!busy}
                           onClick={() => ask("Reinstall machine", selected.slug, "Erases the machine and reinstalls macOS for the same tenant. The customer's data is lost.",
                             () => tenantAction(selected, "hosting_tenant_reinstall", "Reinstall started", { confirm: selected.id }))}>Reinstall</button>
                       )}
                       <button type="button" className={btnDanger} disabled={!!busy}
                         onClick={() => ask("Release tenant", selected.slug,
-                          selected.backend === "container" ? "Destroys the container and its hostname." : "Removes access and wipes or destroys the machine.",
+                          selected.backend === "container" ? "Destroys the container and its hostname." : selected.device ? "Stops the customer's session and cleans the phone back to its baseline." : "Removes access and wipes or destroys the machine.",
                           () => tenantAction(selected, "hosting_tenant_release", "Release started", { confirm: selected.id }))}>Release</button>
                     </div>
                   )}
@@ -518,7 +531,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                   <div key={p.key} className="border border-border rounded p-3 space-y-2 bg-bg-card">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium">{p.name || p.key}</span>
-                      <span className="text-xs text-text-dim">{p.platform}</span>
+                      <span className="text-xs text-text-dim">{p.managed_by ? `${p.platform} phones via ${p.managed_by}` : p.platform}</span>
                       <span className="ml-auto">
                         <Badge value={p.execution_enabled ? "active" : "maintenance"} />
                       </span>
@@ -539,11 +552,11 @@ export default function HostingPanel(_props: NativePanelProps) {
                 <label><span className={label}>Name</span><input className={input} style={{ width: 160 }} value={poolForm.name} onChange={(e) => setPoolForm((f) => ({ ...f, name: e.target.value }))} /></label>
                 <label><span className={label}>Platform</span>
                   <select className={input} value={poolForm.platform} onChange={(e) => setPoolForm((f) => ({ ...f, platform: e.target.value }))}>
-                    <option value="macos">macOS</option><option value="linux">Linux</option>
+                    <option value="macos">macOS</option><option value="linux">Linux</option><option value="android">Android phones (Mobile)</option>
                   </select>
                 </label>
                 <button type="button" className={btn} disabled={!poolForm.key || !!busy}
-                  onClick={() => act("pool", () => callTool("hosting_pool_upsert", poolForm), "Pool saved")}>Save pool</button>
+                  onClick={() => act("pool", () => callTool("hosting_pool_upsert", { ...poolForm, managed_by: poolForm.platform === "android" ? "mobile" : "" }), "Pool saved")}>Save pool</button>
               </div>
             </section>
 
@@ -555,11 +568,20 @@ export default function HostingPanel(_props: NativePanelProps) {
                     {pools.map((p) => <option key={p.key} value={p.key}>{p.name || p.key}</option>)}
                   </select>
                 </label>
-                <label><span className={label}>Instance id</span><input className={input} style={{ width: 100 }} value={machineForm.instance_id} onChange={(e) => setMachineForm((f) => ({ ...f, instance_id: e.target.value.replace(/\D/g, "") }))} /></label>
-                <label><span className={label}>Serial</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.serial} onChange={(e) => setMachineForm((f) => ({ ...f, serial: e.target.value }))} /></label>
-                <label><span className={label}>Management user</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.management_user} onChange={(e) => setMachineForm((f) => ({ ...f, management_user: e.target.value }))} /></label>
-                <button type="button" className={btn} disabled={!machineForm.instance_id || pools.length === 0 || !!busy}
-                  onClick={() => act("machine", () => callTool("hosting_machine_add", {
+                {phonePool ? (
+                  <label><span className={label}>Device id (from Mobile)</span><input className={`${input} font-mono`} style={{ width: 200 }} value={machineForm.device_ref} onChange={(e) => setMachineForm((f) => ({ ...f, device_ref: e.target.value.trim() }))} /></label>
+                ) : (
+                  <>
+                    <label><span className={label}>Instance id</span><input className={input} style={{ width: 100 }} value={machineForm.instance_id} onChange={(e) => setMachineForm((f) => ({ ...f, instance_id: e.target.value.replace(/\D/g, "") }))} /></label>
+                    <label><span className={label}>Serial</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.serial} onChange={(e) => setMachineForm((f) => ({ ...f, serial: e.target.value }))} /></label>
+                    <label><span className={label}>Management user</span><input className={`${input} font-mono`} style={{ width: 140 }} value={machineForm.management_user} onChange={(e) => setMachineForm((f) => ({ ...f, management_user: e.target.value }))} /></label>
+                  </>
+                )}
+                <button type="button" className={btn} disabled={(phonePool ? !machineForm.device_ref : !machineForm.instance_id) || pools.length === 0 || !!busy}
+                  onClick={() => act("machine", () => callTool("hosting_machine_add", phonePool ? {
+                    pool_key: machineForm.pool_key || pools[0]?.key,
+                    device_ref: machineForm.device_ref,
+                  } : {
                     pool_key: machineForm.pool_key || pools[0]?.key,
                     instance_id: Number(machineForm.instance_id),
                     serial: machineForm.serial,
@@ -578,12 +600,16 @@ export default function HostingPanel(_props: NativePanelProps) {
                       <tr key={m.id} className="border-b border-border align-top">
                         <td className="py-2 pr-2">
                           <div className="font-medium">#{m.id} {m.name}</div>
+                          {m.device_ref ? (
+                            <div className="text-text-dim">{m.pool_key} · phone <span className="font-mono">{m.device_ref}</span> · {m.online ? "online" : "offline"}{m.validated ? " · validated" : " · not validated"}{m.last_seen_at ? ` · seen ${fmtDate(m.last_seen_at)}` : ""}</div>
+                          ) : (<>
                           <div className="text-text-dim">{m.pool_key} · instance {m.instance_id} · {CONNECT_LABEL[m.connect_mode || ""] || m.connect_mode || "direct"} · {m.online ? "online" : m.connect_mode === "reverse_tunnel" ? "tunnel down" : "offline"}{m.validated ? " · validated" : " · not validated"}</div>
                           <div className="text-text-dim">
                             {m.public_host ? <span className="font-mono">{m.public_host}:{m.public_port}</span> : "no customer endpoint"}
                             {m.endpoint_source === "manual" ? " (set by hand)" : ""}
                             {m.last_seen_at ? ` · seen ${fmtDate(m.last_seen_at)}` : ""}
                           </div>
+                          </>)}
                         </td>
                         <td className="py-2 pr-2">
                           <Badge value={m.state} />
@@ -601,7 +627,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                             )}
                             {!m.validated && (
                               <button type="button" className={btn} disabled={!!busy}
-                                onClick={() => ask("Mark machine validated", String(m.id), "Only after its erase and recovery have been tested by hand. Validated machines can be wiped automatically.",
+                                onClick={() => ask("Mark machine validated", String(m.id), m.device_ref ? "Only after inspect recorded the phone's baseline as it should be sold. Validated phones are cleaned and sold automatically." : "Only after its erase and recovery have been tested by hand. Validated machines can be wiped automatically.",
                                   () => machineAction(m, "hosting_machine_update", { validated: true, confirm: String(m.id) }, "Machine validated"))}>Validate</button>
                             )}
                             {m.state === "available" && (
@@ -615,7 +641,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                             )}
                             {!m.tenant_id && m.validated && (
                               <button type="button" className={btnDanger} disabled={!!busy}
-                                onClick={() => ask("Clean machine", String(m.id), "Erases the machine, verifies it is clean and puts it back on sale.",
+                                onClick={() => ask("Clean machine", String(m.id), m.device_ref ? "Stops any Hosting session, cleans the phone back to its baseline, verifies it and puts it back on sale." : "Erases the machine, verifies it is clean and puts it back on sale.",
                                   () => machineAction(m, "hosting_machine_clean", { confirm: String(m.id) }, "Clean started"))}>Clean</button>
                             )}
                             {!m.tenant_id && (

@@ -159,6 +159,9 @@ func (a *App) toolTenantHealth(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if t.MachineID > 0 {
 		if m, err := dbMachineGet(db, t.MachineID); err == nil && m != nil {
 			instanceID = m.InstanceID
+			if m.managed() {
+				return a.deviceHealth(ctx, t, m)
+			}
 		}
 	}
 	if instanceID == 0 {
@@ -461,18 +464,31 @@ func (a *App) toolPoolUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("key must be lowercase letters, numbers and dashes")
 	}
 	platform := strArg(args, "platform")
-	if platform != "macos" && platform != "linux" {
-		return nil, errors.New("platform must be macos or linux")
+	managedBy := strings.TrimSpace(strArg(args, "managed_by"))
+	switch managedBy {
+	case "":
+		if platform != "macos" && platform != "linux" {
+			return nil, errors.New("platform must be macos or linux (android pools need managed_by=mobile)")
+		}
+	case managedByMobile:
+		if platform == "" {
+			platform = "android"
+		}
+		if platform != "android" {
+			return nil, errors.New("a pool managed by mobile has platform android")
+		}
+	default:
+		return nil, errors.New("managed_by must be empty (Instances hosts) or mobile (phones)")
 	}
 	existing, err := dbPoolGet(db, key)
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil && existing.Platform != platform {
+	if existing != nil && (existing.Platform != platform || existing.ManagedBy != managedBy) {
 		var n int
 		_ = db.QueryRow(`SELECT COUNT(*) FROM hosting_machines WHERE pool_key=?`, key).Scan(&n)
 		if n > 0 {
-			return nil, errors.New("cannot change the platform of a pool that has machines")
+			return nil, errors.New("cannot change the platform or managed_by of a pool that has machines")
 		}
 	}
 	meta := "{}"
@@ -481,9 +497,9 @@ func (a *App) toolPoolUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	} else if existing != nil {
 		meta = stringOrJSON(existing.Metadata, "{}")
 	}
-	if _, err := db.Exec(`INSERT INTO hosting_pools (key, name, platform, script_set, metadata_json) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(key) DO UPDATE SET name=excluded.name, platform=excluded.platform, script_set=excluded.script_set, metadata_json=excluded.metadata_json, updated_at=CURRENT_TIMESTAMP`,
-		key, firstNonEmpty(strArg(args, "name"), key), platform, platform, meta); err != nil {
+	if _, err := db.Exec(`INSERT INTO hosting_pools (key, name, platform, managed_by, script_set, metadata_json) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET name=excluded.name, platform=excluded.platform, managed_by=excluded.managed_by, script_set=excluded.script_set, metadata_json=excluded.metadata_json, updated_at=CURRENT_TIMESTAMP`,
+		key, firstNonEmpty(strArg(args, "name"), key), platform, managedBy, platform, meta); err != nil {
 		return nil, err
 	}
 	p, err := dbPoolGet(db, key)
@@ -521,6 +537,12 @@ func (a *App) toolMachineAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	pool, err := requirePool(db, strArg(args, "pool_key"))
 	if err != nil {
 		return nil, err
+	}
+	if pool.ManagedBy != "" {
+		return a.addManagedDevice(ctx, pool, args)
+	}
+	if strArg(args, "device_ref") != "" {
+		return nil, fmt.Errorf("pool %s holds Instances hosts; device_ref is for pools managed by mobile", pool.Key)
 	}
 	instanceID := int64Arg(args, "instance_id")
 	if instanceID <= 0 {
@@ -600,7 +622,7 @@ func notForSaleReason(p *Pool, m *Machine) string {
 			return "no public SSH"
 		}
 		return m.EndpointIssue
-	case m.PublicHost == "":
+	case m.PublicHost == "" && !m.managed():
 		return "no customer endpoint"
 	}
 	return ""
@@ -683,6 +705,9 @@ func (a *App) toolMachineUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	// An endpoint typed by the operator wins over Instances; an empty
 	// public_host hands the endpoint back to Instances.
 	resetEndpoint := false
+	if _, ok := args["public_host"]; ok && m.managed() {
+		return nil, errors.New("a phone has no SSH endpoint; customers reach it through Mobile")
+	}
 	if v, ok := args["public_host"]; ok {
 		if host := strings.TrimSpace(strFromAny(v)); host != "" {
 			sets = append(sets, "public_host=?", "endpoint_source='manual'", "endpoint_issue=''")
@@ -764,7 +789,11 @@ func (a *App) toolMachineInspect(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, fmt.Errorf("machine %d cannot be sold: %s", m.ID, m.EndpointIssue)
 	}
 	steps := []string{"prepare_ssh", "preflight", "check_os", "check_clean"}
-	if pool.Platform == "macos" {
+	if m.managed() {
+		steps = deviceInspectSteps(boolArg(args, "capture_baseline"))
+	} else if boolArg(args, "capture_baseline") {
+		return nil, errors.New("capture_baseline is for phones (app-managed pools)")
+	} else if pool.Platform == "macos" {
 		steps = []string{"prepare_ssh", "preflight", "check_os", "install_reset_scripts", "check_clean"}
 	}
 	if m.State != MachineQuarantined {
@@ -790,6 +819,17 @@ func (a *App) toolMachineClean(ctx *sdk.AppCtx, args map[string]any) (any, error
 	pool, err := requirePool(db, m.PoolKey)
 	if err != nil {
 		return nil, err
+	}
+	if m.managed() {
+		if m.State == MachineReserved || m.State == MachinePreparing || m.State == MachineAssigned || m.State == MachineSuspended {
+			return nil, fmt.Errorf("machine %d is %s", m.ID, m.State)
+		}
+		op, err := a.machineOp(ctx, m, OpClean, deviceResetSteps, actor(args))
+		if err != nil {
+			return nil, err
+		}
+		m, _ = dbMachineGet(db, m.ID)
+		return map[string]any{"machine": m, "operation": op}, nil
 	}
 	if pool.Platform != "macos" {
 		return nil, errors.New("automatic cleaning is only available for macOS pools; clean the machine by hand and run inspect")
@@ -914,6 +954,9 @@ func (a *App) refreshMachines(ctx *sdk.AppCtx) {
 	unreachable := 0
 	var lastErr error
 	for _, m := range machines {
+		if m.managed() {
+			continue // refreshDevices asks the managing app
+		}
 		if err := a.refreshMachine(ctx, m); err != nil {
 			unreachable++
 			lastErr = err

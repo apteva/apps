@@ -50,6 +50,9 @@ func eraseRefusedReason(m *Machine) string {
 }
 
 func planSteps(kind string, profile *Profile, product *Product, pool *Pool, m *Machine, t *Tenant) ([]string, error) {
+	if m.managed() || (pool != nil && pool.ManagedBy != "") {
+		return planDeviceSteps(kind)
+	}
 	onDemand := profile.Backend == BackendMachineOnDemand
 	macPool := pool != nil && pool.Platform == "macos"
 	canErase := macPool && eraseRefusedReason(m) == ""
@@ -315,6 +318,10 @@ func (a *App) createMachineTenant(ctx *sdk.AppCtx, t *Tenant, profile *Profile, 
 			return nil, err
 		}
 		t.Metadata = jsonRaw(mergeMaps(mapFromAny(t.Metadata), map[string]any{"platform": pool.Platform}))
+		if pool.ManagedBy != "" {
+			// A phone is reached through its managing app, not SSH.
+			t.SSHUser, t.AccessKeys = "", nil
+		}
 		var presaleHold bool
 		if machine, presaleHold, err = claimMachineTx(tx, profile, t, reservationID, false); err != nil {
 			return nil, err
@@ -422,7 +429,7 @@ func claimMachineTx(tx *sql.Tx, profile *Profile, t *Tenant, reservationID strin
 	} else if r != nil && r.Status == "held" {
 		var ok int
 		err := tx.QueryRow(`SELECT 1 FROM hosting_machines m WHERE m.id=? AND m.state='reserved' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
-			AND m.public_host != '' AND m.endpoint_issue = ''
+			AND `+endpointOK+`
 			AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`, r.MachineID).Scan(&ok)
 		if err == nil {
 			t.ReservationID = r.ID
@@ -604,7 +611,7 @@ type lifecycleSpec struct {
 }
 
 var lifecycleSpecs = map[string]lifecycleSpec{
-	OpSuspend: {kind: OpSuspend, transient: TenantSuspending, settled: TenantSuspended, allowed: []string{TenantActive, TenantResuming, TenantProvisioning}},
+	OpSuspend: {kind: OpSuspend, transient: TenantSuspending, settled: TenantSuspended, allowed: []string{TenantActive, TenantResuming, TenantProvisioning, TenantDegraded}},
 	OpResume:  {kind: OpResume, transient: TenantResuming, settled: TenantActive, allowed: []string{TenantSuspended, TenantSuspending}},
 }
 
@@ -812,6 +819,10 @@ func (a *App) machineTenantOp(ctx *sdk.AppCtx, kind string, args map[string]any)
 			return t, nil, err
 		}
 		return nil, nil, fmt.Errorf("%s is only available for machine tenants", kind)
+	}
+	if t.Device != nil {
+		_, err := planDeviceSteps(kind)
+		return nil, nil, err
 	}
 	if kind == OpReinstall {
 		if err := confirmTenant(t, args); err != nil {
@@ -1093,6 +1104,10 @@ func (a *App) resolveStuckTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant,
 		pool, err := requirePool(db, m.PoolKey)
 		if err != nil {
 			return nil, nil, err
+		}
+		if m.managed() {
+			kind, transient, steps = OpRelease, TenantReleasing, deviceResetSteps
+			break
 		}
 		if pool.Platform != "macos" {
 			return nil, nil, errors.New("force_clean is only available for macOS pool machines")

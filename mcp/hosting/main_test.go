@@ -55,6 +55,7 @@ type platformStub struct {
 	onCall         map[string]func() // hooks run before a tool, outside the lock
 	runErrStarted  bool              // containers_run fails after starting the container
 	workloads      []map[string]any  // what containers_list returns
+	mobile         *fakeMobile       // nil: the Mobile app is not installed
 }
 
 type callAppCall struct {
@@ -88,6 +89,15 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		return json.Unmarshal(b, out)
 	}
 	switch tool {
+	case "mobile_devices", "mobile_session", "mobile_device":
+		if p.mobile == nil {
+			return errors.New("app mobile is not installed")
+		}
+		v, err := p.mobile.handle(tool, input)
+		if err != nil {
+			return err
+		}
+		return reply(v)
 	case "containers_list":
 		return reply(map[string]any{"workloads": p.workloads})
 	case "containers_run":
@@ -335,7 +345,7 @@ func TestEmbeddedManifestValid(t *testing.T) {
 		if !dep.Optional {
 			t.Fatalf("dependency %s must be optional", dep.Name)
 		}
-		if dep.Name != "containers" && dep.Name != "instances" {
+		if dep.Name != "containers" && dep.Name != "instances" && dep.Name != "mobile" {
 			t.Fatalf("unexpected dependency %s", dep.Name)
 		}
 		if len(dep.Events) > 0 {
