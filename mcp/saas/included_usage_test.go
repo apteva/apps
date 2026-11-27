@@ -31,6 +31,8 @@ type stubHold struct {
 	allocs    map[int64]int64 // lot id -> units held
 	status    string
 	committed int64
+	shortfall int64
+	ttl       int64
 }
 
 // includedStub models Credits lots per wallet unit: grants dedupe by
@@ -46,6 +48,18 @@ type includedStub struct {
 	usdAvail    int64
 	subPeriod   [2]string
 	grantErrors int
+	byRef       map[string]int64 // reserve reference -> hold
+	shortfalls  map[string]int64 // unit -> units not covered by a commit
+}
+
+// expireHold lets a hold lapse like Credits does after its ttl: the units go
+// back to the wallet and commit/release fail.
+func (p *includedStub) expireHold(id int64) {
+	h := p.holds[id]
+	if h != nil && h.status == "held" {
+		p.settleHold(h, 0)
+		h.status = "expired"
+	}
 }
 
 func newIncludedStub(now func() time.Time) *includedStub {
@@ -135,13 +149,21 @@ func (p *includedStub) CallAppResult(appName, tool string, input map[string]any,
 	case "credits:credits_lots_list":
 		body = map[string]any{"lots": p.listLots(unit)}
 	case "credits:credits_reserve":
+		if id, ok := p.byRef[unit+"|"+strFromAny(input["reference"])]; ok && strFromAny(input["reference"]) != "" {
+			body = map[string]any{"hold_id": id, "available_after": p.available(unit)}
+			break
+		}
 		amount := int64FromAny(input["amount"])
 		if amount > p.available(unit) {
 			body = map[string]any{"denied": true, "reason": "insufficient_balance"}
 			break
 		}
 		p.nextHold++
-		h := &stubHold{unit: unit, amount: amount, allocs: map[int64]int64{}, status: "held"}
+		h := &stubHold{unit: unit, amount: amount, allocs: map[int64]int64{}, status: "held", ttl: int64FromAny(input["ttl_seconds"])}
+		if p.byRef == nil {
+			p.byRef = map[string]int64{}
+		}
+		p.byRef[unit+"|"+strFromAny(input["reference"])] = p.nextHold
 		if unit != "usd" {
 			left := amount
 			for _, l := range p.lots[unit] {
@@ -168,14 +190,24 @@ func (p *includedStub) CallAppResult(appName, tool string, input map[string]any,
 			amount = int64FromAny(v)
 		}
 		if h.status == "committed" {
-			body = map[string]any{"committed": h.committed, "replayed": true}
+			body = map[string]any{"committed": h.committed, "shortfall": h.shortfall, "replayed": true}
 			break
 		}
-		p.settleHold(h, amount)
-		h.status, h.committed = "committed", amount
-		body = map[string]any{"committed": amount}
+		if h.status == "expired" || h.status == "released" {
+			return fmt.Errorf("hold %d is already %s", int64FromAny(input["hold_id"]), h.status)
+		}
+		short := p.settleHold(h, amount)
+		if p.shortfalls == nil {
+			p.shortfalls = map[string]int64{}
+		}
+		p.shortfalls[h.unit] += short
+		h.status, h.committed, h.shortfall = "committed", amount-short, short
+		body = map[string]any{"committed": amount - short, "shortfall": short}
 	case "credits:credits_release":
 		h := p.holds[int64FromAny(input["hold_id"])]
+		if h.status == "expired" {
+			return fmt.Errorf("hold %d is already expired", int64FromAny(input["hold_id"]))
+		}
 		if h.status == "held" {
 			p.settleHold(h, 0)
 			h.status = "released"
@@ -194,11 +226,17 @@ func (p *includedStub) CallAppResult(appName, tool string, input map[string]any,
 }
 
 // settleHold unholds the hold's lots and consumes amount from them; an
-// overrun is taken from other active lots.
-func (p *includedStub) settleHold(h *stubHold, amount int64) {
+// overrun is taken from other active lots. It returns what could not be
+// covered (Credits records it as a shortfall).
+func (p *includedStub) settleHold(h *stubHold, amount int64) int64 {
 	if h.unit == "usd" {
 		p.usdAvail += h.amount - amount
-		return
+		if p.usdAvail < 0 {
+			short := -p.usdAvail
+			p.usdAvail = 0
+			return short
+		}
+		return 0
 	}
 	left := amount
 	for _, l := range p.lots[h.unit] {
@@ -228,6 +266,7 @@ func (p *includedStub) settleHold(h *stubHold, amount int64) {
 		l.Remaining -= use
 		left -= use
 	}
+	return left
 }
 
 var includedPrices = map[int64]map[string]any{
@@ -319,7 +358,7 @@ func TestIncludedUsage_NewFreeAccountHas60Minutes(t *testing.T) {
 	if lot.Original != 60 || lot.ExpiresAt != "2026-12-01T00:00:00Z" || lot.Priority != includedLotPriority {
 		t.Fatalf("lot=%+v", lot)
 	}
-	wantRef := "saas:included:acct:" + acct.ID + ":meter:telephony/call:minutes:period:2026-11-01T00:00:00Z:plan:free"
+	wantRef := "saas:included:acct:" + acct.ID + ":meter:telephony/call:minutes:period:2026-11-01T00:00:00Z:plan:free:upto:60"
 	if lot.SourceRef != wantRef {
 		t.Fatalf("source_ref=%s, want %s", lot.SourceRef, wantRef)
 	}
@@ -459,7 +498,7 @@ func TestIncludedUsage_PlanChangeGrantsOnlyTheDifference(t *testing.T) {
 		t.Fatal(err)
 	}
 	lots := pf.lots["minutes"]
-	if len(lots) != 2 || lots[1].Original != 40 || !strings.HasSuffix(lots[1].SourceRef, ":plan:free-plus") {
+	if len(lots) != 2 || lots[1].Original != 40 || !strings.HasSuffix(lots[1].SourceRef, ":plan:free-plus:upto:100") {
 		t.Fatalf("upgrade lots=%+v", lots)
 	}
 	e := includedEntry(t, app, ctx, acct)

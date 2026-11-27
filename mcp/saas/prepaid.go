@@ -361,7 +361,10 @@ type accountSnapshot struct {
 	Prepaid  bool
 	Settings prepaidSettings
 	Included []includedUsageItem
-	expires  time.Time
+	// IncludedNextCheck is when the allowance is next due for a grant
+	// (zero: due now).
+	IncludedNextCheck time.Time
+	expires           time.Time
 }
 
 type planMeterSet struct {
@@ -449,10 +452,10 @@ func (a *App) accountSnapshotFor(ctx *sdk.AppCtx, pid, accountID string) (*accou
 		return &s, nil
 	}
 	pricing.mu.Unlock()
-	var status, planKey, billingMode, planMeta string
-	err := ctx.AppDB().QueryRow(`SELECT a.status, a.plan_key, COALESCE(p.billing_mode,''), COALESCE(p.metadata_json,'{}')
+	var status, planKey, billingMode, planMeta, acctMeta string
+	err := ctx.AppDB().QueryRow(`SELECT a.status, a.plan_key, COALESCE(p.billing_mode,''), COALESCE(p.metadata_json,'{}'), COALESCE(a.metadata_json,'{}')
 		FROM saas_accounts a LEFT JOIN saas_plans p ON p.project_id=a.project_id AND p.key=a.plan_key
-		WHERE a.project_id=? AND a.id=?`, pid, accountID).Scan(&status, &planKey, &billingMode, &planMeta)
+		WHERE a.project_id=? AND a.id=?`, pid, accountID).Scan(&status, &planKey, &billingMode, &planMeta, &acctMeta)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -463,7 +466,8 @@ func (a *App) accountSnapshotFor(ctx *sdk.AppCtx, pid, accountID string) (*accou
 	s := accountSnapshot{
 		ID: accountID, Status: status, PlanKey: planKey, Prepaid: billingMode == billingModePrepaid,
 		Settings: prepaidSettingsFromMetadata(planMetadata), Included: includedUsageFromMetadata(planMetadata),
-		expires: now.Add(accountSnapshotTTL),
+		IncludedNextCheck: includedNextCheck(&Account{PlanKey: planKey, Metadata: json.RawMessage(acctMeta)}),
+		expires:           now.Add(accountSnapshotTTL),
 	}
 	pricing.mu.Lock()
 	if pricing.accounts == nil {
@@ -660,15 +664,33 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 		scope = "project:" + project
 	}
 
-	// Included usage is spent first: hold what the allowance covers and
-	// price only the rest from the paid wallet.
+	// Quantity meters (an allowance or a per-unit price) always get a hold,
+	// so settle can bill the actual quantity: without an estimate one unit
+	// is assumed. Their holds live long enough for a long session
+	// (hold_seconds, default 24 hours); settle still bills an expired hold.
+	quantityMeter := included != nil || (meter != nil && meter.Unit != nil)
 	quantity := int64Arg(args, "estimated_quantity")
 	if quantity <= 0 {
 		quantity = int64Arg(args, "quantity")
 	}
+	if quantity <= 0 && quantityMeter {
+		quantity = 1
+	}
+	holdTTL := int64Arg(args, "hold_seconds")
+	if holdTTL <= 0 && quantityMeter {
+		holdTTL = quantityHoldSeconds
+	}
+	if holdTTL > maxHoldSeconds {
+		holdTTL = maxHoldSeconds
+	}
+
+	// Included usage is spent first: hold what the allowance covers and
+	// price only the rest from the paid wallet. A period that just started
+	// is granted here rather than waiting for the worker.
 	var incHold, incTaken, incRemaining int64
 	if included != nil && quantity > 0 {
-		incHold, incTaken, incRemaining, err = a.holdIncludedUsage(ctx, pid, accountID, included, quantity, reference, scope)
+		a.ensureIncludedIfDue(ctx, pid, accountID, snap.IncludedNextCheck)
+		incHold, incTaken, incRemaining, err = a.holdIncludedUsage(ctx, pid, accountID, included, quantity, reference, scope, holdTTL)
 		if err != nil {
 			return nil, err
 		}
@@ -702,6 +724,9 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 		input["metadata"] = map[string]any{"meter": meter.Meter.Meter, "plan_key": snap.PlanKey}
 		if scope != "" {
 			input["scope"] = scope
+		}
+		if holdTTL > 0 {
+			input["ttl_seconds"] = holdTTL
 		}
 		var reserve struct {
 			Denied bool   `json:"denied"`
@@ -756,12 +781,46 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 		out["included_remaining"] = incRemaining - incTaken
 		out["included_unit"] = included.Unit
 	}
+	// max_quantity is how much the account can use right now: what the
+	// allowance has left plus what the paid balance covers at the unit
+	// price. Callers stop the session there (like max_output_tokens);
+	// usage past it is reported as unbilled_quantity on settle.
+	if quantityMeter {
+		maxQty := incRemaining
+		unlimited := false
+		if meter != nil && meter.Unit != nil {
+			perUnit := meter.Unit.UnitAmountCents * microUnitsPerCent
+			paid := availableAfter + amount
+			if moneyHold == 0 {
+				// Nothing was reserved from the paid wallet: read its balance.
+				var wallet map[string]any
+				if err := ctx.PlatformAPI().CallAppResult("credits", "credits_wallet_get", walletRef(pid, accountID, snap.Settings.CreditsUnit), &wallet); err == nil {
+					paid = max(int64Arg(unwrapMap(wallet, "wallet"), "available"), 0)
+				}
+			}
+			if perUnit <= 0 {
+				unlimited = true
+			} else {
+				maxQty += paid * meter.Unit.UnitSize / perUnit
+			}
+		}
+		if !unlimited {
+			out["max_quantity"] = maxQty
+		}
+	}
 	return out, nil
 }
 
+const (
+	// quantityHoldSeconds is the default hold lifetime for quantity meters
+	// (calls, sessions). Credits' own default is 15 minutes.
+	quantityHoldSeconds = 24 * 60 * 60
+	maxHoldSeconds      = 7 * 24 * 60 * 60
+)
+
 // holdIncludedUsage holds up to quantity units from the allowance wallet. It
 // returns the hold, the units held and the units that were available.
-func (a *App) holdIncludedUsage(ctx *sdk.AppCtx, pid, accountID string, item *includedUsageItem, quantity int64, reference, scope string) (int64, int64, int64, error) {
+func (a *App) holdIncludedUsage(ctx *sdk.AppCtx, pid, accountID string, item *includedUsageItem, quantity int64, reference, scope string, ttlSeconds int64) (int64, int64, int64, error) {
 	var wallet map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_wallet_get", walletRef(pid, accountID, item.Unit), &wallet); err != nil {
 		return 0, 0, 0, fmt.Errorf("credits wallet %s: %w", item.Unit, err)
@@ -784,6 +843,9 @@ func (a *App) holdIncludedUsage(ctx *sdk.AppCtx, pid, accountID string, item *in
 	input["metadata"] = map[string]any{"meter": item.key(), "included": true}
 	if scope != "" {
 		input["scope"] = scope
+	}
+	if ttlSeconds > 0 {
+		input["ttl_seconds"] = ttlSeconds
 	}
 	var reserve struct {
 		Denied bool  `json:"denied"`
@@ -865,7 +927,7 @@ func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	release := func(id int64) error {
 		var out map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": id}, &out); err != nil {
+		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": id}, &out); err != nil && !holdGone(err) {
 			return fmt.Errorf("credits release: %w", err)
 		}
 		return nil
@@ -885,68 +947,226 @@ func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if quantity < 0 {
 		quantity = 0
 	}
-	// Units beyond what the allowance held go to the paid wallet when the
-	// request had a paid hold; otherwise they are drawn from the allowance
-	// (Credits records a shortfall if it is empty).
-	incUsed, over := quantity, int64(0)
-	if incHold != 0 && moneyHold != 0 && quantity > incTaken {
-		incUsed, over = incTaken, quantity-incTaken
-	}
-	if incHold == 0 {
-		incUsed, over = 0, quantity
-	}
-	if incHold != 0 {
-		if incUsed == 0 {
-			if err := release(incHold); err != nil {
-				return nil, err
-			}
-		} else {
-			var out struct {
-				Committed int64 `json:"committed"`
-			}
-			if err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", map[string]any{"_project_id": pid, "hold_id": incHold, "amount": incUsed}, &out); err != nil {
-				return nil, fmt.Errorf("credits commit: %w", err)
-			}
-		}
-		result["included_used"] = incUsed
-	}
-	if moneyHold == 0 {
-		return result, nil
-	}
-	commit := map[string]any{"_project_id": pid, "hold_id": moneyHold}
 	meta := tokenMetadata(args["token_metadata"])
-	snap, err := a.accountSnapshotFor(ctx, pid, strArg(meta, "account_id"))
+	accountID := strArg(meta, "account_id")
+	snap, err := a.accountSnapshotFor(ctx, pid, accountID)
 	if err != nil {
 		return nil, err
 	}
-	var meter *resolvedMeter
+	sourceApp := firstNonEmpty(strings.TrimSpace(strArg(args, "source_app")), "llm")
+	meterKey := usageMeterKey(args, "requested_model")
+	reference := sourceApp + "/request/" + firstNonEmpty(strings.TrimSpace(strArg(args, "request_id")), "ref-"+ref)
+	var included *includedUsageItem
 	if snap != nil {
-		meter, err = a.resolveMeter(ctx, pid, snap.PlanKey, firstNonEmpty(strings.TrimSpace(strArg(args, "source_app")), "llm"), usageMeterKey(args, "requested_model"))
+		included = matchIncludedUsage(snap.Included, sourceApp, meterKey)
+	}
+
+	// The allowance covers as much of the quantity as it has left: what was
+	// held plus whatever else is available now. Nothing is drawn past it, so
+	// the allowance never records a shortfall.
+	var incUsed int64
+	if incHold != 0 || (included != nil && quantity > 0) {
+		incUsed, err = a.settleIncluded(ctx, pid, accountID, included, incHold, incTaken, quantity, reference)
+		if err != nil {
+			return nil, err
+		}
+		result["included_used"] = incUsed
+	}
+	over := quantity - incUsed
+	if over < 0 {
+		over = 0
+	}
+
+	// The rest is priced from the plan's meter and taken from the paid
+	// wallet: through the request's hold when it has one, otherwise (or when
+	// the hold expired during a long session) directly.
+	var meter *resolvedMeter
+	if snap != nil && (snap.Prepaid || moneyHold != 0) {
+		meter, err = a.resolveMeter(ctx, pid, snap.PlanKey, sourceApp, meterKey)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if meter != nil {
-		amount := priceUsage(meter, usageQuantities{
-			Input: int64Arg(args, "input_tokens"), Output: int64Arg(args, "output_tokens"),
-			CachedInput: int64Arg(args, "cached_tokens"), Requests: 1, Quantity: over,
-		})
-		commit["amount"] = amount
+	if over > 0 && (meter == nil || meter.Unit == nil) {
+		// No price for usage past the allowance (e.g. a free plan): it is
+		// reported, not billed. Authorize's max_quantity is the limit.
+		result["unbilled_quantity"] = over
+		over = 0
+	}
+	var amount int64
+	priced := meter != nil
+	if priced {
+		q := usageQuantities{Quantity: over}
+		if moneyHold != 0 {
+			q.Input, q.Output, q.CachedInput, q.Requests = int64Arg(args, "input_tokens"), int64Arg(args, "output_tokens"), int64Arg(args, "cached_tokens"), 1
+		}
+		amount = priceUsage(meter, q)
 		result["amount"] = amount
-	} else {
+	} else if moneyHold != 0 {
 		// The price vanished between authorize and settle (plan or meter
 		// changed). The hold was priced when it was authorized, so it is
 		// committed in full rather than given away.
 		result["unpriced"] = true
 	}
+	if moneyHold != 0 {
+		commit := map[string]any{"_project_id": pid, "hold_id": moneyHold}
+		if priced {
+			commit["amount"] = amount
+		}
+		var out struct {
+			Committed int64 `json:"committed"`
+			Shortfall int64 `json:"shortfall"`
+		}
+		err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", commit, &out)
+		switch {
+		case err == nil:
+			result["committed"] = out.Committed
+			if out.Shortfall > 0 {
+				result["shortfall"] = out.Shortfall
+			}
+			return result, nil
+		case !holdGone(err) || !priced || snap == nil:
+			return nil, fmt.Errorf("credits commit: %w", err)
+		}
+		result["hold_expired"] = true
+	}
+	if amount > 0 && snap != nil {
+		committed, short, err := a.chargeWithoutHold(ctx, pid, accountID, snap.Settings.CreditsUnit, amount, reference+"/settle", nil)
+		if err != nil {
+			return nil, err
+		}
+		result["committed"] = committed
+		if short > 0 {
+			result["shortfall"] = short
+		}
+	}
+	return result, nil
+}
+
+// holdGone reports a commit or release on a hold that already expired or
+// was released, e.g. a phone session that outlived its hold.
+func holdGone(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "is already expired") || strings.Contains(msg, "is already released")
+}
+
+// settleIncluded takes up to quantity units from the allowance: the held
+// units plus whatever the allowance wallet still has available, never more.
+// It returns the units taken.
+func (a *App) settleIncluded(ctx *sdk.AppCtx, pid, accountID string, item *includedUsageItem, incHold, incTaken, quantity int64, reference string) (int64, error) {
+	available := func() (int64, error) {
+		if item == nil {
+			return 0, nil
+		}
+		var wallet map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_wallet_get", walletRef(pid, accountID, item.Unit), &wallet); err != nil {
+			return 0, fmt.Errorf("credits wallet %s: %w", item.Unit, err)
+		}
+		w := unwrapMap(wallet, "wallet")
+		if w == nil || strArg(w, "status") == "frozen" {
+			return 0, nil
+		}
+		return max(int64Arg(w, "available"), 0), nil
+	}
+	if incHold != 0 {
+		want := min(quantity, incTaken)
+		if quantity > incTaken {
+			avail, err := available()
+			if err != nil {
+				return 0, err
+			}
+			want = min(quantity, incTaken+avail)
+		}
+		if want == 0 {
+			var out map[string]any
+			if err := ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": incHold}, &out); err != nil && !holdGone(err) {
+				return 0, fmt.Errorf("credits release: %w", err)
+			}
+			return 0, nil
+		}
+		var out struct {
+			Committed int64 `json:"committed"`
+		}
+		err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", map[string]any{"_project_id": pid, "hold_id": incHold, "amount": want}, &out)
+		if err == nil {
+			if out.Committed > 0 {
+				return out.Committed, nil
+			}
+			return want, nil
+		}
+		if !holdGone(err) || item == nil {
+			return 0, fmt.Errorf("credits commit: %w", err)
+		}
+		// The hold expired and its units went back to the wallet: take
+		// them directly below.
+	}
+	if item == nil || quantity <= 0 {
+		return 0, nil
+	}
+	avail, err := available()
+	if err != nil {
+		return 0, err
+	}
+	take := min(quantity, avail)
+	if take <= 0 {
+		return 0, nil
+	}
+	committed, _, err := a.chargeWithoutHold(ctx, pid, accountID, item.Unit, take, reference+"/included/settle", map[string]any{"meter": item.key(), "included": true})
+	return committed, err
+}
+
+// chargeWithoutHold takes amount from a wallet for usage that already
+// happened and has no live hold: it holds what the wallet has and commits
+// the full amount, so Credits records any rest as a shortfall. The
+// reference makes a retry return the same hold and replay the commit.
+// It returns the amount committed and the shortfall.
+func (a *App) chargeWithoutHold(ctx *sdk.AppCtx, pid, accountID, unit string, amount int64, reference string, metadata map[string]any) (int64, int64, error) {
+	if amount <= 0 {
+		return 0, 0, nil
+	}
+	var wallet map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_wallet_get", walletRef(pid, accountID, unit), &wallet); err != nil {
+		return 0, 0, fmt.Errorf("credits wallet %s: %w", unit, err)
+	}
+	w := unwrapMap(wallet, "wallet")
+	if w == nil {
+		return 0, amount, nil
+	}
+	take := min(amount, int64Arg(w, "available"))
+	if take <= 0 {
+		return 0, amount, nil
+	}
+	input := walletRef(pid, accountID, unit)
+	input["amount"] = take
+	input["reference"] = reference
+	if metadata != nil {
+		input["metadata"] = metadata
+	}
+	var reserve struct {
+		Denied bool  `json:"denied"`
+		HoldID int64 `json:"hold_id"`
+		Hold   *struct {
+			ID int64 `json:"id"`
+		} `json:"hold"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_reserve", input, &reserve); err != nil {
+		return 0, 0, fmt.Errorf("credits reserve %s: %w", unit, err)
+	}
+	holdID := reserve.HoldID
+	if holdID == 0 && reserve.Hold != nil {
+		holdID = reserve.Hold.ID
+	}
+	if reserve.Denied || holdID == 0 {
+		return 0, amount, nil
+	}
 	var out struct {
 		Committed int64 `json:"committed"`
+		Shortfall int64 `json:"shortfall"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", commit, &out); err != nil {
-		return nil, fmt.Errorf("credits commit: %w", err)
+	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", map[string]any{"_project_id": pid, "hold_id": holdID, "amount": amount}, &out); err != nil {
+		return 0, 0, fmt.Errorf("credits commit: %w", err)
 	}
-	result["committed"] = out.Committed
-	return result, nil
+	return out.Committed, out.Shortfall, nil
 }
 
 // ─── Account API keys ────────────────────────────────────────────────
@@ -1269,15 +1489,15 @@ func (a *App) prepaidMCPTools() []sdk.Tool {
 		{Name: "saas_plan_meter_set", Description: "Link a prepaid plan's usage meter (source_app + meter, e.g. llm + model:text-fast, or model:* as the default) to Catalog metered prices for input, output, cached_input and per_request. unit_price_id prices the meter's own quantity (e.g. per minute) for usage reported as estimated_quantity / quantity, including usage beyond a plan's included_usage. Prices must be metered, active and in the plan's credits_unit.", InputSchema: schemaObject(map[string]any{
 			"plan_key": strSchema(), "source_app": strSchema(), "meter": strSchema(),
 			"input_price_id": intSchema(), "output_price_id": intSchema(), "cached_input_price_id": intSchema(), "per_request_price_id": intSchema(),
-			"metadata": objSchema(),
+			"unit_price_id": intSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "source_app", "meter"}), Handler: a.toolPlanMeterSet},
 		{Name: "saas_plan_meters_list", Description: "List a plan's usage meters and their Catalog price links.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "source_app": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanMetersList},
-		{Name: "saas_usage_authorize", Description: "Admission hook: price a request's worst case from the account's plan meters and hold that much credit. For quantity meters pass estimated_quantity (e.g. minutes); the plan's included_usage for the meter is held first and only the rest is priced from the paid wallet. Returns {allow, admission_ref} or a refusal with http_status and error_type (included_exhausted when the allowance is used up and the plan has no paid price for the meter).", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_usage_authorize", Description: "Admission hook: price a request's worst case from the account's plan meters and hold that much credit. For quantity meters pass estimated_quantity (e.g. minutes; 1 if omitted); the plan's included_usage for the meter is held first and only the rest is priced from the paid wallet. Quantity holds last hold_seconds (default 24 hours). Returns {allow, admission_ref, max_quantity} (stop the session at max_quantity) or a refusal with http_status and error_type (included_exhausted when the allowance is used up and the plan has no paid price for the meter).", InputSchema: schemaObject(map[string]any{
 			"request_id": strSchema(), "token_metadata": objSchema(), "model": strSchema(), "meter": strSchema(), "source_app": strSchema(),
 			"estimated_input_tokens": intSchema(), "max_output_tokens": intSchema(),
-			"estimated_quantity": intSchema(),
+			"estimated_quantity": intSchema(), "hold_seconds": intSchema(),
 		}, []string{"request_id"}), Handler: a.toolUsageAuthorize},
-		{Name: "saas_usage_settle", Description: "Admission hook settlement: price the actual usage and commit the hold, or release it when the request failed. Pass quantity for quantity meters; it is taken from the included allowance first. Safe to retry.", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_usage_settle", Description: "Admission hook settlement: price the actual usage and commit the hold, or release it when the request failed. Pass request_id and, for quantity meters, the actual quantity: it is taken from the included allowance first (up to what is left), the rest is billed from the paid wallet at the meter's unit price, also when the hold expired during a long session. Usage with no price past the allowance is returned as unbilled_quantity. Safe to retry.", InputSchema: schemaObject(map[string]any{
 			"request_id": strSchema(), "admission_ref": strSchema(), "status": strSchema(), "token_metadata": objSchema(),
 			"requested_model": strSchema(), "model": strSchema(), "meter": strSchema(), "source_app": strSchema(),
 			"input_tokens": intSchema(), "output_tokens": intSchema(), "cached_tokens": intSchema(),

@@ -3690,6 +3690,10 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	if err := validateIncludedUsage(metadata, billingMode, subscriptionRequired); err != nil {
 		return nil, err
 	}
+	var previousIncluded string
+	if err := db.QueryRow(`SELECT COALESCE(json_extract(metadata_json, '$.included_usage'), '') FROM saas_plans WHERE project_id=? AND key=?`, pid, key).Scan(&previousIncluded); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
 		var existingMetadata string
 		err := db.QueryRow(`SELECT metadata_json FROM saas_plans WHERE project_id=? AND key=?`, pid, key).Scan(&existingMetadata)
@@ -3722,6 +3726,18 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 		return nil, err
 	}
 	pricing.invalidatePlan(pid, key)
+	// A changed allowance (e.g. 60 -> 120 minutes) is granted to every
+	// account on the plan by the next included-usage pass, or on its next
+	// request, instead of waiting for the period to end.
+	var currentIncluded string
+	if err := db.QueryRow(`SELECT COALESCE(json_extract(metadata_json, '$.included_usage'), '') FROM saas_plans WHERE project_id=? AND key=?`, pid, key).Scan(&currentIncluded); err != nil {
+		return nil, err
+	}
+	if currentIncluded != previousIncluded {
+		if err := markIncludedUsageChanged(db, pid, key); err != nil {
+			return nil, err
+		}
+	}
 	return dbPlanGet(db, pid, key)
 }
 
