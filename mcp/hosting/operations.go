@@ -24,6 +24,9 @@ const (
 	OpReinstall  = "reinstall"
 	OpInspect    = "inspect"
 	OpClean      = "clean"
+	// OpDeviceStop ends Hosting's session on a phone taken from its tenant
+	// (swap). It changes nothing else.
+	OpDeviceStop = "device_stop"
 )
 
 const (

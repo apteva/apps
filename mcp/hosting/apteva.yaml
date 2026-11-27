@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.5.0
+version: 2.5.1
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH

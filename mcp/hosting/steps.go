@@ -55,7 +55,7 @@ func (a *App) loadStepEnv(ctx *sdk.AppCtx, op *Operation) (*stepEnv, error) {
 		if env.machine, err = requireMachine(db, op.MachineID); err != nil {
 			return nil, err
 		}
-		if env.machine.State == MachineQuarantined && op.Kind != OpInspect && op.Kind != OpClean {
+		if env.machine.State == MachineQuarantined && op.Kind != OpInspect && op.Kind != OpClean && op.Kind != OpDeviceStop {
 			return nil, errors.New("machine was quarantined by an operator")
 		}
 		if env.pool, err = requirePool(db, env.machine.PoolKey); err != nil {

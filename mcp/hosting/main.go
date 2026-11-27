@@ -22,7 +22,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "2.5.0"
+const appVersion = "2.5.1"
 
 type App struct {
 	// quietOffline holds machines marked offline because Instances could not
@@ -118,7 +118,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"ssh_keys": map[string]any{"type": "array", "items": strSchema()}, "slug": strSchema(),
 				"runtime_config": objSchema(), "metadata": objSchema(), "apteva_version": strSchema(),
 			}, []string{"external_ref", "profile", "owner_email"}), Handler: a.toolTenantCreate},
-		{Name: "hosting_tenant_get", Description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details (or, for a rented phone, device: managed_by, device_ref, session_id, online), current run and recent events.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantGet},
+		{Name: "hosting_tenant_get", Description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details (or, for a rented phone, device: managed_by, device_ref, session_id, online; this is the only tool that shows the session id), current run and recent events.", InputSchema: schemaObject(tenantRef, nil), Handler: a.toolTenantGet},
 		{Name: "hosting_tenant_update", Description: "Update a tenant's external_ref, owner_email or metadata (merged). Use it to link a tenant migrated from 1.x to the caller's account id. Changing an external_ref that is already set needs confirm equal to the tenant id.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "external_ref": strSchema(), "owner_email": strSchema(), "metadata": objSchema(), "confirm": strSchema(), "actor": strSchema()}, []string{"tenant_id"}), Handler: a.toolTenantUpdate},
 		{Name: "hosting_tenant_resolve", Description: "Settle a machine tenant left by a failure (quarantined machine, or stuck suspending/resuming/releasing/failed). action: resume, release, or force_clean (erase a validated macOS machine without revoking first). Needs reviewed=true and confirm equal to the tenant id.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "action": strSchema(), "reviewed": boolSchema(), "confirm": strSchema(), "actor": strSchema()}, []string{"tenant_id", "action", "reviewed", "confirm"}), Handler: a.toolTenantResolve},
 		{Name: "hosting_tenant_list", Description: "List tenants. Filters: status, profile_key, backend, owner_email, external_ref, include_released.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "profile_key": strSchema(), "backend": strSchema(), "owner_email": strSchema(), "external_ref": strSchema(), "include_released": boolSchema(), "limit": intSchema()}, nil), Handler: a.toolTenantList},

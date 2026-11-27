@@ -39,6 +39,7 @@ func (a *App) toolTenantGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.revealSession()
 	out := tenantResult(db, t, nil)
 	if events, err := dbEventList(db, t.ID, 20); err == nil {
 		out["events"] = events
