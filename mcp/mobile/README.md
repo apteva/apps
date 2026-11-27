@@ -504,3 +504,8 @@ Field value guards bind account identity; password fields are never read.
 ADB replacements verify the focused field and resulting text and accept printable
 ASCII only (excluding percent); unsupported bytes fail before clearing a field.
 No input is automatically retried by the Instagram Android operations.
+
+Passwords go through `secure_text`, preferably as `secret_ref`: a name from the
+encrypted `mobile_secrets` setting, bound to a package and optionally a field
+and phone, that Mobile resolves itself so the agent never sees the value. See
+[ANDROID_SECURE_INPUT.md](ANDROID_SECURE_INPUT.md).
