@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 
 	_ "embed"
 
@@ -21,9 +22,15 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "2.4.0"
+const appVersion = "2.4.1"
 
-type App struct{}
+type App struct {
+	// quietOffline holds machines marked offline because Instances could not
+	// be reached (not because it reported them down): no alert went out, so
+	// none goes out when they come back either.
+	quietMu      sync.Mutex
+	quietOffline map[int64]bool
+}
 
 var globalCtx *sdk.AppCtx
 

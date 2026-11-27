@@ -51,6 +51,7 @@ type platformStub struct {
 	destroyCalled  []int64
 	osVersion      string            // sw_vers / os-release answer
 	activationLock string            // system_profiler Activation Lock Status answer
+	instancesDown  bool              // instance_get fails as if Instances were unreachable
 	onCall         map[string]func() // hooks run before a tool, outside the lock
 	runErrStarted  bool              // containers_run fails after starting the container
 	workloads      []map[string]any  // what containers_list returns
@@ -107,6 +108,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "containers_usage_get":
 		return reply(map[string]any{"usage": map[string]any{"storage_mb": 12}})
 	case "instance_get":
+		if p.instancesDown {
+			return errors.New("dial tcp 127.0.0.1:41000: connection refused")
+		}
 		inst, ok := p.instances[int64Arg(input, "id")]
 		if !ok {
 			return errors.New("instance not found")
@@ -1674,11 +1678,86 @@ func TestResetExitReasons(t *testing.T) {
 		{"verify_clean", 14, "no receipt yet"},
 		{"verify_clean", 13, "serial number"},
 		{"wipe", 15, "RecoveryValidated"},
-		{"reinstall", 1, "secure token"},
+		{"reinstall", 22, "secure token"},
+		{"wipe", 23, "recovery helper failed"},
+		{"verify_clean", 22, "customer account"},
 		{"wipe", 99, "unexpected"},
 	} {
 		if got := resetExitReason(c.step, c.code); !strings.Contains(got, c.want) {
 			t.Errorf("%s exit %d = %q, want %q", c.step, c.code, got, c.want)
+		}
+	}
+}
+
+// ─── 2.4.1 fixes ─────────────────────────────────────────────────────────
+
+func TestInstancesUnreachableSendsNoMachineAlerts(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupMacPool(t, a, ctx, stub, 2)
+	ev := recordEvents(ctx)
+	stub.instancesDown = true
+	_ = a.tick(ctx)
+	if m := machine(t, db, ids[0]); m.Online {
+		t.Fatal("machines go off sale while Instances cannot be asked")
+	}
+	if got := ev.take("hosting.machine.offline"); len(got) != 0 {
+		t.Fatalf("unreachable Instances must not alert per machine: %v", got)
+	}
+	stub.instancesDown = false
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.machine.online"); len(got) != 0 {
+		t.Fatalf("no online alert after a quiet offline: %v", got)
+	}
+	if !machine(t, db, ids[0]).Online {
+		t.Fatal("machines come back online")
+	}
+	// Instances answers that an instance is gone: that one is alerted.
+	delete(stub.instances, 101)
+	_ = a.tick(ctx)
+	if got := ev.take("hosting.machine.offline"); len(got) != 1 || got[0]["machine_id"] != float64(ids[1]) {
+		t.Fatalf("missing instance alert = %v", got)
+	}
+}
+
+// Under set -e a command starting with "!", and every command of an
+// "a && b" list but the last, never stops the script, so a check written
+// that way silently passes. Every check must end in an explicit exit.
+func TestMachineScriptChecksCanFail(t *testing.T) {
+	// The shell behaviour this guards against, on this machine's /bin/sh.
+	out, _ := exec.Command("/bin/sh", "-c", "set -eu; ! echo x | grep -q x; [ -e /nonexistent ] && true; echo passed").CombinedOutput()
+	if !strings.Contains(string(out), "passed") {
+		t.Log("this /bin/sh stops on ! or && under set -e; the scripts must still not rely on it")
+	}
+	files, err := filepath.Glob("scripts/*/*.sh")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("scripts: %v %v", files, err)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			code := strings.TrimSpace(line)
+			if code == "" || strings.HasPrefix(code, "#") {
+				continue
+			}
+			if strings.HasPrefix(code, "! ") {
+				t.Errorf("%s:%d: a check starting with ! is ignored by set -e: %s", f, i+1, code)
+			}
+			if strings.Contains(code, " && ") && !strings.Contains(code, "||") &&
+				!strings.HasPrefix(code, "if ") && !strings.HasPrefix(code, "while ") && !strings.HasPrefix(code, "elif ") {
+				t.Errorf("%s:%d: only the last command of an && list stops set -e: %s", f, i+1, code)
+			}
+		}
+	}
+}
+
+func TestAccessExitReasons(t *testing.T) {
+	for code, want := range map[int]string{31: "disabled", 32: "key file", 33: "processes", 34: "account is still", 255: "sshd", 99: "unexpected"} {
+		if got := accessExitReason(code); !strings.Contains(got, want) {
+			t.Errorf("exit %d = %q, want %q", code, got, want)
 		}
 	}
 }

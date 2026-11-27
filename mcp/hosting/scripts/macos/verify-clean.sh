@@ -17,8 +17,9 @@ current=$(/usr/sbin/diskutil info -plist /System/Volumes/Data | /usr/bin/plutil 
 [ -n "$(get PreviousDataVolumeUUID)" ] && [ "$current" != "$(get PreviousDataVolumeUUID)" ] || exit 17
 [ "$current" = "$(get NewDataVolumeUUID)" ] || exit 18
 [ "$(/usr/bin/sw_vers -productVersion)" = "$(get MacOSVersion)" ] || exit 19
-! /usr/bin/dscl . -list /Users | /usr/bin/grep -q '^hst_'
+# Explicit exit: set -e ignores a command that starts with `!`.
+if /usr/bin/dscl . -list /Users | /usr/bin/grep -q '^hst_'; then exit 22; fi
 for home in /Users/hst_*; do [ ! -e "$home" ] || exit 20; done
 for key in /etc/ssh/apteva-hosting-keys/hst_*; do [ ! -e "$key" ] || exit 21; done
-/usr/sbin/sshd -t
+/usr/sbin/sshd -t || exit 23
 printf 'HOSTING_OK:%s:verify_clean\n' "$operation"

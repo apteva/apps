@@ -1170,8 +1170,7 @@ func (a *App) alertStuckTenants(ctx *sdk.AppCtx) {
 			WHEN status IN ('provisioning','suspending','resuming','releasing') AND updated_at<=? THEN 'status:'||status
 			ELSE ''
 		END
-		FROM hosting_tenants WHERE stuck_alert!='' OR (status='waiting_for_machine' AND due_at IS NOT NULL) OR status IN ('provisioning','suspending','resuming','releasing')
-		LIMIT 500`, nowS, cutoff)
+		FROM hosting_tenants WHERE stuck_alert!='' OR (status='waiting_for_machine' AND due_at IS NOT NULL) OR status IN ('provisioning','suspending','resuming','releasing')`, nowS, cutoff)
 	if err != nil {
 		return
 	}
