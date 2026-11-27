@@ -159,6 +159,12 @@ func (a *App) Workers() []sdk.Worker {
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.retryOutboxEmails(ctx)
 		},
+	}, {
+		Name:     "included-usage",
+		Schedule: "@every 10m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.runIncludedUsage(ctx)
+		},
 	}}
 }
 
@@ -181,7 +187,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"catalog_discount_id": intSchema(), "subscription_required": boolSchema(), "metadata": objSchema(),
 		}, []string{"key", "name"}), Handler: a.toolPlanUpsert},
 		{Name: "saas_plan_feature_add", Description: "Add a feature grant to a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "grant_type": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanFeatureAdd},
-		{Name: "saas_plan_limit_set", Description: "Set a plan limit.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "limit_value": intSchema(), "reset_interval": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanLimitSet},
+		{Name: "saas_plan_limit_set", Description: "Set a plan limit. reset_interval is deprecated and never applied (Entitlements stores it but does not reset usage); for a recurring allowance such as 60 minutes a month, use plan metadata included_usage.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "limit_value": intSchema(), "reset_interval": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanLimitSet},
 		{Name: "saas_plan_usage_source_add", Description: "Register a live usage source for a SaaS plan.", InputSchema: schemaObject(map[string]any{
 			"plan_key": strSchema(), "app_name": strSchema(), "tool_name": strSchema(), "feature_prefix": strSchema(), "feature_key": strSchema(),
 			"read_path": strSchema(), "quantity_path": strSchema(), "call_args": objSchema(), "metadata": objSchema(),
@@ -239,6 +245,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_access_check", Description: "Check account status and usage limit for a feature.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolAccessCheck},
 	}
 	tools = append(tools, a.creditMCPTools()...)
+	tools = append(tools, sdk.Tool{Name: "saas_account_included_usage", Description: "Show an account's included usage for the current period per meter (included, used, remaining, resets_at) and its paid balance, e.g. \"42 of 60 free minutes left, resets 1 Dec\". Grants come from account activation, plan changes, paid renewals and the included-usage worker.", InputSchema: schemaObject(map[string]any{"account_id": strSchema()}, []string{"account_id"}), Handler: a.toolAccountIncludedUsage})
 	return append(tools, a.prepaidMCPTools()...)
 }
 
@@ -1437,7 +1444,18 @@ func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"usage": out, "count": len(out)}, nil
+	result := map[string]any{"usage": out, "count": len(out)}
+	if accountID := strArg(args, "account_id"); accountID != "" {
+		if acct, err := dbAccountGet(ctx.AppDB(), pid, accountID); err == nil && acct != nil {
+			if summary, err := a.includedUsageSummary(ctx, pid, acct); err == nil && summary != nil {
+				result["included_usage"] = summary["included"]
+				if paid, ok := summary["paid"]; ok {
+					result["paid_balance"] = paid
+				}
+			}
+		}
+	}
+	return result, nil
 }
 
 func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1504,12 +1522,34 @@ func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		available := int64FromAny(wallet["available"])
 		out["credit_available"] = available
 		out["credits_unit"] = prepaidSettingsFor(plan).CreditsUnit
-		if available <= 0 {
+		includedLeft := includedUsageLeft(ctx, a, pid, acct, plan, out)
+		if available <= 0 && !includedLeft {
 			out["allowed"] = false
 			out["reason"] = "no_credit"
 		}
+	} else if len(includedUsageForPlan(plan)) > 0 {
+		includedUsageLeft(ctx, a, pid, acct, plan, out)
 	}
 	return out, nil
+}
+
+// includedUsageLeft adds the included-usage summary to out and reports
+// whether any allowance has units left this period.
+func includedUsageLeft(ctx *sdk.AppCtx, a *App, pid string, acct *Account, plan *Plan, out map[string]any) bool {
+	if len(includedUsageForPlan(plan)) == 0 {
+		return false
+	}
+	summary, err := a.includedUsageSummary(ctx, pid, acct)
+	if err != nil || summary == nil {
+		return false
+	}
+	out["included_usage"] = summary["included"]
+	for _, entry := range summary["included"].([]map[string]any) {
+		if int64FromAny(entry["remaining"]) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, bool, error) {
@@ -1694,6 +1734,9 @@ func (a *App) resumeProvisioning(ctx *sdk.AppCtx, pid string, acct *Account, cus
 			return false, err
 		}
 	}
+	// Grant the plan's included usage for the first period. A failure is
+	// retried by the included-usage worker.
+	a.ensureIncludedUsageSoft(ctx, pid, acct.ID)
 	current, err := dbAccountGet(ctx.AppDB(), pid, acct.ID)
 	if err != nil {
 		return false, err
@@ -2798,6 +2841,9 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 		}
 	}
 	pricing.invalidateAccount(pid, acct.ID)
+	if status == StatusActive {
+		a.ensureIncludedUsageSoft(ctx, pid, acct.ID)
+	}
 	if status == StatusCancelled {
 		a.revokeAllAccountKeys(ctx, pid, acct.ID)
 	}
@@ -3355,6 +3401,8 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	if acct, acctErr := dbAccountGet(ctx.AppDB(), pid, op.AccountID); acctErr == nil {
 		a.sendReceiptEmail(ctx, pid, acct, invoice)
 	}
+	// A paid renewal starts a new billing cycle: grant its included usage.
+	a.ensureIncludedUsageSoft(ctx, pid, op.AccountID)
 	return nil
 }
 
@@ -3637,6 +3685,9 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 		return nil, err
 	}
 	if err := validatePlanEmailSender(metadata); err != nil {
+		return nil, err
+	}
+	if err := validateIncludedUsage(metadata, billingMode, subscriptionRequired); err != nil {
 		return nil, err
 	}
 	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
