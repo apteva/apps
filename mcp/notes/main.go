@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: notes
 display_name: Notes
-version: 0.1.1
+version: 0.2.0
 description: Simple searchable notes for Apteva agents and human teams.
 author: Apteva
 icon: /ui/icon.svg
