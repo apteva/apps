@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -130,16 +131,41 @@ func runtimeCall(app *sdk.AppCtx, tool string, input map[string]any, out any) er
 	}
 	err := app.PlatformAPI().CallAppResult("containers", tool, input, out)
 	if err != nil && containersMissing(err) {
-		return containersMissingError(app)
+		noteContainersProbe(false)
+		return &containersUnavailableError{msg: containersMissingError(app).Error(), absent: containersAbsent(err)}
 	}
 	return err
 }
 
-// containersMissing recognises the platform's answer for a call to an app
-// that is not installed (or not running) in this project.
-func containersMissing(err error) bool {
+// errContainersAbsent matches (errors.Is) a runtime call refused because the
+// Containers app is not installed or not bound for Workspaces, as opposed to
+// installed but momentarily unreachable.
+var errContainersAbsent = errors.New("the Containers app is not available to Workspaces")
+
+type containersUnavailableError struct {
+	msg    string
+	absent bool
+}
+
+func (e *containersUnavailableError) Error() string { return e.msg }
+
+func (e *containersUnavailableError) Is(target error) bool {
+	return e.absent && target == errContainersAbsent
+}
+
+// containersAbsent recognises the platform's answers for a call to an app that
+// Workspaces cannot use at all: "app not bound: containers" (the optional
+// dependency is not installed or not bound, the usual answer) and "not
+// installed".
+func containersAbsent(err error) bool {
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "target unreachable") || strings.Contains(text, "not installed")
+	return strings.Contains(text, "app not bound") || strings.Contains(text, "not installed")
+}
+
+// containersMissing also counts an installed Containers app whose sidecar is
+// not answering.
+func containersMissing(err error) bool {
+	return containersAbsent(err) || strings.Contains(strings.ToLower(err.Error()), "target unreachable")
 }
 
 func containersMissingError(app *sdk.AppCtx) error {
@@ -149,11 +175,43 @@ func containersMissingError(app *sdk.AppCtx) error {
 	return errors.New("Docker and test workspaces need the Containers app, which is not installed or not running; install it, or turn local_driver_enabled back on in the Workspaces settings (it also needs sandbox-exec on macOS or bubblewrap on Linux) to run workspaces as sandboxed folders on this machine")
 }
 
-// containersInstalled probes Containers with a lookup that cannot match.
+// containersInstalled probes Containers with a lookup that cannot match. The
+// answer is kept for containersProbeTTL so creates and /profiles do not each
+// make an extra cross-app call.
 func containersInstalled(app *sdk.AppCtx) bool {
+	containersProbe.mu.Lock()
+	if !containersProbe.at.IsZero() && time.Since(containersProbe.at) < containersProbeTTL {
+		installed := containersProbe.installed
+		containersProbe.mu.Unlock()
+		return installed
+	}
+	containersProbe.mu.Unlock()
 	var out map[string]any
 	err := app.PlatformAPI().CallAppResult("containers", "containers_get", map[string]any{"workload_id": "probe-workspaces"}, &out)
-	return err == nil || !containersMissing(err)
+	installed := err == nil || !containersMissing(err)
+	noteContainersProbe(installed)
+	return installed
+}
+
+// containersProbeTTL is a var so tests can turn the cache off.
+var containersProbeTTL = 30 * time.Second
+
+var containersProbe struct {
+	mu        sync.Mutex
+	at        time.Time
+	installed bool
+}
+
+func noteContainersProbe(installed bool) {
+	containersProbe.mu.Lock()
+	containersProbe.at, containersProbe.installed = time.Now(), installed
+	containersProbe.mu.Unlock()
+}
+
+func resetContainersProbe() {
+	containersProbe.mu.Lock()
+	containersProbe.at = time.Time{}
+	containersProbe.mu.Unlock()
 }
 
 func ownedByLocal(input map[string]any) bool {

@@ -80,7 +80,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	commandID := map[string]any{"workspace_id": strSchema(), "command_id": strSchema()}
 	createProps := map[string]any{
 		"name": strSchema(), "purpose": strSchema(),
-		"profile":     map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
+		"profile":     map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}, "description": "Toolchain image for the containers driver (apteva needs the apteva_image setting). On the local driver the profile only labels the workspace: commands use the machine's own tools, and the response has warnings when the profile's tool (go, bun, python3) is not installed."},
 		"image":       strSchema(),
 		"ttl_minutes": intSchema(), "owner_label": strSchema(), "repo_label": strSchema(),
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),

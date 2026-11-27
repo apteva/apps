@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path"
 	"regexp"
 	"strconv"
@@ -244,7 +245,10 @@ func configBool(app *sdk.AppCtx, key string, fallback bool) bool {
 	return parsed
 }
 
-func resolveProfile(app *sdk.AppCtx, requestedProfile, requestedImage string) (string, string, error) {
+// resolveProfile returns the profile and, for the containers driver, its
+// image. The local driver runs no image (commands use the machine's own
+// toolchains), so it accepts any profile, including one with no image set.
+func resolveProfile(app *sdk.AppCtx, requestedProfile, requestedImage, driver string) (string, string, error) {
 	profile := strings.ToLower(strings.TrimSpace(requestedProfile))
 	if profile == "" {
 		profile = strings.ToLower(configString(app, "default_profile", "go"))
@@ -253,6 +257,9 @@ func resolveProfile(app *sdk.AppCtx, requestedProfile, requestedImage string) (s
 	case "go", "bun", "python", "apteva":
 	default:
 		return "", "", fmt.Errorf("unsupported profile %q; use go, bun, python, or apteva", profile)
+	}
+	if driver == driverLocal {
+		return profile, "", nil
 	}
 	if image := strings.TrimSpace(requestedImage); image != "" {
 		if err := validateRequestedImage(app, image); err != nil {
@@ -272,7 +279,7 @@ func resolveProfile(app *sdk.AppCtx, requestedProfile, requestedImage string) (s
 		image = configString(app, "apteva_image", "")
 	}
 	if image == "" {
-		return "", "", fmt.Errorf("profile %q is not configured with an image", profile)
+		return "", "", fmt.Errorf("profile %q has no image on this install (set %s_image in the Workspaces settings), or use driver local", profile, profile)
 	}
 	return profile, image, nil
 }
@@ -359,3 +366,32 @@ func schemaObject(properties map[string]any, required []string) map[string]any {
 func strSchema() map[string]any  { return map[string]any{"type": "string"} }
 func intSchema() map[string]any  { return map[string]any{"type": "integer"} }
 func boolSchema() map[string]any { return map[string]any{"type": "boolean"} }
+
+// profileTool is the command a local workspace needs on PATH for its profile
+// to mean anything; apteva has none.
+func profileTool(profile string) string {
+	switch profile {
+	case "go":
+		return "go"
+	case "bun":
+		return "bun"
+	case "python":
+		return "python3"
+	}
+	return ""
+}
+
+// localProfileWarnings says when a local workspace's profile is only a label:
+// the local driver uses the machine's toolchains and installs nothing.
+func localProfileWarnings(profile, requestedImage string) []string {
+	var warnings []string
+	if tool := profileTool(profile); tool != "" {
+		if _, err := exec.LookPath(tool); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s is not installed on this machine, so this local workspace has no %s toolchain; commands run with the tools the machine has. Use driver containers (needs the Containers app) for a %s image.", tool, profile, profile))
+		}
+	}
+	if strings.TrimSpace(requestedImage) != "" {
+		warnings = append(warnings, "image is ignored on the local driver; commands use the machine's own toolchains")
+	}
+	return warnings
+}

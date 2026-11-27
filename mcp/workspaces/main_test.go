@@ -41,7 +41,7 @@ type platformStub struct {
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	if p.containersGone && appName == "containers" {
-		return errors.New("platform: target unreachable: app containers is not installed")
+		return errors.New(serverNotBoundText)
 	}
 	if tool == "containers_get" && input["workload_id"] == "probe-workspaces" {
 		// Installed-check from defaultDriver; not part of what tests assert.
@@ -49,7 +49,7 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	}
 	p.calls = append(p.calls, appCall{App: appName, Tool: tool, Input: input})
 	if p.containersGone && appName == "containers" {
-		return errors.New("platform: target unreachable: app containers is not installed")
+		return errors.New(serverNotBoundText)
 	}
 	if p.workloadStatus == "" {
 		p.workloadStatus = "running"
@@ -187,7 +187,7 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.12.2" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.12.3" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false

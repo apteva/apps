@@ -81,6 +81,15 @@ fact() { printf '%s\n' "$FACTS" | awk -F'\t' -v k="$1" '$1==k{print $2}'; }
 [ "$(fact ref)" = "$TAG" ] || die "runtime.source.ref is $(fact ref), not $TAG"
 [ "$(fact artifacts)" = "0" ] || die "apteva.yaml already has runtime.artifacts; package the commit before that block is added"
 
+# The tagged source carries runtime.artifacts, and apps that embed apteva.yaml
+# parse it with the SDK at startup. SDKs before v0.82.0 reject the field, so a
+# source build of the tag (any platform without a package) would not start.
+SDK_MIN=v0.82.0
+SDK_PIN="$(awk '$1=="github.com/apteva/app-sdk"{print $2} $1=="require" && $2=="github.com/apteva/app-sdk"{print $3}' "$APP_DIR/go.mod" | head -1)"
+if [ -n "$SDK_PIN" ] && [ "$(printf '%s\n%s\n' "$SDK_MIN" "$SDK_PIN" | sort -V | head -1)" != "$SDK_MIN" ]; then
+  die "$APP_REL pins app-sdk $SDK_PIN, which cannot parse runtime.artifacts; bump it to the latest tag (at least $SDK_MIN) first"
+fi
+
 cd "$ROOT"
 [ -z "$(git status --porcelain -- "$APP_REL")" ] || die "uncommitted changes under $APP_REL; commit them first"
 

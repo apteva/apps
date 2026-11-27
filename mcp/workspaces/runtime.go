@@ -46,13 +46,13 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
-	profile, image, err := resolveProfile(app, strArg(args, "profile"), strArg(args, "image"))
+	profile, image, err := resolveProfile(app, strArg(args, "profile"), strArg(args, "image"), driver)
 	if err != nil {
 		return nil, err
 	}
+	var warnings []string
 	if driver == driverLocal {
-		// No image: commands use the toolchains installed on the machine.
-		image = ""
+		warnings = localProfileWarnings(profile, strArg(args, "image"))
 	}
 	maxTTL := configInt(app, "max_ttl_minutes", 480)
 	ttl := intArg(args, "ttl_minutes", configInt(app, "default_ttl_minutes", 120))
@@ -213,7 +213,12 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	}
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.created", actor, "Workspace is ready", map[string]any{"workload_id": w.WorkloadID})
 	app.EmitWithProject("workspace.created", w.ProjectID, map[string]any{"workspace_id": w.ID, "consumer_app": w.ConsumerApp})
-	return requireWorkspace(app.AppDB(), w.ProjectID, w.ID)
+	created, err := requireWorkspace(app.AppDB(), w.ProjectID, w.ID)
+	if err != nil {
+		return nil, err
+	}
+	created.Warnings = warnings
+	return created, nil
 }
 
 func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[string]any, actor Actor, w *Workspace) (*Command, error) {
@@ -608,26 +613,58 @@ func (a *App) expire(ctx context.Context, app *sdk.AppCtx) error {
 		if w.Kind == kindTest && !parseTime(w.ExpiresAt).After(now) {
 			// Test workspaces have no retention: expiry destroys them.
 			if _, err := a.destroyWorkspace(app, system, w); err != nil {
-				errs = append(errs, fmt.Errorf("destroy expired test %s: %w", w.ID, err))
+				if !a.settleWithoutContainers(app, system, w, err, true) {
+					errs = append(errs, fmt.Errorf("destroy expired test %s: %w", w.ID, err))
+				}
 			}
 			continue
 		}
 		if w.LifecycleStatus == statusExpired && !parseTime(w.DeleteAt).After(now) {
 			if _, err := a.destroyWorkspace(app, system, w); err != nil {
-				errs = append(errs, fmt.Errorf("destroy expired %s: %w", w.ID, err))
+				if !a.settleWithoutContainers(app, system, w, err, true) {
+					errs = append(errs, fmt.Errorf("destroy expired %s: %w", w.ID, err))
+				}
 			}
 			continue
 		}
 		if w.LifecycleStatus != statusExpired && w.LifecycleStatus != statusDestroyed && !parseTime(w.ExpiresAt).After(now) {
 			if _, err := a.stopWorkspace(app, system, w, "workspace.expired"); err != nil {
-				errs = append(errs, fmt.Errorf("expire %s: %w", w.ID, err))
+				if !a.settleWithoutContainers(app, system, w, err, false) {
+					errs = append(errs, fmt.Errorf("expire %s: %w", w.ID, err))
+				}
 			}
 		}
 	}
-	if err := a.collectTestCaches(app, now); err != nil {
+	if err := a.collectTestCaches(app, now); err != nil && !errors.Is(err, errContainersAbsent) {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// settleWithoutContainers finishes the TTL step for a Docker workspace when
+// the Containers app is not installed or not bound (not merely restarting):
+// Workspaces cannot reach its container, so it records the workspace as
+// expired, or destroyed once retention is over, instead of failing the same
+// call every minute. Containers keeps whatever container it still has.
+func (a *App) settleWithoutContainers(app *sdk.AppCtx, actor Actor, w *Workspace, err error, destroy bool) bool {
+	if !errors.Is(err, errContainersAbsent) {
+		return false
+	}
+	note := "the Containers app is not available, so its container could not be reached"
+	updates := map[string]any{"activity_status": activityIdle, "runtime_status": "unknown", "last_error": note, "updated_at": nowUTC()}
+	event, summary := "workspace.expired", "Workspace TTL expired; "+note
+	if destroy {
+		updates["lifecycle_status"], updates["destroyed_at"] = statusDestroyed, nowUTC()
+		event, summary = "workspace.destroyed", "Workspace retention ended; "+note
+	} else {
+		updates["lifecycle_status"] = statusExpired
+	}
+	if updateWorkspace(app.AppDB(), w.ID, updates) != nil {
+		return false
+	}
+	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, event, actor, summary, nil)
+	app.EmitWithProject(event, w.ProjectID, map[string]any{"workspace_id": w.ID})
+	return true
 }
 
 // workloadTarget is the Instances host a workload runs on; 0 means local Docker.

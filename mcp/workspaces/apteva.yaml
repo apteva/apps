@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.12.2
+version: 0.12.3
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -69,6 +69,13 @@ description: |
   v0.12.2 fixes container mode on a fresh container: the default folder
   /var/lib/apteva-workspaces was created 0700, so no workspace could be
   created; folders the driver creates are now 0711.
+  v0.12.3: projects without the Containers app now get local workspaces by
+  default (the platform answers "app not bound", which earlier versions did
+  not recognise), and expiry no longer fails every minute on a Docker
+  workspace it cannot reach. On the local driver every profile is accepted,
+  including apteva, and the create response warns when the profile's tool
+  (go, bun, python3) is not installed. Built with app-sdk v0.123.0: 0.12.1
+  and 0.12.2 could not start when built from source.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -322,23 +329,10 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.12.2
+    ref: workspaces/v0.12.3
     entry: mcp/workspaces
   port: 8080
   health_check: /health
-  artifacts:
-    linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.2/workspaces-v0.12.2-linux-amd64.tar.gz
-      sha256: 20799ff283ffe1f232deef544abc5e2ecaf4977a375bfb1ad54ed963b05ea1fe
-    linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.2/workspaces-v0.12.2-linux-arm64.tar.gz
-      sha256: e4b0b24322506b5e5e8dfad10112f8db5579743af2603d2a59fa6f916f9d1968
-    darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.2/workspaces-v0.12.2-darwin-arm64.tar.gz
-      sha256: 86f010cc80f2809d3e9bc8dda57854a38b9a9af2c691515258c2dc78ccc53e0d
-    darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.2/workspaces-v0.12.2-darwin-amd64.tar.gz
-      sha256: 64c217bcc3d7d3926975e74e4fb5bdfbb7eea3896d7af2d37ff2b434b931e155
 
 db:
   driver: sqlite

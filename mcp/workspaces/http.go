@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,17 @@ func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		if profile.key == "python" && image == "" {
 			image = "python:3.13-bookworm"
 		}
-		profiles = append(profiles, map[string]any{"key": profile.key, "label": profile.label, "image": image, "available": image != ""})
+		entry := map[string]any{"key": profile.key, "label": profile.label, "image": image, "available": image != ""}
+		if image == "" {
+			entry["reason"] = "no image is set for the containers driver (" + profile.key + "_image); the local driver accepts it as a label"
+		}
+		// On the local driver a profile is only a label; say whether its
+		// toolchain is on this machine.
+		if tool := profileTool(profile.key); tool != "" {
+			_, err := exec.LookPath(tool)
+			entry["local_tool"], entry["local_tool_installed"] = tool, err == nil
+		}
+		profiles = append(profiles, entry)
 	}
 	localDriver := map[string]any{"key": driverLocal, "label": "This machine (sandbox)", "available": true}
 	if err := localDriverAvailable(globalCtx); err != nil {
