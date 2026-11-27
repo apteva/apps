@@ -87,6 +87,8 @@ export interface ResponseProgress {
  tool_name?: string; call_id?: string; tool_started_at?: string;
  /** While the model writes the call's arguments: its label once known, and bytes written so far. */
  tool_reason?: string; tool_arg_bytes?: number;
+ /** Calls the model finished writing that wait for the end of its stream to run. */
+ ready_tools?: Array<{ call_id: string; tool_name: string; reason?: string; arg_bytes?: number; started_at: string; ready_at: string }>;
 }
 export interface StreamFrame {
  snapshot?: boolean;

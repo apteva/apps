@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.37.0 — 2026-11-27
+
+- When the model writes several tool calls in one response, a call it has finished writing now shows as "Ready" until it runs, while the call still being written shows "Writing". Before, only the call being written had a row: a finished call vanished when the model moved on and came back when the whole response ended. A grouped row reads, for example, "1 writing · 1 ready".
+- Uses Core's new `llm.tool_ready` event (apteva/core#19). With an older Core nothing changes: calls go from Writing to Running as before.
+- Ready calls are cleared when the model starts a new pass and when Core retries a failed request on another provider (`llm.provider_error`, which comes without a new `llm.start`), since calls from a failed stream never run.
+
 ## 0.36.0 — 2026-11-27
 
 - While the model writes a tool call, the row says what it's doing instead of "Preparing a tool action…". Conversations reads Core's `_reason` argument out of the streamed argument chunks and shows it as soon as it's complete; models usually write it first (on local, "Counting project agents" showed 141ms into a 297ms write). Calls whose reason comes later still show the generic label until then.

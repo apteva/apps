@@ -544,3 +544,68 @@ func TestFlatStringParserReadsReasonAcrossChunks(t *testing.T) {
 		t.Fatal("nested _reason taken as the call's reason")
 	}
 }
+
+func TestReadyToolsWaitForDispatch(t *testing.T) {
+	s := newStreamer(newHub())
+	var frames []StreamFrame
+	s.onFrame = func(f StreamFrame) { frames = append(frames, f) }
+	s.resolve = func(int64, string) string { return "conv-ready" }
+	ingest := func(kind, raw string) { s.Ingest(kind, 41, "chat-conv-ready", raw, time.Now()) }
+	chunk := func(id, text string) {
+		raw, _ := json.Marshal(map[string]string{"tool": "todo_todos_create", "id": id, "chunk": text})
+		ingest("llm.tool_chunk", string(raw))
+	}
+	last := func() *ResponseProgress { t.Helper(); return frames[len(frames)-1].Progress }
+	s.emitAck("conv-ready", "chat-conv-ready", 41, 80)
+	ingest("llm.start", `{}`)
+
+	// Anthropic order: the call is reported ready before the next starts.
+	chunk("c1", `{"_reason":"First todo","title":"a"}`)
+	ingest("llm.tool_ready", `{"tool":"todo_todos_create","id":"c1","arg_bytes":36}`)
+	p := last()
+	if p.CallID != "" || len(p.ReadyTools) != 1 || p.ReadyTools[0].Reason != "First todo" || p.ReadyTools[0].ArgBytes != 36 || p.ReadyTools[0].StartedAt.IsZero() {
+		t.Fatalf("ready call: %+v", p)
+	}
+	// Chat Completions order: the next call starts before the previous one
+	// is reported ready; the ready call keeps its label.
+	chunk("c2", `{"_reason":"Second todo","title":"b"}`)
+	chunk("c3", `{"_reason":"Third","ti`)
+	ingest("llm.tool_ready", `{"tool":"todo_todos_create","id":"c2","arg_bytes":37}`)
+	p = last()
+	if p.CallID != "c3" || p.Phase != "preparing_tool" || len(p.ReadyTools) != 2 || p.ReadyTools[1].Reason != "Second todo" {
+		t.Fatalf("ready while writing next: %+v", p)
+	}
+	// Repeated reports and late chunks of a ready call change nothing.
+	n := len(frames)
+	ingest("llm.tool_ready", `{"tool":"todo_todos_create","id":"c2"}`)
+	chunk("c2", `}`)
+	if len(frames) != n {
+		t.Fatalf("duplicate ready published %d frames", len(frames)-n)
+	}
+	// Frames are copies: later changes do not alter a published frame.
+	published := last()
+	ingest("tool.call", `{"name":"todo_todos_create","id":"c1"}`)
+	if len(published.ReadyTools) != 2 {
+		t.Fatalf("published frame changed: %+v", published)
+	}
+	if p = last(); p.Phase != "running" || p.CallID != "c1" || len(p.ReadyTools) != 1 || p.ReadyTools[0].CallID != "c2" {
+		t.Fatalf("dispatch kept ready call: %+v", p)
+	}
+	// A failed stream retried on another provider: ready calls never run.
+	ingest("llm.provider_error", `{"provider":"a","error":"boom"}`)
+	if p = last(); len(p.ReadyTools) != 0 || p.CallID != "" || p.Phase != "continuing" {
+		t.Fatalf("provider error kept ready calls: %+v", p)
+	}
+	chunk("c9", `{"x":1}`)
+	ingest("llm.tool_ready", `{"tool":"todo_todos_create","id":"c9"}`)
+	ingest("llm.start", `{}`)
+	if p = last(); len(p.ReadyTools) != 0 {
+		t.Fatalf("llm.start kept ready calls: %+v", p)
+	}
+	// Hidden tools are never shown.
+	n = len(frames)
+	ingest("llm.tool_ready", `{"tool":"pace","id":"p1"}`)
+	if len(frames) != n {
+		t.Fatal("hidden tool reported ready")
+	}
+}

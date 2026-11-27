@@ -252,7 +252,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.36.0"
+	const releaseVersion = "0.37.0"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)

@@ -17,6 +17,9 @@ export interface ToolActivity {
   state: ToolActivityState;
   /** Argument bytes written so far while the call is being prepared. */
   argBytes?: number;
+  /** A preparing call whose arguments are complete; it runs when the model
+   * finishes writing its other calls. */
+  ready?: boolean;
   success?: boolean;
   durationMs?: number;
   startedAt: number;

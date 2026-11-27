@@ -482,6 +482,29 @@ for (const host of ["external","package"]) {
  });
 }
 
+test("calls the model finished writing show as ready until they run",async({page,request})=>{
+ await request.post("/reset");await page.goto("/?host=dashboard");
+ await expect(page.getByTitle("Live")).toBeVisible();
+ const chat="chat-operator";
+ const start=new Date(Date.now()-1000).toISOString();
+ const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+ const progress={run_id:"response-ready",revision:1,after_message_id:0,started_at:start};
+ const phase=async(phase:string,revision:number,extra={})=>request.post("/emit",{data:{...frame,response_progress:{...progress,phase,revision,...extra}}});
+ const ready=(id:string,reason:string)=>({call_id:id,tool_name:"code_repos_list",reason,arg_bytes:40,started_at:start,ready_at:new Date().toISOString()});
+ await phase("preparing_tool",2,{tool_name:"code_repos_list",call_id:"call-2",tool_reason:"Listing branches",ready_tools:[ready("call-1","Listing repositories")]});
+ const rows=page.locator(".chat-tool-activity");
+ await expect(rows).toHaveCount(1);
+ await expect(rows.first()).toHaveAttribute("aria-label",/1 writing · 1 ready/);
+ await page.screenshot({path:test.info().outputPath("ready-and-writing.png")});
+ // The first call runs; the second, now complete, waits as ready.
+ await request.post("/emit",{data:{...frame,tool_activity:{id:601,chat_id:chat,agent_id:41,thread_id:chat,call_id:"call-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1}}});
+ await phase("running",3,{tool_name:"code_repos_list",call_id:"call-1",ready_tools:[ready("call-2","Listing branches")]});
+ await expect(rows.first()).toHaveAttribute("aria-label",/1 ready · 1 running/);
+ // A failed stream clears ready calls: nothing is left waiting.
+ await phase("continuing",4,{ready_tools:[]});
+ await expect(rows.first()).toHaveAttribute("aria-label",/Listing repositories, Running/);
+});
+
 for (const host of ["dashboard","external","package"]) {
  test(`${host}: preparation pulses, a 50ms tool settles through a long model wait, and approval waiting stops activity`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);

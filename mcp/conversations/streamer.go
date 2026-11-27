@@ -229,7 +229,7 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	s.telemetrySeen[agentID] = true
 	s.mu.Unlock()
 	s.observeModel(eventType, agentID, threadID, dataJSON)
-	if eventType == "llm.done" || eventType == "llm.provider_error" {
+	if eventType == "llm.done" {
 		// Subscribed only for the model record; responses advance on the
 		// events below.
 		return
@@ -648,7 +648,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	responseEvents := append([]string{"event.received", "event.settled", "llm.start", "llm.done", "llm.provider_error", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}, compactionEvents...)
+	responseEvents := append([]string{"event.received", "event.settled", "llm.start", "llm.done", "llm.provider_error", "llm.tool_chunk", "llm.tool_ready", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"}, compactionEvents...)
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events: responseEvents, ThreadPrefix: "chat-",
 	}, chatFeed)

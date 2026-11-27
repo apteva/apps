@@ -25,9 +25,10 @@ interface ToolActivityProps {
   waitingLabel?: string;
 }
 
-type VisualState = "preparing" | "running" | "done" | "failed" | "interrupted";
+type VisualState = "preparing" | "ready" | "running" | "done" | "failed" | "interrupted";
 
 function visualState(tool: ToolActivity): VisualState {
+  if (tool.state === "preparing" && tool.ready) return "ready";
   if (tool.state !== "done") return tool.state;
   return tool.success === false ? "failed" : "done";
 }
@@ -52,6 +53,7 @@ function stateLabel(tool: ToolActivity, t: (key: string, options?: Record<string
     const size = argSizeLabel(tool.argBytes);
     return size ? `${t("chat.panel.toolPreparing")} · ${size}` : t("chat.panel.toolPreparing");
   }
+  if (state === "ready") return t("chat.panel.toolReady");
   if (state === "running") return t("chat.panel.toolRunning");
   if (state === "failed") return t("chat.panel.toolFailed");
   return t("chat.panel.toolDone");
@@ -61,7 +63,7 @@ function stateLabel(tool: ToolActivity, t: (key: string, options?: Record<string
 // reason holds only the language-neutral sizes ("77k → 24k").
 function compactionLabel(tool: ToolActivity, t: (key: string, options?: Record<string, unknown>) => string): string {
   const state = visualState(tool);
-  if (state === "running" || state === "preparing") return t("compaction.running");
+  if (state === "running" || state === "preparing" || state === "ready") return t("compaction.running");
   if (state === "failed") return t("compaction.failed");
   if (state === "interrupted") return t("compaction.interrupted");
   return t("compaction.done");
@@ -79,6 +81,7 @@ function reasonLabel(tool: ToolActivity, t: (key: string, options?: Record<strin
   const state = visualState(tool);
   if (state === "interrupted") return t("tool.interrupted");
   if (state === "preparing") return t("chat.panel.toolReasonPreparing");
+  if (state === "ready") return t("chat.panel.toolReasonReady");
   if (state === "running") return t("chat.panel.toolReasonRunning");
   if (state === "failed") return t("chat.panel.toolReasonFailed");
   return t("chat.panel.toolReasonDone");
@@ -88,16 +91,17 @@ function aggregateStatus(
   tools: ToolActivity[],
   t: (key: string, options?: Record<string, unknown>) => string,
 ): { text: string; state: VisualState } {
-  const counts = { preparing: 0, running: 0, done: 0, failed: 0, interrupted: 0 };
+  const counts = { preparing: 0, ready: 0, running: 0, done: 0, failed: 0, interrupted: 0 };
   for (const tool of tools) counts[visualState(tool)] += 1;
   const parts = [
     counts.interrupted ? t("tool.interrupted") : "",
     counts.preparing ? t("chat.panel.toolsPreparingCount", { count: counts.preparing }) : "",
+    counts.ready ? t("chat.panel.toolsReadyCount", { count: counts.ready }) : "",
     counts.running ? t("chat.panel.toolsRunningCount", { count: counts.running }) : "",
     counts.failed ? t("chat.panel.toolsFailedCount", { count: counts.failed }) : "",
   ].filter(Boolean);
   if (parts.length === 0) parts.push(t("chat.panel.toolsCompleted"));
-  const state: VisualState = counts.running || counts.preparing
+  const state: VisualState = counts.running || counts.preparing || counts.ready
     ? "running"
     : counts.failed
       ? "failed"

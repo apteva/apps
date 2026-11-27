@@ -26,6 +26,20 @@ type ResponseProgress struct {
 	// bytes have arrived so far.
 	ToolReason   string `json:"tool_reason,omitempty"`
 	ToolArgBytes int    `json:"tool_arg_bytes,omitempty"`
+	// Calls whose arguments are complete (Core's llm.tool_ready) but that
+	// have not started running yet, in the order they became ready.
+	ReadyTools []ReadyTool `json:"ready_tools,omitempty"`
+}
+
+// ReadyTool is a tool call the model has finished writing while it is still
+// writing others. It waits for the end of the model stream before it runs.
+type ReadyTool struct {
+	CallID    string    `json:"call_id"`
+	ToolName  string    `json:"tool_name"`
+	Reason    string    `json:"reason,omitempty"`
+	ArgBytes  int       `json:"arg_bytes,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	ReadyAt   time.Time `json:"ready_at"`
 }
 type responseProgressState struct {
 	ResponseProgress
@@ -44,6 +58,40 @@ type responseProgressState struct {
 	toolArgsParser flatStringParser
 	toolArgsEmit   time.Time
 	toolArgsSent   int
+	// Calls written in the current model pass, by call id, so a call keeps
+	// its label and start time when it is reported ready after the model
+	// has moved on to the next call.
+	written map[string]ReadyTool
+}
+
+// rememberCurrentCall records the call being written under its id.
+func (p *responseProgressState) rememberCurrentCall() {
+	if p.CallID == "" || p.ToolName == "" {
+		return
+	}
+	if p.written == nil {
+		p.written = map[string]ReadyTool{}
+	}
+	p.written[p.CallID] = ReadyTool{CallID: p.CallID, ToolName: p.ToolName, Reason: p.ToolReason, ArgBytes: p.ToolArgBytes, StartedAt: p.ToolStartedAt}
+}
+
+// clearModelPass forgets the calls of a model pass that ended or failed.
+// Calls reported ready by a failed stream never run.
+func (p *responseProgressState) clearModelPass() {
+	p.ToolName = ""
+	p.CallID = ""
+	p.resetToolArgs()
+	p.ReadyTools = nil
+	p.written = nil
+}
+
+func (p *responseProgressState) readyIndex(callID string) int {
+	for i, tool := range p.ReadyTools {
+		if tool.CallID == callID {
+			return i
+		}
+	}
+	return -1
 }
 
 // The reason is read from the start of the arguments; past this many
@@ -305,6 +353,7 @@ func responseProgressKey(chat string, agent int64) string {
 
 func (s *streamer) progressFrame(p *responseProgressState) StreamFrame {
 	value := p.ResponseProgress
+	value.ReadyTools = append([]ReadyTool(nil), p.ReadyTools...)
 	return StreamFrame{Type: "stream", ConversationID: p.chatID, AgentID: p.agentID, ThreadID: p.threadID, CreatedAt: time.Now(), Progress: &value}
 }
 func (s *streamer) finishResponse(chat string, agent int64, afterMessageIDs ...int64) {
@@ -330,8 +379,7 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 	p.Revision = s.progressSeq
 	p.Phase = "idle"
 	p.CompletionMessageID = messageID
-	p.ToolName = ""
-	p.CallID = ""
+	p.clearModelPass()
 	frame := s.progressFrame(p)
 	s.mu.Unlock()
 	s.publish(frame)
@@ -370,6 +418,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		Source     string `json:"source"`
 		Chunk      string `json:"chunk"`
 		Delta      string `json:"delta"`
+		ArgBytes   int    `json:"arg_bytes"`
 	}
 	_ = json.Unmarshal([]byte(raw), &d)
 	name := firstNonEmptyString(d.Name, d.Tool)
@@ -418,22 +467,63 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		if p.hadTools {
 			phase = "continuing"
 		}
-		p.ToolName = ""
-		p.CallID = ""
-		p.resetToolArgs()
+		p.clearModelPass()
+	case "llm.provider_error":
+		// Core retries the request on another provider without a new
+		// llm.start. Nothing the failed stream wrote will run.
+		if p.CallID == "" && len(p.ReadyTools) == 0 {
+			s.mu.Unlock()
+			return
+		}
+		phase = "thinking"
+		if p.hadTools {
+			phase = "continuing"
+		}
+		p.clearModelPass()
 	case "llm.tool_chunk":
 		if !visibleActivityTool(name) {
 			s.mu.Unlock()
 			return
 		}
+		callID := firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
+		if callID != "" && p.readyIndex(callID) >= 0 {
+			s.mu.Unlock()
+			return
+		}
+		if callID != p.CallID {
+			p.rememberCurrentCall()
+		}
 		phase = "preparing_tool"
 		p.ToolName = name
-		p.CallID = firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
+		p.CallID = callID
 		if p.CallID != p.lastCallID || p.Phase != "preparing_tool" {
 			p.ToolStartedAt = ts
 			p.resetToolArgs()
 		}
 		argsChanged = p.trackToolArgs(firstNonEmptyString(d.Chunk, d.Delta), time.Now())
+	case "llm.tool_ready":
+		callID := firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
+		if !visibleActivityTool(name) || callID == "" || p.readyIndex(callID) >= 0 {
+			s.mu.Unlock()
+			return
+		}
+		p.rememberCurrentCall()
+		ready, ok := p.written[callID]
+		if !ok {
+			ready = ReadyTool{CallID: callID, ToolName: name, StartedAt: ts}
+		}
+		if d.ArgBytes > 0 {
+			ready.ArgBytes = d.ArgBytes
+		}
+		ready.ReadyAt = ts
+		p.ReadyTools = append(p.ReadyTools, ready)
+		if callID == p.CallID {
+			// The model is between calls: the next one has not started yet.
+			p.ToolName = ""
+			p.CallID = ""
+			p.resetToolArgs()
+		}
+		phase = "preparing_tool"
 	case "tool.result":
 		if !visibleActivityTool(name) || !p.hadTools {
 			s.mu.Unlock()
@@ -452,6 +542,9 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		}
 		phase = "running"
 		p.hadTools = true
+		if i := p.readyIndex(firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)); i >= 0 {
+			p.ReadyTools = append(p.ReadyTools[:i], p.ReadyTools[i+1:]...)
+		}
 		// Keep the identity announced by llm.tool_chunk on the running
 		// frame.  The durable tool_activity frame normally follows almost
 		// immediately, but it can arrive on a separate queue (or after a

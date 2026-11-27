@@ -1684,7 +1684,9 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
       && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
       ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:p.tool_reason ?? "",argBytes:p.phase === "preparing_tool" ? p.tool_arg_bytes : undefined,state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
-      : []);
+      : []).concat(progresses.flatMap(p => p.phase === "idle" ? [] : (p.ready_tools ?? []).filter(r => r.call_id !== p.call_id && isVisibleChatTool(r.tool_name)
+      && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===r.call_id))
+      .map(r => ({id:`preparing-${p.run_id}-${r.call_id}`,callId:r.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:r.tool_name,reason:r.reason ?? "",argBytes:r.arg_bytes,state:"preparing" as const,ready:true,startedAt:Date.parse(r.started_at) || p.sourceAt}))));
     const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
     // A spawn row whose thread is linked to this conversation shows as a
     // worker card. Nested workers render inside their parent's card.
