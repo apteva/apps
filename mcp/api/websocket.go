@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -41,7 +42,7 @@ const (
 	wsTicketTargetRef      = "gateway"
 	wsTicketTTL            = 60 * time.Second
 	wsTicketsPerKey        = 32
-	wsTicketsTotal         = 10000
+	wsTicketsPerProject    = 10000
 	wsDefaultMaxConns      = 4
 	wsDefaultMaxDuration   = 3600
 	wsDefaultIdleTimeout   = 300
@@ -188,17 +189,21 @@ func (s *wsTicketStore) mint(project string, apiID, keyID int64, now time.Time) 
 	if s.tickets == nil {
 		s.tickets = map[string]wsTicket{}
 	}
-	perKey := 0
+	perKey, perProject := 0, 0
 	for k, t := range s.tickets {
 		if !t.expires.After(now) {
 			delete(s.tickets, k)
 			continue
 		}
-		if t.keyID == keyID && t.project == project {
+		if t.project != project {
+			continue
+		}
+		perProject++
+		if t.keyID == keyID {
 			perKey++
 		}
 	}
-	if perKey >= wsTicketsPerKey || len(s.tickets) >= wsTicketsTotal {
+	if perKey >= wsTicketsPerKey || perProject >= wsTicketsPerProject {
 		return "", time.Time{}, errors.New("too many outstanding websocket tickets")
 	}
 	var b [24]byte
@@ -383,8 +388,10 @@ func (s *wsCloseState) set(code int, reason string) {
 	s.once.Do(func() { s.code, s.reason = code, reason })
 }
 
-// byteBucket throttles a direction to a byte rate. A zero rate is unlimited.
+// byteBucket throttles a connection to a byte rate shared by both
+// directions. A nil bucket is unlimited.
 type byteBucket struct {
+	mu      sync.Mutex
 	rate    float64
 	tokens  float64
 	updated time.Time
@@ -394,17 +401,12 @@ func (b *byteBucket) wait(ctx context.Context, n int) error {
 	if b == nil || b.rate <= 0 {
 		return nil
 	}
-	now := time.Now()
-	b.tokens += now.Sub(b.updated).Seconds() * b.rate
-	if b.tokens > b.rate {
-		b.tokens = b.rate
-	}
-	b.updated = now
-	b.tokens -= float64(n)
-	if b.tokens >= 0 {
+	b.mu.Lock()
+	delay := b.reserve(n)
+	b.mu.Unlock()
+	if delay <= 0 {
 		return nil
 	}
-	delay := time.Duration(-b.tokens / b.rate * float64(time.Second))
 	t := time.NewTimer(delay)
 	defer t.Stop()
 	select {
@@ -413,6 +415,22 @@ func (b *byteBucket) wait(ctx context.Context, n int) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// reserve takes n bytes from the budget and returns how long the caller must
+// wait for them. Callers hold b.mu.
+func (b *byteBucket) reserve(n int) time.Duration {
+	now := time.Now()
+	b.tokens += now.Sub(b.updated).Seconds() * b.rate
+	if b.tokens > b.rate {
+		b.tokens = b.rate
+	}
+	b.updated = now
+	b.tokens -= float64(n)
+	if b.tokens >= 0 {
+		return 0
+	}
+	return time.Duration(-b.tokens / b.rate * float64(time.Second))
 }
 
 func newByteBucket(rate int64) *byteBucket {
@@ -504,8 +522,20 @@ func (a *App) serveWebSocket(w http.ResponseWriter, r *http.Request, route *APIR
 	for _, c := range []*websocket.Conn{client, upstream} {
 		conn := c
 		_ = conn.SetReadDeadline(time.Now().Add(wsPeerSilenceLimit))
-		conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(wsPeerSilenceLimit)) })
+		// The client's pings and pongs count as activity, so a live viewer
+		// of a still screen (no frames) is not cut by idle_timeout. The
+		// app's pongs only prove the app is up, so they do not.
+		fromClient := conn == client
+		conn.SetPongHandler(func(string) error {
+			if fromClient {
+				lastActivity.Store(time.Now().UnixNano())
+			}
+			return conn.SetReadDeadline(time.Now().Add(wsPeerSilenceLimit))
+		})
 		conn.SetPingHandler(func(data string) error {
+			if fromClient {
+				lastActivity.Store(time.Now().UnixNano())
+			}
 			_ = conn.SetReadDeadline(time.Now().Add(wsPeerSilenceLimit))
 			err := conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(wsCloseWriteWait))
 			if errors.Is(err, websocket.ErrCloseSent) {
@@ -520,8 +550,10 @@ func (a *App) serveWebSocket(w http.ResponseWriter, r *http.Request, route *APIR
 	relayCtx, cancelRelay := context.WithCancel(r.Context())
 	defer cancelRelay()
 
+	// One byte budget for the connection: client-to-app and app-to-client
+	// bytes both draw from it.
+	bucket := newByteBucket(cfg.BytesPerSecond)
 	pump := func(src, dst *websocket.Conn, counter *atomic.Int64, fromClient bool) {
-		bucket := newByteBucket(cfg.BytesPerSecond)
 		for {
 			mt, data, err := src.ReadMessage()
 			if err != nil {
@@ -567,7 +599,11 @@ func (a *App) serveWebSocket(w http.ResponseWriter, r *http.Request, route *APIR
 	maxDuration := time.NewTimer(time.Duration(cfg.MaxDurationSeconds) * time.Second)
 	defer maxDuration.Stop()
 	idle := time.Duration(cfg.IdleTimeoutSeconds) * time.Second
-	tick := time.NewTicker(time.Second)
+	// Ping often enough that a live peer's pong lands well inside the idle
+	// window, and check at least four times per window.
+	pingEvery := min(wsPingInterval, idle/3)
+	checkEvery := min(time.Second, idle/4)
+	tick := time.NewTicker(checkEvery)
 	defer tick.Stop()
 	lastPing := time.Now()
 	ctx := r.Context()
@@ -588,7 +624,7 @@ loop:
 				finish(wsCloseIdleTimeout, "idle timeout")
 				break loop
 			}
-			if now.Sub(lastPing) >= wsPingInterval {
+			if now.Sub(lastPing) >= pingEvery {
 				lastPing = now
 				deadline := now.Add(wsCloseWriteWait)
 				_ = client.WriteControl(websocket.PingMessage, nil, deadline)
@@ -621,10 +657,24 @@ func closePayload(code int, reason string) []byte {
 	if code == websocket.CloseNoStatusReceived || code == websocket.CloseAbnormalClosure || code == 0 {
 		return []byte{}
 	}
-	if len(reason) > 120 {
-		reason = reason[:120]
+	return websocket.FormatCloseMessage(code, truncateCloseReason(reason))
+}
+
+// maxCloseReasonBytes is the protocol limit: a close frame body is at most
+// 125 bytes, two of which are the code.
+const maxCloseReasonBytes = 123
+
+// truncateCloseReason cuts a reason to the protocol limit without splitting
+// a UTF-8 character.
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReasonBytes {
+		return reason
 	}
-	return websocket.FormatCloseMessage(code, reason)
+	cut := maxCloseReasonBytes
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
 }
 
 func wsCloseForCause(cause error) (int, string) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/gorilla/websocket"
@@ -403,7 +404,29 @@ func TestWebSocketLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A client that never answers pings and sends nothing is idle.
+		conn.SetPingHandler(func(string) error { return nil })
 		expectClose(t, conn, wsCloseIdleTimeout, "idle timeout")
+	})
+	t.Run("still screen stays open", func(t *testing.T) {
+		// No frames either way, but the viewer answers the gateway's pings:
+		// that is activity, so idle_timeout must not fire.
+		f := newWSFixture(t, map[string]any{"websocket": map[string]any{"idle_timeout_seconds": 1}})
+		_, secret := f.key(t)
+		conn, _, err := f.dial(t, "/api/stream/s1", "", keyHeader(secret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(3500 * time.Millisecond))
+		_, _, err = conn.ReadMessage()
+		var ce *websocket.CloseError
+		if errors.As(err, &ce) {
+			t.Fatalf("still viewer closed with %d %q", ce.Code, ce.Text)
+		}
+		var ne interface{ Timeout() bool }
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("read = %v, want our own read timeout", err)
+		}
 	})
 	t.Run("max duration", func(t *testing.T) {
 		f := newWSFixture(t, map[string]any{"websocket": map[string]any{"max_duration_seconds": 1, "idle_timeout_seconds": 60}})
@@ -433,9 +456,11 @@ func TestWebSocketLimits(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// 6 KiB at 2 KiB/s with a one-second burst takes about two seconds.
-		if elapsed := time.Since(start); elapsed < 1500*time.Millisecond {
-			t.Fatalf("throttle not applied: %v", elapsed)
+		// 6 KiB each way share one 2 KiB/s budget with a one-second burst:
+		// 12 KiB takes about five seconds. Per-direction budgets would take
+		// about two.
+		if elapsed := time.Since(start); elapsed < 4*time.Second {
+			t.Fatalf("budget not shared across directions: %v", elapsed)
 		}
 	})
 }
@@ -496,5 +521,50 @@ func TestWebSocketRouteValidation(t *testing.T) {
 	}
 	if err := validateTarget("ws_ticket", "other"); err == nil {
 		t.Fatal("ws_ticket accepted a target_ref other than gateway")
+	}
+}
+
+func TestWebSocketTicketSurvivesRefusedOrigin(t *testing.T) {
+	f := newWSFixture(t, nil)
+	if _, err := f.app.toolAPIUpdate(f.ctx, map[string]any{"slug": "live", "cors": map[string]any{"enabled": true, "origins": []any{"https://viewer.example"}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, secret := f.key(t)
+	ticket := f.ticket(t, secret)
+	if _, resp, err := f.dial(t, "/api/stream/s1", "ticket="+ticket, http.Header{"Origin": {"https://evil.example"}}); err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bad origin err=%v resp=%v", err, resp)
+	}
+	if _, resp, err := f.dial(t, "/api/stream/s1", "ticket="+ticket, http.Header{"Origin": {"https://viewer.example"}}); err != nil {
+		t.Fatalf("ticket burned by refused origin: err=%v resp=%v", err, resp)
+	}
+}
+
+func TestWebSocketTicketCapIsPerProject(t *testing.T) {
+	var s wsTicketStore
+	now := time.Now()
+	for i := 0; i < wsTicketsPerProject; i++ {
+		if _, _, err := s.mint("busy", 1, int64(i), now); err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+	}
+	if _, _, err := s.mint("busy", 1, -1, now); err == nil {
+		t.Fatal("project cap not enforced")
+	}
+	if _, _, err := s.mint("quiet", 1, 1, now); err != nil {
+		t.Fatalf("another project blocked by a busy one: %v", err)
+	}
+}
+
+func TestCloseReasonKeepsWholeCharacters(t *testing.T) {
+	reason := strings.Repeat("é", 100) // 200 bytes
+	got := truncateCloseReason(reason)
+	if len(got) > maxCloseReasonBytes || !utf8.ValidString(got) || len(got) != 122 {
+		t.Fatalf("len=%d valid=%v", len(got), utf8.ValidString(got))
+	}
+	if truncateCloseReason("stream ended: stopped") != "stream ended: stopped" {
+		t.Fatal("short reason changed")
+	}
+	if p := closePayload(1000, reason); len(p) > 125 {
+		t.Fatalf("close payload %d bytes", len(p))
 	}
 }

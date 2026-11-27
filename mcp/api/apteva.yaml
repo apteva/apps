@@ -2,8 +2,15 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.16.0
+version: 0.16.1
 description: |
+  v0.16.1 WebSocket fixes. The viewer's pings and pongs count as activity, so
+  a viewer of a still screen is no longer cut by idle_timeout; the gateway
+  pings often enough to fit short idle windows. bytes_per_second is one
+  budget for both directions. A ticket is spent only after the origin check.
+  The ticket cap is per project. Close reasons are cut to the protocol limit
+  on a character boundary.
+
   v0.16.0 WebSocket pass-through. A GET app route can accept WebSocket
   connections (route setting websocket). The upgrade is checked like any
   request: API key and scope, rate limit (one connection = one request) and
@@ -203,7 +210,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.16.0
+    ref: api/v0.16.1
     entry: mcp/api
   port: 8080
   health_check: /health

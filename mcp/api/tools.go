@@ -67,7 +67,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"stage":        map[string]any{"type": "string", "description": "Function routes only: the Functions stage to invoke (Functions 1.23.0+), e.g. \"{{stage.vars.functions_stage}}\". Resolved per stage-served request; unknown or paused stages are refused by Functions. Empty runs the active version."},
 				"events":       map[string]any{"type": "object"},
 				"websocket": map[string]any{
-					"description": "true, or an object with enabled, max_connections_per_key (default 4), max_duration_seconds (default 3600), idle_timeout_seconds (default 300), max_message_bytes (default 4194304), bytes_per_second (0 = unlimited). Gateway close codes: 4001 credential revoked, 4002 max duration, 4003 idle timeout, 4004 credential expired, 1009 message too big, 1012 route changed. Upstream close codes are relayed unchanged.",
+					"description": "true, or an object with enabled, max_connections_per_key (default 4), max_duration_seconds (default 3600), idle_timeout_seconds (default 300), max_message_bytes (default 4194304), bytes_per_second (one budget for both directions, 0 = unlimited). Gateway close codes: 4001 credential revoked, 4002 max duration, 4003 idle timeout, 4004 credential expired, 1009 message too big, 1012 route changed. Upstream close codes are relayed unchanged.",
 					"oneOf":       []any{map[string]any{"type": "boolean"}, map[string]any{"type": "object"}},
 				},
 				"auth":       authPolicySchema(),

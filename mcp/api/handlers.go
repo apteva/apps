@@ -315,6 +315,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	wsMode := false
 	var ticket *wsTicket
+	var ticketValues []string
 	if !preflight && websocket.IsWebSocketUpgrade(r) {
 		if !wsCfg.Enabled {
 			logRow.StatusCode = http.StatusBadRequest
@@ -335,17 +336,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "API keys are not accepted in WebSocket URLs; send X-API-Key or connect with a ticket")
 			return
 		}
-		if raw := strings.TrimSpace(query.Get("ticket")); raw != "" || len(query["ticket"]) > 0 {
-			t, ok := a.wsTickets.consume(raw, pid, api.ID, time.Now())
-			if !ok || len(query["ticket"]) > 1 {
-				logRow.StatusCode = http.StatusUnauthorized
-				logRow.AuthKind = "api_key"
-				logRow.Error = "invalid or expired websocket ticket"
-				httpErr(w, http.StatusUnauthorized, "invalid or expired websocket ticket")
-				return
-			}
-			ticket = &t
-		}
+		ticketValues = query["ticket"]
 	}
 	corsWriter, handled, err := prepareGatewayCORS(w, r, api, route, requestMethod, preflight)
 	if err != nil {
@@ -359,6 +350,19 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w = corsWriter
+	// A ticket is spent only once the request passed the origin check, so a
+	// request from a disallowed origin cannot burn it.
+	if wsMode && len(ticketValues) > 0 {
+		t, ok := a.wsTickets.consume(strings.TrimSpace(ticketValues[0]), pid, api.ID, time.Now())
+		if !ok || len(ticketValues) > 1 {
+			logRow.StatusCode = http.StatusUnauthorized
+			logRow.AuthKind = "api_key"
+			logRow.Error = "invalid or expired websocket ticket"
+			httpErr(w, http.StatusUnauthorized, "invalid or expired websocket ticket")
+			return
+		}
+		ticket = &t
+	}
 	if route.TargetKind != "app_events" && !wsMode {
 		ctx, cancel := context.WithTimeoutCause(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond, errGatewayDeadline)
 		defer cancel()
