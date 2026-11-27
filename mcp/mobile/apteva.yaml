@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.9.0
+version: 0.9.1
 description: |
+  v0.9.1 restarts live video when its phone link breaks during a short USB drop, treats a new adb transport as a reconnect, and reports a stopped action as session_stopped.
   v0.9.0 adds an immediate stop for sessions, session/action/device events, phone health with automatic reconnect, live H.264 video with touch input, long-press, drag, any keycode, Unicode replace and wait_for, and baseline/clean for shared phones.
   v0.8.0 reports Android selection state (checkable, checked, selected, scrollable) in UI source and advertises the selection_state capability on the ADB driver.
   v0.7.0 adds Android password entry through a private stdin pipe and accessibility ACTION_SET_TEXT, with exact screen guards, confirmation and recording exclusion.
@@ -107,7 +108,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.9.0
+    ref: mobile/v0.9.1
     entry: mcp/mobile
   port: 8080
   health_check: /health

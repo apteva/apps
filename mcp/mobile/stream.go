@@ -348,6 +348,8 @@ type liveStream struct {
 	gen      int
 	ended    bool
 	gesture  *gestureState
+	// recovering is set while recover retries a broken phone link.
+	recovering bool
 }
 
 type gestureState struct {
@@ -442,10 +444,18 @@ func (st *liveStream) broadcast(msg []byte, config, key bool) {
 
 // ensureRunning starts scrcpy-server on the phone if it is not running.
 func (st *liveStream) ensureRunning() {
+	if err := st.tryStart(); err != nil {
+		st.notify(map[string]any{"type": "error", "code": errorCode(err), "error": err.Error()})
+	}
+}
+
+// tryStart starts scrcpy-server unless it is running, starting, ended or
+// unwatched; those cases return nil.
+func (st *liveStream) tryStart() error {
 	st.mu.Lock()
 	if st.running || st.starting || st.ended || len(st.viewers) == 0 {
 		st.mu.Unlock()
-		return
+		return nil
 	}
 	st.starting = true
 	st.gen++
@@ -456,14 +466,74 @@ func (st *liveStream) ensureRunning() {
 	st.mu.Lock()
 	st.starting = false
 	st.mu.Unlock()
-	if err != nil {
-		msg, _ := json.Marshal(map[string]any{"type": "error", "code": errorCode(err), "error": err.Error()})
-		st.mu.Lock()
-		for v := range st.viewers {
-			v.send(wsMessage{websocket.TextMessage, msg})
-		}
-		st.mu.Unlock()
+	return err
+}
+
+func (st *liveStream) notify(m map[string]any) {
+	msg, _ := json.Marshal(m)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for v := range st.viewers {
+		v.send(wsMessage{websocket.TextMessage, msg})
 	}
+}
+
+// restartBackoff is how long recover waits before each restart attempt.
+var restartBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second}
+
+// recover restarts a stream whose phone link broke while its session stayed
+// active (a USB drop shorter than the presence check, adb restarting). It
+// stops when the stream runs again, ends, loses its viewers, or the session
+// is no longer active: a paused session is restarted by deviceBack instead.
+func (st *liveStream) recover() {
+	st.mu.Lock()
+	if st.recovering {
+		st.mu.Unlock()
+		return
+	}
+	st.recovering = true
+	st.mu.Unlock()
+	defer func() { st.mu.Lock(); st.recovering = false; st.mu.Unlock() }()
+	st.notify(map[string]any{"type": "reconnecting"})
+	e := st.hub.e
+	for i := 0; ; i++ {
+		delay := restartBackoff[min(i, len(restartBackoff)-1)]
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		st.mu.Lock()
+		done := st.running || st.ended || len(st.viewers) == 0
+		st.mu.Unlock()
+		if done {
+			return
+		}
+		if s, err := e.session(st.s.ProjectID, st.s.ID); err != nil || s.Status != "active" {
+			return
+		}
+		if st.tryStart() == nil {
+			st.mu.Lock()
+			running := st.running
+			st.mu.Unlock()
+			if running {
+				return
+			}
+		}
+	}
+}
+
+// lost handles a broken phone link for generation gen: stop the phone side
+// and restart it in the background.
+func (st *liveStream) lost(gen int) {
+	st.mu.Lock()
+	current := st.gen == gen && st.running
+	st.mu.Unlock()
+	if !current {
+		return
+	}
+	st.stopDevice()
+	go st.recover()
 }
 
 var scrcpyVersionRe = regexp.MustCompile(`scrcpy (\d+\.\d+(?:\.\d+)?)`)
@@ -680,13 +750,9 @@ func (st *liveStream) readVideo(gen int, video net.Conn) {
 		}
 		st.broadcast(msg, config, key)
 	}
-	// The phone side ended (unplugged, killed, or stopped on purpose).
-	st.mu.Lock()
-	current := st.gen == gen && st.running
-	st.mu.Unlock()
-	if current {
-		st.stopDevice()
-	}
+	// The phone side ended (unplugged, adb dropped, killed). A stop on
+	// purpose bumps gen first, so it is not treated as a loss.
+	st.lost(gen)
 }
 
 // requestKeyFrame asks the encoder to restart so a joining viewer can decode.
@@ -699,13 +765,22 @@ func (st *liveStream) sendControl(msg []byte) error {
 	ctrl := st.ctrl
 	st.mu.Unlock()
 	if ctrl == nil {
-		return problem("device_unavailable", "the stream is not connected to the phone")
+		return problem("device_unavailable", "the stream is reconnecting to the phone")
 	}
 	st.ctrlMu.Lock()
-	defer st.ctrlMu.Unlock()
 	_ = ctrl.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_, err := ctrl.Write(msg)
-	return err
+	st.ctrlMu.Unlock()
+	if err != nil {
+		st.mu.Lock()
+		gen, same := st.gen, st.ctrl == ctrl
+		st.mu.Unlock()
+		if same {
+			st.lost(gen)
+		}
+		return problem("device_unavailable", "the stream is reconnecting to the phone")
+	}
+	return nil
 }
 
 // stopDevice ends the phone side; viewers stay connected.

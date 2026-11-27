@@ -410,7 +410,7 @@ func writeFailure(w http.ResponseWriter, err error) {
 		status = 403
 	case "not_found":
 		status = 404
-	case "device_unavailable", "session_inactive", "session_expired", "setup_in_progress":
+	case "device_unavailable", "session_inactive", "session_expired", "session_stopped", "setup_in_progress":
 		status = 409
 	case "unsupported", "setup_required", "invalid_configuration":
 		status = 422

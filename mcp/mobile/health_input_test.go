@@ -283,3 +283,88 @@ func TestBaselineScriptKeepsDateAndSettings(t *testing.T) {
 		t.Fatalf("script: %s", script)
 	}
 }
+
+func TestTransportChangeBetweenChecksReconnects(t *testing.T) {
+	e, _, set := presenceFixture(t, time.Hour)
+	set("device transport_id:7")
+	e.health.scan()
+	s := openFixture(t, e, "p")
+	// The phone left and came back between two checks: still "device", new transport.
+	set("device transport_id:8")
+	e.health.scan()
+	got, _ := e.session("p", s.ID)
+	if got.Status != "active" {
+		t.Fatalf("after re-attach: %+v", got)
+	}
+	if len(eventsOf(e, "p", "mobile.device.offline")) != 1 || len(eventsOf(e, "p", "mobile.device.online")) != 1 {
+		t.Fatal("re-attach not reported as offline then online")
+	}
+	e.health.scan() // same transport: nothing new
+	if len(eventsOf(e, "p", "mobile.device.online")) != 1 {
+		t.Fatal("unchanged transport reported again")
+	}
+}
+
+func TestStreamRecoversWhenPhoneLinkBreaks(t *testing.T) {
+	e, _ := fixture(t)
+	s := openFixture(t, e, "p")
+	old := restartBackoff
+	restartBackoff = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { restartBackoff = old })
+	scrcpyCache.Lock()
+	scrcpyCache.at, scrcpyCache.path, scrcpyCache.ver, scrcpyCache.err = time.Now(), "/fake/scrcpy-server", "5.0.1", nil
+	scrcpyCache.Unlock()
+	t.Cleanup(func() { scrcpyCache.Lock(); scrcpyCache.at = time.Time{}; scrcpyCache.Unlock() })
+	var mu sync.Mutex
+	attempts := 0
+	e.drivers.command = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		for _, a := range args {
+			if a == "forward" {
+				mu.Lock()
+				attempts++
+				mu.Unlock()
+				return []byte("not-a-port"), nil // the phone is not back yet
+			}
+		}
+		return []byte("List of devices attached\nphone device\n"), nil
+	}
+	st := newLiveStream(e.streams, s, streamOptions{MaxSize: defaultMaxSize, BitRateKbps: defaultBitRate})
+	v := &viewer{out: make(chan wsMessage, viewerQueue), closed: make(chan struct{})}
+	st.viewers[v] = true
+	st.running, st.gen = true, 1
+	st.lost(2) // a stale generation is not a loss
+	if !st.running {
+		t.Fatal("stale generation stopped the stream")
+	}
+	st.lost(1)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := attempts
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	if attempts < 3 {
+		t.Fatalf("restart attempts: %d", attempts)
+	}
+	mu.Unlock()
+	if m := <-v.out; !strings.Contains(string(m.data), "reconnecting") {
+		t.Fatalf("viewer not told: %s", m.data)
+	}
+	// Once the session ends, recovery stops.
+	execute(t, e, "p", "mobile_session", map[string]any{"action": "stop", "session_id": s.ID})
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := attempts
+	mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts > n+1 {
+		t.Fatalf("still retrying after the session ended: %d -> %d", n, attempts)
+	}
+}

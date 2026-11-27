@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.1 — 2026-11-27
+
+- Live video recovers on its own when its connection to the phone breaks
+  while the session stays active (a USB drop shorter than the 3 s presence
+  check, adb restarting): it restarts with backoff (0.5 s up to 10 s), tells
+  viewers `{"type":"reconnecting"}` and sends a fresh key frame. The panel
+  shows "Reconnecting…".
+- A new adb transport id for a phone that is still listed counts as a drop:
+  its session pauses and resumes, `mobile.device.offline`/`online` are sent,
+  and streams restart.
+- An action cancelled by `mobile_session stop` returns `session_stopped`
+  instead of `infrastructure_error`.
+
 ## 0.9.0 — 2026-11-27
 
 - Stop: `mobile_session action=stop` (session_id, device_id or all=true, with

@@ -51,7 +51,8 @@
    To end at once, mobile_session(action=stop, session_id or device_id or
    all=true, reason?) cancels the running action, lifts any finger, ends
    streams and recordings and records end_reason=stopped. Nothing else runs on
-   a stopped session. If the phone drops off USB, its session becomes paused
+   a stopped session; an action it interrupted returns session_stopped, which
+   is not a phone or host failure, so do not retry or alert on it. If the phone drops off USB, its session becomes paused
    (actions return device_unavailable; it keeps the phone) and resumes when
    the phone returns, or ends as device_lost after the offline grace period.
    Sessions are exclusive across projects; do not create a second controller.

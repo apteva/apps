@@ -814,7 +814,7 @@ function LiveVideo({ sessionID, call, label, onUnavailable }: { sessionID: strin
       ws.onopen = () => { attempt = 0; };
       ws.onmessage = ev => {
         if (typeof ev.data === "string") {
-          try { const m = JSON.parse(ev.data); if (m.type === "error") setInputError(m.error); } catch { /* ignore */ }
+          try { const m = JSON.parse(ev.data); if (m.type === "error") setInputError(m.error); if (m.type === "reconnecting") { setState("reconnecting"); setInputError(""); } } catch { /* ignore */ }
           return;
         }
         packet(new Uint8Array(ev.data as ArrayBuffer));
