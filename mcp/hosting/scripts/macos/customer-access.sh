@@ -90,8 +90,11 @@ case "$step" in
   ;;
  verify_access)
   /usr/bin/id "$customer" >/dev/null
-  [ -s "$key_file" ] && [ "$(/usr/bin/stat -f '%Su:%Lp' "$key_file")" = root:644 ]
-  ! /usr/bin/dscl . -read "/Users/$customer" AuthenticationAuthority 2>/dev/null | /usr/bin/grep -q DisabledUser
+  # Checks are explicit exits: set -e ignores `! cmd` and all but the last
+  # command of `a && b`.
+  [ -s "$key_file" ] || exit 32
+  [ "$(/usr/bin/stat -f '%Su:%Lp' "$key_file")" = root:644 ] || exit 32
+  if /usr/bin/dscl . -read "/Users/$customer" AuthenticationAuthority 2>/dev/null | /usr/bin/grep -q DisabledUser; then exit 31; fi
   /usr/sbin/sshd -t
   routed
   ;;
@@ -99,12 +102,12 @@ case "$step" in
   [ ! -e "$key_file" ]
   if /usr/bin/id "$customer" >/dev/null 2>&1; then
    /usr/bin/dscl . -read "/Users/$customer" AuthenticationAuthority | /usr/bin/grep -q DisabledUser
-   ! /usr/bin/pgrep -u "$customer" >/dev/null
+   if /usr/bin/pgrep -u "$customer" >/dev/null; then exit 33; fi
   fi
   ;;
  check_clean)
   # Used by inspect: no hosted customer account, home or key may survive.
-  ! /usr/bin/dscl . -list /Users | /usr/bin/grep -q '^hst_'
+  if /usr/bin/dscl . -list /Users | /usr/bin/grep -q '^hst_'; then exit 34; fi
   for home in /Users/hst_*; do [ ! -e "$home" ] || exit 27; done
   for key in "$key_dir"/hst_*; do [ ! -e "$key" ] || exit 28; done
   /usr/sbin/sshd -t

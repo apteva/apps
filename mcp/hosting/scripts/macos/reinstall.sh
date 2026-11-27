@@ -22,15 +22,15 @@ password_file=$(get PasswordFile)
 # The password never enters MCP inputs, output, source control, or the process argument list.
 [ ! -L "$password_file" ] && [ "$(/usr/bin/stat -f '%Su:%Lp' "$password_file")" = root:600 ] || exit 16
 [ -x "$installer/Contents/Resources/startosinstall" ] || exit 17
-/usr/bin/codesign --verify --deep --strict "$installer"
-/usr/sbin/spctl --assess --type execute "$installer"
-/usr/sbin/sysadminctl -secureTokenStatus "$management" 2>&1 | /usr/bin/grep -q ENABLED
+/usr/bin/codesign --verify --deep --strict "$installer" || exit 20
+/usr/sbin/spctl --assess --type execute "$installer" || exit 21
+/usr/sbin/sysadminctl -secureTokenStatus "$management" 2>&1 | /usr/bin/grep -q ENABLED || exit 22
 handoff=/usr/local/libexec/apteva-hosting/recovery-handoff
 [ ! -L "$handoff" ] && [ "$(/usr/bin/stat -f '%Su:%Lp' "$handoff")" = root:700 ] || exit 18
 [ "$(/usr/bin/shasum -a 256 "$handoff" | /usr/bin/awk '{print $1}')" = "$(get RecoveryHandoffSHA256)" ] || exit 19
 # This approved helper must durably acknowledge the off-device recovery intent before erase.
 volume=$(/usr/sbin/diskutil info -plist /System/Volumes/Data | /usr/bin/plutil -extract VolumeUUID raw -o - -)
-"$handoff" "$operation" "$serial" "$volume"
+"$handoff" "$operation" "$serial" "$volume" || { echo "recovery-handoff exited $?" >&2; exit 23; }
 job="$root/reset-$operation.sh"
 if [ ! -e "$job" ]; then
  umask 077

@@ -199,6 +199,14 @@ inspect, validate, maintenance, quarantine, clean, remove, reviewed retry,
 resolve a stuck tenant)
 and profiles (with availability).
 
+## Upgrading to 2.4.1
+
+2.4.1 fixes checks in the machine scripts that never failed (a check
+written as `! cmd`, or as the first part of `a && b`, is ignored by
+`set -e`). Run inspect on every macOS pool machine after upgrading so the
+new reset scripts are installed and their hashes pinned. A test rejects
+both patterns in `scripts/`.
+
 ## Upgrading from 1.x
 
 Migration 004 turns plans into container profiles, maps `deleted` tenants to

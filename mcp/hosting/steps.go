@@ -310,9 +310,40 @@ func (a *App) runAccessStep(ctx *sdk.AppCtx, env *stepEnv, step string) error {
 		return err
 	}
 	if res.ExitCode != 0 || !strings.Contains(res.Output, marker(env.op.ID, scriptStep)) {
-		return fmt.Errorf("%s exited %d: %s", step, res.ExitCode, tail(firstNonEmpty(res.Output, res.Error), 400))
+		return fmt.Errorf("%s: %s (exit %d): %s", step, accessExitReason(res.ExitCode), res.ExitCode, tail(firstNonEmpty(res.Output, res.Error), 300))
 	}
 	return nil
+}
+
+// accessExitReason explains the exit codes of scripts/<platform>/customer-access.sh.
+func accessExitReason(code int) string {
+	if r, ok := map[int]string{
+		10:  "the script must run as root",
+		11:  "invalid customer account name",
+		12:  "invalid customer account name",
+		13:  "the customer account would be the management account",
+		14:  "the machine's serial number does not match the machine record",
+		15:  "the management account is missing or is root",
+		16:  "the SSH key folder is a symlink",
+		17:  "the customer key file is a symlink",
+		20:  "no SSH keys given",
+		21:  "the customer account has a system user id",
+		22:  "the SSH keys could not be decoded",
+		24:  "sshd_config does not include sshd_config.d",
+		25:  "the Hosting SSH profile is a symlink",
+		26:  "the Hosting SSH profile breaks the SSH configuration (removed)",
+		27:  "a customer home folder is still on the machine",
+		28:  "a customer SSH key is still on the machine",
+		30:  "unknown step",
+		31:  "the customer account is disabled",
+		32:  "the customer SSH key file is missing or has the wrong owner or mode",
+		33:  "customer processes are still running",
+		34:  "a customer account is still on the machine",
+		255: "sshd rejected the SSH configuration",
+	}[code]; ok {
+		return r
+	}
+	return "unexpected failure"
 }
 
 func tail(s string, n int) string {
@@ -428,6 +459,10 @@ func resetExitReason(step string, code int) string {
 		17: "the macOS installer app is missing",
 		18: "the recovery helper /usr/local/libexec/apteva-hosting/recovery-handoff is missing or not root-only",
 		19: "the recovery helper does not match RecoveryHandoffSHA256",
+		20: "the macOS installer's code signature is invalid",
+		21: "Gatekeeper rejected the macOS installer",
+		22: "the management user has no secure token (needed to erase Apple silicon)",
+		23: "the recovery helper failed (its exit code is in the output)",
 	}
 	if step == "verify_clean" {
 		byStep = map[int]string{
@@ -439,10 +474,9 @@ func resetExitReason(step string, code int) string {
 			19: "the macOS version differs from the one in the receipt",
 			20: "a customer home folder is still on the Mac",
 			21: "a customer SSH key is still on the Mac",
-			1:  "a customer account is still on the Mac, or the SSH configuration is invalid",
+			22: "a customer account is still on the Mac",
+			23: "sshd rejected the SSH configuration",
 		}
-	} else {
-		byStep[1] = "the installer signature, Gatekeeper or the management user's secure token check failed"
 	}
 	if r, ok := common[code]; ok {
 		return r

@@ -911,24 +911,66 @@ func (a *App) refreshMachines(ctx *sdk.AppCtx) {
 	if err != nil {
 		return
 	}
+	unreachable := 0
+	var lastErr error
 	for _, m := range machines {
-		a.refreshMachine(ctx, m)
+		if err := a.refreshMachine(ctx, m); err != nil {
+			unreachable++
+			lastErr = err
+		}
 	}
+	if unreachable > 0 {
+		// One warning instead of an offline alert per machine: the machines
+		// may be fine, Hosting just cannot ask.
+		ctx.Logger().Warn("hosting cannot reach Instances; machines marked offline without alerts", "machines", unreachable, "err", lastErr)
+	}
+}
+
+func (a *App) setQuietOffline(id int64, quiet bool) (was bool) {
+	a.quietMu.Lock()
+	defer a.quietMu.Unlock()
+	was = a.quietOffline[id]
+	if quiet {
+		if a.quietOffline == nil {
+			a.quietOffline = map[int64]bool{}
+		}
+		a.quietOffline[id] = true
+	} else {
+		delete(a.quietOffline, id)
+	}
+	return was
+}
+
+// instanceMissing tells "Instances answered: no such instance" apart from
+// "Instances could not be reached".
+func instanceMissing(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not found")
 }
 
 // refreshMachine copies Instances' view of one machine: whether it is
 // connected, how it is reached, and (unless an operator set it by hand)
 // where customers reach it. A changed endpoint shows up in the assigned
 // tenant's SSH command at once, since that is built from the machine row.
-func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) {
+//
+// It returns an error only when Instances could not be reached: the machine
+// is then taken off sale without an alert.
+func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) error {
 	db := ctx.AppDB()
 	inst, err := instanceGet(ctx, ctx.CurrentProject(), m.InstanceID)
 	if err != nil {
+		missing := instanceMissing(err)
 		if m.Online {
 			_, _ = db.Exec(`UPDATE hosting_machines SET online=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ID)
-			emitMachineOnline(ctx, m, false, m.LastSeenAt, "instance not found: "+err.Error())
+			if missing {
+				emitMachineOnline(ctx, m, false, m.LastSeenAt, "instance not found in Instances")
+			} else {
+				a.setQuietOffline(m.ID, true)
+			}
 		}
-		return
+		if missing {
+			return nil
+		}
+		return err
 	}
 	online := inst.online()
 	seen := m.LastSeenAt
@@ -951,9 +993,15 @@ func (a *App) refreshMachine(ctx *sdk.AppCtx, m *Machine) {
 		updated_at=CASE WHEN online!=? OR public_host!=? OR public_port!=? OR endpoint_issue!=? OR connect_mode!=? THEN CURRENT_TIMESTAMP ELSE updated_at END
 		WHERE id=?`, boolToInt(online), seen, inst.ConnectMode, host, port, issue,
 		boolToInt(online), host, port, issue, inst.ConnectMode, m.ID)
-	if res != nil && online != m.Online {
+	wasQuiet := a.setQuietOffline(m.ID, false)
+	switch {
+	case res == nil || online == m.Online:
+	case online && wasQuiet:
+		// Back after Instances was unreachable: no offline alert went out.
+	default:
 		emitMachineOnline(ctx, m, online, seen, inst.Status)
 	}
+	return nil
 }
 
 // emitMachineOnline tells operators a machine went offline or came back.

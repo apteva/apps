@@ -92,8 +92,11 @@ case "$step" in
   ;;
  verify_access)
   id "$customer" >/dev/null
-  [ -s "$key_file" ] && [ "$(stat -c '%U:%a' "$key_file")" = root:644 ]
-  ! locked
+  # Checks are explicit exits: set -e ignores `! cmd` and all but the last
+  # command of `a && b`.
+  [ -s "$key_file" ] || exit 32
+  [ "$(stat -c '%U:%a' "$key_file")" = root:644 ] || exit 32
+  if locked; then exit 31; fi
   [ "$(getent passwd "$customer" | cut -d: -f7)" = /bin/bash ]
   "$sshd_bin" -t
   routed
@@ -102,11 +105,11 @@ case "$step" in
   [ ! -e "$key_file" ]
   if id "$customer" >/dev/null 2>&1; then
    locked
-   ! pgrep -u "$customer" >/dev/null
+   if pgrep -u "$customer" >/dev/null; then exit 33; fi
   fi
   ;;
  check_clean)
-  ! getent passwd | cut -d: -f1 | grep -q '^hst_'
+  if getent passwd | cut -d: -f1 | grep -q '^hst_'; then exit 34; fi
   for home in /home/hst_*; do [ ! -e "$home" ] || exit 27; done
   for key in "$key_dir"/hst_*; do [ ! -e "$key" ] || exit 28; done
   "$sshd_bin" -t
