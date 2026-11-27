@@ -11,7 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import GeographyView from "./GeographyView";
 import WorldMap from "./WorldMap";
-import { ConnectorsTab, LedgerTab, OverviewTab, QuestionsTab, ScenariosTab, WorldTab } from "./WorldTabs";
+import { ConnectorsTab, LedgerTab, OverviewTab, QuestionsTab, WorldTab } from "./WorldTabs";
+import { ScenariosTab } from "./ScenariosTab";
 import { EvaluationTab } from "./EvaluationView";
 
 // ─── Inlined SDK app-event hook (forward-compat; v0.2 emits signals) ──

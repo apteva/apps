@@ -36,8 +36,8 @@ func (a *App) worldTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": prop("integer"), "as_of": prop("string")}, []string{"id"}), Handler: a.toolEntityGet},
 		{Name: "entity_upsert", Description: "Create or merge an entity. Kinds: organization, facility, place, region, commodity, product, technology, market, institution, infrastructure, event, indicator, public_role, concept. Private individuals are out of scope. Args: name, kind, description?, aliases?, external_ids?.",
 			InputSchema: schemaObject(map[string]any{"name": prop("string"), "kind": prop("string"), "description": prop("string"), "aliases": map[string]any{"type": "array", "items": prop("string")}, "external_ids": prop("object")}, []string{"name", "kind"}), Handler: a.toolEntityUpsert},
-		{Name: "relationship_assert", Description: "Record a typed, time-bounded relationship. status observed|reported need evidence_ids; use assumed for operator assumptions. Args: from, type, to (entity ids or names), status, confidence?, valid_from?, valid_to?, evidence_ids?, note?.",
-			InputSchema: schemaObject(map[string]any{"from": prop("string"), "type": prop("string"), "to": prop("string"), "status": prop("string"), "confidence": prop("number"), "valid_from": prop("string"), "valid_to": prop("string"), "evidence_ids": map[string]any{"type": "array", "items": prop("integer")}, "note": prop("string")}, []string{"from", "type", "to", "status"}), Handler: a.toolRelationshipAssert},
+		{Name: "relationship_assert", Description: "Record a typed, time-bounded relationship. status observed|reported need evidence_ids; use assumed for operator assumptions. causal_basis says what the sources support: mechanism (they explain how the effect passes), asserted (stated without how), co_occurrence (only mentioned together), unsupported. Args: from, type, to (entity ids or names), status, confidence?, valid_from?, valid_to?, evidence_ids?, note?, causal_basis?, causal_note?.",
+			InputSchema: schemaObject(map[string]any{"from": prop("string"), "type": prop("string"), "to": prop("string"), "status": prop("string"), "confidence": prop("number"), "valid_from": prop("string"), "valid_to": prop("string"), "evidence_ids": map[string]any{"type": "array", "items": prop("integer")}, "note": prop("string"), "causal_basis": prop("string"), "causal_note": prop("string")}, []string{"from", "type", "to", "status"}), Handler: a.toolRelationshipAssert},
 		{Name: "relationship_retract", Description: "Retract a relationship from now on (history is kept). Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": prop("integer")}, []string{"id"}), Handler: a.toolRelationshipRetract},
 		{Name: "graph_neighbors", Description: "Entities and relationships within depth hops of an entity, valid at as_of. Args: entity_id, depth? (1-3), as_of?.",
@@ -58,8 +58,20 @@ func (a *App) worldTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": prop("integer"), "outcome": prop("string"), "void": prop("boolean"), "note": prop("string")}, []string{"id", "note"}), Handler: a.toolQuestionResolve},
 		{Name: "ledger", Description: "Outcome ledger: one scored forecast per resolved question vs market and uniform baselines (Brier, log loss, skill), calibration, coverage, by horizon and venue. Args: lock_hours? (default 24).",
 			InputSchema: schemaObject(map[string]any{"lock_hours": prop("number")}, nil), Handler: a.toolLedger},
-		{Name: "scenario_run", Description: "Hypothetical: propagate stated shocks through typed relationships and list exposed entities and open questions with the assumption chain. Args: name?, shocks [{entity_id|entity, description, severity 0-1}], rules? {type:{factor,direction}}, as_of?, max_depth?, min_impact?, skip_assumed?.",
-			InputSchema: schemaObject(map[string]any{"name": prop("string"), "shocks": map[string]any{"type": "array", "items": prop("object")}, "rules": prop("object"), "as_of": prop("string"), "max_depth": prop("integer"), "min_impact": prop("number"), "skip_assumed": prop("boolean")}, []string{"shocks"}), Handler: a.toolScenarioRun},
+		{Name: "scenario_run", Description: "Conditional what-if, not a forecast: propagate stated shocks through typed relationships known at known_at and valid at as_of; returns exposed entities with each link's causal basis and sources, open questions (forecasts unchanged), the evidence profile, limitations and a snapshot hash for replay. By default only mechanism, asserted and assumed links carry a shock; include_weak adds co_occurrence and ungraded links. Args: name?, shocks [{entity_id|entity, description, severity 0-1}], rules? {type:{factor,direction}}, as_of?, known_at? (default: as_of if past, else now), max_depth?, min_impact?, skip_assumed?, include_weak?, ignore_confidence?.",
+			InputSchema: schemaObject(map[string]any{"name": prop("string"), "shocks": map[string]any{"type": "array", "items": prop("object")}, "rules": prop("object"), "as_of": prop("string"), "known_at": prop("string"), "max_depth": prop("integer"), "min_impact": prop("number"), "skip_assumed": prop("boolean"), "include_weak": prop("boolean"), "ignore_confidence": prop("boolean")}, []string{"shocks"}), Handler: a.toolScenarioRun},
+		{Name: "scenario_replay", Description: "Re-run a stored scenario from its spec and check it reproduces: same graph hash and same exposures. Args: scenario_id.",
+			InputSchema: schemaObject(map[string]any{"scenario_id": prop("integer")}, []string{"scenario_id"}), Handler: a.toolScenarioReplay},
+		{Name: "scenario_sensitivity", Description: "Assumption and sensitivity report for a stored scenario: assumption table, one-at-a-time changes, seeded Monte Carlo ranges, single-link fragility and robust/sensitive/fragile labels, plus the latest historical test. Stored on the scenario. Args: scenario_id, draws? (default 200), seed?.",
+			InputSchema: schemaObject(map[string]any{"scenario_id": prop("integer"), "draws": prop("integer"), "seed": prop("integer")}, []string{"scenario_id"}), Handler: a.toolScenarioSensitivity},
+		{Name: "scenario_report", Description: "A stored scenario with its result and latest assumption and sensitivity report. Args: scenario_id.",
+			InputSchema: schemaObject(map[string]any{"scenario_id": prop("integer")}, []string{"scenario_id"}), Handler: a.toolScenarioReport},
+		{Name: "scenario_history_test", Description: "Historical shock test: replay past news events through the graph known at the time and compare later price moves of exposed vs other market questions, with a before-event placebo and event-clustered intervals. Measures association, not causation. Args: window_hours? (24), since_days? (14), max_events? (40), include_weak?, move_threshold? (0.05), seed?.",
+			InputSchema: schemaObject(map[string]any{"window_hours": prop("integer"), "since_days": prop("integer"), "max_events": prop("integer"), "include_weak": prop("boolean"), "move_threshold": prop("number"), "seed": prop("integer")}, nil), Handler: a.toolScenarioHistoryTest},
+		{Name: "scenario_history_tests", Description: "Past historical shock tests. Args: limit?.",
+			InputSchema: schemaObject(map[string]any{"limit": prop("integer")}, nil), Handler: a.toolScenarioHistoryTests},
+		{Name: "relationships_grade", Description: "Grade ungraded links by what their cited headlines say (mechanism, asserted, co_occurrence, unsupported) using the configured LLM. Grades text, not causality. Args: limit? (links, default 60).",
+			InputSchema: schemaObject(map[string]any{"limit": prop("integer")}, nil), Handler: a.toolRelationshipsGrade},
 		{Name: "scenarios_list", Description: "Saved scenario runs. Args: limit?.",
 			InputSchema: schemaObject(map[string]any{"limit": prop("integer")}, nil), Handler: a.toolScenariosList},
 	}
@@ -578,7 +590,11 @@ func (a *App) toolRelationshipAssert(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	r := Relationship{From: from, To: to, Type: strArg(args, "type"), Status: strArg(args, "status"), EvidenceIDs: idsArg(args, "evidence_ids"), Note: strArg(args, "note")}
+	r := Relationship{From: from, To: to, Type: strArg(args, "type"), Status: strArg(args, "status"), EvidenceIDs: idsArg(args, "evidence_ids"), Note: strArg(args, "note"),
+		CausalBasis: strArg(args, "causal_basis"), CausalNote: strArg(args, "causal_note")}
+	if r.CausalBasis != "" {
+		r.GradedBy = "operator"
+	}
 	if c, ok := floatArgAny(args, "confidence"); ok {
 		if c < 0 || c > 1 {
 			return nil, errors.New("confidence must be between 0 and 1")
@@ -886,12 +902,92 @@ func (a *App) toolScenarioRun(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		in.MinImpact = v
 	}
 	in.SkipAssumed, _ = boolArgAny(args, "skip_assumed")
+	in.IncludeWeak, _ = boolArgAny(args, "include_weak")
+	in.IgnoreConfidence, _ = boolArgAny(args, "ignore_confidence")
 	if t, err := timeArg(args, "as_of"); err != nil {
 		return nil, err
 	} else if t != nil {
 		in.AsOf = *t
 	}
+	if t, err := timeArg(args, "known_at"); err != nil {
+		return nil, err
+	} else if t != nil {
+		in.KnownAt = *t
+	}
 	return runScenario(ctx.AppDB(), pid, in)
+}
+
+func (a *App) toolScenarioReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	return replayScenario(ctx.AppDB(), pid, intArgAny(args, "scenario_id"))
+}
+
+func (a *App) toolScenarioSensitivity(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	return runSensitivity(ctx.AppDB(), pid, intArgAny(args, "scenario_id"), int(intArgAny(args, "draws")), intArgAny(args, "seed"))
+}
+
+func (a *App) toolScenarioReport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := intArgAny(args, "scenario_id")
+	spec, hash, result, err := loadScenarioSpec(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	rep, err := loadScenarioReport(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"scenario_id": id, "spec": spec, "snapshot_hash": hash, "result": result, "report": rep}, nil
+}
+
+func (a *App) toolScenarioHistoryTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	hp := historyParams{WindowHours: int(intArgAny(args, "window_hours")), SinceDays: int(intArgAny(args, "since_days")), MaxEvents: int(intArgAny(args, "max_events")), Seed: intArgAny(args, "seed")}
+	hp.IncludeWeak, _ = boolArgAny(args, "include_weak")
+	if v, ok := floatArgAny(args, "move_threshold"); ok {
+		hp.MoveThreshold = v
+	}
+	return runHistoryTest(ctx.AppDB(), pid, hp, nowUTC())
+}
+
+func (a *App) toolScenarioHistoryTests(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listHistoryTests(ctx.AppDB(), pid, int(intArgAny(args, "limit")))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"tests": rows}, nil
+}
+
+func (a *App) toolRelationshipsGrade(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := gradeRelationships(ctx.AppDB(), pid, appLLM(ctx), int(intArgAny(args, "limit")))
+	if err != nil {
+		return nil, err
+	}
+	if prof, err := causalProfile(ctx.AppDB(), pid); err == nil {
+		out["links_by_causal_basis"] = prof
+	}
+	return out, nil
 }
 
 func (a *App) toolScenariosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -996,6 +1092,12 @@ func (a *App) worldRoutes() []sdk.Route {
 		{Pattern: "/graph", Handler: toolRoute(http.MethodGet, a.toolGraphNeighbors)},
 		{Pattern: "/scenarios", Handler: toolRoute(http.MethodGet, a.toolScenariosList)},
 		{Pattern: "/scenario-run", Handler: toolRoute(http.MethodPost, a.toolScenarioRun)},
+		{Pattern: "/scenario-replay", Handler: toolRoute(http.MethodPost, a.toolScenarioReplay)},
+		{Pattern: "/scenario-sensitivity", Handler: toolRoute(http.MethodPost, a.toolScenarioSensitivity)},
+		{Pattern: "/scenario-report", Handler: toolRoute(http.MethodGet, a.toolScenarioReport)},
+		{Pattern: "/scenario-history-test", Handler: toolRoute(http.MethodPost, a.toolScenarioHistoryTest)},
+		{Pattern: "/scenario-history-tests", Handler: toolRoute(http.MethodGet, a.toolScenarioHistoryTests)},
+		{Pattern: "/relationships-grade", Handler: toolRoute(http.MethodPost, a.toolRelationshipsGrade)},
 		{Pattern: "/access-classes", Handler: handleAccessClasses},
 		{Pattern: "/world-map", Handler: toolRoute(http.MethodGet, a.toolWorldMap)},
 		{Pattern: "/quality", Handler: toolRoute(http.MethodGet, a.toolDataQuality)},

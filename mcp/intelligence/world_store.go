@@ -403,6 +403,11 @@ type Relationship struct {
 	ClaimIDs    []int64    `json:"claim_ids"`
 	Note        string     `json:"note,omitempty"`
 	Basis       string     `json:"basis"`
+	// CausalBasis grades what the sources support (see migration 007):
+	// mechanism | asserted | co_occurrence | unsupported | assumed | "".
+	CausalBasis string `json:"causal_basis"`
+	CausalNote  string `json:"causal_note,omitempty"`
+	GradedBy    string `json:"graded_by,omitempty"`
 }
 
 func assertRelationship(db *sql.DB, pid string, r Relationship) (*Relationship, error) {
@@ -428,9 +433,24 @@ func assertRelationship(db *sql.DB, pid string, r Relationship) (*Relationship, 
 		r.ClaimIDs = []int64{}
 	}
 	r.Basis = relationshipBasis(r.Status, r.Basis)
-	err := db.QueryRow(`INSERT INTO intel_relationships (project_id, from_entity_id, rel_type, to_entity_id, status, confidence, valid_from, valid_to, evidence_ids, claim_ids, note, basis)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, r.From, r.Type, r.To, r.Status, fptr(r.Confidence), timeString(r.ValidFrom), timeString(r.ValidTo),
-		mustJSON(r.EvidenceIDs), mustJSON(r.ClaimIDs), r.Note, r.Basis).Scan(&r.ID)
+	r.CausalBasis = strings.ToLower(strings.TrimSpace(r.CausalBasis))
+	switch {
+	case r.Status == "assumed":
+		r.CausalBasis, r.GradedBy = cbAssumed, "status"
+	case r.CausalBasis == cbAssumed:
+		return nil, errors.New("causal_basis assumed is only for status assumed")
+	case r.CausalBasis != "" && !causalBases[r.CausalBasis]:
+		return nil, errors.New("causal_basis must be mechanism, asserted, co_occurrence or unsupported")
+	case r.CausalBasis == "":
+		r.GradedBy = ""
+	}
+	var gradedAt any
+	if r.GradedBy != "" {
+		gradedAt = ts(nowUTC())
+	}
+	err := db.QueryRow(`INSERT INTO intel_relationships (project_id, from_entity_id, rel_type, to_entity_id, status, confidence, valid_from, valid_to, evidence_ids, claim_ids, note, basis, causal_basis, causal_note, graded_by, graded_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, pid, r.From, r.Type, r.To, r.Status, fptr(r.Confidence), timeString(r.ValidFrom), timeString(r.ValidTo),
+		mustJSON(r.EvidenceIDs), mustJSON(r.ClaimIDs), r.Note, r.Basis, r.CausalBasis, r.CausalNote, r.GradedBy, gradedAt).Scan(&r.ID)
 	return &r, err
 }
 
@@ -453,7 +473,7 @@ func relationshipsAt(db *sql.DB, pid string, entityIDs []int64, at *time.Time) (
 		when = ts(*at)
 	}
 	args = append(args, when, when, when)
-	rows, err := db.Query(`SELECT r.id, r.from_entity_id, f.canonical, r.rel_type, r.to_entity_id, t.canonical, r.status, r.confidence, r.valid_from, r.valid_to, r.evidence_ids, r.claim_ids, r.note, r.basis
+	rows, err := db.Query(`SELECT r.id, r.from_entity_id, f.canonical, r.rel_type, r.to_entity_id, t.canonical, r.status, r.confidence, r.valid_from, r.valid_to, r.evidence_ids, r.claim_ids, r.note, r.basis, r.causal_basis, r.causal_note, r.graded_by
 		FROM intel_relationships r JOIN entities f ON f.id = r.from_entity_id JOIN entities t ON t.id = r.to_entity_id
 		WHERE r.project_id = ? AND (r.from_entity_id IN (`+marks+`) OR r.to_entity_id IN (`+marks+`))
 		AND (r.valid_from IS NULL OR r.valid_from <= ?) AND (r.valid_to IS NULL OR r.valid_to > ?)
@@ -468,7 +488,7 @@ func relationshipsAt(db *sql.DB, pid string, entityIDs []int64, at *time.Time) (
 		var conf sql.NullFloat64
 		var from, to flexibleTime
 		var ev, cl string
-		if err := rows.Scan(&r.ID, &r.From, &r.FromName, &r.Type, &r.To, &r.ToName, &r.Status, &conf, &from, &to, &ev, &cl, &r.Note, &r.Basis); err != nil {
+		if err := rows.Scan(&r.ID, &r.From, &r.FromName, &r.Type, &r.To, &r.ToName, &r.Status, &conf, &from, &to, &ev, &cl, &r.Note, &r.Basis, &r.CausalBasis, &r.CausalNote, &r.GradedBy); err != nil {
 			return nil, err
 		}
 		if conf.Valid {

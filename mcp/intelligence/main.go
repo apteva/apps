@@ -26,7 +26,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: intelligence
 display_name: Intelligence
-version: 0.6.1
+version: 0.7.0
 description: |
   A continuously updated, source-attributed model of a part of the world,
   used for recorded and scored probabilistic forecasts and hypothetical
@@ -178,7 +178,19 @@ provides:
     - name: ledger
       description: "Scored forecasts vs market and uniform baselines, calibration and coverage."
     - name: scenario_run
-      description: "Hypothetical shock propagation through typed relationships, with assumption chains."
+      description: "Conditional what-if (not a forecast): shocks propagate only through links whose sources support them, with causal basis, sources, limitations and a replayable snapshot hash."
+    - name: scenario_replay
+      description: "Re-run a stored scenario and check it reproduces."
+    - name: scenario_sensitivity
+      description: "Assumption and sensitivity report: one-at-a-time changes, Monte Carlo ranges, single-link fragility."
+    - name: scenario_report
+      description: "A stored scenario with its result and sensitivity report."
+    - name: scenario_history_test
+      description: "Past events replayed through the graph known at the time vs later market moves, with a placebo window. Association only."
+    - name: scenario_history_tests
+      description: "Past historical shock tests."
+    - name: relationships_grade
+      description: "Grade links by what their cited headlines say: mechanism, asserted, co_occurrence or unsupported."
     - name: scenarios_list
       description: "Saved scenario runs."
     - name: world_map
@@ -245,7 +257,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: intelligence/v0.6.1
+    ref: intelligence/v0.7.0
     entry: mcp/intelligence
   port: 8080
   health_check: /health
