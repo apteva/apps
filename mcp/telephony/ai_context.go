@@ -43,10 +43,11 @@ var aiContextFactKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 var aiContextSlots = make(chan struct{}, 32)
 
 type aiContextConfig struct {
-	FunctionID int64             `json:"function_id"`
-	TimeoutMS  int               `json:"timeout_ms,omitempty"`
-	Variables  map[string]string `json:"variables,omitempty"`
-	OnFailure  string            `json:"on_failure,omitempty"`
+	FunctionID    int64             `json:"function_id"`
+	FunctionStage string            `json:"function_stage,omitempty"`
+	TimeoutMS     int               `json:"timeout_ms,omitempty"`
+	Variables     map[string]string `json:"variables,omitempty"`
+	OnFailure     string            `json:"on_failure,omitempty"`
 }
 
 func (c aiContextConfig) timeout() time.Duration {
@@ -78,6 +79,9 @@ func destinationAIContext(kind, configJSON string) (*aiContextConfig, error) {
 	}
 	if c.FunctionID <= 0 {
 		return nil, errors.New("context.function_id is required")
+	}
+	if c.FunctionStage != "" && !functionStagePattern.MatchString(c.FunctionStage) {
+		return nil, errors.New("context.function_stage must match ^[a-z0-9][a-z0-9-]{0,39}$")
 	}
 	if c.TimeoutMS != 0 && (c.timeout() < aiContextMinTimeout || c.timeout() > aiContextMaxTimeout) {
 		return nil, fmt.Errorf("context.timeout_ms must be between %d and %d", aiContextMinTimeout.Milliseconds(), aiContextMaxTimeout.Milliseconds())
@@ -325,7 +329,7 @@ func (a *App) invokeAIContext(ctx *sdk.AppCtx, cfg *aiContextConfig, request []b
 		Status   string `json:"status"`
 		Response string `json:"response"`
 	}
-	input := map[string]any{"id": cfg.FunctionID, "event": json.RawMessage(request)}
+	input := functionInvokeInput(cfg.FunctionID, cfg.FunctionStage, request)
 	done := make(chan error, 1)
 	go func() {
 		// The slot is held until the platform call returns, even after a timeout.

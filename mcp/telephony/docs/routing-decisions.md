@@ -42,6 +42,7 @@ Example flow draft, with a saved static overflow group:
       "id": "choose", "type": "decision",
       "config": {
         "function_id": 42,
+        "function_stage": "production",
         "timeout_ms": 2000,
         "ring_timeout_seconds": 20,
         "max_attempts": 12,
@@ -60,6 +61,13 @@ Example flow draft, with a saved static overflow group:
   ]
 }
 ```
+
+`function_stage` (optional, `^[a-z0-9][a-z0-9-]{0,39}$`) is passed to
+`functions_invoke` as `stage`, so the decision runs that Functions stage's
+promoted version with its vars and access. Without it Functions runs the
+function's active version with the function's own settings. Use it when the
+same function serves several environments through stages (for example a
+staging and a production Telephony install calling `staging` and `production`).
 
 Publish and assign the flow to a Twilio, Telnyx, or manually configured
 Bandwidth webhook number, or a direct SIP number from Twilio, Telnyx, or DIDWW.

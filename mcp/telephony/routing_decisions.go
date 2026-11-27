@@ -18,6 +18,7 @@ import (
 // that function's active version, so business rules can evolve independently.
 type decisionConfig struct {
 	FunctionID      int64          `json:"function_id"`
+	FunctionStage   string         `json:"function_stage,omitempty"`
 	TimeoutMS       int            `json:"timeout_ms"`
 	RingTimeout     int            `json:"ring_timeout_seconds"`
 	Destinations    []string       `json:"destination_ids"`
@@ -92,6 +93,9 @@ func parseDecisionConfig(n routingNode) (decisionConfig, error) {
 	}
 	if c.FunctionID <= 0 || c.TimeoutMS < 100 || c.TimeoutMS > 5000 || c.RingTimeout < 5 || c.RingTimeout > 60 || len(c.Destinations) == 0 || len(c.Destinations) > 100 || n.Branches["fallback"] == "" {
 		return c, errors.New("requires function_id, 1–100 destination_ids, fallback branch, timeout_ms 100–5000 and ring_timeout_seconds 5–60")
+	}
+	if c.FunctionStage != "" && !functionStagePattern.MatchString(c.FunctionStage) {
+		return c, errors.New("function_stage must match ^[a-z0-9][a-z0-9-]{0,39}$")
 	}
 	if c.MaxAttempts < 1 || c.MaxAttempts > 100 || c.TotalWaitSec < 5 || c.TotalWaitSec > 1800 || c.FunctionRetries < 0 || c.FunctionRetries > 5 || c.RetryDelaySec < 1 || c.RetryDelaySec > 30 {
 		return c, errors.New("max_attempts must be 1–100, total_wait_seconds 5–1800, function_retry_limit 0–5 and retry_delay_seconds 1–30")
@@ -619,7 +623,7 @@ func (a *App) invokeDecision(rpcCtx context.Context, ctx *sdk.AppCtx, d decision
 		Status   string `json:"status"`
 		Response string `json:"response"`
 	}
-	if e = sdk.CallAppResultContext(rpcCtx, ctx.PlatformAPI(), "functions", "functions_invoke", map[string]any{"id": cfg.FunctionID, "event": json.RawMessage(d.Request)}, &out); e != nil {
+	if e = sdk.CallAppResultContext(rpcCtx, ctx.PlatformAPI(), "functions", "functions_invoke", functionInvokeInput(cfg.FunctionID, cfg.FunctionStage, d.Request), &out); e != nil {
 		return decisionResponse{}, "function_failed", time.Time{}
 	}
 	receivedAt := time.Now()

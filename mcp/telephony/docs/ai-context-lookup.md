@@ -33,6 +33,7 @@ installed in the same project.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `function_id` | required | Functions-app function to invoke |
+| `function_stage` | none | Functions stage to run (passed to `functions_invoke` as `stage`); without it the function's active version runs |
 | `timeout_ms` | 1500 | 200–3000; the lookup is cancelled at this deadline |
 | `variables` | none | Up to 16 literal strings passed to the function |
 | `on_failure` | `continue` | `continue` starts the agent without facts; `fallback` skips the AI and takes the node's failure fallback, as a failed AI startup does |

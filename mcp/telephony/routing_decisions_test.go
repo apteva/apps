@@ -18,6 +18,11 @@ import (
 
 func decisionFixture(t *testing.T) (*App, *callsDB, *inboundRoutingPlan) {
 	t.Helper()
+	return decisionFixtureConfig(t, nil)
+}
+
+func decisionFixtureConfig(t *testing.T, extra map[string]any) (*App, *callsDB, *inboundRoutingPlan) {
+	t.Helper()
 	db := testCallsDB(t)
 	a := &App{}
 	withRoutingTestDB(t, a, db)
@@ -36,13 +41,20 @@ func decisionFixture(t *testing.T) (*App, *callsDB, *inboundRoutingPlan) {
 	if _, e := db.db.Exec(`INSERT INTO telephony_access_policies(project_id,revision,policy_json) VALUES('p1',1,?)`, string(raw)); e != nil {
 		t.Fatal(e)
 	}
-	def := routingDefinition{Entry: "select", Destinations: dests, Nodes: []routingNode{{ID: "select", Type: "decision", Config: map[string]any{"function_id": 42, "timeout_ms": 5000, "destination_ids": []string{"alice", "alias"}}, Branches: map[string]string{"fallback": "end"}}, {ID: "end", Type: "hangup"}}}
+	def := routingDefinition{Entry: "select", Destinations: dests, Nodes: []routingNode{{ID: "select", Type: "decision", Config: decisionNodeConfig(extra), Branches: map[string]string{"fallback": "end"}}, {ID: "end", Type: "hangup"}}}
 	route := &routeRow{ID: "route", ProjectID: "p1", CarrierSlug: "twilio", AnswerMode: answerModeHumanBrowser, TimeoutSec: 30, Enabled: true}
 	p, e := a.resolveRoutingDefinition(route, "+12025550100", map[string]string{"menu": "1"}, &routingFlowVersionRow{ID: "v1", FlowID: "flow"}, def, "")
 	if e != nil {
 		t.Fatal(e)
 	}
 	return a, db, p
+}
+func decisionNodeConfig(extra map[string]any) map[string]any {
+	config := map[string]any{"function_id": 42, "timeout_ms": 5000, "destination_ids": []string{"alice", "alias"}}
+	for k, v := range extra {
+		config[k] = v
+	}
+	return config
 }
 func getDecision(t *testing.T, a *App, call string) decisionRecord {
 	t.Helper()
@@ -315,6 +327,7 @@ func TestDecisionFailedSetupExpiryAndConnectedOccupancy(t *testing.T) {
 type decisionPlatform struct {
 	answerPlatform
 	invoked  atomic.Int32
+	stage    atomic.Value
 	started  chan struct{}
 	release  chan struct{}
 	deadline chan time.Time
@@ -337,6 +350,8 @@ func (p *decisionPlatform) CallAppResultContext(ctx context.Context, app, tool s
 		return fmt.Errorf("unexpected %s/%s", app, tool)
 	}
 	p.invoked.Add(1)
+	stage, _ := args["stage"].(string)
+	p.stage.Store(stage)
 	var request map[string]any
 	raw, _ := json.Marshal(args["event"])
 	_ = json.Unmarshal(raw, &request)
@@ -653,5 +668,59 @@ func TestDecisionMigrationPreservesExistingCallsAndEvents(t *testing.T) {
 	}
 	if e = db.QueryRow(`SELECT status FROM calls WHERE id='existing'`).Scan(&status); e != nil || status != "answered" {
 		t.Fatalf("call %s %v", status, e)
+	}
+}
+
+func TestDecisionFunctionStageIsPassedToFunctions(t *testing.T) {
+	for _, stage := range []string{"", "production"} {
+		t.Run("stage="+stage, func(t *testing.T) {
+			extra := map[string]any{}
+			if stage != "" {
+				extra["function_stage"] = stage
+			}
+			a, db, p := decisionFixtureConfig(t, extra)
+			platform := &decisionPlatform{}
+			ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p1")
+			globalCtx = ctx
+			insertRingCall(t, db, p, "staged")
+			if e := a.runDecisionTick(context.Background(), ctx); e != nil {
+				t.Fatal(e)
+			}
+			until := time.Now().Add(time.Second)
+			for platform.invoked.Load() == 0 && time.Now().Before(until) {
+				time.Sleep(time.Millisecond)
+			}
+			for len(decisionSlots) > 0 && time.Now().Before(until) {
+				time.Sleep(time.Millisecond)
+			}
+			if platform.invoked.Load() != 1 {
+				t.Fatalf("invoked %d times", platform.invoked.Load())
+			}
+			if got, _ := platform.stage.Load().(string); got != stage {
+				t.Fatalf("functions_invoke stage = %q, want %q", got, stage)
+			}
+		})
+	}
+}
+
+func TestDecisionFunctionStageValidation(t *testing.T) {
+	node := func(stage any) routingNode {
+		return routingNode{ID: "select", Type: "decision", Config: decisionNodeConfig(map[string]any{"function_stage": stage}), Branches: map[string]string{"fallback": "end"}}
+	}
+	for _, bad := range []any{"Production", "-staging", "prod_1", strings.Repeat("a", 41)} {
+		if _, e := parseDecisionConfig(node(bad)); e == nil {
+			t.Fatalf("accepted function_stage %v", bad)
+		}
+	}
+	for _, good := range []any{"production", "staging", "parity", "a-1"} {
+		if c, e := parseDecisionConfig(node(good)); e != nil || c.FunctionStage != good {
+			t.Fatalf("rejected function_stage %v: %v", good, e)
+		}
+	}
+	if in := functionInvokeInput(7, "", []byte(`{}`)); in["stage"] != nil || in["id"] != int64(7) {
+		t.Fatalf("stageless input %v", in)
+	}
+	if in := functionInvokeInput(7, "staging", []byte(`{}`)); in["stage"] != "staging" {
+		t.Fatalf("staged input %v", in)
 	}
 }

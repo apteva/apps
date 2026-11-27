@@ -29,6 +29,9 @@ func (p *contextPlatform) CallAppResultContext(ctx context.Context, app, tool st
 	var event map[string]any
 	raw, _ := args["event"].(json.RawMessage)
 	_ = json.Unmarshal(raw, &event)
+	if stage, ok := args["stage"].(string); ok {
+		event["_invoke_stage"] = stage
+	}
 	p.mu.Lock()
 	p.events = append(p.events, event)
 	handler := p.handler
@@ -156,6 +159,8 @@ func TestAIContextConfigValidation(t *testing.T) {
 		{"timeout too low", "ai", `{"context":{"function_id":3,"timeout_ms":50}}`, "timeout_ms"},
 		{"unknown field", "ai", `{"context":{"function_id":3,"url":"https://x"}}`, "invalid context"},
 		{"bad on_failure", "ai", `{"context":{"function_id":3,"on_failure":"retry"}}`, "on_failure"},
+		{"valid stage", "ai", `{"context":{"function_id":3,"function_stage":"production"}}`, ""},
+		{"bad stage", "ai", `{"context":{"function_id":3,"function_stage":"Prod"}}`, "function_stage"},
 		{"bad variable key", "ai", `{"context":{"function_id":3,"variables":{"1bad":"x"}}}`, "invalid context variable"},
 	}
 	for _, c := range cases {
@@ -223,7 +228,7 @@ func TestAIContextResponseValidation(t *testing.T) {
 }
 
 func TestAIContextLookupEnrichesInboundAI(t *testing.T) {
-	a, p, row := aiContextFixture(t, map[string]any{"function_id": 57, "variables": map[string]any{"centre": "zc"}}, func(_ context.Context, event map[string]any) (string, string, error) {
+	a, p, row := aiContextFixture(t, map[string]any{"function_id": 57, "function_stage": "production", "variables": map[string]any{"centre": "zc"}}, func(_ context.Context, event map[string]any) (string, string, error) {
 		response, _ := json.Marshal(map[string]any{"context_id": event["context_id"], "facts": map[string]any{"prospect_status": "existing", "owner_centre": "ZC"}, "greeting": "Bonjour Madame Dupont."})
 		return "ok", string(response), nil
 	})
@@ -253,6 +258,9 @@ func TestAIContextLookupEnrichesInboundAI(t *testing.T) {
 	e := events[0]
 	if e["call_id"] != row.ID || e["caller"] != row.FromNumber || e["called"] != row.ToNumber || e["destination_id"] != row.RoutingDestinationID || e["schema_version"] != float64(1) {
 		t.Fatalf("event=%v", e)
+	}
+	if e["_invoke_stage"] != "production" {
+		t.Fatalf("functions_invoke stage=%v", e["_invoke_stage"])
 	}
 	if vars, _ := e["variables"].(map[string]any); vars["centre"] != "zc" {
 		t.Fatalf("variables=%v", e["variables"])
