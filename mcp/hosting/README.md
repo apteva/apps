@@ -125,7 +125,10 @@ hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-a
   `hosting-tenant:<tenant id>`, one hour) that Hosting renews every minute.
   Nobody else can open a session on that phone while it is rented.
 - **Customer access**: `hosting_tenant_get` returns `device`: `managed_by`,
-  `device_ref`, `session_id`, `online`. The customer drives the phone with
+  `device_ref`, `session_id`, `online`. It is the only place the session id
+  appears: tenant lists, machine views, events and run logs show
+  `session_held` instead, and a session Hosting opened to inspect or clean
+  a phone is never shown to a tenant. The customer drives the phone with
   Mobile's tools and that session id. If Mobile ends the session (the phone
   was away past Mobile's offline grace), Hosting opens a new one and emits
   `hosting.tenant.access_updated` with `reason: session_reopened`: read the
@@ -134,7 +137,9 @@ hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-a
   reinstall and SSH keys do not apply to phones.
 - **Release** (and `hosting_machine_clean`): stop the session, open a new
   one, run Mobile's `clean` with `clear_data` = every third-party app in the
-  baseline, then `verify_clean`. A phone that still differs from its baseline
+  baseline (in batches of 50, Mobile's limit), then `verify_clean`.
+  `verify_clean` cannot see app data, so the release fails, and the phone is
+  quarantined, if Mobile does not report every baseline app's data cleared. A phone that still differs from its baseline
   is quarantined with the differences; otherwise it goes back on sale.
 - **Inspect** records the baseline only when the phone has none. Pass
   `capture_baseline: true` to record it again, and only on a phone set up
@@ -145,9 +150,12 @@ hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-a
 - **Degraded**: a rented phone offline longer than `degraded_after_minutes`
   (default 5), or taken by another session while Hosting's had ended, puts
   the tenant in `degraded` (`hosting.tenant.degraded`). It returns to
-  `active` by itself (`hosting.tenant.recovered`). `hosting_tenant_swap`
-  (confirm = tenant id) moves the tenant to a free phone in the same pool and
-  quarantines the old one; clean it and run inspect to sell it again.
+  `active` by itself (`hosting.tenant.recovered`). The minute sweep never
+  changes a tenant or opens a session once a run (a release, suspend, swap)
+  has been requested for it. `hosting_tenant_swap` (confirm = tenant id)
+  moves the tenant to a free phone in the same pool and quarantines the old
+  one; a `device_stop` run ends the old session, retried while Mobile cannot
+  be reached. Clean the old phone and run inspect to sell it again.
 
 Limits:
 
@@ -263,6 +271,25 @@ reinstall, swap phone, release, run log), machines (pools, phone pools,
 execution switch, add, inspect, validate, maintenance, quarantine, clean,
 remove, reviewed retry, resolve a stuck tenant)
 and profiles (with availability).
+
+## Upgrading to 2.5.1
+
+2.5.1 fixes phone pools from 2.5.0:
+
+- Release cleared the data of only the first 50 baseline apps. All are now
+  cleared in batches, and a release fails if any is not.
+- The minute sweep could bring back a tenant being released, open a session
+  in the middle of a release, or show Hosting's cleaning session to the
+  tenant. Its writes now hold only while no run is requested.
+- Swap could race a release, and left the old phone's session alive for up
+  to an hour when stopping it failed. Swap and every tenant run now start
+  only if the tenant is unchanged, and a run stops the old session.
+- The session id appeared in machine views and tenant lists. It now
+  appears only in `hosting_tenant_get`.
+
+Migration 010 adds `device_session_owner` to machines and records it for
+phones rented under 2.5.0, so their sessions keep being renewed and shown
+to the tenant.
 
 ## Upgrading to 2.5.0
 

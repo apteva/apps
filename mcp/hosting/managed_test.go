@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -26,13 +27,15 @@ type fakeMobile struct {
 	baselines map[string][]string // device → third-party apps at capture
 	installed map[string][]string // device → apps added since
 	stuck     map[string]bool     // clean leaves the phone dirty
+	uncleared map[string]bool     // apps whose data clean fails to clear
+	apps      []string            // third-party apps a baseline records
 	cleans    []map[string]any
 	down      bool
 }
 
 func newFakeMobile(ids ...string) *fakeMobile {
 	f := &fakeMobile{devices: map[string]*mobileDeviceInfo{}, sessions: map[string]*fakeSession{}, baselines: map[string][]string{},
-		installed: map[string][]string{}, stuck: map[string]bool{}}
+		installed: map[string][]string{}, stuck: map[string]bool{}, uncleared: map[string]bool{}}
 	for _, id := range ids {
 		f.devices[id] = &mobileDeviceInfo{ID: id, Name: "Pixel " + id, Platform: "android", Driver: "adb", State: "ready"}
 	}
@@ -139,6 +142,9 @@ func (f *fakeMobile) handle(tool string, in map[string]any) (any, error) {
 		switch strFromAny(in["action"]) {
 		case "baseline_capture":
 			f.baselines[dev] = []string{"com.whatsapp", "org.mozilla.firefox"}
+			if f.apps != nil {
+				f.baselines[dev] = f.apps
+			}
 			f.installed[dev] = nil
 			return map[string]any{"baseline": map[string]any{"apps": f.baselines[dev]}}, nil
 		case "baseline_get":
@@ -155,7 +161,17 @@ func (f *fakeMobile) handle(tool string, in map[string]any) (any, error) {
 			if !f.stuck[dev] {
 				f.installed[dev] = nil
 			}
-			return map[string]any{"uninstalled": []string{}}, nil
+			cleared := []string{}
+			list, _ := in["clear_data"].([]string)
+			if len(list) > 50 {
+				return nil, errors.New("invalid_argument: clear_data takes at most 50 apps")
+			}
+			for _, a := range list {
+				if !f.uncleared[a] {
+					cleared = append(cleared, a)
+				}
+			}
+			return map[string]any{"uninstalled": []string{}, "data_cleared": cleared}, nil
 		case "verify_clean":
 			var diff []map[string]any
 			for _, a := range f.installed[dev] {
@@ -168,6 +184,15 @@ func (f *fakeMobile) handle(tool string, in map[string]any) (any, error) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
+
+// rented reads a tenant the way hosting_tenant_get shows it (with the
+// phone's session id when it is the tenant's own).
+func rented(t *testing.T, db *sql.DB, id string) *Tenant {
+	t.Helper()
+	tn := tenant(t, db, id)
+	tn.revealSession()
+	return tn
+}
 
 // setupPhonePool makes a validated, inspected phone pool "phones" with a
 // profile "phone" and returns the machine ids.
@@ -218,7 +243,7 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 	// Rent: Hosting holds an exclusive session for the customer.
 	out := call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-p", "profile": "phone", "owner_email": "p@example.com", "ssh_keys": []any{testKey}})
 	id := strArg(mapFromAny(out["tenant"]), "id")
-	tn := tenant(t, db, id)
+	tn := rented(t, db, id)
 	if tn.Status != TenantActive || tn.MachineID != ids[0] || tn.Device == nil || tn.Device.SessionID == "" || tn.Access != nil || tn.SSHUser != "" {
 		t.Fatalf("rented phone tenant = %+v device %+v", tn, tn.Device)
 	}
@@ -248,12 +273,12 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 	if got := ev.take("hosting.machine.offline"); len(got) != 1 {
 		t.Fatalf("offline events = %v", got)
 	}
-	if tenant(t, db, id).Status != TenantActive {
+	if rented(t, db, id).Status != TenantActive {
 		t.Fatal("a short drop must not degrade the tenant")
 	}
 	advanceClock(t, 6*time.Minute)
 	_ = a.tick(ctx)
-	if tn := tenant(t, db, id); tn.Status != TenantDegraded || tn.Device.SessionID != sess {
+	if tn := rented(t, db, id); tn.Status != TenantDegraded || tn.Device.SessionID != sess {
 		t.Fatalf("after 6 min offline: %s session %q", tn.Status, tn.Device.SessionID)
 	}
 	if got := ev.take("hosting.tenant.degraded"); len(got) != 1 || got[0]["reason"] != "phone offline" {
@@ -266,7 +291,7 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 	// Suspend works from degraded? Not here: it comes back first.
 	fm.setOnline("android:p1", true)
 	_ = a.tick(ctx)
-	if tn := tenant(t, db, id); tn.Status != TenantActive || tn.Device.SessionID != sess {
+	if tn := rented(t, db, id); tn.Status != TenantActive || tn.Device.SessionID != sess {
 		t.Fatalf("back online: %s session %q", tn.Status, tn.Device.SessionID)
 	}
 	if got := ev.take("hosting.tenant.recovered"); len(got) != 1 {
@@ -276,7 +301,7 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 	// Mobile ended the session (device_lost): Hosting opens a new one.
 	fm.end(sess, "device_lost")
 	_ = a.tick(ctx)
-	tn = tenant(t, db, id)
+	tn = rented(t, db, id)
 	if tn.Status != TenantActive || tn.Device.SessionID == "" || tn.Device.SessionID == sess {
 		t.Fatalf("after device_lost: %s session %q", tn.Status, tn.Device.SessionID)
 	}
@@ -292,14 +317,14 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = a.tick(ctx)
-	if tn := tenant(t, db, id); tn.Status != TenantDegraded || !strings.Contains(tn.LastError, "another session") {
+	if tn := rented(t, db, id); tn.Status != TenantDegraded || !strings.Contains(tn.LastError, "another session") {
 		t.Fatalf("phone taken: %s (%s)", tn.Status, tn.LastError)
 	}
 
 	// Swap to the other phone; the old one is quarantined.
 	callErr(t, a.toolTenantSwap, ctx, map[string]any{"tenant_id": id, "confirm": "nope"}, "confirm must be the tenant id")
 	call(t, a.toolTenantSwap, ctx, map[string]any{"tenant_id": id, "confirm": id, "reason": "phone taken"})
-	tn = tenant(t, db, id)
+	tn = rented(t, db, id)
 	if tn.Status != TenantActive || tn.MachineID != ids[1] || tn.Device.DeviceRef != "android:p2" || tn.Device.SessionID == "" {
 		t.Fatalf("after swap: %+v device %+v", tn, tn.Device)
 	}
@@ -316,7 +341,7 @@ func TestPhonePoolEndToEnd(t *testing.T) {
 	// Release: the renter installed an app; it is cleaned and verified.
 	fm.installed["android:p2"] = []string{"com.example.renter"}
 	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
-	if tn := tenant(t, db, id); tn.Status != TenantReleased || tn.Device == nil || tn.Device.SessionID != "" {
+	if tn := rented(t, db, id); tn.Status != TenantReleased || tn.Device == nil || tn.Device.SessionID != "" {
 		t.Fatalf("released tenant = %s device %+v", tn.Status, tn.Device)
 	}
 	if m := machine(t, db, ids[1]); m.State != MachineAvailable || m.TenantID != "" || m.DeviceSession != "" {
@@ -373,12 +398,12 @@ func TestPhoneSuspendResumeAndWaitingLine(t *testing.T) {
 	fm := stub.mobile
 	first := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-1", "profile": "phone", "owner_email": "1@example.com"})["tenant"]), "id")
 	second := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-2", "profile": "phone", "owner_email": "2@example.com"})["tenant"]), "id")
-	if tenant(t, db, second).Status != TenantWaitingForMachine {
+	if rented(t, db, second).Status != TenantWaitingForMachine {
 		t.Fatal("second renter must wait for the only phone")
 	}
-	sess := tenant(t, db, first).Device.SessionID
+	sess := rented(t, db, first).Device.SessionID
 	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": first})
-	if tn := tenant(t, db, first); tn.Status != TenantSuspended || tn.Device.SessionID != "" || !fm.sessions[sess].Ended || fm.sessions[sess].Status != "stopped" {
+	if tn := rented(t, db, first); tn.Status != TenantSuspended || tn.Device.SessionID != "" || !fm.sessions[sess].Ended || fm.sessions[sess].Status != "stopped" {
 		t.Fatalf("suspended: %s session %q mobile %+v", tn.Status, tn.Device.SessionID, fm.sessions[sess])
 	}
 	_ = a.tick(ctx)
@@ -386,11 +411,11 @@ func TestPhoneSuspendResumeAndWaitingLine(t *testing.T) {
 		t.Fatal("the sweep must not hold a suspended tenant's phone")
 	}
 	call(t, a.toolTenantResume, ctx, map[string]any{"tenant_id": first})
-	if tn := tenant(t, db, first); tn.Status != TenantActive || tn.Device.SessionID == "" || tn.Device.SessionID == sess {
+	if tn := rented(t, db, first); tn.Status != TenantActive || tn.Device.SessionID == "" || tn.Device.SessionID == sess {
 		t.Fatalf("resumed: %s session %q", tn.Status, tn.Device.SessionID)
 	}
 	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": first, "confirm": first})
-	if tn := tenant(t, db, second); tn.Status != TenantActive || tn.MachineID != ids[0] {
+	if tn := rented(t, db, second); tn.Status != TenantActive || tn.MachineID != ids[0] {
 		t.Fatalf("waiting renter after release: %s machine %d", tn.Status, tn.MachineID)
 	}
 }
@@ -402,13 +427,13 @@ func TestPhoneBusyAtProvisionWaits(t *testing.T) {
 	fm := stub.mobile
 	other, _ := fm.open("android:p1", "tester")
 	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-b", "profile": "phone", "owner_email": "b@example.com"})["tenant"]), "id")
-	if tn := tenant(t, db, id); tn.Status != TenantProvisioning {
+	if tn := rented(t, db, id); tn.Status != TenantProvisioning {
 		t.Fatalf("busy phone: %s", tn.Status)
 	}
 	fm.end(other.ID, "closed")
 	advanceClock(t, time.Minute)
 	_ = a.tick(ctx)
-	if tn := tenant(t, db, id); tn.Status != TenantActive {
+	if tn := rented(t, db, id); tn.Status != TenantActive {
 		t.Fatalf("after the other session closed: %s (%s)", tn.Status, tn.LastError)
 	}
 }
@@ -484,12 +509,14 @@ func TestMigration009KeepsMachines(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	raw, err := os.ReadFile("migrations/009_app_managed.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(raw)); err != nil {
-		t.Fatalf("apply 009: %v", err)
+	for _, f := range []string{"migrations/009_app_managed.sql", "migrations/010_device_session_owner.sql"} {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", f, err)
+		}
 	}
 	m, err := dbMachineGet(db, 1)
 	if err != nil || m == nil || m.InstanceID != 7 || m.State != MachineAssigned || m.PublicHost != "mac.example.com" || m.TenantID != "htn_1" || m.ConnectMode != "direct" || m.managed() {
@@ -508,5 +535,227 @@ func TestMigration009KeepsMachines(t *testing.T) {
 	}
 	if _, err := db.Exec(`INSERT INTO hosting_machines (pool_key, name) VALUES ('macs', 'nothing')`); err == nil {
 		t.Fatal("a machine needs an instance or a device")
+	}
+}
+
+// ─── 2.5.1 review fixes ──────────────────────────────────────────────────
+
+func TestPhoneReleaseClearsEveryBaselineApp(t *testing.T) {
+	stub := newStub()
+	stub.mobile = newFakeMobile("android:p1")
+	for i := 0; i < 120; i++ {
+		stub.mobile.apps = append(stub.mobile.apps, fmt.Sprintf("com.example.app%03d", i))
+	}
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupPhonePool(t, a, ctx, stub, "android:p1")
+	fm := stub.mobile
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-c", "profile": "phone", "owner_email": "c@example.com"})["tenant"]), "id")
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	if m := machine(t, db, ids[0]); m.State != MachineAvailable {
+		t.Fatalf("phone = %s (%s)", m.State, m.StateReason)
+	}
+	seen := map[string]bool{}
+	var sizes []int
+	for _, c := range fm.cleans {
+		list := c["clear_data"].([]string)
+		sizes = append(sizes, len(list))
+		for _, a := range list {
+			seen[a] = true
+		}
+	}
+	if fmt.Sprint(sizes) != "[50 50 20]" || len(seen) != 120 {
+		t.Fatalf("clean batches = %v, apps cleared %d", sizes, len(seen))
+	}
+
+	// An app whose data Mobile does not clear stops the phone from being sold.
+	id = strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-c2", "profile": "phone", "owner_email": "c@example.com"})["tenant"]), "id")
+	fm.uncleared["com.example.app077"] = true
+	call(t, a.toolTenantRelease, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	if m := machine(t, db, ids[0]); m.State != MachineQuarantined || !strings.Contains(m.StateReason, "com.example.app077") {
+		t.Fatalf("phone with data left = %s (%s)", m.State, m.StateReason)
+	}
+}
+
+func TestPhoneSweepYieldsToReleaseStartedMeanwhile(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupPhonePool(t, a, ctx, stub, "android:p1")
+	fm := stub.mobile
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-s", "profile": "phone", "owner_email": "s@example.com"})["tenant"]), "id")
+	// Degraded, and Mobile has ended Hosting's session: the sweep would
+	// recover the tenant and open a new session.
+	fm.setOnline("android:p1", false)
+	_ = a.tick(ctx)
+	advanceClock(t, 6*time.Minute)
+	_ = a.tick(ctx)
+	if rented(t, db, id).Status != TenantDegraded {
+		t.Fatal("setup: tenant should be degraded")
+	}
+	fm.end(rented(t, db, id).Device.SessionID, "device_lost")
+	fm.setOnline("android:p1", true)
+	ev := recordEvents(ctx)
+
+	// The release is requested while the sweep waits on Mobile.
+	orig := kickOperation
+	t.Cleanup(func() { kickOperation = orig })
+	fired := false
+	stub.onCall = map[string]func(){"mobile_session": func() {
+		if fired {
+			return
+		}
+		fired = true
+		kickOperation = func(*App, *sdk.AppCtx, string) {}
+		if _, _, err := a.releaseTenant(ctx, map[string]any{"tenant_id": id, "confirm": id}); err != nil {
+			t.Errorf("release: %v", err)
+		}
+	}}
+	_ = a.tick(ctx)
+	stub.onCall = nil
+	if !fired {
+		t.Fatal("the sweep did not call Mobile")
+	}
+	if tn := rented(t, db, id); tn.Status != TenantReleasing || tn.Device.SessionID != "" {
+		t.Fatalf("tenant after sweep = %s session %q (want releasing, no session)", tn.Status, tn.Device.SessionID)
+	}
+	if got := ev.take("hosting.tenant.recovered"); len(got) != 0 {
+		t.Fatalf("recovered a releasing tenant: %v", got)
+	}
+	if got := ev.take("hosting.tenant.access_updated"); len(got) != 0 {
+		t.Fatalf("handed out a session mid-release: %v", got)
+	}
+	if s := fm.liveOn("android:p1"); s != nil {
+		t.Fatalf("sweep left a session open mid-release: %+v", s)
+	}
+	if m := machine(t, db, ids[0]); m.DeviceSession != "" && !fm.sessions[m.DeviceSession].Ended {
+		t.Fatalf("machine holds a live session mid-release: %q", m.DeviceSession)
+	}
+
+	// The release then runs normally.
+	kickOperation = orig
+	_ = a.tick(ctx)
+	if tn := rented(t, db, id); tn.Status != TenantReleased {
+		t.Fatalf("release: %s (%s)", tn.Status, tn.LastError)
+	}
+	if m := machine(t, db, ids[0]); m.State != MachineAvailable {
+		t.Fatalf("phone after release = %s (%s)", m.State, m.StateReason)
+	}
+}
+
+func TestPhoneSwapStopsOldSessionAndYieldsToRuns(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupPhonePool(t, a, ctx, stub, "android:p1", "android:p2")
+	fm := stub.mobile
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-w", "profile": "phone", "owner_email": "w@example.com"})["tenant"]), "id")
+	oldSess := rented(t, db, id).Device.SessionID
+
+	// A run already queued for the tenant: swap refuses.
+	orig := kickOperation
+	kickOperation = func(*App, *sdk.AppCtx, string) {}
+	call(t, a.toolTenantSuspend, ctx, map[string]any{"tenant_id": id})
+	kickOperation = orig
+	callErr(t, a.toolTenantSwap, ctx, map[string]any{"tenant_id": id, "confirm": id}, "while it is suspending")
+	_ = a.tick(ctx)
+	call(t, a.toolTenantResume, ctx, map[string]any{"tenant_id": id})
+	oldSess = rented(t, db, id).Device.SessionID
+
+	// Mobile is unreachable when the swap happens: the old session is
+	// stopped by a run as soon as Mobile answers, not left to expire.
+	fm.down = true
+	call(t, a.toolTenantSwap, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	if fm.sessions[oldSess].Ended {
+		t.Fatal("setup: Mobile was down")
+	}
+	fm.down = false
+	advanceClock(t, time.Minute)
+	_ = a.tick(ctx)
+	if s := fm.sessions[oldSess]; !s.Ended || s.Status != "stopped" {
+		t.Fatalf("old session = %+v", s)
+	}
+	if m := machine(t, db, ids[0]); m.State != MachineQuarantined || m.DeviceSession != "" {
+		t.Fatalf("old phone = %s session %q", m.State, m.DeviceSession)
+	}
+	if tn := rented(t, db, id); tn.Status != TenantActive || tn.MachineID != ids[1] || tn.Device.SessionID == "" {
+		t.Fatalf("tenant after swap = %s machine %d session %q", tn.Status, tn.MachineID, tn.Device.SessionID)
+	}
+}
+
+func TestStaleTenantRequestStartsNothing(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	setupPhonePool(t, a, ctx, stub, "android:p1", "android:p2")
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-x", "profile": "phone", "owner_email": "x@example.com"})["tenant"]), "id")
+	stale := tenant(t, db, id)
+	call(t, a.toolTenantSwap, ctx, map[string]any{"tenant_id": id, "confirm": id})
+	// A release planned on the tenant as read before the swap.
+	if _, err := a.enqueueTenantOp(ctx, stale, OpRelease, TenantReleasing, "test"); err == nil || !strings.Contains(err.Error(), "changed while") {
+		t.Fatalf("stale release = %v", err)
+	}
+	if tn := tenant(t, db, id); tn.Status != TenantActive {
+		t.Fatalf("tenant = %s", tn.Status)
+	}
+}
+
+func TestPhoneSessionIDShownOnlyByTenantGet(t *testing.T) {
+	stub := newStub()
+	a, ctx, db := newTestCtx(t, stub)
+	ids := setupPhonePool(t, a, ctx, stub, "android:p1")
+	id := strArg(mapFromAny(call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-l", "profile": "phone", "owner_email": "l@example.com"})["tenant"]), "id")
+	sess := rented(t, db, id).Device.SessionID
+	if sess == "" {
+		t.Fatal("setup: no session")
+	}
+	_ = a.tick(ctx)
+	got := call(t, a.toolTenantGet, ctx, map[string]any{"tenant_id": id})
+	if mapFromAny(mapFromAny(got["tenant"])["device"])["session_id"] != sess {
+		t.Fatalf("tenant_get = %v", got["tenant"])
+	}
+	for name, out := range map[string]map[string]any{
+		"machine_get":  call(t, a.toolMachineGet, ctx, map[string]any{"machine_id": ids[0]}),
+		"machine_list": call(t, a.toolMachineList, ctx, map[string]any{}),
+		"tenant_list":  call(t, a.toolTenantList, ctx, map[string]any{}),
+		"pool_list":    call(t, a.toolPoolList, ctx, map[string]any{}),
+		"create_again": call(t, a.toolTenantCreate, ctx, map[string]any{"external_ref": "acct-l", "profile": "phone", "owner_email": "l@example.com"}),
+	} {
+		if raw := fmt.Sprint(out); strings.Contains(raw, sess) {
+			t.Fatalf("%s leaks the session id: %s", name, raw)
+		}
+	}
+	if raw := fmt.Sprint(got["events"]); strings.Contains(raw, sess) {
+		t.Fatalf("events leak the session id: %s", raw)
+	}
+	// A session Hosting opened for itself (inspect, clean) is never shown.
+	if _, err := db.Exec(`UPDATE hosting_machines SET device_session='ses_cleaning', device_session_owner='' WHERE id=?`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	got = call(t, a.toolTenantGet, ctx, map[string]any{"tenant_id": id})
+	if dev := mapFromAny(mapFromAny(got["tenant"])["device"]); dev["session_id"] != nil || dev["session_held"] != false {
+		t.Fatalf("tenant_get shows a session that is not the tenant's: %v", dev)
+	}
+}
+
+func TestMigration010RecordsRentedPhoneOwner(t *testing.T) {
+	db := openTestDB(t)
+	applyMigrations(t, db, "009_app_managed.sql")
+	for _, q := range []string{
+		`INSERT INTO hosting_pools (key, name, platform, managed_by, execution_enabled) VALUES ('phones', 'Phones', 'android', 'mobile', 1)`,
+		`INSERT INTO hosting_machines (pool_key, device_ref, device_session, state, tenant_id) VALUES ('phones', 'android:a', 'ses_rented', 'assigned', 'htn_a')`,
+		`INSERT INTO hosting_machines (pool_key, device_ref, device_session, state) VALUES ('phones', 'android:b', 'ses_clean', 'cleaning')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw, err := os.ReadFile("migrations/010_device_session_owner.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := dbMachineGet(db, 1)
+	b, _ := dbMachineGet(db, 2)
+	if a.DeviceSessionOwner != "htn_a" || b.DeviceSessionOwner != "" {
+		t.Fatalf("owners = %q, %q", a.DeviceSessionOwner, b.DeviceSessionOwner)
 	}
 }

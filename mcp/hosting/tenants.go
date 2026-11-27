@@ -693,10 +693,15 @@ func (a *App) enqueueTenantOp(ctx *sdk.AppCtx, t *Tenant, kind, transient, actor
 	if err != nil {
 		return nil, err
 	}
-	if transient != "" {
-		if err := dbTenantSetStatus(tx, t.ID, transient, ""); err != nil {
-			return nil, err
-		}
+	// The run is planned for the tenant as it was read; if a swap, a sweep
+	// or another request changed it meanwhile, start nothing.
+	res, err := tx.Exec(`UPDATE hosting_tenants SET status=CASE WHEN ?!='' THEN ? ELSE status END, last_error=CASE WHEN ?!='' THEN '' ELSE last_error END,
+		updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=? AND COALESCE(machine_id,0)=?`, transient, transient, transient, t.ID, t.Status, t.MachineID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, fmt.Errorf("tenant %s changed while the request was being made; check it and try again", t.ID)
 	}
 	_ = recordEvent(tx, t.ID, kind+".requested", firstNonEmpty(actorName, "tool"), map[string]any{"operation_id": op.ID})
 	if err := tx.Commit(); err != nil {

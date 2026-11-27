@@ -27,7 +27,7 @@ interface Tenant {
   status: string;
   last_error: string;
   access?: Access;
-  device?: { managed_by: string; device_ref: string; session_id?: string; online: boolean };
+  device?: { managed_by: string; device_ref: string; session_held: boolean; online: boolean };
   created_at: string;
   released_at?: string;
   due_at?: string;
@@ -460,7 +460,7 @@ export default function HostingPanel(_props: NativePanelProps) {
                     {selected.default_hostname && (<><dt className="text-text-dim">Hostname</dt><dd className="font-mono">{selected.default_hostname}</dd></>)}
                     {selected.machine_id ? (<><dt className="text-text-dim">Machine</dt><dd>#{selected.machine_id}</dd></>) : null}
                     {selected.instance_id ? (<><dt className="text-text-dim">Instance</dt><dd>#{selected.instance_id}</dd></>) : null}
-                    {selected.device && (<><dt className="text-text-dim">Phone</dt><dd className="font-mono break-all">{selected.device.device_ref} · {selected.device.online ? "online" : "offline"}{selected.device.session_id ? ` · session ${selected.device.session_id}` : " · no session"}</dd></>)}
+                    {selected.device && (<><dt className="text-text-dim">Phone</dt><dd className="font-mono break-all">{selected.device.device_ref} · {selected.device.online ? "online" : "offline"}{selected.device.session_held ? " · session held" : " · no session"}</dd></>)}
                     {selected.access && (<><dt className="text-text-dim">SSH</dt><dd className="font-mono break-all">{selected.access.issue ? <span className="text-red">{selected.access.issue}</span> : selected.access.granted ? selected.access.ssh_command : "access removed"}</dd></>)}
                     <dt className="text-text-dim">Created</dt><dd>{fmtDate(selected.created_at)}</dd>
                     {selected.released_at && (<><dt className="text-text-dim">Released</dt><dd>{fmtDate(selected.released_at)}</dd></>)}

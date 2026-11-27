@@ -298,31 +298,35 @@ type Machine struct {
 	InstanceID int64  `json:"instance_id,omitempty"`
 	// DeviceRef is the managing app's device id on an app-managed pool;
 	// DeviceSession the session Hosting holds on it.
-	DeviceRef      string            `json:"device_ref,omitempty"`
-	DeviceSession  string            `json:"device_session,omitempty"`
-	ManagedBy      string            `json:"managed_by,omitempty"`
-	Name           string            `json:"name"`
-	State          string            `json:"state"`
-	StateReason    string            `json:"state_reason"`
-	Online         bool              `json:"online"`
-	LastSeenAt     string            `json:"last_seen_at,omitempty"`
-	PublicHost     string            `json:"public_host"`
-	PublicPort     int               `json:"public_port"`
-	ConnectMode    string            `json:"connect_mode"`
-	EndpointSource string            `json:"endpoint_source"`
-	EndpointIssue  string            `json:"endpoint_issue,omitempty"`
-	Serial         string            `json:"serial"`
-	ExpectedOS     string            `json:"expected_os"`
-	ManagementUser string            `json:"management_user"`
-	ScriptHashes   map[string]string `json:"script_hashes"`
-	Validated      bool              `json:"validated"`
-	TenantID       string            `json:"tenant_id,omitempty"`
-	Metadata       json.RawMessage   `json:"metadata"`
-	CreatedAt      string            `json:"created_at"`
-	UpdatedAt      string            `json:"updated_at"`
+	DeviceRef string `json:"device_ref,omitempty"`
+	// DeviceSession works like a password for the phone: it is never
+	// serialized. Only hosting_tenant_get shows it, to the owning tenant.
+	DeviceSession      string            `json:"-"`
+	DeviceSessionOwner string            `json:"-"`
+	SessionHeld        bool              `json:"session_held,omitempty"`
+	ManagedBy          string            `json:"managed_by,omitempty"`
+	Name               string            `json:"name"`
+	State              string            `json:"state"`
+	StateReason        string            `json:"state_reason"`
+	Online             bool              `json:"online"`
+	LastSeenAt         string            `json:"last_seen_at,omitempty"`
+	PublicHost         string            `json:"public_host"`
+	PublicPort         int               `json:"public_port"`
+	ConnectMode        string            `json:"connect_mode"`
+	EndpointSource     string            `json:"endpoint_source"`
+	EndpointIssue      string            `json:"endpoint_issue,omitempty"`
+	Serial             string            `json:"serial"`
+	ExpectedOS         string            `json:"expected_os"`
+	ManagementUser     string            `json:"management_user"`
+	ScriptHashes       map[string]string `json:"script_hashes"`
+	Validated          bool              `json:"validated"`
+	TenantID           string            `json:"tenant_id,omitempty"`
+	Metadata           json.RawMessage   `json:"metadata"`
+	CreatedAt          string            `json:"created_at"`
+	UpdatedAt          string            `json:"updated_at"`
 }
 
-const machineSelect = `SELECT id, pool_key, COALESCE(instance_id,0), device_ref, device_session,
+const machineSelect = `SELECT id, pool_key, COALESCE(instance_id,0), device_ref, device_session, device_session_owner,
 	COALESCE((SELECT p.managed_by FROM hosting_pools p WHERE p.key=hosting_machines.pool_key),''), name, state, state_reason, online, COALESCE(last_seen_at,''), public_host, public_port,
 	connect_mode, endpoint_source, endpoint_issue, serial, expected_os, management_user, script_hashes_json, validated, COALESCE(tenant_id,''), metadata_json, created_at, updated_at FROM hosting_machines`
 
@@ -330,11 +334,12 @@ func scanMachine(row rowScanner) (*Machine, error) {
 	var m Machine
 	var online, validated int
 	var hashes, meta string
-	if err := row.Scan(&m.ID, &m.PoolKey, &m.InstanceID, &m.DeviceRef, &m.DeviceSession, &m.ManagedBy, &m.Name, &m.State, &m.StateReason, &online, &m.LastSeenAt, &m.PublicHost, &m.PublicPort,
+	if err := row.Scan(&m.ID, &m.PoolKey, &m.InstanceID, &m.DeviceRef, &m.DeviceSession, &m.DeviceSessionOwner, &m.ManagedBy, &m.Name, &m.State, &m.StateReason, &online, &m.LastSeenAt, &m.PublicHost, &m.PublicPort,
 		&m.ConnectMode, &m.EndpointSource, &m.EndpointIssue, &m.Serial, &m.ExpectedOS, &m.ManagementUser, &hashes, &validated, &m.TenantID, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
 	m.Online = online != 0
+	m.SessionHeld = m.DeviceSession != ""
 	m.Validated = validated != 0
 	m.ScriptHashes = map[string]string{}
 	_ = json.Unmarshal([]byte(hashes), &m.ScriptHashes)
@@ -448,8 +453,20 @@ type Tenant struct {
 type TenantDevice struct {
 	ManagedBy string `json:"managed_by"`
 	DeviceRef string `json:"device_ref"`
-	SessionID string `json:"session_id,omitempty"`
-	Online    bool   `json:"online"`
+	// SessionID is filled only by hosting_tenant_get (revealSession).
+	SessionID   string `json:"session_id,omitempty"`
+	SessionHeld bool   `json:"session_held"`
+	Online      bool   `json:"online"`
+	session     string
+}
+
+// revealSession puts the phone's session id on the tenant when the session
+// is the tenant's own and the rental is live. Called by hosting_tenant_get
+// only, so lists, machine views and events never carry it.
+func (t *Tenant) revealSession() {
+	if t != nil && t.Device != nil && t.Device.SessionHeld && (t.Status == TenantActive || t.Status == TenantDegraded) {
+		t.Device.SessionID = t.Device.session
+	}
 }
 
 // TenantAccess is what storefronts show the customer.
@@ -468,7 +485,7 @@ const tenantSelect = `SELECT id, external_ref, profile_key, backend, workload_id
 	COALESCE((SELECT hm.public_host FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
 	COALESCE((SELECT hm.public_port FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), 0),
 	COALESCE((SELECT hm.endpoint_issue FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
-	COALESCE((SELECT hm.device_ref || char(9) || hm.device_session || char(9) || hm.online || char(9) || p.managed_by
+	COALESCE((SELECT hm.device_ref || char(9) || hm.device_session || char(9) || hm.online || char(9) || p.managed_by || char(9) || hm.device_session_owner
 	  FROM hosting_machines hm JOIN hosting_pools p ON p.key = hm.pool_key WHERE hm.id = hosting_tenants.machine_id AND hm.device_ref != ''), '')
 	FROM hosting_tenants`
 
@@ -491,10 +508,10 @@ func scanTenant(row rowScanner) (*Tenant, error) {
 	if t.MachineID > 0 {
 		host, port, issue = machineHost, machinePort, machineIssue
 	}
-	if parts := strings.Split(device, "\t"); len(parts) == 4 {
+	if parts := strings.Split(device, "\t"); len(parts) == 5 {
 		t.Device = &TenantDevice{DeviceRef: parts[0], Online: parts[2] == "1", ManagedBy: parts[3]}
-		if t.Status == TenantActive || t.Status == TenantDegraded {
-			t.Device.SessionID = parts[1]
+		if parts[1] != "" && parts[4] == t.ID {
+			t.Device.session, t.Device.SessionHeld = parts[1], true
 		}
 	}
 	if t.SSHUser != "" && (host != "" || issue != "") {
