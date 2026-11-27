@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.14.0
+version: 0.14.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -69,6 +69,14 @@ description: |
   saas_usage_authorize / saas_usage_settle (new estimated_quantity /
   quantity and per-unit meter prices), and reported by
   saas_account_included_usage, saas_access_check and saas_usage_get.
+  v0.14.1 makes included usage safe to bill with: usage past the estimate
+  is taken from the allowance and then charged at the unit price (no
+  shortfall), quantity meters always get a hold (1 unit if no estimate)
+  that lasts 24 hours (hold_seconds) and expired holds are still billed,
+  authorize returns max_quantity, plan changes between monthly and
+  billing-cycle periods no longer stack allowances, raising an amount
+  grants the extra, the first request of a period grants it on the spot,
+  and the worker backs off lapsed cycles and drains every due account.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas

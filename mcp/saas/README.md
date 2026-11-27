@@ -540,16 +540,23 @@ a month (v0.14.0). Set it in the plan metadata:
 
 **Grants.** Each period SaaS calls `credits_grant` into the allowance wallet
 with `expires_at` = period end, priority 1 and
-`source_ref = saas:included:acct:<account>:meter:<app>/<meter>:period:<start>:plan:<plan>`,
+`source_ref = saas:included:acct:<account>:meter:<app>/<meter>:period:<start>:plan:<plan>:upto:<amount>`,
 so a retry never grants twice. Grants run when an account is activated or
-resumed, after a plan change, after a paid renewal, and from the
-`included-usage` worker (every 10 minutes; each account is checked again at
-its period end, or after 10 minutes if a grant failed). Free plans get
-calendar-month grants from the worker; no payment event is needed.
+resumed, after a plan change, after a paid renewal, on the first
+`saas_usage_authorize` or access check of a new period (so there is no gap
+at the period boundary), and from the `included-usage` worker (every 10
+minutes, most overdue first, until no account is due). Each account is
+checked again at its period end; one whose grant failed or whose billing
+cycle has lapsed is retried after 10 minutes, doubling up to 6 hours.
+Free plans get calendar-month grants without any payment event.
 
-**Plan changes.** Only the difference over what was already granted this
-period is added (60 to 100 adds 40). A downgrade adds nothing and never
-takes back credit.
+**Plan changes.** Only the difference over what the period already covers
+is added (60 to 100 adds 40). Unused allowance still live from another
+period counts toward it: moving from a free plan's month (20 of 60 used) to
+a 600-minute billing-cycle plan grants 560, not 600. That carry-over is
+fixed when the period is first seen. A downgrade adds nothing and never
+takes back credit. Changing a plan's `included_usage` rechecks every account
+on the plan, so raising 60 to 90 grants 30 within one worker pass.
 
 **Spending.** Quantity meters report `estimated_quantity` to
 `saas_usage_authorize` and `quantity` to `saas_usage_settle`. Authorize
@@ -558,9 +565,20 @@ wallet through the meter's `unit_price_id` (set with `saas_plan_meter_set`).
 When the allowance is used up and the plan has no paid price for the meter
 (free plans), the request is refused with reason `included_exhausted`.
 Accounts on free or paid subscription plans can use metered usage up to
-their allowance; only prepaid plans spend paid credit. Settle takes the
-actual quantity from the allowance first; anything beyond it goes to the
-paid hold. The admission ref is `inc:<allowance hold>:<units held>:<paid
+their allowance; only prepaid plans spend paid credit. Without
+`estimated_quantity` one unit is assumed, so usage is always tracked.
+Quantity holds last `hold_seconds` (default 24 hours, at most 7 days).
+Authorize returns `max_quantity`: the allowance left plus what the paid
+balance buys at the unit price; stop the session there.
+
+Settle takes the actual quantity from the allowance first, up to what it
+has left (never a shortfall on the allowance). The rest is priced at the
+unit price and charged to the paid wallet, through the paid hold when there
+is one, or directly (also when a hold expired during a long session; Credits
+records a shortfall only if the paid balance runs out). Pass `request_id` so
+a retried settle replays instead of charging again. Usage past the
+allowance with no price (free plans) is returned as `unbilled_quantity`.
+The admission ref is `inc:<allowance hold>:<units held>:<paid
 hold or 0>`; plain hold ids from earlier versions still settle.
 
 **Reporting.** `saas_account_included_usage` returns, per allowance,

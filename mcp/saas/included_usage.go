@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -34,6 +35,15 @@ import (
 // Periods: "month" is the UTC calendar month. "billing_cycle" follows the
 // subscription's current period (read from Subscriptions) and falls back to
 // the calendar month for an account without a subscription.
+//
+// v0.14.1: a period's grant counts unused allowance still live from another
+// period (e.g. the free plan's month when moving to a billing-cycle plan)
+// toward the new amount, so a plan change never stacks two allowances. That
+// carry-over is fixed the first time a period is seen and kept in the
+// account's included_usage_state. Raising a plan's amount rechecks every
+// account on the plan, and the grant's source_ref names the cumulative
+// amount, so the raise is granted once. Authorize and access checks grant a
+// due period on the spot, so there is no gap at the period boundary.
 
 const (
 	includedPeriodMonth        = "month"
@@ -42,9 +52,26 @@ const (
 	includedUsageStateKey   = "included_usage_state"
 	includedLotPriority     = 1
 	includedSweepLimit      = 100
+	includedSweepMaxBatches = 50
 	includedRecheckInterval = 10 * time.Minute
+	includedMaxBackoff      = 6 * time.Hour
 	includedLotsListLimit   = 200
 )
+
+// includedBackoff is the wait before rechecking an account whose period
+// could not be granted (a lapsed billing cycle or a failed call): 10 minutes,
+// doubling per consecutive miss, at most 6 hours. A renewal or plan change
+// grants right away anyway.
+func includedBackoff(misses int64) time.Duration {
+	d := includedRecheckInterval
+	for i := int64(1); i < misses && d < includedMaxBackoff; i++ {
+		d *= 2
+	}
+	if d > includedMaxBackoff {
+		d = includedMaxBackoff
+	}
+	return d
+}
 
 // includedNow is the clock for allowance periods; tests replace it.
 var includedNow = func() time.Time { return time.Now().UTC() }
@@ -246,8 +273,11 @@ type includedLot struct {
 
 func (l includedLot) meta() map[string]any { return mapFromAny(l.Metadata) }
 
-func includedSourceRef(accountID string, item includedUsageItem, period includedPeriod, planKey string) string {
-	return fmt.Sprintf("saas:included:acct:%s:meter:%s:period:%s:plan:%s", accountID, item.key(), period.Start.Format(time.RFC3339), planKey)
+// includedSourceRef keys a grant by account, meter, period, plan and the
+// cumulative amount covered after it, so a retry dedups while a raised
+// amount gets its own grant.
+func includedSourceRef(accountID string, item includedUsageItem, period includedPeriod, planKey string, upTo int64) string {
+	return fmt.Sprintf("saas:included:acct:%s:meter:%s:period:%s:plan:%s:upto:%d", accountID, item.key(), period.Start.Format(time.RFC3339), planKey, upTo)
 }
 
 func (a *App) includedLots(ctx *sdk.AppCtx, pid, accountID, unit string) ([]includedLot, error) {
@@ -260,6 +290,54 @@ func (a *App) includedLots(ctx *sdk.AppCtx, pid, accountID, unit string) ([]incl
 		return nil, fmt.Errorf("credits lots: %w", err)
 	}
 	return out.Lots, nil
+}
+
+// carriedOver is the unused allowance for this meter that is still live from
+// lots granted for another period (held units count as unused).
+func carriedOver(lots []includedLot, item includedUsageItem, period includedPeriod, now time.Time) int64 {
+	start := period.Start.Format(time.RFC3339)
+	nowS := now.Format(time.RFC3339)
+	var total int64
+	for _, l := range lots {
+		m := l.meta()
+		if strArg(m, "included_key") != item.key() || strArg(m, "period_start") == start {
+			continue
+		}
+		if l.Status != "active" || (l.ExpiresAt != "" && l.ExpiresAt <= nowS) {
+			continue
+		}
+		if v := l.Remaining; v > 0 {
+			total += v
+		}
+	}
+	return total
+}
+
+// includedState is the account's included_usage_state metadata.
+type includedState struct {
+	PlanKey     string                   `json:"plan_key"`
+	CheckedAt   string                   `json:"checked_at"`
+	NextCheckAt string                   `json:"next_check_at"`
+	Misses      int64                    `json:"misses,omitempty"`
+	Error       string                   `json:"error,omitempty"`
+	Periods     map[string]includedCarry `json:"periods,omitempty"`
+}
+
+// includedCarry fixes, per meter, the period being granted and the unused
+// allowance carried into it from another period.
+type includedCarry struct {
+	PeriodStart string `json:"period_start"`
+	Carried     int64  `json:"carried"`
+}
+
+func includedStateOf(acct *Account) includedState {
+	var st includedState
+	meta := mapFromAny(acct.Metadata)
+	if raw, ok := meta[includedUsageStateKey]; ok {
+		b, _ := json.Marshal(raw)
+		_ = json.Unmarshal(b, &st)
+	}
+	return st
 }
 
 // periodLots returns the allowance lots granted for this meter and period.
@@ -300,7 +378,10 @@ func (a *App) ensureIncludedUsage(ctx *sdk.AppCtx, pid, accountID string) (map[s
 	}
 	now := includedNow()
 	subs := &subscriptionPeriodReader{ctx: ctx, pid: pid}
+	prev := includedStateOf(acct)
+	periods := map[string]includedCarry{}
 	nextCheck := time.Time{}
+	missed := false
 	var granted []map[string]any
 	var firstError error
 	for _, item := range items {
@@ -309,10 +390,8 @@ func (a *App) ensureIncludedUsage(ctx *sdk.AppCtx, pid, accountID string) (map[s
 			if err != nil && firstError == nil {
 				firstError = err
 			}
-			// Lapsed or unreadable cycle: look again soon.
-			if retry := now.Add(includedRecheckInterval); nextCheck.IsZero() || retry.Before(nextCheck) {
-				nextCheck = retry
-			}
+			// Lapsed or unreadable cycle: look again later (backing off).
+			missed = true
 			continue
 		}
 		if nextCheck.IsZero() || period.End.Before(nextCheck) {
@@ -334,7 +413,15 @@ func (a *App) ensureIncludedUsage(ctx *sdk.AppCtx, pid, accountID string) (map[s
 			}
 			continue
 		}
-		var already int64
+		// What this period already covers: its own grants plus unused
+		// allowance carried over from another period, fixed the first time
+		// the period is seen so later spending can't reopen it.
+		carry, seen := prev.Periods[item.key()]
+		if !seen || carry.PeriodStart != period.Start.Format(time.RFC3339) {
+			carry = includedCarry{PeriodStart: period.Start.Format(time.RFC3339), Carried: carriedOver(lots, item, period, now)}
+		}
+		periods[item.key()] = carry
+		already := carry.Carried
 		for _, l := range periodLots(lots, item, period) {
 			already += l.Original
 		}
@@ -345,12 +432,13 @@ func (a *App) ensureIncludedUsage(ctx *sdk.AppCtx, pid, accountID string) (map[s
 		grant := walletRef(pid, acct.ID, item.Unit)
 		grant["amount"] = diff
 		grant["source"] = "promo"
-		grant["source_ref"] = includedSourceRef(acct.ID, item, period, acct.PlanKey)
+		grant["source_ref"] = includedSourceRef(acct.ID, item, period, acct.PlanKey, item.Amount)
 		grant["priority"] = includedLotPriority
 		grant["expires_at"] = period.End.Format(time.RFC3339)
 		grant["metadata"] = map[string]any{
 			"source_app": "saas", "saas_account_id": acct.ID, "plan_key": acct.PlanKey, "reason": "included_usage",
 			"included_key": item.key(), "period": item.Period, "period_start": period.Start.Format(time.RFC3339), "period_end": period.End.Format(time.RFC3339),
+			"carried_over": carry.Carried,
 		}
 		var out struct {
 			Deduped bool `json:"deduped"`
@@ -365,30 +453,34 @@ func (a *App) ensureIncludedUsage(ctx *sdk.AppCtx, pid, accountID string) (map[s
 			continue
 		}
 		entry := map[string]any{
-			"meter": item.key(), "unit": item.Unit, "amount": diff, "plan_amount": item.Amount,
+			"meter": item.key(), "unit": item.Unit, "amount": diff, "plan_amount": item.Amount, "carried_over": carry.Carried,
 			"period_start": period.Start.Format(time.RFC3339), "period_end": period.End.Format(time.RFC3339),
 		}
 		granted = append(granted, entry)
 		_ = recordEvent(db, pid, acct.ID, "included_usage.granted", "saas", entry)
 	}
-	if nextCheck.IsZero() {
-		nextCheck = now.Add(includedRecheckInterval)
-	}
-	if firstError != nil {
-		// Retry on the next sweep rather than at the period end.
-		if retry := now.Add(includedRecheckInterval); retry.Before(nextCheck) {
+	state := includedState{PlanKey: acct.PlanKey, CheckedAt: now.Format(time.RFC3339), Periods: periods}
+	if missed || firstError != nil {
+		// Retry with backoff rather than at the period end, so accounts that
+		// keep failing (a lapsed cycle) can't crowd out the rest.
+		state.Misses = prev.Misses + 1
+		if retry := now.Add(includedBackoff(state.Misses)); nextCheck.IsZero() || retry.Before(nextCheck) {
 			nextCheck = retry
 		}
 	}
-	state := map[string]any{"plan_key": acct.PlanKey, "checked_at": now.Format(time.RFC3339), "next_check_at": nextCheck.Format(time.RFC3339)}
+	if nextCheck.IsZero() {
+		nextCheck = now.Add(includedRecheckInterval)
+	}
+	state.NextCheckAt = nextCheck.Format(time.RFC3339)
 	if firstError != nil {
-		state["error"] = firstError.Error()
+		state.Error = firstError.Error()
 	}
 	if _, err := db.Exec(`UPDATE saas_accounts SET metadata_json=json_set(COALESCE(metadata_json,'{}'), '$.`+includedUsageStateKey+`', json(?)) WHERE project_id=? AND id=?`,
 		jsonOrEmpty(state, "{}"), pid, acct.ID); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"granted": granted, "next_check_at": state["next_check_at"]}
+	pricing.invalidateAccount(pid, acct.ID)
+	out := map[string]any{"granted": granted, "next_check_at": state.NextCheckAt}
 	if firstError != nil {
 		return out, firstError
 	}
@@ -404,18 +496,81 @@ func (a *App) ensureIncludedUsageSoft(ctx *sdk.AppCtx, pid, accountID string) {
 	_, _ = a.ensureIncludedUsage(ctx, pid, accountID)
 }
 
+// includedGrantLocks serializes on-demand grants per account so a burst of
+// requests at a period boundary makes one round of Credits calls.
+var includedGrantLocks sync.Map
+
+// ensureIncludedIfDue grants the account's current period now when its
+// included_usage_state says one is due (the period ended, the plan or its
+// allowance changed, or it was never checked). Used on the request path so
+// usage at a period boundary never waits for the worker.
+func (a *App) ensureIncludedIfDue(ctx *sdk.AppCtx, pid, accountID string, nextCheck time.Time) {
+	if ctx.PlatformAPI() == nil || (!nextCheck.IsZero() && includedNow().Before(nextCheck)) {
+		return
+	}
+	muAny, _ := includedGrantLocks.LoadOrStore(pid+"\x00"+accountID, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	acct, err := dbAccountGet(ctx.AppDB(), pid, accountID)
+	if err != nil || acct == nil || !includedDue(acct, includedNow()) {
+		return
+	}
+	_, _ = a.ensureIncludedUsage(ctx, pid, accountID)
+}
+
+// includedDue mirrors dbAccountsDueIncludedUsage for one account.
+func includedDue(acct *Account, now time.Time) bool {
+	st := includedStateOf(acct)
+	if st.NextCheckAt == "" || st.PlanKey != acct.PlanKey {
+		return true
+	}
+	next, err := time.Parse(time.RFC3339, st.NextCheckAt)
+	return err != nil || !now.Before(next)
+}
+
+func includedNextCheck(acct *Account) time.Time {
+	st := includedStateOf(acct)
+	if st.PlanKey != acct.PlanKey {
+		return time.Time{}
+	}
+	next, _ := time.Parse(time.RFC3339, st.NextCheckAt)
+	return next
+}
+
 // runIncludedUsage is the included-usage worker: it grants allowances for
 // active accounts whose period ended, whose plan changed, or that were never
-// checked.
+// checked, most overdue first, in batches until none are due.
 func (a *App) runIncludedUsage(ctx *sdk.AppCtx) error {
-	accounts, err := dbAccountsDueIncludedUsage(ctx.AppDB(), projectID(ctx, nil), includedNow(), includedSweepLimit)
-	if err != nil {
-		return err
-	}
-	for _, acct := range accounts {
-		_, _ = a.ensureIncludedUsage(ctx, acct.ProjectID, acct.ID)
+	seen := map[string]bool{}
+	for batch := 0; batch < includedSweepMaxBatches; batch++ {
+		accounts, err := dbAccountsDueIncludedUsage(ctx.AppDB(), projectID(ctx, nil), includedNow(), includedSweepLimit)
+		if err != nil {
+			return err
+		}
+		progress := false
+		for _, acct := range accounts {
+			key := acct.ProjectID + "\x00" + acct.ID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			progress = true
+			_, _ = a.ensureIncludedUsage(ctx, acct.ProjectID, acct.ID)
+		}
+		if len(accounts) < includedSweepLimit || !progress {
+			return nil
+		}
 	}
 	return nil
+}
+
+// markIncludedUsageChanged makes every account on a plan due for a grant
+// check, e.g. after the plan's included_usage was raised.
+func markIncludedUsageChanged(db *sql.DB, pid, planKey string) error {
+	_, err := db.Exec(`UPDATE saas_accounts SET metadata_json=json_remove(metadata_json, '$.`+includedUsageStateKey+`.next_check_at')
+		WHERE project_id=? AND plan_key=? AND json_extract(metadata_json, '$.`+includedUsageStateKey+`') IS NOT NULL`, pid, planKey)
+	return err
 }
 
 func dbAccountsDueIncludedUsage(db *sql.DB, pid string, now time.Time, limit int) ([]*Account, error) {
@@ -433,7 +588,7 @@ func dbAccountsDueIncludedUsage(db *sql.DB, pid string, now time.Time, limit int
 		query += ` AND a.project_id=?`
 		args = append(args, pid)
 	}
-	query += `) ORDER BY updated_at, id LIMIT ?`
+	query += `) ORDER BY COALESCE(json_extract(metadata_json, '$.` + includedUsageStateKey + `.next_check_at'), ''), id LIMIT ?`
 	args = append(args, limit)
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -467,6 +622,12 @@ func (a *App) includedUsageSummary(ctx *sdk.AppCtx, pid string, acct *Account) (
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
 	}
+	if len(items) > 0 && acct.Status == StatusActive && includedDue(acct, includedNow()) {
+		a.ensureIncludedIfDue(ctx, pid, acct.ID, time.Time{})
+		if fresh, err := dbAccountGet(ctx.AppDB(), pid, acct.ID); err == nil && fresh != nil {
+			acct = fresh
+		}
+	}
 	now := includedNow()
 	nowS := now.Format(time.RFC3339)
 	subs := &subscriptionPeriodReader{ctx: ctx, pid: pid}
@@ -489,6 +650,19 @@ func (a *App) includedUsageSummary(ctx *sdk.AppCtx, pid string, acct *Account) (
 					total += l.Original
 					if l.Status == "active" && (l.ExpiresAt == "" || l.ExpiresAt > nowS) {
 						remaining += l.Remaining - l.Held
+					}
+				}
+				// Unused allowance carried over from another period (a plan
+				// change) counts toward this period, as it did when granting.
+				if carry, ok := includedStateOf(acct).Periods[item.key()]; ok && carry.PeriodStart == period.Start.Format(time.RFC3339) && carry.Carried > 0 {
+					total += carry.Carried
+					entry["carried_over"] = carry.Carried
+					for _, l := range lots {
+						m := l.meta()
+						if strArg(m, "included_key") == item.key() && strArg(m, "period_start") != period.Start.Format(time.RFC3339) &&
+							l.Status == "active" && (l.ExpiresAt == "" || l.ExpiresAt > nowS) {
+							remaining += l.Remaining - l.Held
+						}
 					}
 				}
 				if remaining < 0 {
