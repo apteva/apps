@@ -496,12 +496,19 @@ for (const host of ["dashboard","external","package"]) {
   await phase("preparing_tool",2,{tool_name:"code_repos_list",call_id:"call-1"});
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);
-  await expect(row).toHaveAttribute("aria-label",/Preparing/);
+  await expect(row).toHaveAttribute("aria-label",/Writing the next action…, Writing/);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  // The call's own label replaces the generic one as soon as Core's _reason
+  // argument is read, and a long argument write shows its size.
+  await phase("preparing_tool",3,{tool_name:"code_repos_list",call_id:"call-1",tool_reason:"Listing repositories",tool_arg_bytes:1500});
+  await expect(row.locator(".chat-tool-copy").first()).toHaveText("Listing repositories");
+  await expect(row.locator("[data-tool-arg-size]")).toHaveText("1.5 KB");
+  await expect(row).toHaveAttribute("aria-label",/Listing repositories, Writing · 1\.5 KB/);
+  await row.screenshot({path:test.info().outputPath("writing-tool.png")});
   expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await page.screenshot({path:test.info().outputPath("preparing-tool.png")});
   const activity={id:501,chat_id:chat,agent_id:41,thread_id:chat,call_id:"call-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
-  await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",3);
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",4);
   await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
   expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:50,revision:2}}});
@@ -509,7 +516,7 @@ for (const host of ["dashboard","external","package"]) {
   // A completed call settles; the next model step owns the indicator.
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
-  await phase("continuing",4);
+  await phase("continuing",5);
   // While processing the result, Thinking occupies the existing tool row.
   await expect(row).toHaveAttribute("aria-label",/Listing repositories.*Done.*Thinking/);
   await expect(row.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
@@ -524,12 +531,12 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row).toHaveAttribute("aria-label",/Done/);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
-  await phase("idle",5);
+  await phase("idle",6);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
   // An approval verdict begins a new turn. Existing tool history stays done.
-  await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
+  await phase("thinking",7,{run_id:"response-2",started_at:new Date().toISOString()});
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
  });

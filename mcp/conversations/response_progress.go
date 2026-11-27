@@ -21,6 +21,11 @@ type ResponseProgress struct {
 	ToolName            string    `json:"tool_name,omitempty"`
 	CallID              string    `json:"call_id,omitempty"`
 	ToolStartedAt       time.Time `json:"tool_started_at,omitempty"`
+	// While the model writes a tool call's arguments: its activity label as
+	// soon as Core's "_reason" argument is complete, and how many argument
+	// bytes have arrived so far.
+	ToolReason   string `json:"tool_reason,omitempty"`
+	ToolArgBytes int    `json:"tool_arg_bytes,omitempty"`
 }
 type responseProgressState struct {
 	ResponseProgress
@@ -34,6 +39,63 @@ type responseProgressState struct {
 	inboundReceived bool
 	touched         time.Time
 	lastEvent       time.Time
+	// Argument stream of the tool call being written (see ToolReason).
+	toolArgs       strings.Builder
+	toolArgsParser flatStringParser
+	toolArgsEmit   time.Time
+	toolArgsSent   int
+}
+
+// The reason is read from the start of the arguments; past this many
+// buffered bytes only the count is kept.
+const maxReasonScanBytes = 16 << 10
+
+// Argument-size updates are throttled: a frame when the size grew by this
+// much and this long has passed since the previous one.
+const (
+	toolArgsStep     = 256
+	toolArgsInterval = 500 * time.Millisecond
+)
+
+// resetToolArgs starts tracking a new tool call's arguments.
+func (p *responseProgressState) resetToolArgs() {
+	p.toolArgs.Reset()
+	p.toolArgsParser = flatStringParser{}
+	p.toolArgsEmit = time.Time{}
+	p.toolArgsSent = 0
+	p.ToolReason = ""
+	p.ToolArgBytes = 0
+}
+
+// trackToolArgs adds one argument chunk and reports whether the visible
+// state (a newly read reason, or enough new bytes) is worth a frame.
+func (p *responseProgressState) trackToolArgs(chunk string, now time.Time) bool {
+	p.ToolArgBytes += len(chunk)
+	reasonFound := false
+	if !p.toolArgsParser.reasonSeen && p.toolArgs.Len() < maxReasonScanBytes {
+		p.toolArgs.WriteString(chunk)
+		p.toolArgsParser.consume(p.toolArgs.String())
+		if p.toolArgsParser.reasonSeen {
+			p.ToolReason = truncateRunes(strings.TrimSpace(p.toolArgsParser.reason), 120)
+			reasonFound = p.ToolReason != ""
+			p.toolArgs.Reset() // nothing else is read from the arguments
+		}
+	}
+	grown := p.ToolArgBytes-p.toolArgsSent >= toolArgsStep && now.Sub(p.toolArgsEmit) >= toolArgsInterval
+	if reasonFound || grown {
+		p.toolArgsEmit = now
+		p.toolArgsSent = p.ToolArgBytes
+		return true
+	}
+	return false
+}
+
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:max-1]) + "…"
 }
 
 // Keep the completed turn boundary through the model's post-reply work.
@@ -306,6 +368,8 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		ToolCallID string `json:"tool_call_id"`
 		Message    string `json:"message"`
 		Source     string `json:"source"`
+		Chunk      string `json:"chunk"`
+		Delta      string `json:"delta"`
 	}
 	_ = json.Unmarshal([]byte(raw), &d)
 	name := firstNonEmptyString(d.Name, d.Tool)
@@ -347,6 +411,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		return
 	}
 	phase := p.Phase
+	argsChanged := false
 	switch event {
 	case "llm.start":
 		phase = "thinking"
@@ -355,6 +420,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		}
 		p.ToolName = ""
 		p.CallID = ""
+		p.resetToolArgs()
 	case "llm.tool_chunk":
 		if !visibleActivityTool(name) {
 			s.mu.Unlock()
@@ -365,7 +431,9 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		p.CallID = firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
 		if p.CallID != p.lastCallID || p.Phase != "preparing_tool" {
 			p.ToolStartedAt = ts
+			p.resetToolArgs()
 		}
+		argsChanged = p.trackToolArgs(firstNonEmptyString(d.Chunk, d.Delta), time.Now())
 	case "tool.result":
 		if !visibleActivityTool(name) || !p.hadTools {
 			s.mu.Unlock()
@@ -376,6 +444,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		phase = "continuing"
 		p.ToolName = ""
 		p.CallID = ""
+		p.resetToolArgs()
 	case "tool.call":
 		if !visibleActivityTool(name) {
 			s.mu.Unlock()
@@ -397,8 +466,9 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		s.mu.Unlock()
 		return
 	}
-	// Argument deltas contain no safe final label; emit once per tool identity.
-	if phase == p.Phase && event == "llm.tool_chunk" && p.CallID == p.lastCallID {
+	// Argument deltas are sent once per tool identity, then only when the
+	// reason is read or the size grew (throttled), never per chunk.
+	if phase == p.Phase && event == "llm.tool_chunk" && p.CallID == p.lastCallID && !argsChanged {
 		s.mu.Unlock()
 		return
 	}

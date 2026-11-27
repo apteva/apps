@@ -473,3 +473,74 @@ func TestInputDuringTimedPaceShowsThinking(t *testing.T) {
 		t.Fatal("input during a timed pace showed no Thinking")
 	}
 }
+
+// While the model writes a tool call's arguments, the row shows the call's
+// own label as soon as Core's "_reason" argument is complete, and how much
+// has been written; size updates are throttled, never one frame per chunk.
+// Prod: 16% of Codex tool calls spent over 3s in "Preparing a tool action…"
+// while the model wrote ~1.5 KB of arguments.
+func TestPreparingToolShowsReasonAndArgumentSize(t *testing.T) {
+	s := newStreamer(newHub())
+	var frames []StreamFrame
+	s.onFrame = func(f StreamFrame) { frames = append(frames, f) }
+	s.resolve = func(int64, string) string { return "conv-args" }
+	ingest := func(kind, raw string) { s.Ingest(kind, 41, "chat-conv-args", raw, time.Now()) }
+	chunk := func(id, text string) {
+		raw, _ := json.Marshal(map[string]string{"tool": "todo_todos_create", "id": id, "chunk": text})
+		ingest("llm.tool_chunk", string(raw))
+	}
+	last := func() *ResponseProgress { t.Helper(); return frames[len(frames)-1].Progress }
+	s.emitAck("conv-args", "chat-conv-args", 41, 80)
+	ingest("llm.start", `{}`)
+
+	chunk("c1", `{"_reason":"Creating mark`)
+	if p := last(); p.Phase != "preparing_tool" || p.ToolReason != "" || p.ToolArgBytes != 25 {
+		t.Fatalf("first chunk: %+v", p)
+	}
+	n := len(frames)
+	chunk("c1", `eting todo","notes":"`)
+	if len(frames) != n+1 || last().ToolReason != "Creating marketing todo" {
+		t.Fatalf("reason not published once complete: frames=%d %+v", len(frames)-n, last())
+	}
+	n = len(frames)
+	for i := 0; i < 40; i++ {
+		chunk("c1", strings.Repeat("x", 50))
+	}
+	if len(frames) != n {
+		t.Fatalf("argument deltas flooded progress: %d frames", len(frames)-n)
+	}
+	s.mu.Lock()
+	s.responses[responseProgressKey("conv-args", 41)].toolArgsEmit = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	chunk("c1", "y")
+	if p := last(); len(frames) != n+1 || p.ToolArgBytes != 25+21+40*50+1 || p.ToolReason != "Creating marketing todo" {
+		t.Fatalf("size update: frames=%d %+v", len(frames)-n, p)
+	}
+	// A new call starts from zero, without the previous call's label.
+	chunk("c2", `{"title":"x"`)
+	if p := last(); p.CallID != "c2" || p.ToolReason != "" || p.ToolArgBytes != 12 {
+		t.Fatalf("second call inherited state: %+v", p)
+	}
+	ingest("tool.call", `{"name":"todo_todos_create","id":"c2"}`)
+	ingest("tool.result", `{"name":"todo_todos_create","id":"c2"}`)
+	if p := last(); p.ToolReason != "" || p.ToolArgBytes != 0 {
+		t.Fatalf("result kept argument state: %+v", p)
+	}
+}
+
+func TestFlatStringParserReadsReasonAcrossChunks(t *testing.T) {
+	var p flatStringParser
+	buf := ""
+	for _, c := range []string{`{"_rea`, `son":"Sending é`, `t\"e\" note","text":"hi"}`} {
+		buf += c
+		p.consume(buf)
+	}
+	if !p.reasonSeen || p.reason != `Sending ét"e" note` {
+		t.Fatalf("reason=%q seen=%v", p.reason, p.reasonSeen)
+	}
+	var nested flatStringParser
+	nested.consume(`{"input":{"_reason":"inner"},"x":1`)
+	if nested.reasonSeen {
+		t.Fatal("nested _reason taken as the call's reason")
+	}
+}

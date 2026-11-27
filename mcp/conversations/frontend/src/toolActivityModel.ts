@@ -15,6 +15,8 @@ export interface ToolActivity {
   name: string;
   reason: string;
   state: ToolActivityState;
+  /** Argument bytes written so far while the call is being prepared. */
+  argBytes?: number;
   success?: boolean;
   durationMs?: number;
   startedAt: number;

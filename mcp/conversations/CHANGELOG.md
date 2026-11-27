@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.36.0 — 2026-11-27
+
+- While the model writes a tool call, the row says what it's doing instead of "Preparing a tool action…". Conversations reads Core's `_reason` argument out of the streamed argument chunks and shows it as soon as it's complete; models usually write it first (on local, "Counting project agents" showed 141ms into a 297ms write). Calls whose reason comes later still show the generic label until then.
+- The state is now called "Writing" (it's the model writing the call's arguments), and writes over 1 KB show their size ("1.5 KB"), so a long write visibly moves. Prod measurement behind this: 16% of Codex tool calls spent over 3s in this state, driven by argument size (median ~1.5 KB at ~250 B/s), not by Core or the app.
+- Size updates are throttled (a frame per 256 bytes, at most every 500ms); argument text is never sent to clients, only the label and the byte count.
+
 ## 0.35.1 — 2026-11-26
 
 - A queued message now shows where it was sent to the agent, not where it was typed. A message queued while the agent was still working rendered above the reply it had waited for, because that reply was saved after the message was queued (prod: the "instagram reference" message showed above "Done. Server Tycoon…"). A release or steer records the last message shown at that moment (`placed_after`, migration 020), and the transcript places the message right after it. Ids, paging and deliveries are unchanged.

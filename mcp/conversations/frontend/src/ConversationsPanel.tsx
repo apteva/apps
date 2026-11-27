@@ -1226,6 +1226,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
                 tool_name: progress.tool_name || existing.tool_name,
                 call_id: progress.call_id || existing.call_id,
                 tool_started_at: progress.tool_started_at || existing.tool_started_at,
+                tool_reason: progress.tool_reason || existing.tool_reason,
               }
             : {};
           return [...current.filter(p=>p!==existing), {...progress, ...carriedTool}];
@@ -1682,7 +1683,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       : undefined;
     const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
       && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
-      ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
+      ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:p.tool_reason ?? "",argBytes:p.phase === "preparing_tool" ? p.tool_arg_bytes : undefined,state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
       : []);
     const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
     // A spawn row whose thread is linked to this conversation shows as a

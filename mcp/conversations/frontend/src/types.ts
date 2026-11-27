@@ -85,6 +85,8 @@ export interface ResponseProgress {
  phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
  run_id: string; revision: number; after_message_id: number; started_at: string;
  tool_name?: string; call_id?: string; tool_started_at?: string;
+ /** While the model writes the call's arguments: its label once known, and bytes written so far. */
+ tool_reason?: string; tool_arg_bytes?: number;
 }
 export interface StreamFrame {
  snapshot?: boolean;

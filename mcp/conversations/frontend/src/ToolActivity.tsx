@@ -32,6 +32,12 @@ function visualState(tool: ToolActivity): VisualState {
   return tool.success === false ? "failed" : "done";
 }
 
+/** Argument size while writing; small arguments need no counter. */
+export function argSizeLabel(bytes?: number): string {
+  if (!bytes || bytes < 1024) return "";
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
 export function durationLabel(milliseconds?: number): string {
   if (milliseconds === undefined || milliseconds < 0) return "";
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)}s` : `${milliseconds}ms`;
@@ -40,7 +46,12 @@ export function durationLabel(milliseconds?: number): string {
 function stateLabel(tool: ToolActivity, t: (key: string, options?: Record<string, unknown>) => string): string {
   const state = visualState(tool);
   if (state === "interrupted") return t("tool.interrupted");
-  if (state === "preparing") return t("chat.panel.toolPreparing");
+  if (state === "preparing") {
+    // The model is writing the call's arguments; a size shows that a long
+    // write (a message, a directive) is moving.
+    const size = argSizeLabel(tool.argBytes);
+    return size ? `${t("chat.panel.toolPreparing")} · ${size}` : t("chat.panel.toolPreparing");
+  }
   if (state === "running") return t("chat.panel.toolRunning");
   if (state === "failed") return t("chat.panel.toolFailed");
   return t("chat.panel.toolDone");
@@ -151,6 +162,7 @@ export function ChatToolActivity({
   const focusReason = reasonLabel(focusTool, t);
   const focusTitle = reasonTitle(focusTool, t);
   const copyIsActive = status.state === "preparing" || status.state === "running";
+  const focusSize = focusTool.state === "preparing" ? argSizeLabel(focusTool.argBytes) : "";
   const failedCount = tools.filter((tool) => visualState(tool) === "failed").length;
   const visibleFailure = failedCount > 0
     ? grouped
@@ -215,6 +227,7 @@ export function ChatToolActivity({
           ) : null}
         </span>
         <span className="inline-flex shrink-0 items-center gap-2">
+          {focusSize && <span className="text-[11px] tabular-nums text-text-dim" data-tool-arg-size>{focusSize}</span>}
           {duration && <span className="text-[11px] tabular-nums text-text-dim" title={t("tool.executionTime")}>{duration}</span>}
           {grouped && <ChevronIcon expanded={expanded} />}
         </span>
@@ -307,6 +320,7 @@ function ToolCallRow({
             <span>{stateText}</span>
           </span>
         )}
+        {state === "preparing" && argSizeLabel(tool.argBytes) && <span className="normal-case tabular-nums text-text-dim" data-tool-arg-size>{argSizeLabel(tool.argBytes)}</span>}
         {duration && <span className="text-text-dim">{duration}</span>}
       </span>
     </div>

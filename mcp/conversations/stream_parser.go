@@ -19,6 +19,11 @@ type flatStringParser struct {
 	destinationSeen          bool
 	textComplete             bool
 	expectingValue           bool
+	// reason is Core's "_reason" activity label, read once it is complete.
+	// Core adds it to every tool schema first, so it usually arrives within
+	// the first chunks, long before the remaining arguments.
+	reason     string
+	reasonSeen bool
 }
 
 func (p *flatStringParser) consume(raw string) {
@@ -58,6 +63,10 @@ func (p *flatStringParser) consume(raw string) {
 				if p.key == "text" {
 					p.textComplete = true
 				}
+				if p.key == "_reason" && !p.reasonSeen {
+					p.reason = p.token.String()
+					p.reasonSeen = true
+				}
 			}
 			p.pos++
 			continue
@@ -92,7 +101,7 @@ func (p *flatStringParser) consume(raw string) {
 			value = raw[p.pos : p.pos+1]
 			p.pos++
 		}
-		if p.isKey || (p.depth == 1 && p.key == "conversation_id") {
+		if p.isKey || (p.depth == 1 && (p.key == "conversation_id" || p.key == "_reason")) {
 			p.token.WriteString(value)
 		}
 		if !p.isKey && p.depth == 1 && p.key == "text" {
