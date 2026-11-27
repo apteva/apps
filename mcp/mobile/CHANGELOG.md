@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 — 2026-11-27
+
+- Password references: `mobile_action action=secure_text` takes exactly one
+  of `secret_ref` or `password`. A reference names an entry in the new
+  encrypted `mobile_secrets` setting (project ID → reference →
+  `{value, package, resource_id?, device_id?, expires_at}`, the same shape and
+  expiry rule as Actors' `browser_secrets`). Mobile looks the value up itself,
+  so it never passes through the agent's context, Core telemetry or
+  app-to-app calls.
+- A reference's `package`, `resource_id` and `device_id` (inventory ID or
+  serial) become guards: a call that names a different package or field, or a
+  session on another device, is refused. Missing, expired, unbound or
+  other-project references fail with `secret_unavailable`; no error contains
+  the value.
+- `allow_literal_secure_text` (default on): when off, `password` is refused and
+  only `secret_ref` is accepted.
+
 ## 0.9.1 — 2026-11-27
 
 - Live video recovers on its own when its connection to the phone breaks

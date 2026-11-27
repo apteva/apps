@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.9.1
+version: 0.10.0
 description: |
+  v0.10.0 adds password references: secure_text takes secret_ref, a name from the encrypted mobile_secrets setting bound to a package and optionally a field and device, so agents never see the password; allow_literal_secure_text=false refuses literal passwords.
   v0.9.1 restarts live video when its phone link breaks during a short USB drop, treats a new adb transport as a reconnect, and reports a stopped action as session_stopped.
   v0.9.0 adds an immediate stop for sessions, session/action/device events, phone health with automatic reconnect, live H.264 video with touch input, long-press, drag, any keycode, Unicode replace and wait_for, and baseline/clean for shared phones.
   v0.8.0 reports Android selection state (checkable, checked, selected, scrollable) in UI source and advertises the selection_state capability on the ADB driver.
@@ -108,7 +109,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.9.1
+    ref: mobile/v0.10.0
     entry: mcp/mobile
   port: 8080
   health_check: /health
@@ -133,4 +134,6 @@ config_schema:
   - { name: offline_grace_seconds, type: text, default: "300", label: Offline grace (seconds), description: "How long a session stays paused waiting for its phone to come back before it ends as device_lost. 0 waits until the session expires." }
   - { name: max_stream_viewers, type: text, default: "4", label: Live video viewers per session, description: "1..20." }
   - { name: blocked_keycodes, type: text, default: "26,223,276", label: Blocked Android keycodes, description: "Comma-separated keycodes that key actions refuse. Default: power, sleep, soft sleep. Use none to allow all." }
+  - { name: mobile_secrets, type: secret, label: Password references, description: 'Encrypted JSON map of project IDs to references for secure_text: {"<project_id>":{"bank-login":{"value":"...","package":"com.example.bank","resource_id":"com.example.bank:id/password","device_id":"R5GYC4D9S5M","expires_at":"2027-01-01T00:00:00Z"}}}. value, package and expires_at (RFC3339) are required; resource_id and device_id (inventory ID or serial) narrow where the value may be typed. Agents pass secret_ref and never see the value.' }
+  - { name: allow_literal_secure_text, type: bool, default: true, label: Allow literal passwords, description: "When off, secure_text refuses password and accepts only secret_ref, so no password can pass through an agent's context or logs." }
 upgrade_policy: auto-patch

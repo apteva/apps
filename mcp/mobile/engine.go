@@ -649,6 +649,9 @@ func (e *engine) executeTool(ctx context.Context, pid, tool string, args map[str
 	case "mobile_action":
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
 			if str(args, "action") == "secure_text" {
+				if !secretDeviceAllowed(args, s.Device) {
+					return nil, problem("forbidden", "secret is not bound to this device")
+				}
 				var count int
 				if err := e.db.QueryRow(`SELECT COUNT(*) FROM mobile_recordings WHERE device_id=? AND status IN ('starting','recording','stopping','processing')`, s.Device.ID).Scan(&count); err != nil {
 					return nil, problem("invalid_state", "cannot confirm recording state")

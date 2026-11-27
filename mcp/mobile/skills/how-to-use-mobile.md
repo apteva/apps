@@ -123,6 +123,14 @@ put passwords in definitions, presets, run inputs, screenshots or recording
 scenarios. Private Android observation is mobile_observe(source=true,image=false);
 it requires Android ADB and fails without a screenshot fallback.
 
+Pass secret_ref (a reference name the operator configured in Mobile's
+mobile_secrets setting) instead of password whenever one exists: Mobile looks
+the value up itself and you never see it. Ask the operator for a reference name;
+never ask the user to paste a password into chat. A reference may be bound to a
+package, field and phone; secret_unavailable means it is missing, expired or
+belongs to another project, and forbidden means this screen, field or phone is
+not the one it is bound to. Do not retry with a literal password.
+
 The secure_text action receives a password only at runtime, plus exact package,
 resource ID (empty for anonymous fields), bounds, native_required screen markers
 and native_values regular-field guards. It requires a live exclusive session,
