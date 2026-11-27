@@ -28,6 +28,9 @@ const (
 	TenantReleasing         = "releasing"
 	TenantReleased          = "released"
 	TenantFailed            = "failed"
+	// TenantDegraded: an app-managed tenant whose device is offline or held
+	// by someone else. It returns to active by itself when that is over.
+	TenantDegraded = "degraded"
 )
 
 // Machine states (pool backend).
@@ -224,9 +227,12 @@ func seedProfiles(db *sql.DB, defaultImage string) error {
 // ─── Pools ───────────────────────────────────────────────────────────────
 
 type Pool struct {
-	Key              string          `json:"key"`
-	Name             string          `json:"name"`
-	Platform         string          `json:"platform"`
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	Platform string `json:"platform"`
+	// ManagedBy names the app that drives the pool's machines ("mobile" for
+	// phones); empty for Instances hosts.
+	ManagedBy        string          `json:"managed_by,omitempty"`
 	ScriptSet        string          `json:"-"` // always the platform; scripts are picked by platform
 	ExecutionEnabled bool            `json:"execution_enabled"`
 	Metadata         json.RawMessage `json:"metadata"`
@@ -234,13 +240,13 @@ type Pool struct {
 	UpdatedAt        string          `json:"updated_at"`
 }
 
-const poolSelect = `SELECT key, name, platform, script_set, execution_enabled, metadata_json, created_at, updated_at FROM hosting_pools`
+const poolSelect = `SELECT key, name, platform, managed_by, script_set, execution_enabled, metadata_json, created_at, updated_at FROM hosting_pools`
 
 func scanPool(row rowScanner) (*Pool, error) {
 	var p Pool
 	var enabled int
 	var meta string
-	if err := row.Scan(&p.Key, &p.Name, &p.Platform, &p.ScriptSet, &enabled, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.Key, &p.Name, &p.Platform, &p.ManagedBy, &p.ScriptSet, &enabled, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	p.ExecutionEnabled = enabled != 0
@@ -287,9 +293,14 @@ func dbPoolList(db *sql.DB) ([]*Pool, error) {
 // ─── Machines ────────────────────────────────────────────────────────────
 
 type Machine struct {
-	ID             int64             `json:"id"`
-	PoolKey        string            `json:"pool_key"`
-	InstanceID     int64             `json:"instance_id"`
+	ID         int64  `json:"id"`
+	PoolKey    string `json:"pool_key"`
+	InstanceID int64  `json:"instance_id,omitempty"`
+	// DeviceRef is the managing app's device id on an app-managed pool;
+	// DeviceSession the session Hosting holds on it.
+	DeviceRef      string            `json:"device_ref,omitempty"`
+	DeviceSession  string            `json:"device_session,omitempty"`
+	ManagedBy      string            `json:"managed_by,omitempty"`
 	Name           string            `json:"name"`
 	State          string            `json:"state"`
 	StateReason    string            `json:"state_reason"`
@@ -311,14 +322,15 @@ type Machine struct {
 	UpdatedAt      string            `json:"updated_at"`
 }
 
-const machineSelect = `SELECT id, pool_key, instance_id, name, state, state_reason, online, COALESCE(last_seen_at,''), public_host, public_port,
+const machineSelect = `SELECT id, pool_key, COALESCE(instance_id,0), device_ref, device_session,
+	COALESCE((SELECT p.managed_by FROM hosting_pools p WHERE p.key=hosting_machines.pool_key),''), name, state, state_reason, online, COALESCE(last_seen_at,''), public_host, public_port,
 	connect_mode, endpoint_source, endpoint_issue, serial, expected_os, management_user, script_hashes_json, validated, COALESCE(tenant_id,''), metadata_json, created_at, updated_at FROM hosting_machines`
 
 func scanMachine(row rowScanner) (*Machine, error) {
 	var m Machine
 	var online, validated int
 	var hashes, meta string
-	if err := row.Scan(&m.ID, &m.PoolKey, &m.InstanceID, &m.Name, &m.State, &m.StateReason, &online, &m.LastSeenAt, &m.PublicHost, &m.PublicPort,
+	if err := row.Scan(&m.ID, &m.PoolKey, &m.InstanceID, &m.DeviceRef, &m.DeviceSession, &m.ManagedBy, &m.Name, &m.State, &m.StateReason, &online, &m.LastSeenAt, &m.PublicHost, &m.PublicPort,
 		&m.ConnectMode, &m.EndpointSource, &m.EndpointIssue, &m.Serial, &m.ExpectedOS, &m.ManagementUser, &hashes, &validated, &m.TenantID, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -384,11 +396,17 @@ func dbMachineSetState(db querier, id int64, state, reason string) error {
 	return err
 }
 
+// endpointOK: customers can reach the machine. An app-managed device is
+// reached through its managing app, so it has no SSH endpoint.
+const endpointOK = `(m.device_ref != '' OR (m.public_host != '' AND m.endpoint_issue = ''))`
+
 // forSaleCondition is the SQL predicate for a machine Hosting may hand to a
 // new tenant: available, online, validated, in a pool with execution on.
 const forSaleCondition = `m.state='available' AND m.online=1 AND m.validated=1 AND m.tenant_id IS NULL
-	AND m.public_host != '' AND m.endpoint_issue = ''
+	AND ` + endpointOK + `
 	AND EXISTS (SELECT 1 FROM hosting_pools p WHERE p.key=m.pool_key AND p.execution_enabled=1)`
+
+func (m *Machine) managed() bool { return m != nil && m.DeviceRef != "" }
 
 // ─── Tenants ─────────────────────────────────────────────────────────────
 
@@ -413,12 +431,25 @@ type Tenant struct {
 	LastError        string          `json:"last_error"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
 	Access           *TenantAccess   `json:"access,omitempty"`
-	ReleasedAt       string          `json:"released_at,omitempty"`
+	// Device is set for a tenant on an app-managed pool (a phone): the
+	// customer uses the managing app with this session.
+	Device     *TenantDevice `json:"device,omitempty"`
+	ReleasedAt string        `json:"released_at,omitempty"`
 	// DueAt is when a tenant that had to wait was promised its machine
 	// (order time + the profile's presale_ready_days).
 	DueAt     string `json:"due_at,omitempty"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+}
+
+// TenantDevice is how a customer reaches a rented phone: Mobile's tools
+// with session_id on device_ref. The session id is a bearer: whoever has it
+// drives the phone.
+type TenantDevice struct {
+	ManagedBy string `json:"managed_by"`
+	DeviceRef string `json:"device_ref"`
+	SessionID string `json:"session_id,omitempty"`
+	Online    bool   `json:"online"`
 }
 
 // TenantAccess is what storefronts show the customer.
@@ -436,16 +467,18 @@ const tenantSelect = `SELECT id, external_ref, profile_key, backend, workload_id
 	metadata_json, COALESCE(released_at,''), created_at, updated_at, COALESCE(due_at,''),
 	COALESCE((SELECT hm.public_host FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
 	COALESCE((SELECT hm.public_port FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), 0),
-	COALESCE((SELECT hm.endpoint_issue FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), '')
+	COALESCE((SELECT hm.endpoint_issue FROM hosting_machines hm WHERE hm.id = hosting_tenants.machine_id), ''),
+	COALESCE((SELECT hm.device_ref || char(9) || hm.device_session || char(9) || hm.online || char(9) || p.managed_by
+	  FROM hosting_machines hm JOIN hosting_pools p ON p.key = hm.pool_key WHERE hm.id = hosting_tenants.machine_id AND hm.device_ref != ''), '')
 	FROM hosting_tenants`
 
 func scanTenant(row rowScanner) (*Tenant, error) {
 	var t Tenant
-	var keys, meta, machineHost, machineIssue string
+	var keys, meta, machineHost, machineIssue, device string
 	var machinePort int
 	if err := row.Scan(&t.ID, &t.ExternalRef, &t.ProfileKey, &t.Backend, &t.WorkloadID, &t.MachineID, &t.InstanceID, &t.ReservationID,
 		&t.Slug, &t.DefaultHostname, &t.OwnerEmail, &t.SSHUser, &keys, &t.Status, &t.AptevaVersion, &t.Image, &t.LastHealthStatus, &t.LastError,
-		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt, &t.DueAt, &machineHost, &machinePort, &machineIssue); err != nil {
+		&meta, &t.ReleasedAt, &t.CreatedAt, &t.UpdatedAt, &t.DueAt, &machineHost, &machinePort, &machineIssue, &device); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(keys), &t.AccessKeys)
@@ -457,6 +490,12 @@ func scanTenant(row rowScanner) (*Tenant, error) {
 	host, port, issue := strArg(md, "access_host"), intArg(md, "access_port", 22), ""
 	if t.MachineID > 0 {
 		host, port, issue = machineHost, machinePort, machineIssue
+	}
+	if parts := strings.Split(device, "\t"); len(parts) == 4 {
+		t.Device = &TenantDevice{DeviceRef: parts[0], Online: parts[2] == "1", ManagedBy: parts[3]}
+		if t.Status == TenantActive || t.Status == TenantDegraded {
+			t.Device.SessionID = parts[1]
+		}
 	}
 	if t.SSHUser != "" && (host != "" || issue != "") {
 		t.Access = &TenantAccess{Host: host, Port: port, User: t.SSHUser, Issue: issue, Granted: boolFromAny(md["access_granted"], false)}

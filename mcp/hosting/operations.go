@@ -36,6 +36,11 @@ var stepTimeouts = map[string]time.Duration{
 	"verify_clean": time.Hour,
 	"wait_ready":   2 * time.Hour,
 	"wait_access":  15 * time.Minute,
+	// A phone that stays offline, or that someone else keeps holding.
+	"device_check": 15 * time.Minute,
+	"device_open":  15 * time.Minute,
+	"device_stop":  15 * time.Minute,
+	"device_close": 15 * time.Minute,
 }
 
 // errPending means the step has not finished yet and should be polled again.
@@ -269,6 +274,9 @@ func (a *App) failOperation(ctx *sdk.AppCtx, op *Operation, token, step string, 
 	}
 	if op.MachineID > 0 {
 		_ = dbMachineSetState(db, op.MachineID, MachineQuarantined, msg)
+		if m, _ := dbMachineGet(db, op.MachineID); m != nil {
+			emitMachineQuarantined(ctx, m, msg)
+		}
 	}
 	if op.TenantID != "" {
 		_ = dbTenantSetError(db, op.TenantID, msg)
@@ -346,9 +354,10 @@ func (a *App) finishOperation(ctx *sdk.AppCtx, op *Operation, token string) {
 		}
 		if machine != nil {
 			_, _ = tx.Exec(`UPDATE hosting_machines SET tenant_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?`, machine.ID)
-			if containsStep(op.Steps, "verify_clean") && machine.Validated {
+			verified := containsStep(op.Steps, "verify_clean") || containsStep(op.Steps, "device_verify_clean")
+			if verified && machine.Validated {
 				_ = dbMachineSetState(tx, machine.ID, MachineAvailable, "cleaned after "+op.TenantID)
-			} else if containsStep(op.Steps, "verify_clean") {
+			} else if verified {
 				_ = dbMachineSetState(tx, machine.ID, MachineQuarantined, "cleaned, but the machine is not validated")
 			} else {
 				reason := "released; this pool has no automatic reset, clean it and run inspect"
@@ -384,7 +393,11 @@ func (a *App) finishOperation(ctx *sdk.AppCtx, op *Operation, token string) {
 		return
 	}
 	if event != "" {
-		ctx.Emit(event, map[string]any{"operation_id": op.ID, "tenant_id": op.TenantID, "machine_id": op.MachineID, "external_ref": tenantRef(tenant)})
+		payload := map[string]any{"operation_id": op.ID, "tenant_id": op.TenantID, "machine_id": op.MachineID, "external_ref": tenantRef(tenant)}
+		if machine.managed() {
+			payload["managed_by"], payload["device_ref"] = machine.ManagedBy, machine.DeviceRef
+		}
+		ctx.Emit(event, payload)
 	}
 	// A freed machine may be waited on by a paid tenant.
 	if op.Kind == OpRelease || op.Kind == OpInspect || op.Kind == OpClean {

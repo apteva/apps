@@ -1,14 +1,16 @@
 # Hosting
 
 Runs tenants. A tenant is one thing running for one buyer: a container, a
-machine from a pool, or a machine created on demand. Hosting does not sell
+machine from a pool, a machine created on demand, or a phone from a phone
+pool. Hosting does not sell
 anything. Prices, checkout, invoices and subscriptions belong to the SaaS app
 (or any other caller), which calls Hosting's tools.
 
-Dependencies, both optional:
+Dependencies, all optional:
 
 - `containers` for container tenants and workloads on machines.
 - `instances` for machines (pool hosts and on-demand servers).
+- `mobile` for phone pools (Android phones on ADB).
 
 Hosting subscribes to no events and calls no billing app.
 
@@ -18,9 +20,11 @@ Hosting subscribes to no events and calls no billing app.
 - **Profile**: where it runs. `backend` is `container`, `machine_pool`
   (needs `pool_key`) or `machine_on_demand` (needs `settings.provider` and
   `settings.server_type`).
-- **Pool**: a set of Instances hosts of one platform (`macos` or `linux`).
-  New pools start with execution switched off.
-- **Machine**: one Instances host in a pool. States: `quarantined`,
+- **Pool**: a set of Instances hosts of one platform (`macos` or `linux`),
+  or, with `managed_by: mobile`, a set of Android phones that the Mobile app
+  drives (see [Phone pools](#phone-pools)). New pools start with execution
+  switched off.
+- **Machine**: one Instances host (or one phone) in a pool. States: `quarantined`,
   `preparing`, `available`, `reserved`, `assigned`, `suspended`, `cleaning`,
   `maintenance`. A machine is for sale only when it is available, online,
   validated and its pool allows execution.
@@ -102,6 +106,64 @@ tenants return `provisioning` (or `waiting_for_machine` when the pool is
 empty) and become `active` in the background; read `hosting_tenant_get` for
 the SSH command.
 
+## Phone pools
+
+A pool with `managed_by: mobile` rents Android phones through the Mobile
+app. Hosting uses Mobile's tools as they are (`mobile_devices`,
+`mobile_session`, `mobile_device`) and keeps no phone logic of its own. Mac
+and Linux pools work as before; both kinds can exist side by side.
+
+```
+hosting_pool_upsert         key=phones, managed_by=mobile   (platform android)
+hosting_machine_add         pool_key=phones, device_ref=<id from mobile_devices>
+hosting_machine_update      validated=true, confirm=<machine id>
+hosting_machine_inspect     records the baseline the first time, verifies it
+hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-access
+```
+
+- **Lock**: renting a phone opens an exclusive Mobile session (caller_ref
+  `hosting-tenant:<tenant id>`, one hour) that Hosting renews every minute.
+  Nobody else can open a session on that phone while it is rented.
+- **Customer access**: `hosting_tenant_get` returns `device`: `managed_by`,
+  `device_ref`, `session_id`, `online`. The customer drives the phone with
+  Mobile's tools and that session id. If Mobile ends the session (the phone
+  was away past Mobile's offline grace), Hosting opens a new one and emits
+  `hosting.tenant.access_updated` with `reason: session_reopened`: read the
+  tenant again for the new id.
+- **Suspend** stops the session; **resume** opens a new one. Restart,
+  reinstall and SSH keys do not apply to phones.
+- **Release** (and `hosting_machine_clean`): stop the session, open a new
+  one, run Mobile's `clean` with `clear_data` = every third-party app in the
+  baseline, then `verify_clean`. A phone that still differs from its baseline
+  is quarantined with the differences; otherwise it goes back on sale.
+- **Inspect** records the baseline only when the phone has none. Pass
+  `capture_baseline: true` to record it again, and only on a phone set up
+  exactly as it should be sold: the baseline is what "clean" means.
+- **Health**: every minute Hosting reads `mobile_devices`. A phone Mobile does
+  not list as ready, configured or busy is offline and not sold. When Mobile
+  cannot be reached, phones go off sale without alerts.
+- **Degraded**: a rented phone offline longer than `degraded_after_minutes`
+  (default 5), or taken by another session while Hosting's had ended, puts
+  the tenant in `degraded` (`hosting.tenant.degraded`). It returns to
+  `active` by itself (`hosting.tenant.recovered`). `hosting_tenant_swap`
+  (confirm = tenant id) moves the tenant to a free phone in the same pool and
+  quarantines the old one; clean it and run inspect to sell it again.
+
+Limits:
+
+- **The session id is a bearer.** Whoever has it drives the phone, and
+  `mobile_session list` shows every session of the project to anyone with
+  Mobile tools there. Renters must not get Mobile tool access in the project
+  Hosting runs in; give them the session id through your own front end.
+- **Clean is not a factory reset.** It removes apps added since the baseline,
+  clears the data of baseline apps, the clipboard, and new downloads and
+  screenshots. Accounts added to the phone show up as differences and stop
+  the phone from being sold, but nothing removes them automatically. Rent
+  phones for app testing, not to strangers who will sign in to personal
+  accounts.
+- Android phones on Mobile's ADB driver only (clean and verify_clean need
+  ADB).
+
 ## Machine scripts
 
 `scripts/<platform>/customer-access.sh` creates the customer account
@@ -173,6 +235,9 @@ chat message. Nothing needs polling.
 |---|---|
 | `hosting.operation.failed` | a run failed (step and error included); its machine is quarantined |
 | `hosting.machine.offline` / `hosting.machine.online` | the minute refresh sees a machine drop off or come back. Not sent while the machine is being erased (state `cleaning`): that run reports its own failure |
+| `hosting.machine.quarantined` | a run failed on a machine, or a phone was swapped away from its tenant |
+| `hosting.tenant.degraded` / `hosting.tenant.recovered` | a rented phone is offline longer than `degraded_after_minutes`, or held by someone else; and when that is over |
+| `hosting.tenant.swapped` | `hosting_tenant_swap` moved a tenant to another phone (`from_device_ref`, `device_ref`) |
 | `hosting.tenant.stuck` | once per situation: a waiting tenant past its `due_at` (`reason: presale_due`), or a tenant still provisioning, suspending, resuming or releasing after `stuck_after_minutes` (default 180; `reason: status:<status>`) |
 
 `presale_ready_days` on a pool profile is the promise made to customers who
@@ -194,10 +259,19 @@ test it on the first machine before marking machines `validated`.
 ## Operator
 
 The panel has three views: tenants (create, suspend, resume, restart,
-reinstall, release, run log), machines (pools, execution switch, add,
-inspect, validate, maintenance, quarantine, clean, remove, reviewed retry,
-resolve a stuck tenant)
+reinstall, swap phone, release, run log), machines (pools, phone pools,
+execution switch, add, inspect, validate, maintenance, quarantine, clean,
+remove, reviewed retry, resolve a stuck tenant)
 and profiles (with availability).
+
+## Upgrading to 2.5.0
+
+Migration 009 rebuilds `hosting_pools` (adds `managed_by`, allows platform
+`android`) and `hosting_machines` (`instance_id` may be empty for phones;
+adds `device_ref` and `device_session`). Existing pools, machines and
+tenants are kept as they are. Tenant and machine events from phone pools
+carry `managed_by` and `device_ref`. Nothing changes for Mac and Linux
+pools.
 
 ## Upgrading to 2.4.1
 

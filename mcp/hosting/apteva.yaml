@@ -2,14 +2,17 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.4.1
+version: 2.5.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
   access, suspend, resume, clean and release. A runtime profile says where
   a tenant runs (container, a fixed machine pool, or a machine created on
   demand through Instances) and what runs on it (Apteva, a Docker image,
-  WordPress, or SSH access to the bare machine).
+  WordPress, or SSH access to the bare machine). A pool can also be a set of
+  Android phones driven by the Mobile app: Hosting rents a phone by holding
+  an exclusive Mobile session for the customer and cleans it back to its
+  baseline on release.
   Hosting sells nothing and listens to no payment events: SaaS plan actions,
   storefronts or operators call its tools, keyed by an external_ref, and
   every call is safe to repeat. Pool machines are reserved and assigned in
@@ -23,7 +26,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [hosting, tenants, containers, machines, instances, infrastructure]
+tags: [hosting, tenants, containers, machines, instances, phones, infrastructure]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -40,6 +43,9 @@ requires:
     - name: instances
       optional: true
       reason: pool machines and on-demand machines
+    - name: mobile
+      optional: true
+      reason: phone pools (managed_by mobile)
 
 provides:
   http_routes:
@@ -48,7 +54,7 @@ provides:
     - name: hosting_tenant_create
       description: "Create a tenant on a runtime profile, keyed by external_ref (repeat calls return the same tenant). Machine profiles finish in the background; with no free machine the tenant waits, within the profile's presale_limit when set."
     - name: hosting_tenant_get
-      description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details, current run and recent events."
+      description: "Fetch one tenant by tenant_id or external_ref, with its SSH access details (or its phone's device_ref and session_id), current run and recent events."
     - name: hosting_tenant_update
       description: "Update a tenant's external_ref, owner_email or metadata. Links a tenant migrated from 1.x to the caller's account id; changing an external_ref already set needs confirm equal to the tenant id."
     - name: hosting_tenant_resolve
@@ -56,11 +62,13 @@ provides:
     - name: hosting_tenant_list
       description: "List tenants. Filters: status, profile_key, backend, owner_email, external_ref, include_released."
     - name: hosting_tenant_suspend
-      description: "Suspend a tenant: stop its container, or remove SSH access to its machine. Never wipes. Repeating it is a no-op."
+      description: "Suspend a tenant: stop its container, remove SSH access to its machine, or stop the session on its phone. Never wipes. Repeating it is a no-op."
     - name: hosting_tenant_resume
-      description: "Resume a suspended tenant: start its container, or restore SSH access. Repeating it is a no-op."
+      description: "Resume a suspended tenant: start its container, restore SSH access, or open a new session on its phone. Repeating it is a no-op."
     - name: hosting_tenant_release
-      description: "End a tenant now: destroy its container, wipe and recycle its pool machine, or destroy its on-demand machine. Needs confirm equal to the tenant id. Repeat calls are no-ops."
+      description: "End a tenant now: destroy its container, wipe and recycle its pool machine, clean its phone back to its baseline, or destroy its on-demand machine. Needs confirm equal to the tenant id. Repeat calls are no-ops."
+    - name: hosting_tenant_swap
+      description: "Move a phone tenant to a free phone in the same pool; the old phone is quarantined. Needs confirm equal to the tenant id."
     - name: hosting_tenant_restart
       description: "Restart a tenant's container or reboot its machine."
     - name: hosting_tenant_reinstall
@@ -70,7 +78,7 @@ provides:
     - name: hosting_tenant_logs
       description: "Container logs, or a machine tenant's run log and events."
     - name: hosting_tenant_health
-      description: "Container health, or a machine's Instances status."
+      description: "Container health, a machine's Instances status, or a phone's Mobile status."
     - name: hosting_tenant_usage
       description: "Runtime usage for a tenant: container usage gauges, or machine metrics from Instances. Suitable as a SaaS usage source."
     - name: hosting_availability
@@ -88,11 +96,11 @@ provides:
     - name: hosting_pool_list
       description: "List machine pools with machine counts per state."
     - name: hosting_pool_upsert
-      description: "Create or update a machine pool. platform: macos or linux. New pools start with execution switched off."
+      description: "Create or update a machine pool: macos or linux Instances hosts, or Android phones with managed_by mobile. New pools start with execution switched off."
     - name: hosting_pool_set_execution
       description: "Switch command execution on or off for a pool. While off, no command runs on its machines and nothing from it is for sale."
     - name: hosting_machine_add
-      description: "Add an Instances host to a pool. It starts quarantined; run inspect, then validate it. The customer endpoint comes from Instances (reverse-tunnel machines use their public SSH port; enable_public_ssh turns it on) unless public_host is given."
+      description: "Add an Instances host (instance_id) or a phone (device_ref, pools managed by mobile) to a pool. It starts quarantined; run inspect, then validate it. The customer endpoint comes from Instances (reverse-tunnel machines use their public SSH port; enable_public_ssh turns it on) unless public_host is given."
     - name: hosting_machine_list
       description: "List pool machines with state, online status, tenant and current run."
     - name: hosting_machine_get
@@ -100,9 +108,9 @@ provides:
     - name: hosting_machine_update
       description: "Update a machine's serial, management user, expected OS, name or customer endpoint (public_host/public_port win over Instances; an empty public_host hands it back). Setting validated needs confirm equal to the machine id."
     - name: hosting_machine_inspect
-      description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives."
+      description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives. On a phone: record its baseline the first time (capture_baseline records it again) and verify it matches."
     - name: hosting_machine_clean
-      description: "Erase a macOS machine without a tenant, verify it is clean and put it back on sale. Needs confirm equal to the machine id."
+      description: "Erase a macOS machine (or clean a phone back to its baseline) without a tenant, verify it is clean and put it back on sale. Needs confirm equal to the machine id."
     - name: hosting_machine_set_maintenance
       description: "Take an available machine off sale (maintenance=true) or put it back (false) without re-inspecting."
     - name: hosting_machine_quarantine
@@ -156,5 +164,10 @@ config_schema:
     default: "180"
     label: Stuck tenant alert (minutes)
     description: How long a tenant may stay provisioning, suspending, resuming or releasing before hosting.tenant.stuck is emitted.
+  - name: degraded_after_minutes
+    type: text
+    default: "5"
+    label: Phone offline before degraded (minutes)
+    description: How long a rented phone may stay offline before its tenant is marked degraded and hosting.tenant.degraded is emitted.
 
 upgrade_policy: auto-patch
