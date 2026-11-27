@@ -209,7 +209,7 @@ function HistorySummary({ h }: { h: History }) {
   if (h.status === "not run") return <div className={`${card} p-3 text-xs text-text-muted`}>Historical shock test: not run. {h.note}</div>;
   const g = h.groups || {};
   const row = (k: string) => { const x = g[k]; return x && x.n > 0 ? `${x.n} obs / ${x.events} events · after ${x.mean_abs_move_after?.toFixed(3)} · before ${x.mean_abs_move_before?.toFixed(3)} · moved ≥ threshold ${pct(x.share_moved_after)}` : "no observations"; };
-  const tone = h.verdict?.status === "associated" ? "var(--color-green)" : h.verdict?.status === "insufficient" || h.verdict?.status === "confounded" ? "var(--color-warn)" : "var(--text-muted)";
+  const tone = h.verdict?.status === "associated" ? "var(--color-green)" : h.verdict?.status === "insufficient" || h.verdict?.status === "confounded" || h.verdict?.status === "untestable" ? "var(--color-warn)" : "var(--text-muted)";
   return <Section title={`Historical shock test${h.id ? ` #${h.id}` : ""}`} hint={h.note}>
     <div className="px-3 py-2 text-xs space-y-1">
       <div style={{ color: tone }}><b>{h.verdict?.status}</b>: {h.verdict?.detail}</div>

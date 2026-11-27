@@ -295,6 +295,12 @@ func runHistoryTest(db *sql.DB, pid string, hp historyParams, now time.Time) (ma
 	post := func(o histObs) float64 { return o.Post }
 	pre := func(o histObs) float64 { return o.Pre }
 	compare := func(a string) map[string]any {
+		if ev, _ := summarize(a)["events"].(int); ev < 5 {
+			// Too few events in the group: a resampled interval would only
+			// reflect those few windows.
+			none := ci{Mean: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
+			return map[string]any{"after_minus_other": none, "before_minus_other": none, "note": fmt.Sprintf("%d events in this group; need 5 for an interval", ev)}
+		}
 		return map[string]any{
 			"after_minus_other":  eventBootstrap(obs, diff(a, "other", post), 1000, hp.Seed),
 			"before_minus_other": eventBootstrap(obs, diff(a, "other", pre), 1000, hp.Seed+1),
@@ -306,7 +312,12 @@ func runHistoryTest(db *sql.DB, pid string, hp historyParams, now time.Time) (ma
 	expEvents, _ := exp["events"].(int)
 	cmpExposed, cmpDirect := compare("exposed"), compare("direct")
 	verdict := map[string]any{}
+	if expN == 0 {
+		verdict["status"] = "untestable"
+		verdict["detail"] = "No event reached a question-linked entity through links that may carry a shock, so the model made no testable claim in this period. This says the graph is too sparse here, not that the model works or fails."
+	}
 	switch {
+	case expN == 0:
 	case expN < 30 || expEvents < 10:
 		verdict["status"] = "insufficient"
 		verdict["detail"] = fmt.Sprintf("%d exposed question observations over %d events; need at least 30 over 10 events before reading anything into the difference", expN, expEvents)
@@ -328,15 +339,15 @@ func runHistoryTest(db *sql.DB, pid string, hp historyParams, now time.Time) (ma
 		}
 	}
 	report := map[string]any{
-		"kind":   "historical shock test",
-		"params": hp,
-		"note":   "Association between modelled exposure and later market moves, not causal validation.",
-		"method": "Each event is an entity named in a claim at time t. It is shocked (severity 1) through only the links recorded by t and valid at t. Market questions linked to entities by t are grouped as direct (linked to the shocked entity), exposed (linked to an entity the model reaches) or other, and their absolute price change over the window after t is compared; the window before t is a placebo. Intervals are 95% event-cluster bootstraps.",
+		"kind":             "historical shock test",
+		"params":           hp,
+		"note":             "Association between modelled exposure and later market moves, not causal validation.",
+		"method":           "Each event is an entity named in a claim at time t. It is shocked (severity 1) through only the links recorded by t and valid at t. Market questions linked to entities by t are grouped as direct (linked to the shocked entity), exposed (linked to an entity the model reaches) or other, and their absolute price change over the window after t is compared; the window before t is a placebo. Intervals are 95% event-cluster bootstraps.",
 		"candidate_events": candidates, "events_used": len(events), "observations": len(obs),
-		"groups":     groups,
+		"groups":           groups,
 		"exposed_vs_other": cmpExposed,
 		"direct_vs_other":  cmpDirect,
-		"verdict":    verdict,
+		"verdict":          verdict,
 		"caveats": []string{
 			"News often reports price moves that already happened; the placebo window shows when that drives the result.",
 			"Events overlap in time, so windows from different events share market moves.",

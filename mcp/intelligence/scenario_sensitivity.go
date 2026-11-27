@@ -48,16 +48,16 @@ type rangeRow struct {
 }
 
 type fragRow struct {
-	EntityID        int64    `json:"entity_id"`
-	Entity          string   `json:"entity"`
-	Base            float64  `json:"base_impact"`
-	PathLinks       int      `json:"path_links"`
-	CriticalLinks   []string `json:"critical_links"` // removal drops the entity below min_impact
-	SingleSourceOn  int      `json:"single_source_links_on_path"`
-	WeakOnPath      bool     `json:"weak_links_on_path"`
-	AssumedOnPath   bool     `json:"assumed_links_on_path"`
-	Classification  string   `json:"classification"`
-	ClassifiedWhy   string   `json:"why"`
+	EntityID       int64    `json:"entity_id"`
+	Entity         string   `json:"entity"`
+	Base           float64  `json:"base_impact"`
+	PathLinks      int      `json:"path_links"`
+	CriticalLinks  []string `json:"critical_links"` // removal drops the entity below min_impact
+	SingleSourceOn int      `json:"single_source_links_on_path"`
+	WeakOnPath     bool     `json:"weak_links_on_path"`
+	AssumedOnPath  bool     `json:"assumed_links_on_path"`
+	Classification string   `json:"classification"`
+	ClassifiedWhy  string   `json:"why"`
 }
 
 func impactMap(res propResult, shocks []Shock) map[int64]float64 {
@@ -154,7 +154,7 @@ func sensitivityReport(g *worldGraph, spec scenarioSpec, draws int, seed int64) 
 		lo, hi := base.clone(), base.clone()
 		lo.Rules[t] = propagationRule{clip(r.Factor*0.5, 0.05, 1), r.Direction}
 		hi.Rules[t] = propagationRule{clip(r.Factor*1.5, 0.05, 1), r.Direction}
-		try("factor: "+t, "propagation factor", r.Factor, lo.Rules[t].Factor, hi.Rules[t].Factor, lo, hi)
+		try("factor: "+t, "propagation factor", r.Factor, round3(lo.Rules[t].Factor), round3(hi.Rules[t].Factor), lo, hi)
 	}
 	for _, s := range sortedKeys(base.StatusWeights) {
 		if !statusesInGraph[s] {
@@ -163,7 +163,7 @@ func sensitivityReport(g *worldGraph, spec scenarioSpec, draws int, seed int64) 
 		v := base.StatusWeights[s]
 		lo, hi := base.clone(), base.clone()
 		lo.StatusWeights[s], hi.StatusWeights[s] = clip(v*0.5, 0.05, 1), clip(v*1.5, 0.05, 1)
-		try("status weight: "+s, "evidence status weight", v, lo.StatusWeights[s], hi.StatusWeights[s], lo, hi)
+		try("status weight: "+s, "evidence status weight", v, round3(lo.StatusWeights[s]), round3(hi.StatusWeights[s]), lo, hi)
 	}
 	for _, b := range sortedKeys(base.BasisWeights) {
 		if !basesInGraph[b] || (!strongBasis(b) && !base.IncludeWeak) {
@@ -172,7 +172,7 @@ func sensitivityReport(g *worldGraph, spec scenarioSpec, draws int, seed int64) 
 		v := base.BasisWeights[b]
 		lo, hi := base.clone(), base.clone()
 		lo.BasisWeights[b], hi.BasisWeights[b] = clip(v*0.5, 0.05, 1), clip(v*1.5, 0.05, 1)
-		try("causal-basis weight: "+orStr(b, "ungraded"), "causal-basis weight", v, lo.BasisWeights[b], hi.BasisWeights[b], lo, hi)
+		try("causal-basis weight: "+orStr(b, "ungraded"), "causal-basis weight", v, round3(lo.BasisWeights[b]), round3(hi.BasisWeights[b]), lo, hi)
 	}
 	{
 		lo, hi := base.clone(), base.clone()
@@ -301,13 +301,13 @@ func sensitivityReport(g *worldGraph, spec scenarioSpec, draws int, seed int64) 
 		"kind":          "assumption and sensitivity report",
 		"snapshot_hash": g.Hash,
 		"draws":         draws, "seed": seed,
-		"assumptions":   assumptions,
-		"one_at_a_time": rows,
-		"ranges":        ranges,
-		"ranges_note":   "Each factor and weight scaled independently by U(0.5, 1.5) per draw. Ranges show sensitivity to the assumptions, not statistical confidence intervals.",
-		"fragility":     frag,
+		"assumptions":           assumptions,
+		"one_at_a_time":         rows,
+		"ranges":                ranges,
+		"ranges_note":           "Each factor and weight scaled independently by U(0.5, 1.5) per draw. Ranges show sensitivity to the assumptions, not statistical confidence intervals.",
+		"fragility":             frag,
 		"classification_counts": counts,
-		"limitations":   scenarioLimitations(),
+		"limitations":           scenarioLimitations(),
 	}
 }
 

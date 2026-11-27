@@ -144,7 +144,7 @@ func gradeRelationships(db *sql.DB, pid string, llm llmClient, limit int) (map[s
 	}
 	out := map[string]any{"links_graded": graded, "by_causal_basis": counts, "llm_calls": calls, "graded_by": gradedBy,
 		"ungraded_links_remaining": remainingBefore - graded,
-		"note": "Grades describe what the cited headlines say, read by a language model; they are not causal validation."}
+		"note":                     "Grades describe what the cited headlines say, read by a language model; they are not causal validation."}
 	if firstErr != nil {
 		out["error"] = firstErr.Error()
 	}

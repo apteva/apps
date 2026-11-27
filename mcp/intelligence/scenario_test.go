@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -30,7 +31,7 @@ func TestScenarioWeakLinksOnlyWithIncludeWeak(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mustAssert(Relationship{From: ids["Plant"], Type: "depends_on", To: ids["Port"], Status: "reported", EvidenceIDs: []int64{ev}})                                // ungraded
+	mustAssert(Relationship{From: ids["Plant"], Type: "depends_on", To: ids["Port"], Status: "reported", EvidenceIDs: []int64{ev}})                         // ungraded
 	mustAssert(Relationship{From: ids["Port"], Type: "affects", To: ids["Bank"], Status: "reported", EvidenceIDs: []int64{ev}, CausalBasis: "unsupported"}) // never
 	shock := []Shock{{EntityID: ids["Port"], Description: "closed"}}
 
@@ -197,6 +198,9 @@ func TestHistoryTestGroupsQuestionsByModelledExposure(t *testing.T) {
 	ex, ot, di := g["exposed"].(map[string]any), g["other"].(map[string]any), g["direct"].(map[string]any)
 	if ex["n"] != 1 || ex["mean_abs_move_after"] != 0.2 || ot["n"] != 1 || ot["mean_abs_move_after"] != 0.0 || di["n"] != 1 {
 		t.Fatalf("groups: %v", g)
+	}
+	if c := rep["direct_vs_other"].(map[string]any)["after_minus_other"].(ci); !math.IsNaN(c.Lo) {
+		t.Fatalf("one event must not get an interval: %+v", c)
 	}
 	if rep["verdict"].(map[string]any)["status"] != "insufficient" {
 		t.Fatalf("one event cannot give a verdict: %v", rep["verdict"])
