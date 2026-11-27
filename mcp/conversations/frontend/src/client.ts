@@ -121,6 +121,8 @@ export class ConversationsClient {
   workerActivity = (id: string, agentId: number, threadId: string, options: { cursor?: string; detail?: boolean; limit?: number } = {}, init?: RequestInit) =>
     this.app.get<WorkerActivityPage>(query("/workers/activity", { chat_id: id, agent_id: agentId, thread_id: threadId, cursor: options.cursor || undefined, detail: options.detail ? 1 : undefined, limit: options.limit }), init);
   agentWork = (id: string, init?: RequestInit) => this.app.get<AgentWork>(query("/agent-work", { chat_id: id }), init);
+  stopWorker = (id: string, workerId: number, init?: RequestInit) =>
+    this.app.post<{ workers: ConversationWorker[]; parent_notified: boolean }>("/workers/stop", { chat_id: id, worker_id: workerId }, init);
   toolVisuals = (init?: RequestInit) => this.app.get<{ integrations: Array<{slug:string;name:string;logo?:string}> }>("/tool-visuals", init);
   agents = (init?: RequestInit) => this.app.get<AgentInfo[]>("/agents", init);
   inbox = (options: { agent_id?: number; cursor?: string; limit?: number; project_id?: string } = {}, init?: RequestInit) =>

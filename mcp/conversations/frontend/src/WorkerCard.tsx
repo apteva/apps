@@ -1,31 +1,37 @@
-// A worker card replaces the spawn tool row once the spawned thread is linked
-// to this conversation: what the helper is doing now, and its steps on demand.
-import { useEffect, useMemo, useRef, useState } from "react";
+// What a helper did: its steps (newest last, earlier ones on request) and its
+// result. HelperGroup.tsx shows helpers in the chat and in the detail view.
+import { useEffect, useState } from "react";
 import { useConversationAPI } from "./context";
-import { useConversationLocalization } from "./i18n";
-import { CheckIcon, ChevronIcon, FailureIcon, ToolVisualIcon, durationLabel } from "./ToolActivity";
-import { resolveToolVisual, type ToolVisual, type ToolVisualRegistry } from "./toolVisuals";
-import type { ToolActivity } from "./toolActivityModel";
+import { FailureIcon, ToolVisualIcon, durationLabel } from "./ToolActivity";
+import { resolveToolVisual, type ToolVisualRegistry } from "./toolVisuals";
 import type { ConversationWorker, WorkerStep } from "./types";
 
-type T = (key: string, params?: Record<string, unknown>) => string;
+export type T = (key: string, params?: Record<string, unknown>) => string;
 
 const VISIBLE_STEPS = 8;
-const MAX_NESTING = 2;
 const RESULT_PREVIEW_CHARS = 600;
 // Core plumbing that other rows already show: send is the report row, done
 // the end of the helper.
 const HIDDEN_STEP_TOOLS = new Set(["send", "done", "search_tools"]);
 // Pace and wait return at once; the wait is the gap until the next step.
 const WAIT_TOOLS = new Set(["pace", "wait"]);
-const HELPER_VISUAL: ToolVisual = { key: "native:spawn", label: "Apteva", glyph: "agent" };
 
 export function workerUnfinished(worker: ConversationWorker): boolean {
   return !worker.ended_at && !["done", "failed", "stopped"].includes(worker.state);
 }
 
-export function workerName(worker: ConversationWorker, reason?: string): string {
-  return worker.name?.trim() || worker.purpose?.trim() || reason?.trim() || worker.thread_id;
+/** "fan-care_review" → "Fan care review": a thread id read as a title. */
+export function humanizeThreadId(id: string): string {
+  const words = id.replace(/[-_.]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim().toLowerCase();
+  return words ? words[0]!.toUpperCase() + words.slice(1) : id;
+}
+
+/**
+ * A helper's title: the reason its spawn gave. Never its instructions, which
+ * are a paragraph written for the model.
+ */
+export function workerTitle(worker: Pick<ConversationWorker, "label" | "name" | "thread_id">, spawnReason?: string): string {
+  return worker.label?.trim() || spawnReason?.trim() || humanizeThreadId(worker.name?.trim() || worker.thread_id);
 }
 
 /** Key a spawn tool row and the worker it started share. */
@@ -33,7 +39,7 @@ export function spawnKey(agentId: number, threadId: string, callId?: string): st
   return `${agentId}:${threadId}:${callId ?? ""}`;
 }
 
-function descendants(worker: ConversationWorker, all: ConversationWorker[]): ConversationWorker[] {
+export function descendants(worker: ConversationWorker, all: ConversationWorker[]): ConversationWorker[] {
   const out: ConversationWorker[] = [];
   const queue = [worker.thread_id];
   const seen = new Set(queue);
@@ -46,7 +52,7 @@ function descendants(worker: ConversationWorker, all: ConversationWorker[]): Con
   return out;
 }
 
-function directChildren(worker: ConversationWorker, all: ConversationWorker[]): ConversationWorker[] {
+export function directChildren(worker: ConversationWorker, all: ConversationWorker[]): ConversationWorker[] {
   // Only the newest incarnation of each child thread.
   const byThread = new Map<string, ConversationWorker>();
   for (const w of all) if (w.agent_id === worker.agent_id && w.parent_thread_id === worker.thread_id && w.id !== worker.id) {
@@ -56,31 +62,19 @@ function directChildren(worker: ConversationWorker, all: ConversationWorker[]): 
   return [...byThread.values()].sort((a, b) => a.id - b.id);
 }
 
-function stateText(worker: ConversationWorker, registry: ToolVisualRegistry, t: T, time: (v: string) => string): string {
-  if (worker.outcome === "lost") return t("worker.state.lost");
-  if (workerUnfinished(worker) && worker.current?.kind === "tool" && worker.current.tool) {
-    return t("worker.usingTool", { tool: toolLabel(worker.current.tool, registry) });
-  }
-  if (workerUnfinished(worker) && worker.current?.kind === "model") return t("worker.thinking");
-  if (worker.state === "sleeping" && worker.next_wake_at) return t("worker.state.sleepingUntil", { time: time(worker.next_wake_at) });
-  const key = `worker.state.${worker.state}`;
-  const label = t(key);
-  return label === key ? worker.state : label;
-}
-
-function toolLabel(tool: string, _registry?: ToolVisualRegistry): string {
+export function toolLabel(tool: string, _registry?: ToolVisualRegistry): string {
   // The icon names the app; the label says what the tool does.
   return tool.replace(/^.*__/, "").replace(/_/g, " ").trim() || tool;
 }
 
-function elapsedMs(worker: ConversationWorker, now: number): number | undefined {
+export function elapsedMs(worker: ConversationWorker, now: number): number | undefined {
   const start = Date.parse(worker.started_at);
   if (!Number.isFinite(start)) return undefined;
   const end = worker.ended_at ? Date.parse(worker.ended_at) : now;
   return Number.isFinite(end) ? Math.max(0, end - start) : undefined;
 }
 
-function clockLabel(ms?: number): string {
+export function clockLabel(ms?: number): string {
   if (ms === undefined) return "";
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -89,7 +83,7 @@ function clockLabel(ms?: number): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-function useNow(active: boolean): number {
+export function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!active) return;
@@ -100,103 +94,7 @@ function useNow(active: boolean): number {
   return now;
 }
 
-export interface WorkerCardProps {
-  worker: ConversationWorker;
-  workers: ConversationWorker[];
-  spawnTool?: ToolActivity;
-  registry: ToolVisualRegistry;
-  chatId: string;
-  defaultExpanded?: boolean;
-  level?: number;
-}
-
-export function WorkerCard({ worker, workers, spawnTool, registry, chatId, defaultExpanded = false, level = 0 }: WorkerCardProps) {
-  const { t: translate, dateTime } = useConversationLocalization();
-  const t = translate as unknown as T;
-  const time = (value: string) => dateTime(value, { timeStyle: "short" });
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const unfinished = workerUnfinished(worker);
-  const now = useNow(unfinished);
-  const name = workerName(worker, spawnTool?.reason);
-  const status = stateText(worker, registry, t, time);
-  const helpers = useMemo(() => descendants(worker, workers), [worker, workers]);
-  const children = useMemo(() => directChildren(worker, workers), [worker, workers]);
-  const working = unfinished && worker.state === "working";
-  const visual = worker.current?.kind === "tool" && worker.current.tool && unfinished ? resolveToolVisual(worker.current.tool, registry) : HELPER_VISUAL;
-  const failed = worker.state === "failed" || worker.outcome === "lost" || worker.outcome === "failed";
-  const detailsId = `worker-${chatId}-${worker.id}`.replace(/[^a-zA-Z0-9_-]/g, "-");
-  const [announcement, setAnnouncement] = useState("");
-  // What the steps tell beyond the list: the model actually used (the list
-  // may only know the tier) and the text the helper ended with.
-  const [stepInfo, setStepInfo] = useState<{ model?: string; endText?: string }>({});
-  const shownWorker = useMemo(() => ({ ...worker, model: stepInfo.model || worker.model, result: worker.result || stepInfo.endText }), [worker, stepInfo]);
-  const previous = useRef(unfinished);
-  useEffect(() => {
-    if (previous.current && !unfinished) setAnnouncement(t(failed ? "worker.announceFailed" : "worker.announceFinished", { name }));
-    previous.current = unfinished;
-  }, [unfinished, failed, name, t]);
-
-  return (
-    <section
-      className={`chat-worker-card min-w-0 shrink-0 rounded-lg ${level > 0 ? "border-l border-border pl-2" : ""}`}
-      data-worker-thread={worker.thread_id}
-      data-worker-state={worker.state}
-      aria-label={t("worker.cardLabel", { name, status })}
-    >
-      <button
-        type="button"
-        className="grid min-h-9 w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-1 text-left hover:bg-bg-hover/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        aria-expanded={expanded}
-        aria-controls={detailsId}
-        title={t("worker.toggle", { name })}
-        onClick={() => setExpanded(value => !value)}
-      >
-        <ToolVisualIcon visual={visual} running={working} />
-        <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span className={`chat-tool-copy truncate text-[13px] font-medium leading-5 ${working ? "chat-tool-copy-running" : ""}`} title={name}>{name}</span>
-            {helpers.length > 0 && <span className="shrink-0 text-[11px] font-medium text-text-muted sm:text-xs">{t("worker.moreHelpers", { count: helpers.length })}</span>}
-          </span>
-          <span className={`inline-flex min-w-0 items-center gap-1 text-[11px] leading-4 ${failed ? "chat-tool-failed-text" : "text-text-muted"}`}>
-            {failed ? <FailureIcon /> : !unfinished ? <span className="inline-flex text-green" aria-hidden="true"><CheckIcon /></span> : null}
-            <span className="truncate">{status}</span>
-          </span>
-        </span>
-        <span className="inline-flex shrink-0 items-center gap-2">
-          <span className="text-[11px] tabular-nums text-text-dim">{clockLabel(elapsedMs(worker, now))}</span>
-          <ChevronIcon expanded={expanded} />
-        </span>
-      </button>
-      <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
-      {expanded && (
-        <div id={detailsId} className="mt-1 grid min-w-0 gap-2 pb-1 pl-1 sm:pl-9">
-          <WorkerHeader worker={shownWorker} t={t} time={time} hidePurpose={name === worker.purpose?.trim()} />
-          <WorkerSteps worker={worker} chatId={chatId} registry={registry} t={t} onInfo={setStepInfo} />
-          {children.length > 0 && (level < MAX_NESTING ? (
-            <div className="grid min-w-0 gap-1" aria-label={t("worker.nestedHelpers")}>
-              {children.map(child => <WorkerCard key={child.id} worker={child} workers={workers} registry={registry} chatId={chatId} level={level + 1} />)}
-            </div>
-          ) : (
-            <p className="text-[11px] text-text-muted">{t("worker.moreHelpers", { count: helpers.length })}</p>
-          ))}
-          {shownWorker.result && !workerUnfinished(worker) && <WorkerResult worker={shownWorker} t={t} />}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function WorkerHeader({ worker, t, time, hidePurpose = false }: { worker: ConversationWorker; t: T; time: (v: string) => string; hidePurpose?: boolean }) {
-  const parts = [worker.model ? t("worker.model", { model: worker.model }) : "", worker.started_at ? t("worker.started", { time: time(worker.started_at) }) : ""].filter(Boolean);
-  return (
-    <div className="grid min-w-0 gap-0.5">
-      {worker.purpose && !hidePurpose && <p className="text-[13px] leading-5 text-text [overflow-wrap:anywhere]">{worker.purpose}</p>}
-      {parts.length > 0 && <p className="text-[11px] text-text-muted">{parts.join(" · ")}</p>}
-    </div>
-  );
-}
-
-function WorkerResult({ worker, t }: { worker: ConversationWorker; t: T }) {
+export function WorkerResult({ worker, t }: { worker: ConversationWorker; t: T }) {
   const [full, setFull] = useState(false);
   const text = worker.result ?? "";
   const long = text.length > RESULT_PREVIEW_CHARS;
@@ -214,7 +112,7 @@ function WorkerResult({ worker, t }: { worker: ConversationWorker; t: T }) {
   );
 }
 
-function WorkerSteps({ worker, chatId, registry, t, onInfo }: {
+export function WorkerSteps({ worker, chatId, registry, t, onInfo }: {
   worker: ConversationWorker; chatId: string; registry: ToolVisualRegistry; t: T;
   onInfo?: (info: { model?: string; endText?: string }) => void;
 }) {

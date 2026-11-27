@@ -13,7 +13,8 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup, responseWaitingToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { WorkerCard, spawnKey, workerUnfinished } from "./WorkerCard";
+import { spawnKey, workerUnfinished } from "./WorkerCard";
+import { HelperDetail, HelperDetailContext, HelperGroup, TurnWorkFooter, turnWork, useHelperDetail, useHelperDetailHost, type HelperDetailHost } from "./HelperGroup";
 import { AgentWorkSection } from "./AgentWork";
 import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
@@ -876,6 +877,9 @@ function ContextColumn({
   const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [participants, setParticipants] = useState<ParticipantsInfo | null>(null);
+  // An open helper fills the column; the chat renders it into this slot.
+  const helperHost = useHelperDetailHost();
+  const helperOpen = Boolean(helperHost?.columnVisible && helperHost.openId !== null);
 
   useEffect(() => {
     onEnsureAgents();
@@ -906,6 +910,7 @@ function ContextColumn({
     [t("common.updated"), relativeTime(conversation.updated_at) || "—"],
   ];
 
+  if (helperOpen) return <div ref={helperHost!.setSlot} className="flex h-full min-h-0 flex-col bg-bg" data-helper-detail-slot />;
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       {!embedded && (
@@ -977,7 +982,8 @@ function ContextColumn({
             {t("chat.manage")}
           </button>
         </div>
-        <AgentWorkSection conversation={conversation} agentName={agentName} onOpenConversation={onOpenConversation} />
+        <AgentWorkSection conversation={conversation} agentName={agentName} onOpenConversation={onOpenConversation}
+          onOpenHelper={helperHost ? id => helperHost.open(id) : undefined} />
       </div>
     </div>
   );
@@ -1368,7 +1374,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onContextCleared?: (context: import("./pageContext").PageContext) => void;
   showToolCompletion?: boolean;
   showToolDuration?: boolean;
-  /** Open helper cards with their steps shown. */
+  /** @deprecated Start helper groups with every helper's row shown. Live groups show them already. */
   showHelperSteps?: boolean;
   onOpenDetails?: () => void;
   leadingAction?: ReactNode;
@@ -1402,6 +1408,8 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, replySuggestions, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities: storedActivities, workers, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const helperDetail = useHelperDetail();
+  const openHelper = helperDetail.open;
   const hostPage = useHostPageContext();
   const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
   // Resolve display names only for a room or a transcript with multiple speakers.
@@ -1737,6 +1745,11 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           const waiting = waitingToolGroups.has(item.key);
           const owner = tools[tools.length - 1];
           const helpers = waiting && owner ? waitingHelpers(owner.agentId, owner.threadId) : 0;
+          // The helpers these spawns started, newest incarnation once each.
+          const group = [...new Map(linked.map(tool => [workerFor(tool)!.id, workerFor(tool)!])).values()];
+          const spawnReasons = new Map(linked.map(tool => [workerFor(tool)!.id, tool.reason]));
+          // The group line already says its own helpers are working.
+          const waitingElsewhere = helpers - group.filter(workerUnfinished).length;
           return <Fragment key={item.key}>
             {plain.length > 0 && <ChatToolActivity
               tools={plain}
@@ -1750,16 +1763,16 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
               showCompletion={showToolCompletion}
               showDuration={showToolDuration}
             />}
-            {linked.map(tool => <WorkerCard
-              key={`worker-${tool.id}`}
-              worker={workerFor(tool)!}
-              workers={workers}
-              spawnTool={tool}
+            {group.length > 0 && <HelperGroup
+              key={`helpers-${group[0]!.id}`}
+              workers={group}
+              all={workers}
               registry={toolVisualRegistry}
-              chatId={conversation.id}
-              defaultExpanded={showHelperSteps}
-            />)}
-            {waiting && linked.length > 0 && <ThinkingMessagePlaceholder helpers={helpers} />}
+              spawnReasons={spawnReasons}
+              onOpen={worker => openHelper(worker.id)}
+              defaultExpanded={showHelperSteps || undefined}
+            />}
+            {waiting && group.length > 0 && (helpers === 0 || waitingElsewhere > 0) && <ThinkingMessagePlaceholder helpers={helpers} />}
           </Fragment>;
         }
         if (item.kind === "stream") {
@@ -1774,6 +1787,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           <fieldset disabled={archived} className="min-w-0">
             <MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction} />
           </fieldset>
+          {message.role === "agent" && turnWork(message.metadata) && <div className="mt-1"><TurnWorkFooter work={turnWork(message.metadata)!} /></div>}
           {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => (
             <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
               <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
@@ -1800,10 +1814,25 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     activities, agentNames, archived, awaitingProgressMessage, bubbles, conversation.id,
     conversation.lead_agent_id, conversation.lead_agent_name, deliveries, expandedToolGroups,
     hasOlder, loadOlder, messages, onAction, progresses, retryDelivery, showAgentNames,
-    showToolCompletion, showToolDuration, showHelperSteps, t, toggleToolGroup, toolVisualRegistry, workers,
+    showToolCompletion, showToolDuration, showHelperSteps, t, toggleToolGroup, toolVisualRegistry, workers, openHelper,
   ]);
+  const openWorker = helperDetail.openId === null ? undefined : workers.find(worker => worker.id === helperDetail.openId);
+  const openWorkerParent = openWorker ? workers.filter(worker => worker.agent_id === openWorker.agent_id && worker.thread_id === openWorker.parent_thread_id).sort((a, b) => b.id - a.id)[0] : undefined;
+  const openSpawnReason = openWorker?.spawn_call_id ? activities.find(tool => tool.agent_id === openWorker.agent_id && tool.thread_id === openWorker.parent_thread_id && tool.call_id === openWorker.spawn_call_id)?.reason : undefined;
+  const helperDetailNode = openWorker ? <HelperDetail
+    key={openWorker.id}
+    worker={openWorker}
+    all={workers}
+    chatId={conversation.id}
+    registry={toolVisualRegistry}
+    spawnReason={openSpawnReason}
+    canStop={!archived && conversation.audience !== "public"}
+    parent={openWorkerParent}
+    onOpen={worker => openHelper(worker.id)}
+    onClose={() => openHelper(null)}
+  /> : null;
 
-  return (
+  return (<>
     <ConversationChatView
       queuedMessages={<QueuedMessages key={conversation.id} messages={queuedMessages} canSteer={resolvedAgentOnline!==false&&connected&&!voiceActive} onEdit={onQueueEdit} onRemove={onQueueRemove} onSteer={onQueueSteer}/>}
       voiceControl={!archived && conversation.audience !== "public" && conversation.kind === "direct" ? <VoiceControls client={conversationsClient} chatId={conversation.id} disabled={Boolean(activeResponse) || sending} onActiveChange={setVoiceActive} onTranscript={text => setDraft(current => [current.trimEnd(), text].filter(Boolean).join(" "))}/> : undefined}
@@ -1854,7 +1883,8 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       onCancelDelete={() => setConfirmDelete(false)}
       onDelete={deleteConversation}
     />
-  );
+    {helperDetail.place(helperDetailNode)}
+  </>);
 });
 
 // ─── inbox tab ───────────────────────────────────────────────────────
@@ -2234,14 +2264,13 @@ const TOOL_DISPLAY_STORAGE_KEY = "conversations:tool-display:v1";
 interface ToolDisplayPreferences {
   showCompletion: boolean;
   showDuration: boolean;
-  showHelperSteps: boolean;
 }
 function readToolDisplayPreferences(): ToolDisplayPreferences {
-  const defaults = { showCompletion: false, showDuration: false, showHelperSteps: false };
+  const defaults = { showCompletion: false, showDuration: false };
   try {
     const saved = JSON.parse(window.localStorage.getItem(TOOL_DISPLAY_STORAGE_KEY) || "null");
     if (!saved || typeof saved !== "object") return defaults;
-    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true, showHelperSteps: saved.showHelperSteps === true };
+    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true };
   } catch { return defaults; }
 }
 
@@ -2266,6 +2295,8 @@ export default function ConversationsPanel({ host, projectId, instanceId, worksp
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [helperOpenId, setHelperOpenId] = useState<number | null>(null);
+  const [helperSlot, setHelperSlot] = useState<HTMLElement | null>(null);
   const [toolDisplay, setToolDisplay] = useState<ToolDisplayPreferences>(readToolDisplayPreferences);
   useEffect(() => {
     try { window.localStorage.setItem(TOOL_DISPLAY_STORAGE_KEY, JSON.stringify(toolDisplay)); } catch {}
@@ -2279,6 +2310,13 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   // context column.
   const hasContextColumn = useMediaQuery("(min-width: 1024px)");
   const isMobile = useMediaQuery("(max-width: 767px)");
+  const helperHost = useMemo<HelperDetailHost>(() => ({
+    columnVisible: hasContextColumn,
+    openId: helperOpenId,
+    open: id => { setHelperOpenId(id); if (id !== null) setWorkspaceOpen(false); },
+    slot: helperSlot,
+    setSlot: setHelperSlot,
+  }), [hasContextColumn, helperOpenId, helperSlot]);
   useEffect(() => { if (!isMobile) setMobileDetail(false); }, [isMobile]);
   useLayoutEffect(() => {
     if (isMobile && !mobileDetail && tab === "chats" && listScrollRef.current) listScrollRef.current.scrollTop = listScrollPositionRef.current;
@@ -2375,6 +2413,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   useEffect(() => {
     setDetailsOpen(false);
     setWorkspaceOpen(false);
+    setHelperOpenId(null);
   }, [selectedId]);
 
   const openDetails = () => {
@@ -2407,6 +2446,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   };
 
   return (
+    <HelperDetailContext.Provider value={helperHost}>
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <header className={`${isMobile && mobileDetail ? "hidden" : "flex"} shrink-0 border-b border-border px-3 py-2 md:px-4 md:py-3 items-center gap-2 md:gap-3`}>
         {isMobile && tab === "telegram" && (
@@ -2614,7 +2654,6 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               archived={showArchived}
               showToolCompletion={toolDisplay.showCompletion}
               showToolDuration={toolDisplay.showDuration}
-              showHelperSteps={toolDisplay.showHelperSteps}
               leadingAction={isMobile && <button ref={mobileBackRef} type="button" onClick={() => setMobileDetail(false)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t(tab === "inbox" ? "panel.backToInbox" : "panel.backToChats")}><Glyph d={GLYPH_BACK} size={18} /></button>}
               headerActions={<details className="relative">
                 <summary role="button" className={`flex cursor-pointer list-none items-center rounded text-xs text-text-muted hover:bg-bg-input hover:text-text ${isMobile ? "h-11 w-11 justify-center border border-border" : "border border-border px-2 py-1.5"}`} aria-label={isMobile ? t("panel.conversationOptions") : undefined}>{isMobile ? <Glyph d={GLYPH_MORE} size={16} /> : t("chat.toolDisplay")}</summary>
@@ -2628,10 +2667,6 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
                     <input type="checkbox" checked={toolDisplay.showDuration} onChange={event => setToolDisplay(current => ({...current, showDuration: event.target.checked}))} />
                     {t("chat.showToolDuration")}
-                  </label>
-                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
-                    <input type="checkbox" checked={toolDisplay.showHelperSteps} onChange={event => setToolDisplay(current => ({...current, showHelperSteps: event.target.checked}))} />
-                    {t("worker.showSteps")}
                   </label>
                 </div>
               </details>}
@@ -2770,5 +2805,6 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
         />
       )}
     </div>
+    </HelperDetailContext.Provider>
   );
 }

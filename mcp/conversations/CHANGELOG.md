@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.39.0 — 2026-11-27
+
+Helpers read like ChatGPT and Claude Code instead of a full log in the chat (prod H Sites, 2026-11-26: five helpers appeared with no word about why, and their steps filled the conversation).
+
+- The agent announces helpers before spawning them. The using-conversations skill, main's reply contract and the conversation thread directive now say: before the first spawn for a request, tell the person in one short message why, how many helpers, what each covers and what they will and will not change, and give each spawn a short `_reason` naming its part.
+- A helper's title is the `_reason` of the spawn call that started it, never its directive. Helpers started by another helper take the reason from their parent's spawn step. Migration 021 adds `label` and backfills it for existing helpers from their recorded spawn call.
+- In the chat, a request's helpers are one line ("2 helpers · 1 finished, 1 working") with one row per helper underneath: its title and only its latest activity or result. A single helper is just its row. The group is open while helpers work and folds once they're done. The "Show helper steps" option is gone: there is no step log in the chat any more.
+- A helper's row shows the reason of the step it is running ("Reading the support inbox"), read from the helper thread, instead of the tool name.
+- Clicking a helper, in the chat or in Agent work, opens its detail: who started it, its task, every step with its reason, its result, and the tool calls and tokens it used. It opens in the side column on wide screens and as a drawer otherwise.
+- A running helper can be stopped from its detail, after a confirmation. Stopping kills the helper and the helpers it started, records them as stopped by you, and tells the thread that started it which one was stopped, so it can say what was and wasn't finished. It is told not to start the helper again unless asked.
+- A response that took 10 seconds or more ends with "Worked for 42s · 18,240 tokens". The time and the responding thread's tokens are kept on the reply (`metadata.work`), so the line stays after a reload.
+- Agent work titles helpers the same way, and a thread waiting on its own helpers says "Waiting for 2 helpers" instead of "Thinking".
+- The native iOS and Android clients do not show helpers yet; this release changes nothing there.
+- New tier-3 scenario 33: asked for two helpers, the agent must first say how many and what they won't change, and each helper must have a short title from its spawn reason.
+
 ## 0.38.0 — 2026-11-27
 
 - `conversations_send` now files alerts and reports too: `kind=alert` (`text`, `severity`) and `kind=report` (`title`, `summary`, optional `sections` and `period`). They are stored and shown exactly like before, with the same rules: no cards in public conversations, and a refusal of a plain reply from main now points to `kind=alert`/`kind=report`. A model that picks the one send tool can always file a card, so a tool budget that leaves out the separate alert or report tool no longer turns a card into plain text (prod Messaging Agent, 2026-11-27).

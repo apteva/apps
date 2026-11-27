@@ -143,6 +143,8 @@ func conversationThreadDirective(conv *Conversation) string {
 		" A local alert is only for an urgent issue caused by work originating in this conversation." +
 		" When delegating, pass the originating conversation_id to the child and preserve it in results and escalations." +
 		" Do not grant the child Conversations tools; the child reports to you and you communicate here." +
+		" Before spawning helpers for a request, tell the person in one message why, how many, what each covers and what they will and will not change; give each spawn a short _reason naming its part, which titles the helper in this conversation." +
+		" If the person stops a helper, you are told: say what it had and had not finished, and do not start it again unless asked." +
 		" You pace yourself, like main: end every turn with an explicit timing decision using pace." +
 		" When nothing is pending, wait for the next message with pace clear_wake=true." +
 		" When you promised a follow-up, are running a job, or are watching a condition for this conversation, set the wake that matters with pace sleep (at most 24h)." +

@@ -23,14 +23,16 @@ import (
 
 // ConversationWorker is one worker thread linked to a conversation.
 type ConversationWorker struct {
-	ID              int64          `json:"id"`
-	ConversationID  string         `json:"chat_id"`
-	AgentID         int64          `json:"agent_id"`
-	ThreadID        string         `json:"thread_id"`
-	ParentThreadID  string         `json:"parent_thread_id"`
-	SpawnCallID     string         `json:"spawn_call_id,omitempty"`
-	Depth           int            `json:"depth"`
-	Name            string         `json:"name"`
+	ID             int64  `json:"id"`
+	ConversationID string `json:"chat_id"`
+	AgentID        int64  `json:"agent_id"`
+	ThreadID       string `json:"thread_id"`
+	ParentThreadID string `json:"parent_thread_id"`
+	SpawnCallID    string `json:"spawn_call_id,omitempty"`
+	Depth          int    `json:"depth"`
+	Name           string `json:"name"`
+	// Label is the reason the spawn call gave: the helper's title.
+	Label           string         `json:"label,omitempty"`
 	Purpose         string         `json:"purpose,omitempty"`
 	State           string         `json:"state"`
 	Current         *WorkerCurrent `json:"current,omitempty"`
@@ -42,8 +44,11 @@ type ConversationWorker struct {
 	Outcome         string         `json:"outcome,omitempty"`
 	Result          string         `json:"result,omitempty"`
 	ResultTruncated bool           `json:"result_truncated,omitempty"`
-	Revision        int64          `json:"revision"`
-	incarnation     string
+	// Tokens and ToolSteps are summed from the helper's steps once it ended.
+	Tokens      int64 `json:"tokens,omitempty"`
+	ToolSteps   int   `json:"tool_steps,omitempty"`
+	Revision    int64 `json:"revision"`
+	incarnation string
 }
 
 // WorkerCurrent is what an unfinished worker is doing now.
@@ -51,10 +56,17 @@ type WorkerCurrent struct {
 	Kind  string `json:"kind"` // model or tool
 	Tool  string `json:"tool,omitempty"`
 	Since string `json:"since"`
+	// Reason is the running tool call's "_reason": what the helper is doing.
+	Reason string `json:"reason,omitempty"`
+}
+
+// sameStep reports whether two current steps are the same call.
+func (c *WorkerCurrent) sameStep(o *WorkerCurrent) bool {
+	return c != nil && o != nil && c.Kind == o.Kind && c.Tool == o.Tool && c.Since == o.Since
 }
 
 const (
-	workerColumns = `id,conversation_id,agent_id,thread_id,incarnation,parent_thread_id,spawn_call_id,depth,name,purpose,state,current_json,model,next_wake_at,started_at,last_activity_at,ended_at,outcome,result,result_truncated,revision`
+	workerColumns = `id,conversation_id,agent_id,thread_id,incarnation,parent_thread_id,spawn_call_id,depth,name,purpose,state,current_json,model,next_wake_at,started_at,last_activity_at,ended_at,outcome,result,result_truncated,revision,label,tokens,tool_steps`
 	// workerWatchCap bounds live telemetry watchers; agents past it poll.
 	workerWatchCap  = 50
 	workerPollEvery = 15 * time.Second
@@ -88,7 +100,7 @@ func scanWorker(row interface{ Scan(...any) error }) (ConversationWorker, error)
 	var truncated int
 	err := row.Scan(&w.ID, &w.ConversationID, &w.AgentID, &w.ThreadID, &w.incarnation, &w.ParentThreadID, &w.SpawnCallID, &w.Depth,
 		&w.Name, &w.Purpose, &w.State, &current, &w.Model, &w.NextWakeAt, &w.StartedAt, &w.LastActivityAt, &w.EndedAt,
-		&w.Outcome, &w.Result, &truncated, &w.Revision)
+		&w.Outcome, &w.Result, &truncated, &w.Revision, &w.Label, &w.Tokens, &w.ToolSteps)
 	if err != nil {
 		return w, err
 	}
@@ -132,7 +144,7 @@ func workerTimeString(t time.Time) string {
 }
 
 type spawnRow struct {
-	chat, callID, thread, span, spawnThread string
+	chat, callID, thread, span, spawnThread, reason string
 }
 
 // workerWatches owns the per-agent thread watchers.
@@ -147,6 +159,8 @@ type workerWatches struct {
 	// spawns are shown as plain tool rows without retrying every spawn.
 	unsupportedUntil time.Time
 	logged           bool
+	// tried holds activity lookups already made (see firstTry).
+	tried map[string]bool
 }
 
 type agentWorkerWatch struct {
@@ -324,14 +338,14 @@ func (a *App) resumeWorkerWatches() {
 func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, complete bool) error {
 	since := activityTime(time.Now().Add(-workerEndedWindow))
 	spawns := []spawnRow{}
-	rows, err := a.store.db.Query(`SELECT t.conversation_id,t.call_id,t.thread_id,t.tool_span_id,t.spawn_thread_id FROM conversation_tool_activity t JOIN conversations c ON c.id=t.conversation_id
+	rows, err := a.store.db.Query(`SELECT t.conversation_id,t.call_id,t.thread_id,t.tool_span_id,t.spawn_thread_id,t.reason FROM conversation_tool_activity t JOIN conversations c ON c.id=t.conversation_id
 		WHERE t.agent_id=? AND lower(t.name)='spawn' AND t.started_at>=? AND c.audience<>'public' ORDER BY t.id`, agent, since)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var s spawnRow
-		if rows.Scan(&s.chat, &s.callID, &s.thread, &s.span, &s.spawnThread) == nil {
+		if rows.Scan(&s.chat, &s.callID, &s.thread, &s.span, &s.spawnThread, &s.reason) == nil {
 			spawns = append(spawns, s)
 		}
 	}
@@ -340,7 +354,11 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 	}
 	bySpan := map[string]spawnRow{}
 	byChild := map[string]spawnRow{} // parent thread + "\x00" + requested id; the newest wins
+	byCall := map[string]string{}    // conversation + "\x00" + call id → spawn reason
 	for _, s := range spawns {
+		if s.reason != "" {
+			byCall[s.chat+"\x00"+s.callID] = s.reason
+		}
 		if s.span != "" {
 			bySpan[s.span] = s
 		}
@@ -423,6 +441,9 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 			// The span is the identity once known.
 			w.incarnation = incarnation
 		}
+		if w.Label == "" && w.SpawnCallID != "" {
+			w.Label = truncateActivity(byCall[w.ConversationID+"\x00"+w.SpawnCallID], 200)
+		}
 		applyObservedThread(&w, t)
 		if found && workerEqual(before, w) {
 			seen[w.ID], chosen[w.ThreadID] = true, w.ID
@@ -459,6 +480,7 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 			changed = append(changed, saved)
 		}
 	}
+	a.enrichWorkers(changed)
 	for i := range changed {
 		w := changed[i]
 		a.hub.publishStream(StreamFrame{Type: "stream", ConversationID: w.ConversationID, AgentID: w.AgentID, ThreadID: w.ThreadID, CreatedAt: time.Now().UTC(), Worker: &w})
@@ -467,6 +489,10 @@ func (a *App) reconcileWorkers(agent int64, threads []sdk.ObservedThread, comple
 }
 
 func applyObservedThread(w *ConversationWorker, t sdk.ObservedThread) {
+	if w.Outcome == workerOutcomeStoppedByOperator && w.EndedAt != "" {
+		// Stopped here: the kill can reach the thread list a moment later.
+		return
+	}
 	w.Name = truncateActivity(t.Name, 200)
 	if t.Purpose != "" {
 		w.Purpose = truncateActivity(t.Purpose, 300)
@@ -494,9 +520,14 @@ func applyObservedThread(w *ConversationWorker, t sdk.ObservedThread) {
 	if s := workerTimeString(t.LastActivityAt); s != "" {
 		w.LastActivityAt = s
 	}
+	previous := w.Current
 	w.Current = nil
 	if t.Current != nil && t.Current.Kind != "" && unfinishedWorkerState(w.State) {
 		w.Current = &WorkerCurrent{Kind: t.Current.Kind, Tool: truncateActivity(t.Current.Tool, 256), Since: workerTimeString(t.Current.Since)}
+		if w.Current.sameStep(previous) {
+			// The reason was read from the step's activity once.
+			w.Current.Reason = previous.Reason
+		}
 	}
 	if t.Ended != nil {
 		w.EndedAt = workerTimeString(t.Ended.At)
@@ -537,10 +568,10 @@ func (s *store) saveWorker(w ConversationWorker) (ConversationWorker, error) {
 		current = string(raw)
 	}
 	if w.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO conversation_workers(conversation_id,agent_id,thread_id,incarnation,parent_thread_id,spawn_call_id,depth,name,purpose,state,current_json,model,next_wake_at,started_at,last_activity_at,ended_at,outcome,result,result_truncated)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,thread_id,incarnation) DO NOTHING`,
+		res, err := s.db.Exec(`INSERT INTO conversation_workers(conversation_id,agent_id,thread_id,incarnation,parent_thread_id,spawn_call_id,depth,name,purpose,state,current_json,model,next_wake_at,started_at,last_activity_at,ended_at,outcome,result,result_truncated,label,tokens,tool_steps)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,thread_id,incarnation) DO NOTHING`,
 			w.ConversationID, w.AgentID, w.ThreadID, w.incarnation, w.ParentThreadID, w.SpawnCallID, w.Depth, w.Name, w.Purpose, w.State, current,
-			w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated))
+			w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated), w.Label, w.Tokens, w.ToolSteps)
 		if err != nil {
 			return w, err
 		}
@@ -551,8 +582,8 @@ func (s *store) saveWorker(w ConversationWorker) (ConversationWorker, error) {
 		return scanWorker(s.db.QueryRow(`SELECT `+workerColumns+` FROM conversation_workers WHERE agent_id=? AND thread_id=? AND incarnation=?`, w.AgentID, w.ThreadID, w.incarnation))
 	}
 	w.Revision++
-	_, err := s.db.Exec(`UPDATE conversation_workers SET incarnation=?,name=?,purpose=?,state=?,current_json=?,model=?,next_wake_at=?,started_at=?,last_activity_at=?,ended_at=?,outcome=?,result=?,result_truncated=?,revision=? WHERE id=?`,
-		w.incarnation, w.Name, w.Purpose, w.State, current, w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated), w.Revision, w.ID)
+	_, err := s.db.Exec(`UPDATE conversation_workers SET incarnation=?,name=?,purpose=?,state=?,current_json=?,model=?,next_wake_at=?,started_at=?,last_activity_at=?,ended_at=?,outcome=?,result=?,result_truncated=?,revision=?,label=?,tokens=?,tool_steps=? WHERE id=?`,
+		w.incarnation, w.Name, w.Purpose, w.State, current, w.Model, w.NextWakeAt, w.StartedAt, w.LastActivityAt, w.EndedAt, w.Outcome, w.Result, boolToInt(w.ResultTruncated), w.Revision, w.Label, w.Tokens, w.ToolSteps, w.ID)
 	return w, err
 }
 
@@ -680,6 +711,12 @@ type AgentWorkThread struct {
 	ConversationID   string         `json:"chat_id,omitempty"`
 	Title            string         `json:"title,omitempty"`
 	ThisConversation bool           `json:"this_conversation,omitempty"`
+	// Helpers linked to a conversation: their title, and the row id this
+	// conversation can stop them by.
+	Label     string `json:"label,omitempty"`
+	WorkerID  int64  `json:"worker_id,omitempty"`
+	Tokens    int64  `json:"tokens,omitempty"`
+	ToolSteps int    `json:"tool_steps,omitempty"`
 }
 
 // handleAgentWork lists each participant agent's threads for operators.
@@ -734,6 +771,12 @@ func (a *App) agentWorkThreads(agent int64, current string, threads []sdk.Observ
 	if id, title, ok := a.store.mainConversationFor(agent); ok {
 		chats[mainThreadID] = [2]string{id, title}
 	}
+	linked := map[string]ConversationWorker{} // thread id → newest linked row
+	if rows, err := a.store.queryWorkers(`WHERE agent_id=? AND (ended_at='' OR ended_at>=?) ORDER BY id`, agent, activityTime(time.Now().Add(-workerEndedWindow))); err == nil {
+		for _, w := range rows {
+			linked[w.ThreadID] = w
+		}
+	}
 	out := make([]AgentWorkThread, 0, len(threads))
 	for _, t := range threads {
 		kind := "worker"
@@ -765,6 +808,16 @@ func (a *App) agentWorkThreads(agent int64, current string, threads []sdk.Observ
 			// Public conversations are left out above: their titles can carry
 			// visitor details.
 			item.ConversationID, item.Title, item.ThisConversation = c[0], c[1], c[0] == current
+		}
+		if w, ok := linked[t.ID]; ok && kind == "worker" {
+			item.Label, item.ConversationID, item.ThisConversation = w.Label, w.ConversationID, w.ConversationID == current
+			item.Tokens, item.ToolSteps = w.Tokens, w.ToolSteps
+			if item.ThisConversation {
+				item.WorkerID = w.ID
+			}
+			if item.Current != nil && w.Current != nil && item.Current.Kind == w.Current.Kind && item.Current.Tool == truncateActivity(w.Current.Tool, 256) {
+				item.Current.Reason = w.Current.Reason
+			}
 		}
 		out = append(out, item)
 	}

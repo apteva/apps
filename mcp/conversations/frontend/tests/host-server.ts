@@ -110,6 +110,19 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/workers")return Response.json(workerRows.get(url.searchParams.get("chat_id")||"")??[]);
+ if(path==="/workers/stop" && req.method==="POST"){
+  // Stops the helper and the helpers it started, like the app does.
+  const body=await req.json();const list=workerRows.get(body.chat_id)??[];const target=list.find(w=>w.id===body.worker_id);
+  if(!target)return new Response("helper not found",{status:404});
+  if(target.ended_at)return new Response("helper already ended",{status:409});
+  calls.at(-1).body=body;
+  const stopped=[target];for(let i=0;i<stopped.length;i++)for(const w of list)if(w.parent_thread_id===stopped[i].thread_id&&!w.ended_at&&!stopped.includes(w))stopped.push(w);
+  const now=new Date().toISOString();
+  const updated=stopped.map(w=>({...w,state:"stopped",outcome:"stopped_by_operator",ended_at:now,current:undefined,revision:(w.revision??1)+1}));
+  workerRows.set(body.chat_id,list.map(w=>updated.find(u=>u.id===w.id)??w));
+  for(const w of updated)for(const c of streams){try{c.enqueue(new TextEncoder().encode(`event: stream\ndata: ${JSON.stringify({type:"stream",chat_id:body.chat_id,agent_id:w.agent_id,thread_id:w.thread_id,worker:w})}\n\n`));}catch{streams.delete(c);}}
+  return Response.json({workers:updated,parent_notified:true});
+ }
  if(path==="/workers/activity"){const steps=[...(workerSteps.get(url.searchParams.get("thread_id")||"")??[])].reverse();const detail=url.searchParams.get("detail")==="1";return Response.json({steps:detail?steps:steps.map(({arguments:_a,result:_r,...rest}:any)=>rest),next_cursor:"",projection:"content"});}
  if(path==="/agent-work")return agentWork?Response.json(agentWork):new Response("not found",{status:404});
  if(path==="/activity-summary")return Response.json({active_conversation_ids:activeConversations});

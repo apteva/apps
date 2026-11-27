@@ -104,6 +104,8 @@ type streamer struct {
 	ackSeq           uint64
 	onFrame          func(StreamFrame)
 	onActivityChange func(string)
+	// onResponseDone receives a finished response's work (see TurnWork).
+	onResponseDone func(chat string, agent, messageID, afterMessageID int64, work TurnWork)
 }
 
 // responseActive reports whether the mapped agent currently owns a live
@@ -229,11 +231,6 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	s.telemetrySeen[agentID] = true
 	s.mu.Unlock()
 	s.observeModel(eventType, agentID, threadID, dataJSON)
-	if eventType == "llm.done" {
-		// Subscribed only for the model record; responses advance on the
-		// events below.
-		return
-	}
 	if eventType == "event.settled" {
 		s.settleTrackedEvent(agentID, threadID, dataJSON)
 		return
@@ -255,6 +252,12 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 		if conversationID == "" {
 			return
 		}
+	}
+	if eventType == "llm.done" {
+		// Counted into the open response's usage; responses advance on the
+		// events below.
+		s.addResponseTokens(conversationID, agentID, threadID, dataJSON)
+		return
 	}
 	s.observeResponseWake(eventType, agentID, threadID, dataJSON, ts)
 	// Proactive turns (subscription, webhook, timer, or an agent-created

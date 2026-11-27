@@ -64,10 +64,18 @@ export type WorkerState = "working" | "sleeping" | "waiting" | "paused" | "block
 export interface ConversationWorker {
   id: number; chat_id: string; agent_id: number; thread_id: string; parent_thread_id: string;
   spawn_call_id?: string; depth: number; name: string; purpose?: string; state: WorkerState | string;
-  current?: { kind: "model" | "tool" | string; tool?: string; since: string };
+  /** The reason its spawn call gave: the helper's title. */
+  label?: string;
+  /** reason: what the running tool call is doing ("Reading assignments"). */
+  current?: { kind: "model" | "tool" | string; tool?: string; since: string; reason?: string };
   model?: string; next_wake_at?: string; started_at: string; last_activity_at?: string;
+  /** outcome "stopped_by_operator" when a person stopped it. */
   ended_at?: string; outcome?: string; result?: string; result_truncated?: boolean; revision: number;
+  /** Summed once the helper ended. */
+  tokens?: number; tool_steps?: number;
 }
+/** A response's duration and model usage, kept on its last message (metadata.work). */
+export interface TurnWork { duration_ms: number; tokens?: number }
 export interface WorkerStep {
   kind: "model" | "tool" | "message" | "end" | string; started_at: string; ended_at?: string; duration_ms?: number;
   status: string; model?: string; tool?: string; child_thread_id?: string; to?: string; outcome?: string;
@@ -78,6 +86,8 @@ export interface AgentWorkThread {
   id: string; parent_id?: string; kind: "main" | "chat" | "voice" | "worker"; name?: string; purpose?: string;
   state: string; next_wake_at?: string; current?: ConversationWorker["current"]; started_at?: string;
   ended_at?: string; outcome?: string; blocked_reason?: string; chat_id?: string; title?: string; this_conversation?: boolean;
+  /** Helpers linked to a conversation: title, and the id this conversation stops and opens them by. */
+  label?: string; worker_id?: number; tokens?: number; tool_steps?: number;
 }
 export interface AgentWork { available: boolean; agents: Array<{ agent_id: number; available: boolean; threads: AgentWorkThread[] }> }
 export interface ResponseProgress {

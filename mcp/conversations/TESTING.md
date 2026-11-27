@@ -534,3 +534,33 @@ local dev Core (`dev-build/turn-waits-20261127`), 21 passed 5 of 5 with
 gpt-6.2-sol (12–13 iterations, 304–331K tokens) and its driver passed 5 of 5 with
 kimi-k3.1-pro (15–17 iterations, 446–509K tokens). The first Kimi run went over
 the old 500K budget, which is now 750K.
+
+## Helper UI (0.39.0)
+
+Go coverage in `worker_ui_test.go`: a helper's title is its spawn `_reason`
+and its running step carries that step's reason; an ended helper sums its
+tokens and tool calls; stopping a helper stops its subtree, records it as
+stopped by the operator and tells the parent thread; Agent work carries the
+helper title and the worker id that opens its detail; a response's duration
+and tokens are kept on its last message.
+
+Browser coverage in `frontend/tests/workers.browser.ts` (12 tests): one
+group line with one row per helper at 1280 and 390px, a single helper as one
+row, thread-id titles when no reason was given, eight-step helpers showing
+only their latest activity, an open response waiting on helpers, French,
+Agent work titles and paused state, the detail in the side column (1280) or a
+drawer (390) with Stop, and the "Worked for" footer.
+
+Scenario 33 is new:
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.2-sol \
+  scenarios/33-helpers-announced.yaml
+```
+
+The operator asks for two helpers: one marks PAID invoices done, the other only
+reads a support list. The trajectory must have a `conversations_send` before
+the first `spawn`; the driver checks that an agent message sent before the first
+helper started names the count and what the helpers won't change, that each
+helper has a short title that isn't its directive, that only the PAID todos
+were completed, and that the final answer names both refund requests.

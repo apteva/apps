@@ -95,6 +95,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.publishListProgress(chat)
 		a.releaseQueuedMessages(chat)
 	}
+	a.streamer.onResponseDone = a.recordTurnWork
 	mountedCtx = ctx
 	a.workers = newWorkerWatches(a.workerObserver)
 	a.resumeWorkerWatches()

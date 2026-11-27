@@ -62,6 +62,34 @@ type responseProgressState struct {
 	// its label and start time when it is reported ready after the model
 	// has moved on to the next call.
 	written map[string]ReadyTool
+	// tokens is what the responding thread's model calls used (in + out).
+	tokens int64
+}
+
+// TurnWork is how long a response took and what its model calls used. It is
+// kept on the response's last agent message (metadata "work").
+type TurnWork struct {
+	DurationMS int64 `json:"duration_ms"`
+	Tokens     int64 `json:"tokens,omitempty"`
+}
+
+// addResponseTokens adds one model call's usage to the open response.
+func (s *streamer) addResponseTokens(chat string, agent int64, thread, raw string) {
+	var d struct {
+		TokensIn  int64 `json:"tokens_in"`
+		TokensOut int64 `json:"tokens_out"`
+	}
+	if json.Unmarshal([]byte(raw), &d) != nil || d.TokensIn+d.TokensOut <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.responses[responseProgressKey(chat, agent)]
+	if p == nil || p.threadID != thread || p.Phase == "idle" || (p.inboundPreview != "" && !p.inboundReceived) {
+		// No response, or the previous turn's housekeeping.
+		return
+	}
+	p.tokens += max(d.TokensIn, 0) + max(d.TokensOut, 0)
 }
 
 // rememberCurrentCall records the call being written under its id.
@@ -381,8 +409,16 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 	p.CompletionMessageID = messageID
 	p.clearModelPass()
 	frame := s.progressFrame(p)
+	var work *TurnWork
+	if !p.StartedAt.IsZero() && (p.modelStarted || p.tokens > 0) {
+		work = &TurnWork{DurationMS: max(settledAt.Sub(p.StartedAt).Milliseconds(), 0), Tokens: p.tokens}
+	}
+	after := p.AfterMessageID
 	s.mu.Unlock()
 	s.publish(frame)
+	if work != nil && s.onResponseDone != nil {
+		s.onResponseDone(chat, agent, messageID, after, *work)
+	}
 	if s.onActivityChange != nil {
 		s.onActivityChange(chat)
 	}

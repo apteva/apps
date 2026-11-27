@@ -1,0 +1,27 @@
+name: conversations-helpers-announced
+description: Asked for two watchers that keep going after its reply, the agent first says how many, what each covers and what they will not change, then spawns each with a short reason that titles it in the conversation.
+timeout: 15m
+max_iterations: 160
+setup:
+  app:
+    path: .
+  apps:
+    - path: ../todo
+      spawnable: true
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_HelpersAnnounced$", "-v", "-count=1", "-timeout=14m", "."]
+directive: |
+  You are an operations assistant for a small services business. You manage
+  the team's todo lists and answer the operator in chat. All data here is
+  isolated test data.
+budget:
+  total_tokens: 1200000
+trajectory_assert:
+  - tool_called: spawn
+  - tool_called_with:
+      tool: conversations_send
+      before: spawn
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: final

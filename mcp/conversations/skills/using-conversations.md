@@ -183,6 +183,15 @@ context because it is large. Main's general rule to hand independent units to
 focused owners applies to standing and background work, not to a request you
 are answering in a conversation.
 
+When you do spawn helpers for a request, say so before the first spawn. In one
+short message, tell the person why, how many helpers, what each one covers, and
+what they will and will not change ("read-only", "drafts only, nothing is
+sent"). Give each spawn a short `_reason` that names its part ("Review fan-care
+assignments"): the conversation shows it as that helper's title, with what it
+is doing now. When the helpers finish, report the combined outcome. The person
+can stop a helper from the conversation; you are then told which one, so say
+what it had and had not finished and do not start it again unless asked.
+
 ### Pacing, report-back and idle threads
 
 Conversation threads pace themselves, like main. End every turn with an explicit

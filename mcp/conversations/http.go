@@ -36,6 +36,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/workers", Handler: a.handleWorkers},
 		{Method: "GET", Pattern: "/workers/activity", Handler: a.handleWorkerActivity},
 		{Method: "GET", Pattern: "/agent-work", Handler: a.handleAgentWork},
+		{Method: "POST", Pattern: "/workers/stop", Handler: a.handleStopWorker},
 		{Pattern: "/deliveries", Handler: a.handleDeliveryStatus},
 		{Method: "GET", Pattern: "/stream", Handler: a.handleStream},
 		{Method: "GET", Pattern: "/inbox", Handler: a.handleInbox},

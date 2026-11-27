@@ -109,7 +109,9 @@ func mainReplyContract(conv *Conversation) string {
 		" The person is waiting: a request made here is very small work you do yourself in this turn, even when it"+
 		" covers several items. Make the reads, lookups and approved writes directly, in parallel when they are"+
 		" independent; do not spawn a thread for them. Spawn only for work that must continue after your reply"+
-		" (waiting, polling, retries or a schedule) or that is too large to finish in this turn.",
+		" (waiting, polling, retries or a schedule) or that is too large to finish in this turn."+
+		" If you do spawn for this request, first tell the person here why, how many helpers, what each covers and what they"+
+		" will and will not change, and give each spawn a short _reason naming its part: it titles the helper in this conversation.",
 		conv.Title, conv.ID, conv.ID) + createdByAgentNote(conv)
 }
 
