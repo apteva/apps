@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.12.0
+version: 0.12.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -63,6 +63,9 @@ description: |
   go through os.Root, so a planted symlink cannot redirect them. Each
   workspace records its isolation (capabilities.sandbox). Workspaces
   report their capabilities (isolation, hardened, sessions, preview, images).
+  v0.12.1 ships prebuilt packages for linux-amd64, linux-arm64, darwin-arm64
+  and darwin-amd64, so installs and upgrades download the app instead of
+  building it from source. No behaviour change.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -316,7 +319,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.12.0
+    ref: workspaces/v0.12.1
     entry: mcp/workspaces
   port: 8080
   health_check: /health

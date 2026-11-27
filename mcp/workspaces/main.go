@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.12.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", a.Manifest().Version, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	if kind, err := resolveSandbox(configString(ctx, "local_sandbox", sandboxModeAuto), configString(ctx, "local_network", "open")); err != nil {
 		ctx.Logger().Info("local driver unavailable", "reason", err.Error())
 	} else {
