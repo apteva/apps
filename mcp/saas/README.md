@@ -516,6 +516,63 @@ Credits cap scope, so caps per space work through `credits_caps_set`.
 prepaid accounts. Top-ups, caps and the statement are called on Credits
 directly (`credits_topup_create`, `credits_caps_set`, `credits_entries_list`).
 
+## Included Usage
+
+A plan can include a recurring allowance per meter, such as 60 free minutes
+a month (v0.14.0). Set it in the plan metadata:
+
+```json
+{
+  "included_usage": [
+    {"source_app": "telephony", "meter": "call:minutes", "amount": 60, "unit": "minutes", "period": "month"}
+  ]
+}
+```
+
+- `source_app` defaults to `llm`. `meter` matches exactly, or `<kind>:*` as
+  a fallback, like plan meters.
+- `unit` names the allowance's own Credits wallet for the account. It must
+  differ from the plan's `credits_unit` and be unique within the plan
+  (use `call_minutes` / `video_minutes` for two minute allowances).
+- `period` is `month` (UTC calendar month, the default) or `billing_cycle`
+  (the subscription's current period; paid subscription plans only).
+  Allowances always expire at the period end (`expires: period_end`).
+
+**Grants.** Each period SaaS calls `credits_grant` into the allowance wallet
+with `expires_at` = period end, priority 1 and
+`source_ref = saas:included:acct:<account>:meter:<app>/<meter>:period:<start>:plan:<plan>`,
+so a retry never grants twice. Grants run when an account is activated or
+resumed, after a plan change, after a paid renewal, and from the
+`included-usage` worker (every 10 minutes; each account is checked again at
+its period end, or after 10 minutes if a grant failed). Free plans get
+calendar-month grants from the worker; no payment event is needed.
+
+**Plan changes.** Only the difference over what was already granted this
+period is added (60 to 100 adds 40). A downgrade adds nothing and never
+takes back credit.
+
+**Spending.** Quantity meters report `estimated_quantity` to
+`saas_usage_authorize` and `quantity` to `saas_usage_settle`. Authorize
+holds what the allowance can cover and prices only the rest from the paid
+wallet through the meter's `unit_price_id` (set with `saas_plan_meter_set`).
+When the allowance is used up and the plan has no paid price for the meter
+(free plans), the request is refused with reason `included_exhausted`.
+Accounts on free or paid subscription plans can use metered usage up to
+their allowance; only prepaid plans spend paid credit. Settle takes the
+actual quantity from the allowance first; anything beyond it goes to the
+paid hold. The admission ref is `inc:<allowance hold>:<units held>:<paid
+hold or 0>`; plain hold ids from earlier versions still settle.
+
+**Reporting.** `saas_account_included_usage` returns, per allowance,
+`included`, `used`, `remaining`, `period_start` and `resets_at`, plus the
+paid balance for prepaid plans ("42 of 60 free minutes left, resets 1 Dec").
+`saas_access_check` adds `included_usage`, and a prepaid account with no
+paid credit stays allowed while an allowance has units left.
+`saas_usage_get` with `account_id` adds `included_usage` and `paid_balance`.
+
+Plan limits' `reset_interval` is deprecated: Entitlements stores it but never
+resets usage. Use `included_usage` for recurring allowances.
+
 ## Transactional Email
 
 When the optional messaging app is installed, SaaS emails the account owner

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.13.2
+version: 0.14.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -63,6 +63,12 @@ description: |
   v0.13.2 passes idempotency_key to an app action only when the target
   tool declares it, so tools that reject unknown fields (containers_run)
   no longer fail every fulfillment call.
+  v0.14.0 adds recurring included usage: plan metadata included_usage
+  (e.g. 60 minutes a month per meter) is granted each period as an
+  expiring Credits lot in its own wallet, spent before paid credit by
+  saas_usage_authorize / saas_usage_settle (new estimated_quantity /
+  quantity and per-unit meter prices), and reported by
+  saas_account_included_usage, saas_access_check and saas_usage_get.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -284,6 +290,9 @@ provides:
     - name: saas_access_check
       description: Check whether a SaaS account is active and within limit for a feature.
       requires: saas.read
+    - name: saas_account_included_usage
+      description: Show an account's included usage this period (included, used, remaining, reset date) and its paid balance.
+      requires: saas.read
     - name: saas_credit_pack_checkout_create
       description: Create a one-time Catalog credit-pack checkout; grant credits only after invoice.paid.
       requires: saas.checkout
@@ -294,7 +303,7 @@ provides:
       description: List prepaid credit ledger transactions for a SaaS account.
       requires: saas.read
     - name: saas_plan_meter_set
-      description: Link a prepaid plan's usage meter to Catalog metered prices for input, output, cached input and per request.
+      description: Link a prepaid plan's usage meter to Catalog metered prices for input, output, cached input, per request and per unit.
       requires: saas.admin
     - name: saas_plan_meters_list
       description: List a plan's usage meters and their Catalog price links.

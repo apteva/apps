@@ -201,21 +201,23 @@ type PlanMeter struct {
 	OutputPriceID      *int64          `json:"output_price_id,omitempty"`
 	CachedInputPriceID *int64          `json:"cached_input_price_id,omitempty"`
 	PerRequestPriceID  *int64          `json:"per_request_price_id,omitempty"`
+	UnitPriceID        *int64          `json:"unit_price_id,omitempty"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt          string          `json:"created_at"`
 	UpdatedAt          string          `json:"updated_at"`
 }
 
-const planMeterColumns = `id, project_id, plan_key, source_app, meter, input_price_id, output_price_id, cached_input_price_id, per_request_price_id, metadata_json, created_at, updated_at`
+const planMeterColumns = `id, project_id, plan_key, source_app, meter, input_price_id, output_price_id, cached_input_price_id, per_request_price_id, unit_price_id, metadata_json, created_at, updated_at`
 
 func scanPlanMeter(r interface{ Scan(...any) error }) (*PlanMeter, error) {
 	var m PlanMeter
-	var in, out, cached, per sql.NullInt64
+	var in, out, cached, per, unit sql.NullInt64
 	var meta string
-	if err := r.Scan(&m.ID, &m.ProjectID, &m.PlanKey, &m.SourceApp, &m.Meter, &in, &out, &cached, &per, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := r.Scan(&m.ID, &m.ProjectID, &m.PlanKey, &m.SourceApp, &m.Meter, &in, &out, &cached, &per, &unit, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
 	m.InputPriceID, m.OutputPriceID, m.CachedInputPriceID, m.PerRequestPriceID = nullInt(in), nullInt(out), nullInt(cached), nullInt(per)
+	m.UnitPriceID = nullInt(unit)
 	if meta == "" || meta == "null" {
 		meta = "{}"
 	}
@@ -254,7 +256,7 @@ func dbPlanMetersList(db *sql.DB, pid, planKey, sourceApp string) ([]*PlanMeter,
 	return out, rows.Err()
 }
 
-var meterPriceFields = []string{"input_price_id", "output_price_id", "cached_input_price_id", "per_request_price_id"}
+var meterPriceFields = []string{"input_price_id", "output_price_id", "cached_input_price_id", "per_request_price_id", "unit_price_id"}
 
 func (a *App) toolPlanMeterSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := requireProject(ctx, args)
@@ -293,25 +295,26 @@ func (a *App) toolPlanMeterSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 		ids[field] = id
 	}
 	if len(ids) == 0 {
-		return nil, errors.New("at least one of input_price_id, output_price_id, cached_input_price_id or per_request_price_id is required")
+		return nil, errors.New("at least one of input_price_id, output_price_id, cached_input_price_id, per_request_price_id or unit_price_id is required")
 	}
 	meterMetadata := mapFromAny(args["metadata"])
 	if meterMetadata == nil {
 		meterMetadata = map[string]any{}
 	}
 	_, err = ctx.AppDB().Exec(`INSERT INTO saas_plan_meters
-		(project_id, plan_key, source_app, meter, input_price_id, output_price_id, cached_input_price_id, per_request_price_id, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(project_id, plan_key, source_app, meter, input_price_id, output_price_id, cached_input_price_id, per_request_price_id, unit_price_id, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, plan_key, source_app, meter) DO UPDATE SET
 			input_price_id=excluded.input_price_id,
 			output_price_id=excluded.output_price_id,
 			cached_input_price_id=excluded.cached_input_price_id,
 			per_request_price_id=excluded.per_request_price_id,
+			unit_price_id=excluded.unit_price_id,
 			metadata_json=excluded.metadata_json,
 			updated_at=CURRENT_TIMESTAMP`,
 		pid, plan.Key, sourceApp, meter,
 		nullableInt64(ids["input_price_id"]), nullableInt64(ids["output_price_id"]),
-		nullableInt64(ids["cached_input_price_id"]), nullableInt64(ids["per_request_price_id"]),
+		nullableInt64(ids["cached_input_price_id"]), nullableInt64(ids["per_request_price_id"]), nullableInt64(ids["unit_price_id"]),
 		jsonOrEmpty(meterMetadata, "{}"))
 	if err != nil {
 		return nil, err
@@ -357,6 +360,7 @@ type accountSnapshot struct {
 	PlanKey  string
 	Prepaid  bool
 	Settings prepaidSettings
+	Included []includedUsageItem
 	expires  time.Time
 }
 
@@ -455,9 +459,11 @@ func (a *App) accountSnapshotFor(ctx *sdk.AppCtx, pid, accountID string) (*accou
 	if err != nil {
 		return nil, err
 	}
+	planMetadata := mapFromAny(json.RawMessage(planMeta))
 	s := accountSnapshot{
 		ID: accountID, Status: status, PlanKey: planKey, Prepaid: billingMode == billingModePrepaid,
-		Settings: prepaidSettingsFromMetadata(mapFromAny(json.RawMessage(planMeta))), expires: now.Add(accountSnapshotTTL),
+		Settings: prepaidSettingsFromMetadata(planMetadata), Included: includedUsageFromMetadata(planMetadata),
+		expires: now.Add(accountSnapshotTTL),
 	}
 	pricing.mu.Lock()
 	if pricing.accounts == nil {
@@ -475,6 +481,8 @@ type resolvedMeter struct {
 	Output      *meterPriceInfo
 	CachedInput *meterPriceInfo
 	PerRequest  *meterPriceInfo
+	// Unit prices the meter's own quantity (e.g. per minute).
+	Unit *meterPriceInfo
 }
 
 // resolveMeter finds the plan's meter for source_app, trying the exact meter
@@ -514,7 +522,7 @@ func (a *App) resolveMeter(ctx *sdk.AppCtx, pid, planKey, sourceApp, meter strin
 	for _, part := range []struct {
 		id  *int64
 		dst **meterPriceInfo
-	}{{m.InputPriceID, &out.Input}, {m.OutputPriceID, &out.Output}, {m.CachedInputPriceID, &out.CachedInput}, {m.PerRequestPriceID, &out.PerRequest}} {
+	}{{m.InputPriceID, &out.Input}, {m.OutputPriceID, &out.Output}, {m.CachedInputPriceID, &out.CachedInput}, {m.PerRequestPriceID, &out.PerRequest}, {m.UnitPriceID, &out.Unit}} {
 		if part.id == nil {
 			continue
 		}
@@ -532,6 +540,8 @@ type usageQuantities struct {
 	Output      int64
 	CachedInput int64
 	Requests    int64
+	// Quantity is the meter's own unit (e.g. minutes), priced by Unit.
+	Quantity int64
 }
 
 // priceUsage returns the cost in wallet micro-units, rounded up once.
@@ -564,6 +574,7 @@ func priceUsage(m *resolvedMeter, q usageQuantities) int64 {
 	add(q.CachedInput, cachedPrice)
 	add(q.Output, m.Output)
 	add(q.Requests, m.PerRequest)
+	add(q.Quantity, m.Unit)
 	ceil := new(big.Int).Add(total.Num(), new(big.Int).Sub(total.Denom(), big.NewInt(1)))
 	ceil.Quo(ceil, total.Denom())
 	if !ceil.IsInt64() {
@@ -627,70 +638,209 @@ func (a *App) toolUsageAuthorize(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if snap.Status != StatusActive {
 		return denyUsage(http.StatusForbidden, "permission_error", "account is "+snap.Status, "account_"+snap.Status), nil
 	}
-	if !snap.Prepaid {
-		return denyUsage(http.StatusForbidden, "permission_error", "account plan is not prepaid", "not_prepaid"), nil
-	}
 	sourceApp := firstNonEmpty(strings.TrimSpace(strArg(args, "source_app")), "llm")
 	meterKey := usageMeterKey(args, "model")
-	meter, err := a.resolveMeter(ctx, pid, snap.PlanKey, sourceApp, meterKey)
-	if err != nil {
-		return nil, err
+	included := matchIncludedUsage(snap.Included, sourceApp, meterKey)
+	if !snap.Prepaid && included == nil {
+		return denyUsage(http.StatusForbidden, "permission_error", "account plan is not prepaid", "not_prepaid"), nil
 	}
-	if meter == nil {
+	var meter *resolvedMeter
+	if snap.Prepaid {
+		meter, err = a.resolveMeter(ctx, pid, snap.PlanKey, sourceApp, meterKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if meter == nil && included == nil {
 		return denyUsage(http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("%s has no price on this plan", firstNonEmpty(strings.TrimPrefix(meterKey, "model:"), "request")), "no_price"), nil
 	}
+	reference := sourceApp + "/request/" + requestID
+	scope := ""
+	if project := strings.TrimSpace(strArg(meta, "project")); project != "" {
+		scope = "project:" + project
+	}
+
+	// Included usage is spent first: hold what the allowance covers and
+	// price only the rest from the paid wallet.
+	quantity := int64Arg(args, "estimated_quantity")
+	if quantity <= 0 {
+		quantity = int64Arg(args, "quantity")
+	}
+	var incHold, incTaken, incRemaining int64
+	if included != nil && quantity > 0 {
+		incHold, incTaken, incRemaining, err = a.holdIncludedUsage(ctx, pid, accountID, included, quantity, reference, scope)
+		if err != nil {
+			return nil, err
+		}
+	}
+	releaseIncluded := func() {
+		if incHold != 0 {
+			var out map[string]any
+			_ = ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": incHold}, &out)
+		}
+	}
+	rest := quantity - incTaken
+	if rest > 0 && (meter == nil || meter.Unit == nil) {
+		releaseIncluded()
+		return denyUsage(http.StatusTooManyRequests, "insufficient_quota", "included usage for this period is used up", "included_exhausted"), nil
+	}
+
 	maxOutput := int64Arg(args, "max_output_tokens")
 	if maxOutput <= 0 {
 		maxOutput = snap.Settings.MaxOutputTokens
 	}
-	estimatedInput := inputWithMargin(int64Arg(args, "estimated_input_tokens"), snap.Settings.InputMarginPct)
-	amount := priceUsage(meter, usageQuantities{Input: estimatedInput, Output: maxOutput, Requests: 1})
-	if amount <= 0 {
-		return map[string]any{"allow": true, "admission_ref": "", "amount": 0}, nil
+	var amount int64
+	if meter != nil {
+		estimatedInput := inputWithMargin(int64Arg(args, "estimated_input_tokens"), snap.Settings.InputMarginPct)
+		amount = priceUsage(meter, usageQuantities{Input: estimatedInput, Output: maxOutput, Requests: 1, Quantity: rest})
 	}
-	input := walletRef(pid, accountID, snap.Settings.CreditsUnit)
-	input["amount"] = amount
-	input["reference"] = sourceApp + "/request/" + requestID
-	input["metadata"] = map[string]any{"meter": meter.Meter.Meter, "plan_key": snap.PlanKey}
-	if project := strings.TrimSpace(strArg(meta, "project")); project != "" {
-		input["scope"] = "project:" + project
+	var moneyHold, availableAfter int64
+	if amount > 0 {
+		input := walletRef(pid, accountID, snap.Settings.CreditsUnit)
+		input["amount"] = amount
+		input["reference"] = reference
+		input["metadata"] = map[string]any{"meter": meter.Meter.Meter, "plan_key": snap.PlanKey}
+		if scope != "" {
+			input["scope"] = scope
+		}
+		var reserve struct {
+			Denied bool   `json:"denied"`
+			Reason string `json:"reason"`
+			HoldID int64  `json:"hold_id"`
+			Hold   *struct {
+				ID int64 `json:"id"`
+			} `json:"hold"`
+			AvailableAfter int64 `json:"available_after"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_reserve", input, &reserve); err != nil {
+			releaseIncluded()
+			return nil, fmt.Errorf("credits reserve: %w", err)
+		}
+		if reserve.Denied {
+			releaseIncluded()
+			switch reserve.Reason {
+			case "frozen":
+				return denyUsage(http.StatusForbidden, "permission_error", "credit wallet is frozen", "frozen"), nil
+			case "cap_reached":
+				return denyUsage(http.StatusTooManyRequests, "insufficient_quota", "spending cap reached", "cap_reached"), nil
+			default:
+				return denyUsage(http.StatusTooManyRequests, "insufficient_quota", "insufficient credit balance", "no_credit"), nil
+			}
+		}
+		moneyHold = reserve.HoldID
+		if moneyHold == 0 && reserve.Hold != nil {
+			moneyHold = reserve.Hold.ID
+		}
+		if moneyHold == 0 {
+			releaseIncluded()
+			return nil, errors.New("credits reserve returned no hold")
+		}
+		availableAfter = reserve.AvailableAfter
+	}
+	if incHold == 0 && moneyHold == 0 {
+		return map[string]any{"allow": true, "admission_ref": "", "amount": 0, "max_output_tokens": maxOutput}, nil
+	}
+	// Return the output limit the hold was priced on. llm caps the provider
+	// request at it (max_tokens), so settle can never exceed the hold on
+	// output. Without it a request with no max_tokens runs unbounded.
+	out := map[string]any{
+		"allow": true, "admission_ref": encodeAdmissionRef(incHold, incTaken, moneyHold), "amount": amount,
+		"max_output_tokens": maxOutput,
+	}
+	if moneyHold != 0 {
+		out["hold_id"] = moneyHold
+		out["available_after"] = availableAfter
+	}
+	if included != nil {
+		out["included_held"] = incTaken
+		out["included_remaining"] = incRemaining - incTaken
+		out["included_unit"] = included.Unit
+	}
+	return out, nil
+}
+
+// holdIncludedUsage holds up to quantity units from the allowance wallet. It
+// returns the hold, the units held and the units that were available.
+func (a *App) holdIncludedUsage(ctx *sdk.AppCtx, pid, accountID string, item *includedUsageItem, quantity int64, reference, scope string) (int64, int64, int64, error) {
+	var wallet map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_wallet_get", walletRef(pid, accountID, item.Unit), &wallet); err != nil {
+		return 0, 0, 0, fmt.Errorf("credits wallet %s: %w", item.Unit, err)
+	}
+	w := unwrapMap(wallet, "wallet")
+	if w == nil || strArg(w, "status") == "frozen" {
+		return 0, 0, 0, nil
+	}
+	available := int64Arg(w, "available")
+	take := quantity
+	if take > available {
+		take = available
+	}
+	if take <= 0 {
+		return 0, 0, available, nil
+	}
+	input := walletRef(pid, accountID, item.Unit)
+	input["amount"] = take
+	input["reference"] = reference + "/included"
+	input["metadata"] = map[string]any{"meter": item.key(), "included": true}
+	if scope != "" {
+		input["scope"] = scope
 	}
 	var reserve struct {
-		Denied bool   `json:"denied"`
-		Reason string `json:"reason"`
-		HoldID int64  `json:"hold_id"`
+		Denied bool  `json:"denied"`
+		HoldID int64 `json:"hold_id"`
 		Hold   *struct {
 			ID int64 `json:"id"`
 		} `json:"hold"`
-		AvailableAfter int64 `json:"available_after"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("credits", "credits_reserve", input, &reserve); err != nil {
-		return nil, fmt.Errorf("credits reserve: %w", err)
-	}
-	if reserve.Denied {
-		switch reserve.Reason {
-		case "frozen":
-			return denyUsage(http.StatusForbidden, "permission_error", "credit wallet is frozen", "frozen"), nil
-		case "cap_reached":
-			return denyUsage(http.StatusTooManyRequests, "insufficient_quota", "spending cap reached", "cap_reached"), nil
-		default:
-			return denyUsage(http.StatusTooManyRequests, "insufficient_quota", "insufficient credit balance", "no_credit"), nil
-		}
+		return 0, 0, available, fmt.Errorf("credits reserve %s: %w", item.Unit, err)
 	}
 	holdID := reserve.HoldID
 	if holdID == 0 && reserve.Hold != nil {
 		holdID = reserve.Hold.ID
 	}
-	if holdID == 0 {
-		return nil, errors.New("credits reserve returned no hold")
+	if reserve.Denied || holdID == 0 {
+		// The balance moved since it was read (another request, or a cap);
+		// the rest is priced from the paid wallet.
+		return 0, 0, available, nil
 	}
-	// Return the output limit the hold was priced on. llm caps the provider
-	// request at it (max_tokens), so settle can never exceed the hold on
-	// output. Without it a request with no max_tokens runs unbounded.
-	return map[string]any{
-		"allow": true, "admission_ref": strconv.FormatInt(holdID, 10), "hold_id": holdID,
-		"amount": amount, "available_after": reserve.AvailableAfter, "max_output_tokens": maxOutput,
-	}, nil
+	return holdID, take, available, nil
+}
+
+// Admission refs: a plain hold id is a paid-wallet hold only (as before
+// v0.14.0). With included usage the ref is "inc:<included hold>:<units
+// held>:<paid hold or 0>".
+func encodeAdmissionRef(incHold, incTaken, moneyHold int64) string {
+	if incHold == 0 {
+		return strconv.FormatInt(moneyHold, 10)
+	}
+	return fmt.Sprintf("inc:%d:%d:%d", incHold, incTaken, moneyHold)
+}
+
+func decodeAdmissionRef(ref string) (incHold, incTaken, moneyHold int64, ok bool) {
+	if !strings.HasPrefix(ref, "inc:") {
+		id, err := strconv.ParseInt(ref, 10, 64)
+		if err != nil || id <= 0 {
+			return 0, 0, 0, false
+		}
+		return 0, 0, id, true
+	}
+	parts := strings.Split(strings.TrimPrefix(ref, "inc:"), ":")
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	var vals [3]int64
+	for i, p := range parts {
+		v, err := strconv.ParseInt(p, 10, 64)
+		if err != nil || v < 0 {
+			return 0, 0, 0, false
+		}
+		vals[i] = v
+	}
+	if vals[0] == 0 {
+		return 0, 0, 0, false
+	}
+	return vals[0], vals[1], vals[2], true
 }
 
 func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -702,19 +852,68 @@ func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if ref == "" {
 		return map[string]any{"settled": false, "skipped": "no_admission_ref"}, nil
 	}
-	holdID, err := strconv.ParseInt(ref, 10, 64)
-	if err != nil || holdID <= 0 {
+	incHold, incTaken, moneyHold, ok := decodeAdmissionRef(ref)
+	if !ok {
 		return map[string]any{"settled": false, "skipped": "foreign_admission_ref"}, nil
 	}
-	if strArg(args, "status") != "completed" {
-		var out map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": holdID}, &out); err != nil {
-			return nil, fmt.Errorf("credits release: %w", err)
-		}
-		return map[string]any{"settled": true, "released": true, "hold_id": holdID}, nil
+	result := map[string]any{"settled": true}
+	if moneyHold != 0 {
+		result["hold_id"] = moneyHold
 	}
-	commit := map[string]any{"_project_id": pid, "hold_id": holdID}
-	result := map[string]any{"settled": true, "hold_id": holdID}
+	if incHold != 0 {
+		result["included_hold_id"] = incHold
+	}
+	release := func(id int64) error {
+		var out map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("credits", "credits_release", map[string]any{"_project_id": pid, "hold_id": id}, &out); err != nil {
+			return fmt.Errorf("credits release: %w", err)
+		}
+		return nil
+	}
+	if strArg(args, "status") != "completed" {
+		for _, id := range []int64{incHold, moneyHold} {
+			if id != 0 {
+				if err := release(id); err != nil {
+					return nil, err
+				}
+			}
+		}
+		result["released"] = true
+		return result, nil
+	}
+	quantity := int64Arg(args, "quantity")
+	if quantity < 0 {
+		quantity = 0
+	}
+	// Units beyond what the allowance held go to the paid wallet when the
+	// request had a paid hold; otherwise they are drawn from the allowance
+	// (Credits records a shortfall if it is empty).
+	incUsed, over := quantity, int64(0)
+	if incHold != 0 && moneyHold != 0 && quantity > incTaken {
+		incUsed, over = incTaken, quantity-incTaken
+	}
+	if incHold == 0 {
+		incUsed, over = 0, quantity
+	}
+	if incHold != 0 {
+		if incUsed == 0 {
+			if err := release(incHold); err != nil {
+				return nil, err
+			}
+		} else {
+			var out struct {
+				Committed int64 `json:"committed"`
+			}
+			if err := ctx.PlatformAPI().CallAppResult("credits", "credits_commit", map[string]any{"_project_id": pid, "hold_id": incHold, "amount": incUsed}, &out); err != nil {
+				return nil, fmt.Errorf("credits commit: %w", err)
+			}
+		}
+		result["included_used"] = incUsed
+	}
+	if moneyHold == 0 {
+		return result, nil
+	}
+	commit := map[string]any{"_project_id": pid, "hold_id": moneyHold}
 	meta := tokenMetadata(args["token_metadata"])
 	snap, err := a.accountSnapshotFor(ctx, pid, strArg(meta, "account_id"))
 	if err != nil {
@@ -730,7 +929,7 @@ func (a *App) toolUsageSettle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if meter != nil {
 		amount := priceUsage(meter, usageQuantities{
 			Input: int64Arg(args, "input_tokens"), Output: int64Arg(args, "output_tokens"),
-			CachedInput: int64Arg(args, "cached_tokens"), Requests: 1,
+			CachedInput: int64Arg(args, "cached_tokens"), Requests: 1, Quantity: over,
 		})
 		commit["amount"] = amount
 		result["amount"] = amount
@@ -1067,20 +1266,22 @@ func (a *App) handleCreditsTopupPaid(ctx *sdk.AppCtx, event sdk.Event) error {
 
 func (a *App) prepaidMCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "saas_plan_meter_set", Description: "Link a prepaid plan's usage meter (source_app + meter, e.g. llm + model:text-fast, or model:* as the default) to Catalog metered prices for input, output, cached_input and per_request. Prices must be metered, active and in the plan's credits_unit.", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_plan_meter_set", Description: "Link a prepaid plan's usage meter (source_app + meter, e.g. llm + model:text-fast, or model:* as the default) to Catalog metered prices for input, output, cached_input and per_request. unit_price_id prices the meter's own quantity (e.g. per minute) for usage reported as estimated_quantity / quantity, including usage beyond a plan's included_usage. Prices must be metered, active and in the plan's credits_unit.", InputSchema: schemaObject(map[string]any{
 			"plan_key": strSchema(), "source_app": strSchema(), "meter": strSchema(),
 			"input_price_id": intSchema(), "output_price_id": intSchema(), "cached_input_price_id": intSchema(), "per_request_price_id": intSchema(),
 			"metadata": objSchema(),
 		}, []string{"plan_key", "source_app", "meter"}), Handler: a.toolPlanMeterSet},
 		{Name: "saas_plan_meters_list", Description: "List a plan's usage meters and their Catalog price links.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "source_app": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanMetersList},
-		{Name: "saas_usage_authorize", Description: "Admission hook: price a request's worst case from the account's plan meters and hold that much credit. Returns {allow, admission_ref} or a refusal with http_status and error_type.", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_usage_authorize", Description: "Admission hook: price a request's worst case from the account's plan meters and hold that much credit. For quantity meters pass estimated_quantity (e.g. minutes); the plan's included_usage for the meter is held first and only the rest is priced from the paid wallet. Returns {allow, admission_ref} or a refusal with http_status and error_type (included_exhausted when the allowance is used up and the plan has no paid price for the meter).", InputSchema: schemaObject(map[string]any{
 			"request_id": strSchema(), "token_metadata": objSchema(), "model": strSchema(), "meter": strSchema(), "source_app": strSchema(),
 			"estimated_input_tokens": intSchema(), "max_output_tokens": intSchema(),
+			"estimated_quantity": intSchema(),
 		}, []string{"request_id"}), Handler: a.toolUsageAuthorize},
-		{Name: "saas_usage_settle", Description: "Admission hook settlement: price the actual usage and commit the hold, or release it when the request failed. Safe to retry.", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_usage_settle", Description: "Admission hook settlement: price the actual usage and commit the hold, or release it when the request failed. Pass quantity for quantity meters; it is taken from the included allowance first. Safe to retry.", InputSchema: schemaObject(map[string]any{
 			"request_id": strSchema(), "admission_ref": strSchema(), "status": strSchema(), "token_metadata": objSchema(),
 			"requested_model": strSchema(), "model": strSchema(), "meter": strSchema(), "source_app": strSchema(),
 			"input_tokens": intSchema(), "output_tokens": intSchema(), "cached_tokens": intSchema(),
+			"quantity": intSchema(),
 		}, []string{"admission_ref"}), Handler: a.toolUsageSettle},
 		{Name: "saas_account_keys_create", Description: "Issue an API key for an active account through its plan's credential provider (llm by default), linked to the account and its admission hook. The secret is returned once.", InputSchema: schemaObject(map[string]any{
 			"account_id": strSchema(), "label": strSchema(), "project": strSchema(), "prefix": strSchema(), "scopes": strArraySchema(),

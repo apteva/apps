@@ -562,6 +562,10 @@ func (a *App) finalizePlanChange(ctx *sdk.AppCtx, pid, changeID string) error {
 	if err := dbAccountCompletePlanChange(ctx.AppDB(), pid, acct.ID, targetPlan.Key, change); err != nil {
 		return err
 	}
+	pricing.invalidateAccount(pid, acct.ID)
+	// Grant the new plan's included usage; only the difference over what was
+	// already granted this period is added.
+	a.ensureIncludedUsageSoft(ctx, pid, acct.ID)
 	ctx.Emit("saas.account.plan_changed", map[string]any{
 		"plan_change_id": change.ID, "account_id": acct.ID, "customer_id": acct.CustomerID,
 		"from_plan_key": change.FromPlanKey, "target_plan_key": change.TargetPlanKey, "change_kind": change.ChangeKind,
