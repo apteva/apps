@@ -874,6 +874,22 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	}
 }
 
+// sipCoreCloseStatus is the Close frame Core receives when a direct SIP bridge
+// stops: a media failure keeps its code, and a hang-up or transfer is a
+// normal end that says which.
+func sipCoreCloseStatus(callCtx context.Context, handover *sipBridgeHandover, failure *websocketCloseState) (ws.StatusCode, string) {
+	if code, reason, ok := failure.Explicit(); ok {
+		return code, reason
+	}
+	if handover != nil && handover.requested.Load() && callCtx.Err() == nil {
+		return ws.StatusNormalClosure, "call transferred to an adviser"
+	}
+	if callCtx.Err() != nil {
+		return ws.StatusNormalClosure, "call ended"
+	}
+	return ws.StatusGoingAway, "direct SIP media stopped"
+}
+
 // bridgeSIPMedia carries one bridge between the RTP socket and the call's
 // peer. handedOver is true when a transfer stopped it and the call goes on.
 func (a *App) bridgeSIPMedia(session sipBridgeSession) (handedOver bool) {
@@ -918,19 +934,23 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) (handedOver bool) {
 	media.coreForwardTelemetry.Store(coreWriter)
 	defer media.coreForwardTelemetry.CompareAndSwap(coreWriter, nil)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
-	defer coreCloser.Close(ws.StatusNormalClosure, "direct SIP media ended")
+	var handover *sipBridgeHandover
+	closeState := &websocketCloseState{}
+	closeCore := func() {
+		code, reason := sipCoreCloseStatus(session.ctx, handover, closeState)
+		coreCloser.Close(code, reason)
+	}
+	defer closeCore()
 
 	_ = a.db().updateMediaStatus(row.ID, "connected", "", 0, "")
 	_ = a.db().clearStateExpiry(row.ID)
 	ctx, cancel := context.WithCancel(session.ctx)
 	defer cancel()
-	var handover *sipBridgeHandover
 	if session.handover {
 		handover = &sipBridgeHandover{cancel: cancel, media: media}
 		a.sipBridgeHandovers.Store(row.ID, handover)
 		defer a.sipBridgeHandovers.CompareAndDelete(row.ID, handover)
 	}
-	closeState := &websocketCloseState{}
 	tap := a.listeners.openBridge(row.ID)
 	defer a.listeners.closeBridge(row.ID, tap)
 	audioFrontend := newCarrierAudioFrontend(media.sampleRate())
@@ -1011,7 +1031,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) (handedOver bool) {
 		if !handedOver {
 			media.Close()
 		}
-		coreCloser.Close(ws.StatusGoingAway, "SIP media drained")
+		closeCore()
 		workers.Wait()
 		<-pacer.done
 	}()
@@ -1022,7 +1042,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) (handedOver bool) {
 	go func() {
 		defer workers.Done()
 		<-ctx.Done()
-		coreCloser.Close(ws.StatusGoingAway, "direct SIP media stopped")
+		closeCore()
 	}()
 	workers.Add(1)
 	go func() {
