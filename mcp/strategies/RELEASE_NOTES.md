@@ -1,3 +1,10 @@
+# Strategies v0.2.2
+
+- Remove three symlinked scenario aliases (`scenarios/05`–`07`) left by the
+  split. They duplicated files in `scenarios/strategies/`, and the source
+  installer refuses packages that contain links, so no Strategies release
+  could install on current servers.
+
 # Strategies v0.2.1
 
 - Migration 029 drops the 19 Trading tables 0.1.x copied, the rest of the
