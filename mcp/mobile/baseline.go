@@ -126,7 +126,7 @@ func (e *engine) baseline(s Session) (Baseline, error) {
 const baselineScript = `echo @time; date +%s; echo @apps; pm list packages -3; echo @accounts; dumpsys account 2>/dev/null | grep -E 'Account \{name='; echo @settings; {{settings}} echo @storage; df -k /data | tail -n 1; echo @downloads; ls -1 /sdcard/Download 2>/dev/null | wc -l; echo @screenshots; (ls -1 /sdcard/Pictures/Screenshots /sdcard/DCIM/Screenshots 2>/dev/null | grep -v ':$' | grep -v '^$') | wc -l; ` +
 	`echo @wifi; cmd wifi list-networks 2>/dev/null; echo @a11y; settings get secure enabled_accessibility_services; echo @listeners; settings get secure enabled_notification_listeners; ` +
 	`echo @admins; dumpsys device_policy 2>/dev/null | sed -n '/Enabled Device Admins/,/^ *$/p'; echo @bt; dumpsys bluetooth_manager 2>/dev/null | grep -m1 'Bonded devices:'; ` +
-	`echo @vpn; echo "always_on=$(settings get secure always_on_vpn_app)"; echo "active=$(dumpsys connectivity 2>/dev/null | grep -c 'Transports: VPN')"; echo @users; pm list users 2>/dev/null | grep -c 'UserInfo{'; ` +
+	`echo @vpn; echo "always_on=$(settings get secure always_on_vpn_app)"; echo "active=$(dumpsys connectivity 2>/dev/null | grep -c 'NetworkAgentInfo{.*Transports: VPN')"; echo @users; pm list users 2>/dev/null | grep -c 'UserInfo{'; ` +
 	`echo @perms; for p in $(pm list packages -3 | cut -d: -f2); do echo "#$p"; dumpsys package "$p" 2>/dev/null | sed -n '/runtime permissions:/,/^ *$/p' | grep 'granted=true' | sed -E 's/^ +([^:]+):.*/\1/'; done; ` +
 	lockScript
 
