@@ -7,13 +7,7 @@ import (
 )
 
 func governanceStrategyDefinition(symbols ...string) map[string]any {
-	return map[string]any{
-		"universe": symbols,
-		"cadence":  "1d",
-		"rules": []any{map[string]any{
-			"name": "allocate", "allocate": []any{map[string]any{"symbol": symbols[0], "weight": 1.0}},
-		}},
-	}
+	return targetDefinition(symbols, "1d", 1/float64(len(symbols)))
 }
 
 func mustCreateTestStrategy(t *testing.T, ctx interface{ AppDB() *sql.DB }, symbols ...string) int64 {

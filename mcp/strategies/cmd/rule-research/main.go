@@ -117,21 +117,17 @@ func run() error {
 	var sample struct {
 		ID         string `json:"id"`
 		Definition struct {
-			Engine   string        `json:"engine"`
-			Universe []string      `json:"universe"`
-			Cadence  string        `json:"cadence"`
-			Program  rules.Program `json:"program"`
+			Program rules.Program `json:"program"`
 		} `json:"definition"`
 	}
 	if err = json.Unmarshal(raw, &sample); err != nil {
 		return err
 	}
-	if sample.Definition.Engine != "rules" {
-		return errors.New("rules example required")
-	}
 	p := &sample.Definition.Program
-	p.Symbol = *symbol
-	sample.Definition.Universe = []string{*symbol}
+	if len(p.Symbols) != 1 {
+		return errors.New("one-symbol rules example required")
+	}
+	p.Symbols = []string{*symbol}
 	if p.Timeframe != "1m" && p.Timeframe != "1h" {
 		return errors.New("CSV adapter currently supports 1m/1h base")
 	}
@@ -212,7 +208,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	terminal, err := rules.Strategy(&rules.Program{Version: rules.Version, Symbol: *symbol, Timeframe: p.Timeframe, Timezone: p.Timezone, Rules: []rules.Rule{{ID: "research_terminal_liquidation", On: "any", Repeat: "always", Actions: []rules.Action{{Kind: "flatten"}}}}}, config)
+	terminal, err := rules.Strategy(&rules.Program{Version: rules.Version, Symbols: []string{*symbol}, Timeframe: p.Timeframe, Timezone: p.Timezone, Rules: []rules.Rule{{ID: "research_terminal_liquidation", On: "any", Repeat: "always", Actions: []rules.Action{{Kind: "flatten"}}}}}, config)
 	if err != nil {
 		return err
 	}

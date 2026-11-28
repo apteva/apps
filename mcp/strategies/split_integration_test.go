@@ -72,7 +72,7 @@ func TestSeparateAppsStrategyExecutesThroughTrading(t *testing.T) {
 	strategies := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "10"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL), tk.WithEnv("DB_PATH", strategiesDB))
 	portfolio := trading.MCP("portfolio_create", map[string]any{"name": "Team portfolio", "allowed_classes": []string{"crypto"}, "starting_cash": 100000})
 	id := portfolio["portfolio_id"].(float64)
-	definition := map[string]any{"universe": []string{"BTC-USD"}, "cadence": "1d", "rules": []any{map[string]any{"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": .01}}}}}
+	definition := targetDefinition([]string{"BTC-USD"}, "1d", .01)
 	saved := strategies.MCP("strategy_create", map[string]any{"name": "Boundary test", "status": "active", "definition": definition})
 	sid := saved["strategy"].(map[string]any)["id"].(float64)
 	strategies.MCP("strategy_assign", map[string]any{"portfolio_id": id, "strategy_id": sid})

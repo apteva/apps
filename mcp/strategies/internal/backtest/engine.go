@@ -53,6 +53,11 @@ type Config struct {
 	Costs                 Costs               `json:"costs"`
 	SymbolCosts           map[string]Costs    `json:"symbol_costs,omitempty"`
 	BenchmarkSymbol       string              `json:"benchmark_symbol,omitempty"`
+	Shorts                *Shorts             `json:"shorts,omitempty"`
+	// PruneResolved drops orders resolved more than two days before the
+	// current simulated time from the checkpoint. Large cross-sectional books
+	// otherwise carry every historical order in each step's state.
+	PruneResolved bool `json:"prune_resolved,omitempty"`
 }
 
 type RiskLimits struct {
@@ -137,6 +142,18 @@ type State struct {
 	Pending        []Scheduled                   `json:"pending"`
 	StrategyState  json.RawMessage               `json:"strategy_state,omitempty"`
 	Finished       bool                          `json:"finished"`
+	// Short-enabled runs only; omitted otherwise so long-only checkpoints keep
+	// their original bytes.
+	BorrowCost    float64 `json:"borrow_cost,omitempty"`
+	RealizedLong  float64 `json:"realized_long,omitempty"`
+	RealizedShort float64 `json:"realized_short,omitempty"`
+	MarginCalls   int     `json:"margin_calls,omitempty"`
+	MaxMarginPct  float64 `json:"max_margin_pct,omitempty"`
+	// Tape is the engine's canonically ordered input tape and Warmup any
+	// observation-only history that preceded it. Neither is serialized: a
+	// strategy may rebuild derived state from them instead of checkpointing it.
+	Tape   []Input `json:"-"`
+	Warmup []Input `json:"-"`
 }
 
 type Output struct {
@@ -174,6 +191,9 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func New(config Config, inputs []Input, state *State, strategy Strategy) (*Engine, error) {
 	if err := validateContracts(config.Contracts); err != nil {
+		return nil, err
+	}
+	if err := validateShorts(config.Shorts); err != nil {
 		return nil, err
 	}
 	if !finite(config.StartingCash) || config.StartingCash <= 0 {
@@ -240,8 +260,24 @@ func New(config Config, inputs []Input, state *State, strategy Strategy) (*Engin
 			return nil, errors.New("market inputs require a symbol, positive price and nonnegative volume")
 		}
 	}
-	// Closing information is published before the next opening quote at the
-	// same timestamp. Features arriving then are visible to the closing signal.
+	SortInputs(tape)
+	if len(tape) == 0 {
+		return nil, errors.New("at least one input required")
+	}
+	if state == nil {
+		state = &State{Cash: config.StartingCash, Peak: config.StartingCash, Positions: map[string]Position{}, Quotes: map[string]Quote{}, Features: map[string]map[string]float64{}, Orders: []*Order{}, Pending: []Scheduled{}}
+	}
+	if state.Cursor < 0 || state.Cursor > len(tape) || state.Positions == nil || state.Quotes == nil || state.Features == nil {
+		return nil, errors.New("invalid checkpoint")
+	}
+	state.Tape = tape
+	return &Engine{Config: config, Inputs: tape, State: state, Strategy: strategy}, nil
+}
+
+// SortInputs puts a tape in the engine's canonical order. Closing information
+// is published before the next opening quote at the same timestamp, so features
+// arriving then are visible to the closing signal.
+func SortInputs(tape []Input) {
 	sort.Slice(tape, func(i, j int) bool {
 		a, b := tape[i], tape[j]
 		if !a.AvailableAt.Equal(b.AvailableAt) {
@@ -265,16 +301,6 @@ func New(config Config, inputs []Input, state *State, strategy Strategy) (*Engin
 		}
 		return a.ID < b.ID
 	})
-	if len(tape) == 0 {
-		return nil, errors.New("at least one input required")
-	}
-	if state == nil {
-		state = &State{Cash: config.StartingCash, Peak: config.StartingCash, Positions: map[string]Position{}, Quotes: map[string]Quote{}, Features: map[string]map[string]float64{}, Orders: []*Order{}, Pending: []Scheduled{}}
-	}
-	if state.Cursor < 0 || state.Cursor > len(tape) || state.Positions == nil || state.Quotes == nil || state.Features == nil {
-		return nil, errors.New("invalid checkpoint")
-	}
-	return &Engine{Config: config, Inputs: tape, State: state, Strategy: strategy}, nil
 }
 
 func inputPriority(kind string) int {
@@ -404,6 +430,7 @@ func (e *Engine) Advance() ([]Output, error) {
 		e.record("run.completed", e.Metrics())
 		return e.outputs, nil
 	}
+	e.accrueBorrow(at)
 	s.Now = at
 	day := at.UTC().Format("2006-01-02")
 	if day != s.Day {
@@ -494,8 +521,12 @@ func (e *Engine) Advance() ([]Output, error) {
 			}
 		}
 	}
+	e.checkMaintenance()
 	metrics := e.Metrics()
 	equity := metrics["equity"]
+	if e.shortsEnabled() && equity > 0 {
+		s.MaxMarginPct = math.Max(s.MaxMarginPct, e.marginUsed()/equity*100)
+	}
 	if equity > s.Peak {
 		s.Peak = equity
 	}
@@ -503,6 +534,9 @@ func (e *Engine) Advance() ([]Output, error) {
 		s.MaxDrawdownPct = math.Min(s.MaxDrawdownPct, (equity/s.Peak-1)*100)
 	}
 	e.record("portfolio.snapshot", e.Metrics())
+	if e.Config.PruneResolved {
+		e.pruneResolved()
+	}
 	return e.outputs, nil
 }
 
@@ -621,11 +655,11 @@ func (e *Engine) fill(fresh map[string]bool) {
 		}
 		if !contract && buy {
 			qty = math.Min(qty, s.Cash/(price*(1+p.FeeBps/10000)))
-		} else if !contract {
-			qty = math.Min(qty, s.Positions[o.Symbol].Qty)
+		} else if !contract && !e.shortable(o.Symbol) {
+			qty = math.Min(qty, math.Max(0, s.Positions[o.Symbol].Qty))
 		}
 		if p.QtyStep > 0 {
-			qty = floorFillQuantity(qty, p.QtyStep, math.Max(o.Qty, s.Positions[o.Symbol].Qty))
+			qty = floorFillQuantity(qty, p.QtyStep, math.Max(o.Qty, math.Abs(s.Positions[o.Symbol].Qty)))
 		}
 		if q.Volume > 0 {
 			impact = p.ImpactBps * math.Min(1, qty/q.Volume)
@@ -644,7 +678,11 @@ func (e *Engine) fill(fresh map[string]bool) {
 			continue
 		}
 		increases := math.Abs(position.Qty+direction*qty) > math.Abs(position.Qty)+1e-12
-		if buy && !contract || contract && increases {
+		spotRisk := buy
+		if e.shortsEnabled() {
+			spotRisk = increases
+		}
+		if !contract && spotRisk || contract && increases {
 			m := e.Metrics()
 			equity := m["equity"]
 			risk := e.Config.Risk
@@ -676,6 +714,9 @@ func (e *Engine) fill(fresh map[string]bool) {
 					breach = "insufficient contract margin"
 				}
 			}
+			if !contract && e.shortsEnabled() && breach == "" && e.spotMarginBreach(o.Symbol, position.Qty+direction*qty, price, qty*price*p.FeeBps/10000, equity) {
+				breach = "insufficient initial margin"
+			}
 			if breach != "" {
 				e.resolve(o, "rejected", breach)
 				continue
@@ -695,6 +736,8 @@ func (e *Engine) fill(fresh map[string]bool) {
 		pos := s.Positions[o.Symbol]
 		if contract {
 			e.contractFill(o, qty, price, fee)
+		} else if e.shortsEnabled() {
+			e.spotFill(o, qty, price, fee)
 		} else if buy {
 			pos.AvgCost = (pos.AvgCost*pos.Qty + price*qty) / (pos.Qty + qty)
 			pos.Qty += qty
@@ -704,7 +747,7 @@ func (e *Engine) fill(fresh map[string]bool) {
 			pos.Qty -= qty
 			s.Cash += qty*price - fee
 		}
-		if !contract {
+		if !contract && !e.shortsEnabled() {
 			if pos.Qty <= 1e-12 {
 				delete(s.Positions, o.Symbol)
 			} else {
@@ -767,5 +810,21 @@ func (e *Engine) Metrics() map[string]float64 {
 	}
 	ret := (equity/e.Config.StartingCash - 1) * 100
 	br := (benchmark/e.Config.StartingCash - 1) * 100
-	return map[string]float64{"equity": equity, "cash": s.Cash, "margin_used": e.marginUsed(), "available_margin": equity - e.marginUsed(), "open_pnl": open, "realized_pnl": s.RealizedPnL, "total_pnl": equity - e.Config.StartingCash, "fees": s.Fees, "return_pct": ret, "benchmark_equity": benchmark, "benchmark_return_pct": br, "excess_return_pct": ret - br, "max_drawdown_pct": s.MaxDrawdownPct, "turnover_pct": s.Turnover / e.Config.StartingCash * 100, "exposure": exposure / math.Max(equity, 1e-12) * 100}
+	m := map[string]float64{"equity": equity, "cash": s.Cash, "margin_used": e.marginUsed(), "available_margin": equity - e.marginUsed(), "open_pnl": open, "realized_pnl": s.RealizedPnL, "total_pnl": equity - e.Config.StartingCash, "fees": s.Fees, "return_pct": ret, "benchmark_equity": benchmark, "benchmark_return_pct": br, "excess_return_pct": ret - br, "max_drawdown_pct": s.MaxDrawdownPct, "turnover_pct": s.Turnover / e.Config.StartingCash * 100, "exposure": exposure / math.Max(equity, 1e-12) * 100}
+	e.shortMetrics(m)
+	return m
+}
+
+func (e *Engine) pruneResolved() {
+	cutoff := e.State.Now.Add(-48 * time.Hour)
+	kept := e.State.Orders[:0]
+	for _, o := range e.State.Orders {
+		if active(o) || o.ResolvedAt.IsZero() || !o.ResolvedAt.Before(cutoff) {
+			kept = append(kept, o)
+		}
+	}
+	for i := len(kept); i < len(e.State.Orders); i++ {
+		e.State.Orders[i] = nil
+	}
+	e.State.Orders = kept
 }

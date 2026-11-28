@@ -59,7 +59,7 @@ func TestEventBacktestArtifactReproducesAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runStrategyBacktestToEnd(clone); err != nil {
+	if _, err := runEventSimulationToEnd(clone); err != nil {
 		t.Fatal(err)
 	}
 	copy, err := simulationBundle(ctx.AppDB(), clone)
@@ -82,25 +82,10 @@ func TestEventBacktestArtifactReproducesAndResumes(t *testing.T) {
 	}
 }
 
-func TestEventBacktestDisabledDrawdownLimit(t *testing.T) {
-	policy := &replayExecutionPolicy{Allowed: map[string]bool{"BTC-USD": true}, Risk: &PortfolioRiskPolicy{MaxOrderPct: 100, MaxPositionPct: 100, MaxGrossExposurePct: 100}}
-	spec := simulationSpec{Config: sim.Config{StartingCash: 1000}, Symbols: []string{"BTC-USD"}, Policy: policy}
-	state := &sim.State{Cash: 900, Peak: 1000, Positions: map[string]sim.Position{}, Quotes: map[string]sim.Quote{"BTC-USD": {Price: 100}}}
-	targets := []StrategyAllocation{{Symbol: "BTC-USD", Weight: 0.1}}
-	commands := simulationTargets(spec, state, targets, nil)
-	if len(commands) != 1 || commands[0].Order == nil {
-		t.Fatalf("disabled drawdown limit prevented rebalance: %+v", commands)
-	}
-	policy.Risk.MaxDrawdownPct = 5
-	if commands := simulationTargets(spec, state, targets, nil); len(commands) != 0 {
-		t.Fatalf("enabled drawdown limit allowed rebalance: %+v", commands)
-	}
-}
-
 func TestEventBacktestSentimentHasNoLookahead(t *testing.T) {
 	ctx := newTestCtx(t)
 	pid := mustCreatePortfolio(t, ctx, "sentiment", []string{"crypto"})
-	definition := map[string]any{"universe": []string{"BTC-USD"}, "cadence": "1h", "rules": []any{map[string]any{"when": map[string]any{"symbol": "BTC-USD", "indicator": "feature:sentiment.score", "operator": ">", "value": 0.5}, "allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.1}}}}}
+	definition := targetDefinition([]string{"BTC-USD"}, "1h", map[string]any{"op": "if", "args": []any{map[string]any{"op": ">", "args": []any{map[string]any{"metric": "feature", "feature": "sentiment", "field": "score"}, map[string]any{"value": 0.5}}}, map[string]any{"value": 0.1}, map[string]any{"value": 0.0}}})
 	sid, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: "sentiment", Status: "active", Version: 1, Definition: definition})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +102,7 @@ func TestEventBacktestSentimentHasNoLookahead(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := dbGetBacktestRun(ctx.AppDB(), "test-proj", id)
-	if _, err := runStrategyBacktestToEnd(run); err != nil {
+	if _, err := runEventSimulationToEnd(run); err != nil {
 		t.Fatal(err)
 	}
 	record, err := loadSimulation(ctx.AppDB(), id)
@@ -206,7 +191,7 @@ func TestEventBacktestRecordedOrdersAndLivePortfolioState(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ = dbGetBacktestRun(ctx.AppDB(), run.ProjectID, id)
-	if _, err := runStrategyBacktestToEnd(run); err != nil {
+	if _, err := runEventSimulationToEnd(run); err != nil {
 		t.Fatal(err)
 	}
 	perf, err := backtestPerformance(run)

@@ -3,14 +3,11 @@
   "name": "Donchian channel breakout",
   "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
   "definition": {
-    "engine": "rules",
-    "universe": [
-      "XAUUSD"
-    ],
-    "cadence": "1m",
     "program": {
       "version": "trading-rules/1",
-      "symbol": "XAUUSD",
+      "symbols": [
+        "XAUUSD"
+      ],
       "timeframe": "1m",
       "timezone": "UTC",
       "calculations": {

@@ -105,7 +105,7 @@ func TestValidationWalkForwardIsolatedWindowsAndArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = runStrategyBacktestToEnd(clone); err != nil {
+	if _, err = runEventSimulationToEnd(clone); err != nil {
 		t.Fatal(err)
 	}
 	replay, err := simulationBundle(ctx.AppDB(), clone)
@@ -364,7 +364,7 @@ func TestValidationParameterGridAndInvalidPlans(t *testing.T) {
 	ctx, run := seedValidationStrategy(t)
 	r, _ := loadSimulation(ctx.AppDB(), run.ID)
 	source := validationSource{Spec: r.Spec, Inputs: r.Inputs, InputHash: r.InputHash}
-	grid := map[string][]any{"rules.0.allocate.0.weight": {.05, .1, .2}}
+	grid := map[string][]any{"program.rules.0.actions.0.weight.value": {.05, .1, .2}}
 	cfg := validationConfig{Mode: "robustness", ParameterGrid: grid}
 	plan, err := planValidation(source, &cfg)
 	if err != nil {

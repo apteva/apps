@@ -371,15 +371,15 @@ func TestRuleDeadlineHandlesCancellationRace(t *testing.T) {
 	closeTo(t, 2.5, e.State.RealizedPnL)
 }
 
-func TestRuleUnknownFieldsAndLegacyCompatibility(t *testing.T) {
+func TestRuleUnknownFieldsAndRemovedFormat(t *testing.T) {
 	f := loadRuleFixture(t, "donchian")
 	program := f.Definition["program"].(map[string]any)
 	program["stop_los"] = .005
 	if _, _, err := validateStrategyDefinition(f.Definition); err == nil {
 		t.Fatal("misspelled rule field silently accepted")
 	}
-	legacy := testStrategyDefinition()
-	if _, _, err := validateStrategyDefinition(legacy); err != nil {
-		t.Fatal("existing allocation definition changed", err)
+	legacy := map[string]any{"universe": []any{"BTC-USD"}, "rules": []any{map[string]any{"allocate": []any{}}}}
+	if _, _, err := validateStrategyDefinition(legacy); err == nil {
+		t.Fatal("removed allocation format accepted")
 	}
 }

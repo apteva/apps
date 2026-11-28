@@ -72,8 +72,8 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		if def.Engine == "rules" {
-			e.logger.Warn("rule execution adapter unavailable", "assignment_id", a.ID)
+		if err := liveSupport(def); err != nil {
+			e.logger.Warn("strategy cannot run live", "assignment_id", a.ID, "err", err)
 			continue
 		}
 		var pendingTargets string
@@ -131,12 +131,11 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if !stockStrategyExecutionReady(e, state, runtimeDef, now) {
 			continue
 		}
-		market, err := liveStrategyMarket(app, runtimeDef)
+		tape, marketBarAt, err := liveRuleTape(runtimeDef, now)
 		if err != nil {
 			e.logger.Warn("strategy market load failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		marketBarAt := market.barTimes[len(market.barTimes)-1]
 		if a.LastMarketBarAt == "" && a.LastEvaluatedAt != "" {
 			if err := dbInitializeStrategyAssignmentMarketBar(e.db, a.ID, marketBarAt, checkSlot); err != nil {
 				e.logger.Warn("strategy assignment schedule initialization failed", "assignment_id", a.ID, "err", err)
@@ -146,15 +145,34 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if seen, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastSeenBarAt)); err == nil && !marketBarAt.After(seen) {
 			continue
 		}
-		if !strategyAssignmentDueForMarket(a, runtimeDef, market) {
+		checkpoint, err := dbRuleAssignmentState(e.db, a.ID)
+		if err != nil {
+			e.logger.Warn("strategy rule state lookup failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		result, err := evaluateRulesOnTape(runtimeDef, state, checkpoint, tape, marketBarAt)
+		if err != nil {
+			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		eval := result.Targets
+		if eval == nil {
+			eval = &StrategyEvaluation{AsOf: marketBarAt.Format(time.RFC3339), TargetAllocations: []StrategyAllocation{}}
+		}
+		for _, report := range result.Reports {
+			if report["status"] == "triggered" || report["status"] == "waiting_for_data" {
+				eval.Decisions = append(eval.Decisions, fmt.Sprintf("rule %v %v", report["rule"], report["status"]))
+			}
+		}
+		if result.Targets == nil && len(result.Orders) == 0 {
+			// Nothing to trade: record the bar and the program's new state.
+			if err := dbSaveRuleAssignmentState(e.db, a.ID, result.Checkpoint); err != nil {
+				e.logger.Warn("strategy rule state save failed", "assignment_id", a.ID, "err", err)
+				continue
+			}
 			if err := dbSetStrategyAssignmentObserved(e.db, a.ID, marketBarAt, checkSlot); err != nil {
 				e.logger.Warn("strategy assignment observation update failed", "assignment_id", a.ID, "err", err)
 			}
-			continue
-		}
-		eval, err := evaluateStrategy(strategy, market)
-		if err != nil {
-			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
 		claimed, err := dbClaimStrategyRun(e.db, &StrategyRunEvent{
@@ -169,6 +187,9 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			_ = dbSetStrategyAssignmentEvaluated(e.db, a.ID, checkSlot, marketBarAt, checkSlot)
 			continue
 		}
+		if err := dbSaveRuleAssignmentState(e.db, a.ID, result.Checkpoint); err != nil {
+			e.logger.Warn("strategy rule state save failed", "assignment_id", a.ID, "err", err)
+		}
 		app.Emit("strategy.run.started", map[string]any{
 			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
 			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
@@ -181,7 +202,13 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano),
 			"decisions":     eval.Decisions, "target_allocations": eval.TargetAllocations,
 		})
-		created, pending, err := placeStrategyPaperOrders(e, app, state, strategy, a, eval)
+		created, err := submitRuleOrders(app, state, strategy, a, result.Orders)
+		pending := false
+		if err == nil && result.Targets != nil {
+			var rebalance []*Order
+			rebalance, pending, err = placeStrategyPaperOrders(e, app, state, strategy, a, eval)
+			created = append(created, rebalance...)
+		}
 		if err != nil {
 			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			app.Emit("strategy.run.failed", map[string]any{"schema_version": 1, "portfolio_id": pf.ID,
@@ -269,24 +296,6 @@ func strategyAssignmentCheckDue(a *StrategyAssignment, slot time.Time) bool {
 	}
 	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastCheckedAt))
 	return err != nil || last.Before(slot)
-}
-
-func strategyAssignmentDueForMarket(a *StrategyAssignment, def *StrategyDefinition, market strategyMarket) bool {
-	if strings.TrimSpace(a.LastMarketBarAt) == "" {
-		return strings.TrimSpace(a.LastEvaluatedAt) == ""
-	}
-	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastMarketBarAt))
-	if err != nil {
-		return true
-	}
-	every := strategyRebalanceEvery(def, strategyHistoryInterval(def))
-	completed := 0
-	for _, barAt := range market.barTimes {
-		if barAt.After(last) {
-			completed++
-		}
-	}
-	return completed >= every
 }
 
 func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.Time, bool) {

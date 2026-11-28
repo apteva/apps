@@ -18,7 +18,7 @@ directive: |
   the main thread. Do not spawn or delegate. This is a synthetic wire test.
   Use the following exact definition, passed as JSON TEXT (a string value in
   the definition argument) rather than as a nested object:
-  {"engine":"rules","universe":["AAPL"],"cadence":"1m","program":{"version":"trading-rules/1","symbol":"AAPL","timeframe":"1m","timezone":"UTC","rules":[{"id":"observe_only","on":"quote","when":{"value":0},"actions":[{"kind":"cancel"}]}]}}
+  {"program":{"version":"trading-rules/1","symbols":["AAPL"],"timeframe":"1m","timezone":"UTC","rules":[{"id":"observe_only","on":"quote","when":{"value":0},"actions":[{"kind":"cancel"}]}]}}
   First validate it with strategy_validate; confirm valid=true. Create one
   draft strategy named "Tier 3 JSON transport" with this same JSON-text
   definition. Confirm the create response has version=1 and use its returned ID.

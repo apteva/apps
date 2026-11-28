@@ -7,7 +7,7 @@ import (
 
 // Contract is an explicit cash-settled linear instrument. CurrencyRate converts
 // settlement currency to account currency. No borrowing/financing is invented.
-// Spot instruments retain their original cash-funded, long-only accounting.
+// Spot instruments are cash-funded and long-only unless Config.Shorts opts in.
 type Contract struct {
 	Multiplier     float64 `json:"multiplier"`
 	CurrencyRate   float64 `json:"currency_rate"`
@@ -32,6 +32,9 @@ func (e *Engine) multiplier(symbol string) float64 {
 
 func (e *Engine) marginUsed() float64 {
 	margin := 0.0
+	if e.shortsEnabled() {
+		margin += e.spotGross() * e.Config.Shorts.InitialMargin
+	}
 	for symbol, pos := range e.State.Positions {
 		if c, ok := e.Config.Contracts[symbol]; ok {
 			price := e.State.Quotes[symbol].Price

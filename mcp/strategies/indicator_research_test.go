@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
 )
 
 func TestIndicatorResearch(t *testing.T) {
@@ -38,11 +40,8 @@ func TestIndicatorResearch(t *testing.T) {
 		}
 	}
 	presets := strategyPresets(symbols)
-	passive := StrategyDefinition{Universe: symbols, Cadence: "1h", RebalanceEvery: 24, Risk: StrategyRisk{MaxPositionWeight: 0.15}, Rules: []StrategyRule{{Name: "Equal exposure reference"}}}
-	for _, s := range symbols {
-		passive.Rules[0].Allocate = append(passive.Rules[0].Allocate, StrategyAllocation{Symbol: s, Weight: 0.6 / float64(len(symbols))})
-	}
-	presets = append(presets, strategyPreset{ID: "passive60", Name: "Diversified 60%", Definition: passive})
+	passive := mustTargetDefinition(symbols, "1h", math.Min(0.15, 0.6/float64(len(symbols))))
+	presets = append(presets, strategyPreset{ID: "passive60", Name: "Diversified 60%", Definition: *passive})
 	source := validationSource{Spec: spec, Inputs: old.Inputs}
 	start, _ := time.Parse(time.RFC3339, "2026-07-01T00:00:00Z")
 	end, _ := time.Parse(time.RFC3339, "2026-09-01T00:00:00Z")

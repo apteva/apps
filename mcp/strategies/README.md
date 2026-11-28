@@ -3,7 +3,7 @@
 Strategies v0.1 owns automated strategies and research. It is a project-scoped
 Apteva app with its own database and a required integration with Trading >=0.16.
 
-- Versioned allocation strategies and generic trading rule programs.
+- Versioned `trading-rules/1` strategy programs: one engine for backtests, validation and live assignments, from single-instrument trade rules to 500-symbol long/short books.
 - Strategy evaluation, assignments, scheduling and promotion scorecards.
 - Event backtests, agent simulations, validation suites and portable reports.
 - Sourced CSV market-data import and strategy performance attribution.
@@ -44,7 +44,6 @@ resolution. Existing users should follow [MIGRATION.md](MIGRATION.md).
 Detailed research documentation:
 
 - [Rule engine](RULE_ENGINE.md)
-- [Indicators and allocation strategies](INDICATOR_STRATEGIES.md)
 - [Event backtesting](EVENT_BACKTESTING.md)
 - [Validation suites](VALIDATION.md)
 

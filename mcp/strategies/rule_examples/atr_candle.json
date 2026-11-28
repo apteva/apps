@@ -3,14 +3,11 @@
   "name": "ATR candle breakout",
   "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
   "definition": {
-    "engine": "rules",
-    "universe": [
-      "XAUUSD"
-    ],
-    "cadence": "1h",
     "program": {
       "version": "trading-rules/1",
-      "symbol": "XAUUSD",
+      "symbols": [
+        "XAUUSD"
+      ],
       "timeframe": "1h",
       "timezone": "UTC",
       "rules": [

@@ -5,13 +5,13 @@ import { StrategyPresetPicker, SimulationControls } from "../StrategiesPanel.tsx
 let root:Root;let container:HTMLElement;
 afterEach(async()=>{if(root)await act(async()=>root.unmount());container?.remove()});
 function mount(){container=document.createElement("div");document.body.append(container);root=createRoot(container)}
-test("indicator catalog loads watchlist presets into the draft without creating or assigning a strategy",async()=>{
+test("strategy catalog loads watchlist presets into the draft without creating or assigning a strategy",async()=>{
  mount();const selected:any[]=[];const calls:any[]=[];
- const preset={id:"macd",name:"MACD trend",description:"Test",definition:{universe:["BTC-USD","ETH-USD"],rules:[{rank:{where:{all:[{indicator:"macd_hist_12_26_9",operator:">",value:0}]}}}]}};
- const api:any=async(...args:any[])=>{calls.push(args);return{presets:[preset],indicators:[{name:"rsi_wilder_14",description:"Wilder smoothing"}],conditions:"all / any",limitations:"Research template",sources:[]}};
+ const preset={id:"trend_rotation",name:"Trend rotation",description:"Test",definition:{program:{version:"trading-rules/1",symbols:["BTC-USD","ETH-USD"],timeframe:"1d",timezone:"UTC",rules:[]}}};
+ const api:any=async(...args:any[])=>{calls.push(args);return{presets:[preset],limitations:"Research template",rule_engine:{authoring:{cross_section:"cs_rank, top, bottom"}}}};
  await act(async()=>root.render(<StrategyPresetPicker api={api} symbols={["BTC-USD","ETH-USD"]} onSelect={p=>selected.push(p)}/>));
  expect(calls[0]).toEqual(["GET","/strategies/catalog",{symbols:"BTC-USD,ETH-USD"}]);
- await act(async()=>container.querySelector("button")!.click());expect(selected).toEqual([preset]);expect(calls.length).toBe(1);expect(container.textContent).toContain("Wilder smoothing");
+ await act(async()=>container.querySelector("button")!.click());expect(selected).toEqual([preset]);expect(calls.length).toBe(1);expect(container.textContent).toContain("cs_rank, top, bottom");
 });
 test("next-open timing resets all three latency fields and preserves costs and inputs",async()=>{
  mount();const writes:any[]=[];const inputs=[{id:"news",type:"news.headline"}];const config={submission_latency_ms:250,cancellation_latency_ms:50,latency_jitter_ms:100,costs:{fee_bps:10}};
@@ -26,9 +26,9 @@ test("next-open timing resets all three latency fields and preserves costs and i
 
 test("generic trade examples load into the draft with their execution configuration",async()=>{
  mount();const selected:any[]=[];
- const preset={id:"session_range",name:"Session range",description:"Sourced event tape required",definition:{engine:"rules",program:{version:"trading-rules/1"}},simulation:{contracts:{DE40:{multiplier:1,currency_rate:1,margin_fraction:.1}}}};
- const api:any=async()=>({presets:[],rule_presets:[preset],indicators:[],conditions:"",limitations:"",sources:[]});
+ const preset={id:"session_range",name:"Session range",description:"Sourced event tape required",definition:{program:{version:"trading-rules/1",symbols:["DE40"]}},simulation:{contracts:{DE40:{multiplier:1,currency_rate:1,margin_fraction:.1}}}};
+ const api:any=async()=>({presets:[],rule_presets:[preset],limitations:""});
  await act(async()=>root.render(<StrategyPresetPicker api={api} symbols={[]} onSelect={p=>selected.push(p)}/>));
  await act(async()=>container.querySelector("button")!.click());
- expect(selected).toEqual([preset]);expect(container.textContent).toContain("sourced event tape");
+ expect(selected).toEqual([preset]);expect(container.textContent).toContain("trade examples name their instrument");
 });

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
+	rules "github.com/apteva/apps/mcp/strategies/internal/ruleengine"
 )
 
 const validationVersion = "validation/1"
@@ -167,13 +168,13 @@ func planValidation(source validationSource, cfg *validationConfig) ([]validatio
 				return nil, err
 			}
 			if automaticWarmup {
-				cfg.WarmupSteps = maxInt(cfg.WarmupSteps, strategyReplayWarmupSteps(def, source.Spec.Interval))
+				cfg.WarmupSteps = maxInt(cfg.WarmupSteps, rules.RequiredBaseBars(def.Program))
 			}
 			if cfg.WarmupSteps > 10000 {
 				return nil, errors.New("candidate requires more than 10000 warmup steps")
 			}
-			if err := validateStrategyReplayInterval(def, source.Spec.Interval); err != nil {
-				return nil, err
+			if source.Spec.Interval != "" && source.Spec.Interval != strategyHistoryInterval(def) {
+				return nil, fmt.Errorf("candidate timeframe %s does not match captured interval %s", strategyHistoryInterval(def), source.Spec.Interval)
 			}
 			for _, s := range def.Universe {
 				if !contains(source.Spec.Symbols, s) {
@@ -364,7 +365,7 @@ func validationCaseData(source validationSource, cfg validationConfig, c validat
 	to := sort.Search(len(source.Inputs), func(i int) bool { return !source.Inputs[i].AvailableAt.Before(c.End) })
 	all := append(cloneValidation(source.Spec.WarmupInputs), cloneValidation(source.Inputs[from:to])...)
 	for _, in := range all {
-		if !strings.HasPrefix(in.Type, "market.") {
+		if strings.HasPrefix(in.Type, "feature.") {
 			in.AvailableAt = in.AvailableAt.Add(time.Duration(shock.FeatureDelayMS) * time.Millisecond)
 		}
 		if in.AvailableAt.Before(c.WarmupStart) || !in.AvailableAt.Before(c.End) {
@@ -372,7 +373,7 @@ func validationCaseData(source validationSource, cfg validationConfig, c validat
 		}
 		if strings.HasPrefix(in.Type, "market.") {
 			if in.AvailableAt.Compare(midpoint) >= 0 {
-				for _, key := range []string{"price", "bid", "ask"} {
+				for _, key := range []string{"price", "bid", "ask", "open", "high", "low"} {
 					if in.Data[key] > 0 {
 						in.Data[key] *= 1 + shock.PriceShockPct/100
 					}

@@ -14,7 +14,7 @@ func ScheduleInputs(p *Program, inputs []sim.Input) ([]sim.Input, error) {
 		return nil, err
 	}
 	if len(inputs) == 0 {
-		return inputs, nil
+		return EvaluationInputs(p, inputs), nil
 	}
 	start, end := inputs[0].AvailableAt, inputs[0].AvailableAt
 	ids := map[string]bool{}
@@ -46,5 +46,5 @@ func ScheduleInputs(p *Program, inputs []sim.Input) ([]sim.Input, error) {
 		}
 		day = day.AddDate(0, 0, 1)
 	}
-	return out, nil
+	return EvaluationInputs(p, out), nil
 }

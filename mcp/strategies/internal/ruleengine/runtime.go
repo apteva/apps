@@ -1,50 +1,16 @@
 package ruleengine
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
-	"sync"
-	"time"
 
 	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
 )
 
-type checkpointCache struct {
-	mu      sync.Mutex
-	runtime *Runtime
-	digest  [32]byte
-}
-
-func (cache *checkpointCache) restore(p *Program, s *sim.State, limits map[string]int, location *time.Location) (*Runtime, error) {
-	if cache.runtime != nil && sha256.Sum256(s.StrategyState) == cache.digest {
-		return cache.runtime, nil
-	}
-	r := newRuntime(p)
-	r.limits, r.location, r.cacheEnabled = limits, location, true
-	if len(s.StrategyState) > 0 {
-		if err := json.Unmarshal(s.StrategyState, r); err != nil {
-			return nil, err
-		}
-		if r.Bars == nil || r.Aggregates == nil || r.Windows == nil || r.Variables == nil || r.Fired == nil {
-			return nil, errors.New("invalid rule checkpoint")
-		}
-	}
-	return r, nil
-}
-func (cache *checkpointCache) save(r *Runtime, s *sim.State) error {
-	raw, err := r.marshalCheckpoint()
-	if err != nil {
-		return err
-	}
-	s.StrategyState = raw
-	cache.runtime, cache.digest = r, sha256.Sum256(raw)
-	return nil
-}
-
+// Strategy compiles a program into a simulator strategy. The same evaluator
+// runs live through Evaluate.
 func Strategy(p *Program, config sim.Config) (sim.Strategy, error) {
 	if err := Validate(p); err != nil {
 		return nil, err
@@ -52,151 +18,24 @@ func Strategy(p *Program, config sim.Config) (sim.Strategy, error) {
 	if err := ValidateExecution(p, config); err != nil {
 		return nil, err
 	}
-	limits := historyLimits(p)
-	location, _ := time.LoadLocation(p.Timezone)
-	cache := &checkpointCache{}
-	return func(s *sim.State, in sim.Input) (retCommands []sim.Command, retErr error) {
-		// Candle-only signals and resets cannot change between candle events.
-		// Skip unrelated quotes without decoding and reserializing the checkpoint.
-		if in.Type != "market.bar.close" {
-			relevant := false
-			for _, rule := range p.Rules {
-				if rule.On == "any" || matches(p, rule, in, nil) || rule.Reset != nil && !historicalExpr(p, *rule.Reset, 0) {
-					relevant = true
-					break
-				}
-			}
-			if !relevant {
-				return nil, nil
-			}
-		}
-		cache.mu.Lock()
-		defer func() {
-			if retErr != nil {
-				cache.runtime = nil
-			}
-			cache.mu.Unlock()
-		}()
-		r, err := cache.restore(p, s, limits, location)
-		if err != nil {
-			return nil, err
-		}
-		closed, err := r.observe(p, in)
-		if err != nil {
-			return nil, err
-		}
-		c := context{program: p, runtime: r, state: s, config: config}
-		var commands []sim.Command
-		plannedEntry := false
-		for _, rule := range p.Rules {
-			// Reset is independent of entry trigger and open-position state.
-			if rule.Reset != nil {
-				v, e := c.eval(*rule.Reset, 0)
-				if e == nil && v != 0 {
-					delete(r.Fired, rule.ID)
-				} else if e != nil && !errors.Is(e, ErrUnavailable) {
-					return nil, e
-				}
-			}
-			if !matches(p, rule, in, closed) {
-				continue
-			}
-			frame := rule.Timeframe
-			if frame == "" {
-				frame = p.Timeframe
-			}
-			key := in.AvailableAt.Format("2006-01-02T15:04:05.999999999Z07:00")
-			switch rule.Repeat {
-			case "once_per_day":
-				loc := r.timezone(p)
-				key = s.Now.In(loc).Format("2006-01-02")
-			case "until_reset":
-				key = "latched"
-			case "always":
-				key = ""
-			default:
-				if h := r.Bars[frame]; len(h) > 0 {
-					key = h[len(h)-1].At.String()
-				}
-			}
-			if old, ok := r.Fired[rule.ID]; ok && key != "" && old == key {
-				continue
-			}
-			if rule.When != nil {
-				v, e := c.eval(*rule.When, 0)
-				if errors.Is(e, ErrUnavailable) {
-					commands = append(commands, sim.Command{Report: map[string]any{"rule": rule.ID, "status": "waiting_for_data"}})
-					continue
-				}
-				if e != nil {
-					return nil, e
-				}
-				if v == 0 {
-					continue
-				}
-			}
-			var batch []sim.Command
-			vars := map[string]float64{}
-			for name, v := range r.Variables {
-				vars[name] = v
-			}
-			successful := true
-			for _, action := range rule.Actions {
-				var result []sim.Command
-				var e error
-				if action.Kind == "enter" && plannedEntry {
-					e = ErrUnavailable
-				} else {
-					result, e = c.action(rule.ID, action)
-				}
-				if errors.Is(e, ErrUnavailable) {
-					successful = false
-					r.Variables = vars
-					commands = append(commands, sim.Command{Report: map[string]any{"rule": rule.ID, "status": "waiting_for_data"}})
-					break
-				}
-				if e != nil {
-					return nil, fmt.Errorf("rule %s: %w", rule.ID, e)
-				}
-				batch = append(batch, result...)
-			}
-			if successful {
-				for _, cmd := range batch {
-					if cmd.Order != nil && !cmd.Order.ReduceOnly {
-						plannedEntry = true
-					}
-				}
-				r.Fired[rule.ID] = key
-				commands = append(commands, batch...)
-				commands = append(commands, sim.Command{Report: map[string]any{"rule": rule.ID, "status": "triggered", "event": in.ID}})
-			}
-		}
-		return commands, cache.save(r, s)
-	}, nil
+	return multiStrategy(p, config, false), nil
 }
 
-func matches(p *Program, r Rule, in sim.Input, closed map[string]bool) bool {
-	switch r.On {
-	case "bar.close":
-		frame := r.Timeframe
-		if frame == "" {
-			frame = p.Timeframe
-		}
-		return in.Symbol == p.Symbol && closed[frame]
-	case "quote":
-		return in.Symbol == p.Symbol && in.Type == "market.quote"
-	case "fill":
-		return in.Symbol == p.Symbol && in.Type == "execution.fill"
-	case "clock":
-		return in.Type == "clock" && (r.Schedule == "" || in.Metadata["schedule"] == r.Schedule)
-	case "any":
-		return true
+// actionSymbol is the symbol an order action trades: its own symbol, else the
+// rule's current symbol (the program symbol in trading-rules/1).
+func (c context) actionSymbol(a Action) string {
+	if a.Symbol != "" {
+		return a.Symbol
 	}
-	return false
+	if c.symbol == "" && len(c.program.Symbols) == 1 {
+		return c.program.Symbols[0]
+	}
+	return c.symbol
 }
 
 func (c context) action(rule string, a Action) ([]sim.Command, error) {
-	s, p := c.state, c.program
+	s := c.state
+	symbol := c.actionSymbol(a)
 	switch a.Kind {
 	case "set":
 		v, e := c.eval(*a.Value, 0)
@@ -204,45 +43,64 @@ func (c context) action(rule string, a Action) ([]sim.Command, error) {
 			return nil, e
 		}
 		c.runtime.Variables[a.Name] = v
+		for k := range c.memo {
+			delete(c.memo, k)
+		}
 		return nil, nil
+	case "target":
+		return c.target(rule, a)
 	case "cancel", "flatten":
+		if symbol == "" {
+			// Outside for_each a symbol-less flatten or cancel covers the book.
+			var out []sim.Command
+			for _, each := range ProgramSymbols(c.program) {
+				x := c
+				x.symbol = each
+				batch, err := x.action(rule, a)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, batch...)
+			}
+			return out, nil
+		}
 		var out []sim.Command
 		for _, o := range s.Orders {
 			if a.Kind == "flatten" && o.ReduceOnly && o.ParentID == "" {
 				continue
 			}
-			if o.Symbol == p.Symbol && (a.Group == "" || o.OCOGroup == a.Group) && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
+			if o.Symbol == symbol && (a.Group == "" || o.OCOGroup == a.Group) && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
 				out = append(out, sim.Command{CancelID: o.ID})
 			}
 		}
 		if a.Kind == "flatten" {
 			for _, o := range s.Orders {
-				if o.Symbol == p.Symbol && o.ReduceOnly && o.ParentID == "" && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
+				if o.Symbol == symbol && o.ReduceOnly && o.ParentID == "" && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
 					return out, nil
 				}
 			}
-			qty := s.Positions[p.Symbol].Qty
+			qty := s.Positions[symbol].Qty
 			if math.Abs(qty) > 1e-12 {
 				side := "sell"
 				if qty < 0 {
 					side = "buy"
 				}
-				out = append(out, sim.Command{Order: &sim.Order{Symbol: p.Symbol, Side: side, Type: "market", Qty: math.Abs(qty), ReduceOnly: true, TIF: "gtc", Tag: rule}})
+				out = append(out, sim.Command{Order: &sim.Order{Symbol: symbol, Side: side, Type: "market", Qty: math.Abs(qty), ReduceOnly: true, TIF: "gtc", Tag: rule}})
 			}
 		}
 		return out, nil
 	case "enter":
 		// Entry groups can contain opposing pending orders, but never silently
 		// pyramid a held position or replace a different pending entry group.
-		if math.Abs(s.Positions[p.Symbol].Qty) > 1e-12 {
+		if math.Abs(s.Positions[symbol].Qty) > 1e-12 {
 			return nil, ErrUnavailable
 		}
 		for _, o := range s.Orders {
-			if o.Symbol == p.Symbol && !o.ReduceOnly && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
+			if o.Symbol == symbol && !o.ReduceOnly && (o.Status == "working" || o.Status == "submitted" || o.Status == "partially_filled") {
 				return nil, ErrUnavailable
 			}
 		}
-		price := s.Quotes[p.Symbol].Price
+		price := s.Quotes[symbol].Price
 		if a.Price != nil {
 			v, e := c.eval(*a.Price, 0)
 			if e != nil {
@@ -281,7 +139,7 @@ func (c context) action(rule string, a Action) ([]sim.Command, error) {
 			return nil, errors.New("target must be on the profitable side of entry")
 		}
 		mult := 1.0
-		if contract, ok := c.config.Contracts[p.Symbol]; ok {
+		if contract, ok := c.config.Contracts[symbol]; ok {
 			mult = contract.Multiplier * contract.CurrencyRate
 		}
 		qty := a.Sizing.Amount
@@ -294,7 +152,7 @@ func (c context) action(rule string, a Action) ([]sim.Command, error) {
 			qty = sim.Equity(c.config, s) * a.Sizing.Amount / (price * mult)
 		}
 		costs := c.config.Costs
-		if v, ok := c.config.SymbolCosts[p.Symbol]; ok {
+		if v, ok := c.config.SymbolCosts[symbol]; ok {
 			costs = v
 		}
 		if costs.QtyStep > 0 {
@@ -307,7 +165,7 @@ func (c context) action(rule string, a Action) ([]sim.Command, error) {
 		if typ == "" {
 			typ = "market"
 		}
-		o := &sim.Order{Symbol: p.Symbol, Side: a.Side, Type: typ, Qty: qty, TIF: "gtc", Tag: rule, OCOGroup: a.Group, Protection: protection}
+		o := &sim.Order{Symbol: symbol, Side: a.Side, Type: typ, Qty: qty, TIF: "gtc", Tag: rule, OCOGroup: a.Group, Protection: protection}
 		if typ == "stop" {
 			o.StopPrice = price
 		}
@@ -347,7 +205,7 @@ func RequiredBaseBars(p *Program) int {
 			n *= 5
 		case "atr", "rsi":
 			n = 5*n + 1
-		case "return", "volatility":
+		case "return", "volatility", "correlation", "beta":
 			n++
 		}
 		total := (n + e.Offset + 1) * int(d/base)
@@ -373,7 +231,7 @@ func RequiredBaseBars(p *Program) int {
 			}
 		}
 		for _, a := range r.Actions {
-			for _, e := range []*Expr{a.Price, a.Stop, a.Target, a.Value} {
+			for _, e := range []*Expr{a.Price, a.Stop, a.Target, a.Value, a.Weight} {
 				if e != nil {
 					total = max(total, need(*e, 0))
 				}
@@ -393,34 +251,12 @@ func OrderedCalculations(p *Program) []string {
 }
 
 // ObserveOnly warms calculations without consuming triggers, setting variables,
-// or emitting orders. This is also used to validate complete imported tapes.
+// or emitting orders.
 func ObserveOnly(p *Program) (sim.Strategy, error) {
 	if err := Validate(p); err != nil {
 		return nil, err
 	}
-	limits := historyLimits(p)
-	location, _ := time.LoadLocation(p.Timezone)
-	cache := &checkpointCache{}
-	return func(s *sim.State, in sim.Input) (retCommands []sim.Command, retErr error) {
-		if in.Type != "market.bar.close" {
-			return nil, nil
-		}
-		cache.mu.Lock()
-		defer func() {
-			if retErr != nil {
-				cache.runtime = nil
-			}
-			cache.mu.Unlock()
-		}()
-		r, err := cache.restore(p, s, limits, location)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := r.observe(p, in); err != nil {
-			return nil, err
-		}
-		return nil, cache.save(r, s)
-	}, nil
+	return multiStrategy(p, sim.Config{}, true), nil
 }
 
 // ValidateTape rejects incomplete or externally controlled inputs before execution.
@@ -431,15 +267,21 @@ func ValidateTape(program *Program, inputs []sim.Input) error {
 	if err := Validate(program); err != nil {
 		return err
 	}
-	runtime := newRuntime(program)
-	runtime.limits = historyLimits(program)
+	limits := historyLimits(program)
+	series := map[string]*Runtime{}
+	allowed := map[string]bool{}
+	for _, symbol := range ProgramSymbols(program) {
+		series[symbol] = newRuntime(program)
+		series[symbol].limits = limits
+		allowed[symbol] = true
+	}
 	quotes, bars := 0, 0
 	for _, in := range inputs {
 		if in.Type == "order.intent" || in.Type == "order.cancel_intent" {
 			return errors.New("rule tapes cannot contain external order intents")
 		}
 		if len(in.Type) > 7 && in.Type[:7] == "market." {
-			if in.Symbol != program.Symbol || in.Source == "" {
+			if !allowed[in.Symbol] || in.Source == "" {
 				return errors.New("rule market events require the program symbol and an explicit data source")
 			}
 			if in.Type == "market.quote" {
@@ -449,7 +291,7 @@ func ValidateTape(program *Program, inputs []sim.Input) error {
 				bars++
 			}
 		}
-		if _, err := runtime.observe(program, in); err != nil {
+		if _, err := series[in.Symbol].observe(program, in.Symbol, in); in.Type == "market.bar.close" && err != nil {
 			return fmt.Errorf("input %s: %w", in.ID, err)
 		}
 	}

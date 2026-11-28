@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
 	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
 )
 
+// Version is the one program format. A program trades a list of symbols;
+// expressions may name a symbol, rules may run once per symbol, and
+// cross-sectional operators and the target action work across the list.
 const Version = "trading-rules/1"
+
+// MaxSymbols bounds a program's universe.
+const MaxSymbols = 500
 
 // Expr is a bounded expression tree, never executable source code. Booleans are
 // represented as 0/1, allowing calculated comparisons and nested all/any rules.
@@ -27,6 +34,8 @@ type Expr struct {
 	Period    int      `json:"period,omitempty"`
 	Offset    int      `json:"offset,omitempty"`
 	Window    string   `json:"window,omitempty"`
+	Symbol    string   `json:"symbol,omitempty"`  // read this symbol
+	Against   string   `json:"against,omitempty"` // correlation/beta reference symbol
 	Op        string   `json:"op,omitempty"`
 	Args      []Expr   `json:"args,omitempty"`
 }
@@ -39,7 +48,7 @@ type Window struct {
 type Program struct {
 	Schedules    map[string]string  `json:"schedules,omitempty"`
 	Version      string             `json:"version"`
-	Symbol       string             `json:"symbol"`
+	Symbols      []string           `json:"symbols"`
 	Timeframe    string             `json:"timeframe"`
 	Timezone     string             `json:"timezone"`
 	Windows      map[string]Window  `json:"windows,omitempty"`
@@ -56,24 +65,38 @@ type Rule struct {
 	When      *Expr    `json:"when,omitempty"`
 	Reset     *Expr    `json:"reset,omitempty"`  // rearm an until_reset rule
 	Repeat    string   `json:"repeat,omitempty"` // once_per_bar (default), once_per_day, until_reset, always
+	ForEach   bool     `json:"for_each,omitempty"`
 	Actions   []Action `json:"actions"`
 }
 
 type Action struct {
-	Kind               string  `json:"kind"` // enter, flatten, cancel, set
-	Name               string  `json:"name,omitempty"`
-	Value              *Expr   `json:"value,omitempty"`
-	Side               string  `json:"side,omitempty"`
-	OrderType          string  `json:"order_type,omitempty"`
-	Price              *Expr   `json:"price,omitempty"`
-	Stop               *Expr   `json:"stop,omitempty"`
-	Target             *Expr   `json:"target,omitempty"`
-	StopPct            float64 `json:"stop_pct,omitempty"`
-	TargetPct          float64 `json:"target_pct,omitempty"`
-	TrailActivationPct float64 `json:"trail_activation_pct,omitempty"`
-	TrailDistancePct   float64 `json:"trail_distance_pct,omitempty"`
-	Sizing             Sizing  `json:"sizing,omitempty"`
-	Group              string  `json:"group,omitempty"`
+	Kind               string     `json:"kind"` // enter, flatten, cancel, set, target
+	Symbol             string     `json:"symbol,omitempty"`
+	Weight             *Expr      `json:"weight,omitempty"`
+	Construct          *Construct `json:"construct,omitempty"`
+	Name               string     `json:"name,omitempty"`
+	Value              *Expr      `json:"value,omitempty"`
+	Side               string     `json:"side,omitempty"`
+	OrderType          string     `json:"order_type,omitempty"`
+	Price              *Expr      `json:"price,omitempty"`
+	Stop               *Expr      `json:"stop,omitempty"`
+	Target             *Expr      `json:"target,omitempty"`
+	StopPct            float64    `json:"stop_pct,omitempty"`
+	TargetPct          float64    `json:"target_pct,omitempty"`
+	TrailActivationPct float64    `json:"trail_activation_pct,omitempty"`
+	TrailDistancePct   float64    `json:"trail_distance_pct,omitempty"`
+	Sizing             Sizing     `json:"sizing,omitempty"`
+	Group              string     `json:"group,omitempty"`
+}
+
+// Construct turns raw signed target scores into an executable book.
+type Construct struct {
+	Normalize   string  `json:"normalize,omitempty"` // legs (default), gross, none
+	Gross       float64 `json:"gross,omitempty"`     // default 1
+	Net         float64 `json:"net,omitempty"`       // legs only; default 0
+	MaxPosition float64 `json:"max_position,omitempty"`
+	MaxGross    float64 `json:"max_gross,omitempty"`     // default and ceiling 2
+	MinTradePct float64 `json:"min_trade_pct,omitempty"` // percent of equity
 }
 
 type Sizing struct {
@@ -109,10 +132,36 @@ func minute(text string) (int, error) {
 }
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-func Validate(p *Program) error {
-	if p == nil || p.Version != Version || strings.TrimSpace(p.Symbol) == "" {
-		return errors.New("program requires trading-rules/1 version and symbol")
+// ProgramSymbols lists the symbols a program trades, sorted.
+func ProgramSymbols(p *Program) []string {
+	out := append([]string(nil), p.Symbols...)
+	sort.Strings(out)
+	return out
+}
+
+func csOp(op string) bool {
+	switch op {
+	case "cs_rank", "cs_zscore", "cs_demean", "cs_count", "top", "bottom", "quantile":
+		return true
 	}
+	return false
+}
+
+func Validate(p *Program) error {
+	if p == nil || p.Version != Version {
+		return errors.New("program requires version trading-rules/1")
+	}
+	if len(p.Symbols) == 0 || len(p.Symbols) > MaxSymbols {
+		return fmt.Errorf("program requires 1–%d symbols", MaxSymbols)
+	}
+	universe := map[string]bool{}
+	for _, symbol := range p.Symbols {
+		if strings.TrimSpace(symbol) == "" || symbol != strings.TrimSpace(symbol) || universe[symbol] {
+			return errors.New("symbols must be unique and non-blank")
+		}
+		universe[symbol] = true
+	}
+	single := len(p.Symbols) == 1
 	base, err := duration(p.Timeframe)
 	if err != nil {
 		return err
@@ -167,8 +216,17 @@ func Validate(p *Program) error {
 		if e.Period < 0 || e.Period > 2000 || e.Offset < 0 || e.Offset > 2000 {
 			return errors.New("period/offset must be between 0 and 2000")
 		}
-		if e.Metric == "" && (e.Period != 0 || e.Offset != 0 || e.Timeframe != "" || e.Window != "" || e.Input != nil || e.Feature != "" || e.Field != "") {
+		if e.Metric == "" && (e.Period != 0 || e.Offset != 0 || e.Timeframe != "" || e.Window != "" || e.Input != nil || e.Feature != "" || e.Field != "" || e.Symbol != "" || e.Against != "") {
 			return errors.New("metric parameters require a metric expression")
+		}
+		if e.Symbol != "" && !universe[e.Symbol] {
+			return errors.New("expression symbol must be one of the program's symbols")
+		}
+		if (e.Metric == "correlation" || e.Metric == "beta") != (e.Against != "") {
+			return errors.New("correlation and beta require against; against is only for them")
+		}
+		if e.Against != "" && (!universe[e.Against] || e.Period < 2) {
+			return errors.New("correlation/beta require an against symbol in the program and period >= 2")
 		}
 		if e.Value != nil && !finite(*e.Value) {
 			return errors.New("literal must be finite")
@@ -197,7 +255,7 @@ func Validate(p *Program) error {
 		}
 		if e.Metric != "" {
 			switch e.Metric {
-			case "open", "high", "low", "close", "volume", "range", "body", "close_fraction", "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return", "feature", "price", "bid", "ask", "position_qty", "entry_count", "minute", "weekday", "window_high", "window_low", "window_complete", "equity":
+			case "open", "high", "low", "close", "volume", "range", "body", "close_fraction", "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return", "feature", "price", "bid", "ask", "position_qty", "entry_count", "minute", "weekday", "day_of_month", "month", "window_high", "window_low", "window_complete", "equity", "correlation", "beta":
 			default:
 				return fmt.Errorf("unsupported metric %q", e.Metric)
 			}
@@ -207,7 +265,7 @@ func Validate(p *Program) error {
 				}
 			}
 			switch e.Metric {
-			case "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return":
+			case "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return", "correlation", "beta":
 				if e.Period < 1 {
 					return errors.New("rolling indicators require period >= 1")
 				}
@@ -241,13 +299,24 @@ func Validate(p *Program) error {
 			return errors.New("indicator history exceeds 10001 retained candles")
 		}
 		if e.Op != "" {
-			unary := false
+			n := 2
 			switch e.Op {
-			case "not", "abs":
-				unary = true
-			case "+", "-", "*", "/", "min", "max", ">", ">=", "<", "<=", "==", "!=", "and", "or", "crosses_above", "crosses_below":
+			case "not", "abs", "sign", "log", "exp", "sqrt", "cs_rank", "cs_zscore", "cs_demean", "cs_count":
+				n = 1
+			case "clamp", "if":
+				n = 3
+			case "+", "-", "*", "/", "min", "max", ">", ">=", "<", "<=", "==", "!=", "and", "or", "crosses_above", "crosses_below", "top", "bottom", "quantile":
 			default:
 				return fmt.Errorf("unsupported operator %q", e.Op)
+			}
+			if e.Op == "top" || e.Op == "bottom" || e.Op == "quantile" {
+				low := 1.0
+				if e.Op == "quantile" {
+					low = 2
+				}
+				if len(e.Args) != 2 || e.Args[1].Value == nil || *e.Args[1].Value < low || *e.Args[1].Value != math.Trunc(*e.Args[1].Value) || *e.Args[1].Value > MaxSymbols {
+					return fmt.Errorf("%s requires a whole-number literal count", e.Op)
+				}
 			}
 			if e.Op == "crosses_above" || e.Op == "crosses_below" {
 				var candleOnly func(Expr, int) bool
@@ -260,6 +329,9 @@ func Validate(p *Program) error {
 					}
 					if x.Value != nil {
 						return true
+					}
+					if csOp(x.Op) {
+						return false
 					}
 					if x.Name != "" {
 						calc, ok := p.Calculations[x.Name]
@@ -285,10 +357,6 @@ func Validate(p *Program) error {
 						return errors.New("crossovers require candle expressions; account, clock and mutable variables have no historical series")
 					}
 				}
-			}
-			n := 2
-			if unary {
-				n = 1
 			}
 			if e.Op == "and" || e.Op == "or" {
 				if len(e.Args) < 2 || len(e.Args) > 64 {
@@ -316,11 +384,22 @@ func Validate(p *Program) error {
 		}
 	}
 	ids := map[string]bool{}
+	targets, entering := 0, false
 	for _, r := range p.Rules {
 		if r.ID == "" || ids[r.ID] || len(r.Actions) == 0 || len(r.Actions) > 32 {
 			return errors.New("rules require unique IDs and 1–32 actions")
 		}
 		ids[r.ID] = true
+		// Outside for_each a rule of a multi-symbol program has no implicit
+		// symbol, so every symbol-dependent metric must name one.
+		bound := single || r.ForEach
+		if !bound {
+			for _, expr := range []*Expr{r.When, r.Reset} {
+				if expr != nil && !symbolBound(p, *expr, 0) {
+					return fmt.Errorf("rule %s: outside for_each, metrics must name a symbol", r.ID)
+				}
+			}
+		}
 		if r.Schedule != "" {
 			if r.On != "clock" {
 				return errors.New("schedule triggers require on=clock")
@@ -357,11 +436,27 @@ func Validate(p *Program) error {
 		}
 		var entries []Action
 		for _, a := range r.Actions {
-			for _, expr := range []*Expr{a.Price, a.Stop, a.Target, a.Value} {
+			for _, expr := range []*Expr{a.Price, a.Stop, a.Target, a.Value, a.Weight} {
 				if expr != nil {
 					if e := check(*expr, 0, map[string]bool{}); e != nil {
 						return e
 					}
+				}
+			}
+			if a.Symbol != "" && (!universe[a.Symbol] || (a.Kind != "enter" && a.Kind != "flatten" && a.Kind != "cancel")) {
+				return errors.New("action symbol must be a program symbol on enter, flatten or cancel")
+			}
+			if a.Kind != "target" && (a.Weight != nil || a.Construct != nil) {
+				return errors.New("weight and construct belong to target actions")
+			}
+			if !bound && a.Kind != "target" {
+				for _, expr := range []*Expr{a.Price, a.Stop, a.Target, a.Value} {
+					if expr != nil && !symbolBound(p, *expr, 0) {
+						return fmt.Errorf("rule %s: outside for_each, metrics must name a symbol", r.ID)
+					}
+				}
+				if a.Kind == "enter" && a.Symbol == "" {
+					return fmt.Errorf("rule %s: outside for_each, enter requires a symbol", r.ID)
 				}
 			}
 			switch a.Kind {
@@ -370,7 +465,16 @@ func Validate(p *Program) error {
 					return errors.New("set requires a declared variable and value")
 				}
 			case "flatten", "cancel":
+			case "target":
+				targets++
+				if r.ForEach || a.Weight == nil {
+					return errors.New("target requires a rule without for_each and a weight expression")
+				}
+				if err := validateConstruct(a.Construct); err != nil {
+					return err
+				}
 			case "enter":
+				entering = true
 				entries = append(entries, a)
 				if a.Side != "buy" && a.Side != "sell" {
 					return errors.New("entry side must be buy or sell")
@@ -415,20 +519,110 @@ func Validate(p *Program) error {
 			return errors.New("multiple entries in one rule require one opposing OCO pair")
 		}
 	}
+	if targets > 1 || targets == 1 && entering {
+		return errors.New("a program holds at most one target action, and target and enter cannot both manage its symbols")
+	}
 	if RequiredBaseBars(p) > 1000000 {
 		return errors.New("calculation warmup exceeds one million base candles")
 	}
 	return nil
 }
 
-// Config must agree with the program's symbol. It deliberately does not invent
-// a contract specification for a ticker or silently enable short spot sales.
+func validateConstruct(c *Construct) error {
+	if c == nil {
+		return nil
+	}
+	switch c.Normalize {
+	case "", "legs", "gross", "none":
+	default:
+		return errors.New("construct.normalize must be legs, gross or none")
+	}
+	for _, v := range []float64{c.Gross, c.Net, c.MaxPosition, c.MaxGross, c.MinTradePct} {
+		if !finite(v) {
+			return errors.New("construct values must be finite")
+		}
+	}
+	if c.Gross < 0 || c.Gross > 2 || c.MaxGross < 0 || c.MaxGross > 2 || c.MaxPosition < 0 || c.MaxPosition > 2 || c.MinTradePct < 0 || c.MinTradePct >= 100 {
+		return errors.New("construct: gross, max_gross and max_position in [0,2]; min_trade_pct in [0,100)")
+	}
+	gross := c.Gross
+	if gross == 0 {
+		gross = 1
+	}
+	if math.Abs(c.Net) > gross {
+		return errors.New("construct: |net| cannot exceed gross")
+	}
+	return nil
+}
+
+// symbolBound reports whether an expression can be evaluated with no current
+// symbol: every symbol-dependent metric names its symbol.
+func symbolBound(p *Program, e Expr, depth int) bool {
+	if depth > 24 {
+		return false
+	}
+	if e.Name != "" {
+		if calc, ok := p.Calculations[e.Name]; ok {
+			return symbolBound(p, calc, depth+1)
+		}
+		return true
+	}
+	if e.Metric != "" {
+		switch e.Metric {
+		case "minute", "weekday", "day_of_month", "month", "equity":
+			return true
+		}
+		if e.Symbol == "" && e.Input != nil {
+			return symbolBound(p, *e.Input, depth+1)
+		}
+		return e.Symbol != ""
+	}
+	if e.Op == "cs_count" {
+		return true
+	}
+	if csOp(e.Op) {
+		return false
+	}
+	for _, a := range e.Args {
+		if !symbolBound(p, a, depth+1) {
+			return false
+		}
+	}
+	return true
+}
+
+// Shortable reports whether the simulator may hold symbol short: a declared
+// linear contract, or spot with shorts enabled and the symbol not excluded.
+func Shortable(c sim.Config, symbol string) bool {
+	if _, ok := c.Contracts[symbol]; ok {
+		return true
+	}
+	if c.Shorts == nil || !c.Shorts.Enabled {
+		return false
+	}
+	for _, s := range c.Shorts.Unshortable {
+		if s == symbol {
+			return false
+		}
+	}
+	return true
+}
+
+// Config must agree with the program's symbols. It deliberately does not
+// invent a contract specification for a ticker or silently enable short spot
+// sales: spot shorts need Config.Shorts.
 func ValidateExecution(p *Program, c sim.Config) error {
 	for _, r := range p.Rules {
 		for _, a := range r.Actions {
 			if a.Kind == "enter" && a.Side == "sell" {
-				if _, ok := c.Contracts[p.Symbol]; !ok {
-					return errors.New("short entries require an explicit simulated linear contract")
+				symbols := []string{a.Symbol}
+				if a.Symbol == "" {
+					symbols = ProgramSymbols(p)
+				}
+				for _, symbol := range symbols {
+					if !Shortable(c, symbol) {
+						return fmt.Errorf("short entries on %s require an explicit simulated linear contract or simulator shorts", symbol)
+					}
 				}
 			}
 		}
@@ -443,6 +637,9 @@ func historicalExpr(p *Program, e Expr, depth int) bool {
 	}
 	if e.Value != nil {
 		return true
+	}
+	if csOp(e.Op) {
+		return false
 	}
 	if e.Name != "" {
 		v, ok := p.Calculations[e.Name]
@@ -508,7 +705,7 @@ func seriesBars(p *Program, e Expr, depth int) int {
 		n *= 5
 	case "atr", "rsi":
 		n = 5*n + 1
-	case "return", "volatility":
+	case "return", "volatility", "correlation", "beta":
 		n++
 	}
 	n += e.Offset
@@ -520,3 +717,7 @@ func seriesBars(p *Program, e Expr, depth int) int {
 	}
 	return n
 }
+
+// SessionCloseKey is bar metadata naming a session close earlier than the
+// candle interval's end (RFC 3339); the candle is complete from then.
+const SessionCloseKey = "session_close"

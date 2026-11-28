@@ -107,7 +107,7 @@ func TestLegacyResearchImportsPausedAndOnlyOnce(t *testing.T) {
 	platform := &legacyTradingFixture{fixtureTrading: *newFixtureTrading(t)}
 	ctx := newTestCtxWith(t, platform)
 	id := mustCreatePortfolio(t, ctx, "Preserved portfolio", []string{"crypto"})
-	definition := map[string]any{"universe": []string{"BTC-USD"}, "cadence": "1d", "rules": []any{map[string]any{"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": .1}}}}}
+	definition := targetDefinition([]string{"BTC-USD"}, "1d", .1)
 	raw, _ := json.Marshal(definition)
 	platform.legacy = researchSnapshot{Version: 1, SourceInstallID: 11, ProjectID: "test-proj", Tables: map[string][]map[string]any{
 		"strategies":                     {{"id": int64(42), "project_id": "test-proj", "name": "Legacy strategy", "definition_json": string(raw), "version": int64(2), "status": "active"}},

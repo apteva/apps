@@ -24,7 +24,7 @@ directive: |
   "Time,Bid,Ask\n2026-09-14T12:00:00Z,99,101\n", columns mapping timestamp to
   Time, bid to Bid, ask to Ask. Inspect the returned bid=99, ask=101 and input
   hash. This isolated import fixture is separate from the backtest tapes below.
-  Discover strategy_catalog, then author a NEW engine=rules strategy called
+  Discover strategy_catalog, then author a NEW rule strategy called
   "Tier 3 EMA SMA research" (do not copy a screenshot preset): symbol AAPL,
   timeframe 1m, timezone UTC. On a completed base candle, while position_qty
   equals zero, buy at market only if close > EMA2 AND close > SMA3. Use

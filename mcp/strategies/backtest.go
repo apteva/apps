@@ -152,11 +152,11 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		var out map[string]any
 		var err error
 		if run.RunKind == "strategy" {
-			if eventBacktest(run) {
-				out, err = startEventSimulation(run, false)
-			} else {
-				out, err = startLegacyStrategyWorker(run)
+			if !eventBacktest(run) {
+				httpErr(w, 409, "strategy backtest has no event simulation; recreate it")
+				return
 			}
+			out, err = startEventSimulation(run, false)
 		} else {
 			out, err = runBacktestToEnd(run)
 		}
@@ -267,7 +267,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 				httpErr(w, 400, err.Error())
 				return
 			}
-			if def.Engine == "rules" {
+			if hasMarketInputs(body.Inputs) {
 				run, err := createRuleEventBacktest(globalCtx, pf, strategy, body.Name, body.StartingCash, body.Simulation, body.Inputs)
 				if err != nil {
 					httpErr(w, 400, err.Error())
@@ -309,7 +309,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		interval, err := normalizeBacktestInterval(body.Interval)
 		if strategy != nil {
 			def, _, _ := validateStrategyDefinition(strategy.Definition)
-			interval, err = normalizeStrategyReplayInterval(def, body.Interval)
+			interval, err = strategyInterval(def, body.Interval)
 		}
 		if err != nil {
 			httpErr(w, 400, err.Error())
@@ -436,7 +436,7 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return startEventSimulation(run, true)
 	}
 	if run != nil && run.RunKind == "strategy" {
-		return startStrategyBacktestRun(run)
+		return nil, errors.New("strategy backtest has no event simulation; recreate it")
 	}
 	if run.Status != "queued" && run.Status != "failed" {
 		return map[string]any{"backtest": run}, nil
@@ -521,7 +521,7 @@ func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 		return startEventSimulation(run, false)
 	}
 	if run != nil && run.RunKind == "strategy" {
-		return runStrategyBacktestToEnd(run)
+		return nil, errors.New("strategy backtest has no event simulation; recreate it")
 	}
 	if run == nil {
 		return nil, errors.New("backtest run required")
@@ -832,7 +832,7 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return startEventSimulation(run, true)
 	}
 	if run != nil && run.RunKind == "strategy" {
-		return stepStrategyBacktestRun(run)
+		return nil, errors.New("strategy backtest has no event simulation; recreate it")
 	}
 	if run == nil {
 		return nil, errors.New("backtest run required")

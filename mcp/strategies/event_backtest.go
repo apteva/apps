@@ -33,6 +33,7 @@ type simulationSpec struct {
 	Interval          string                 `json:"interval"`
 	ReferenceManifest map[string]any         `json:"reference_manifest,omitempty"`
 	Policy            *replayExecutionPolicy `json:"execution_policy,omitempty"`
+	AdjustmentMode    string                 `json:"adjustment_mode,omitempty"`
 }
 
 // Pin local builds as well as release builds in portable artifacts. Only
@@ -40,12 +41,12 @@ type simulationSpec struct {
 // layer (exec.go, integrity.go, pricing.go) talks to Trading and stays out, so
 // changing it never strands a paused simulation or an exported artifact.
 //
-//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go internal/backtest/contracts.go internal/backtest/protection.go internal/ruleengine/schema.go internal/ruleengine/market.go internal/ruleengine/runtime.go internal/ruleengine/schedule.go strategy_rules.go rule_examples/*.json event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go simulation_kernel.go
+//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go internal/backtest/contracts.go internal/backtest/protection.go internal/backtest/shorts.go internal/ruleengine/schema.go internal/ruleengine/market.go internal/ruleengine/runtime.go internal/ruleengine/multi.go internal/ruleengine/schedule.go strategy_rules.go strategy_program.go event_backtest.go strategy.go strategy_catalog.go market_calendar.go simulation_kernel.go rule_examples/*.json
 var simulationSources embed.FS
 
 func simulationSourceHash() string {
 	files := map[string]string{}
-	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "internal/backtest/contracts.go", "internal/backtest/protection.go", "internal/ruleengine/schema.go", "internal/ruleengine/market.go", "internal/ruleengine/runtime.go", "internal/ruleengine/schedule.go", "strategy_rules.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "simulation_kernel.go"} {
+	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "internal/backtest/contracts.go", "internal/backtest/protection.go", "internal/backtest/shorts.go", "internal/ruleengine/schema.go", "internal/ruleengine/market.go", "internal/ruleengine/runtime.go", "internal/ruleengine/multi.go", "internal/ruleengine/schedule.go", "strategy_rules.go", "strategy_program.go", "event_backtest.go", "strategy.go", "strategy_catalog.go", "market_calendar.go", "simulation_kernel.go"} {
 		data, _ := simulationSources.ReadFile(name)
 		files[name] = string(data)
 	}
@@ -75,18 +76,6 @@ type simulationArtifact struct {
 	Outputs            []sim.Output       `json:"outputs,omitempty"`
 	Result             map[string]float64 `json:"result,omitempty"`
 	ResultHash         string             `json:"result_sha256,omitempty"`
-}
-
-type simulationStrategyState struct {
-	Targets     []StrategyAllocation `json:"targets,omitempty"`
-	History     map[string][]float64 `json:"history"`
-	Prices      map[string]float64   `json:"prices"`
-	AsOf        time.Time            `json:"as_of"`
-	SignalStep  int                  `json:"signal_step"`
-	SignalCount int                  `json:"signal_count"`
-	Step        int                  `json:"step"`
-	Day         string               `json:"day"`
-	DayEquity   float64              `json:"day_equity"`
 }
 
 func eventBacktest(run *BacktestRun) bool {
@@ -137,10 +126,16 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 		p := policy.Risk
 		config.Risk = sim.RiskLimits{MaxOrderPct: p.MaxOrderPct, MaxPositionPct: p.MaxPositionPct, MaxGrossExposurePct: p.MaxGrossExposurePct, MaxDailyLossPct: p.MaxDailyLossPct, MaxDrawdownPct: p.MaxDrawdownPct}
 	}
-	if def.Engine == "rules" {
+	if def.Program != nil {
 		config.NotifyFills = true
+		config.PruneResolved = true
 		if _, err := rules.Strategy(def.Program, config); err != nil {
 			return err
+		}
+		for _, symbol := range def.Universe {
+			if policy != nil && !policy.Allowed[symbol] {
+				return fmt.Errorf("program symbol %s is excluded by the portfolio universe", symbol)
+			}
 		}
 	}
 	config.SymbolCosts = map[string]sim.Costs{}
@@ -156,7 +151,7 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 			config.SymbolCosts[symbol] = c
 		}
 	}
-	spec := simulationSpec{SourceHash: simulationSourceHash(), Version: sim.Version, Config: config, Strategy: strategy.Definition, StrategyVersion: strategy.Version, Symbols: run.Symbols, Interval: run.Interval, Policy: policy, ReferenceManifest: run.ReferenceManifest}
+	spec := simulationSpec{SourceHash: simulationSourceHash(), Version: sim.Version, Config: config, Strategy: strategy.Definition, StrategyVersion: strategy.Version, Symbols: run.Symbols, Interval: run.Interval, Policy: policy, ReferenceManifest: run.ReferenceManifest, AdjustmentMode: run.AdjustmentMode}
 	if agent != nil {
 		spec.Agent = agent
 		spec.DecisionMode = "agent"
@@ -168,12 +163,15 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 	inputs := make([]sim.Input, 0, 2*len(bars)+len(extra))
 	previousVolume := map[string]float64{}
 	for _, bar := range bars {
+		if def.Program != nil && agent == nil && !contains(def.Universe, bar.Symbol) {
+			continue // captured for another purpose; the program never reads it
+		}
 		at := time.Unix(bar.T, 0).UTC()
 		closeAt := simulationBarClose(def, run.Interval, at)
 		if bar.Step > 0 {
 			inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/open", bar.Step, bar.Symbol), Type: "market.quote", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: at, Data: map[string]float64{"price": bar.O, "volume": previousVolume[bar.Symbol], "step": float64(bar.Step)}, Metadata: map[string]string{"liquidity_model": "previous_completed_bar_volume"}})
 		}
-		inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/close", bar.Step, bar.Symbol), Type: "market.bar.close", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: closeAt, Data: map[string]float64{"price": bar.C, "open": bar.O, "high": bar.H, "low": bar.L, "volume": bar.V, "step": float64(bar.Step)}, Metadata: map[string]string{"timeframe": run.Interval}})
+		inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/close", bar.Step, bar.Symbol), Type: "market.bar.close", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: closeAt, Data: map[string]float64{"price": bar.C, "open": bar.O, "high": bar.H, "low": bar.L, "volume": bar.V, "step": float64(bar.Step)}, Metadata: barCloseMetadata(run.Interval, at, closeAt)})
 		previousVolume[bar.Symbol] = bar.V
 	}
 	for _, in := range extra {
@@ -182,13 +180,25 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 		}
 	}
 	inputs = append(inputs, extra...)
+	if def.Program != nil && agent == nil {
+		if inputs, err = rules.ScheduleInputs(def.Program, inputs); err != nil {
+			return err
+		}
+	}
 	return storeSimulation(db, run, spec, inputs)
 }
 
 // Describe the actual tape rather than implying millisecond market resolution.
 func simulationExecutionNotes(spec simulationSpec, inputs []sim.Input) string {
-	if spec.Strategy["engine"] == "rules" {
-		return "Rules execute on captured completed candles, clock and quote events. Protective orders require subsequent observed quotes; no intrabar price path is invented. Linked OCO groups model atomic venue cancellation. Linear contracts use explicit multiplier, fixed currency conversion and margin; financing and automatic margin liquidation are not modeled."
+	if spec.DecisionMode != "agent" && spec.DecisionMode != "recorded_orders" {
+		note := "Rules execute on captured completed candles, clock and quote events. Protective orders require subsequent observed quotes; no intrabar price path is invented. Linked OCO groups model atomic venue cancellation. Linear contracts use explicit multiplier, fixed currency conversion and margin; financing and automatic margin liquidation are not modeled."
+		if spec.Config.Shorts != nil && spec.Config.Shorts.Enabled {
+			note += " Spot shorts pay borrow and Reg T margin; the simulator has no dividend events, so short results assume total-return adjusted prices."
+			if spec.AdjustmentMode != "" && spec.AdjustmentMode != "total_return" {
+				note += " Warning: this run's bars are " + spec.AdjustmentMode + "-adjusted, so shorts do not pay dividends here."
+			}
+		}
+		return note
 	}
 	barQuotes, otherQuotes := 0, 0
 	for _, in := range inputs {
@@ -211,6 +221,16 @@ func simulationExecutionNotes(spec simulationSpec, inputs []sim.Input) string {
 		note += " This tape also contains additional quote observations."
 	}
 	return note
+}
+
+// barCloseMetadata tags a bar's timeframe and, when a trading session ends it
+// before the interval does, the session close the rule engine should accept.
+func barCloseMetadata(interval string, at, closeAt time.Time) map[string]string {
+	m := map[string]string{"timeframe": interval}
+	if closeAt.After(at) && closeAt.Before(at.Add(backtestIntervalDuration(interval))) {
+		m[rules.SessionCloseKey] = closeAt.UTC().Format(time.RFC3339)
+	}
+	return m
 }
 
 func simulationBarClose(def *StrategyDefinition, interval string, at time.Time) time.Time {
@@ -274,7 +294,7 @@ func storeSimulation(db *sql.DB, run *BacktestRun, spec simulationSpec, inputs [
 		return err
 	}
 	inputs = engine.Inputs
-	if def, _, err := validateStrategyDefinition(spec.Strategy); err == nil && def.Engine == "rules" && spec.DecisionMode != "recorded_orders" && spec.DecisionMode != "agent" {
+	if def, _, err := validateStrategyDefinition(spec.Strategy); err == nil && spec.DecisionMode != "recorded_orders" && spec.DecisionMode != "agent" {
 		if _, err := rules.Strategy(def.Program, spec.Config); err != nil {
 			return err
 		}
@@ -393,7 +413,7 @@ func updateSimulationInputs(db *sql.DB, run *BacktestRun, options *sim.Config, e
 	}
 	inputs := []sim.Input{}
 	for _, in := range r.Inputs {
-		if strings.HasPrefix(in.Type, "market.") || (r.Spec.Strategy["engine"] == "rules" && in.Type == "clock") {
+		if strings.HasPrefix(in.Type, "market.") || (r.Spec.DecisionMode != "agent" && (in.Type == "clock" || in.Type == rules.EvaluateInput)) {
 			inputs = append(inputs, in)
 		}
 	}
@@ -406,21 +426,20 @@ func updateSimulationInputs(db *sql.DB, run *BacktestRun, options *sim.Config, e
 	return storeSimulation(db, run, r.Spec, inputs)
 }
 
+// simulationStrategy runs the strategy's rule program, or replays recorded
+// order intents for agent and recorded-order runs.
 func simulationStrategy(spec simulationSpec) sim.Strategy {
-	def, _, _ := validateStrategyDefinition(spec.Strategy)
-	if def == nil {
-		def = &StrategyDefinition{Universe: spec.Symbols, Cadence: spec.Interval}
-	}
-	if def.Engine == "rules" && spec.DecisionMode != "recorded_orders" {
+	if spec.DecisionMode != "recorded_orders" && spec.DecisionMode != "agent" {
+		def, _, err := validateStrategyDefinition(spec.Strategy)
+		if err != nil {
+			return func(*sim.State, sim.Input) ([]sim.Command, error) { return nil, err }
+		}
 		evaluator, err := rules.Strategy(def.Program, spec.Config)
 		if err != nil {
 			return func(*sim.State, sim.Input) ([]sim.Command, error) { return nil, err }
 		}
 		return evaluator
 	}
-	symbols := append([]string(nil), spec.Symbols...)
-	sort.Strings(symbols)
-	lastSymbol := symbols[len(symbols)-1]
 	return func(state *sim.State, in sim.Input) ([]sim.Command, error) {
 		if in.Type == "order.intent" {
 			if !contains(spec.Symbols, in.Symbol) {
@@ -442,105 +461,8 @@ func simulationStrategy(spec simulationSpec) sim.Strategy {
 		if in.Type == "order.cancel_intent" {
 			return []sim.Command{{CancelID: in.Metadata["order_id"]}}, nil
 		}
-
-		if in.Type != "market.bar.close" {
-			return nil, nil
-		}
-		m := simulationStrategyState{History: map[string][]float64{}, Prices: map[string]float64{}}
-		if len(state.StrategyState) > 0 {
-			if err := json.Unmarshal(state.StrategyState, &m); err != nil {
-				return nil, err
-			}
-		}
-		market := strategyMarket{history: m.History, prices: m.Prices, asOf: m.AsOf, signalStep: m.SignalStep, signalCount: m.SignalCount, features: state.Features}
-		step := int(in.Data["step"])
-		appendStrategyReplayBar(&BacktestRun{Symbols: spec.Symbols, Interval: spec.Interval}, def, &market, &BacktestMarketBar{Step: step, Symbol: in.Symbol, T: in.EventTime.Unix(), C: in.Data["price"]})
-		for symbol, h := range market.history {
-			if len(h) > 1000 {
-				market.history[symbol] = h[len(h)-1000:]
-			}
-		}
-		m.History, m.Prices, m.AsOf, m.SignalStep, m.SignalCount = market.history, market.prices, market.asOf, market.signalStep, market.signalCount
-		m.Step = maxInt(m.Step, step)
-		var commands []sim.Command
-		if spec.DecisionMode != "recorded_orders" && in.Symbol == lastSymbol && strategyReplaySignalDue(def, step, market) {
-			eval, err := evaluateStrategy(&Strategy{Version: spec.StrategyVersion, Definition: spec.Strategy}, market)
-			if err != nil {
-				return nil, err
-			}
-			commands = simulationTargets(spec, state, eval.TargetAllocations, m.Targets)
-			m.Targets = eval.TargetAllocations
-			commands = append(commands, sim.Command{Report: map[string]any{"decisions": eval.Decisions, "warnings": eval.Warnings, "targets": eval.TargetAllocations, "signal_as_of": eval.AsOf}})
-		}
-		state.StrategyState, _ = json.Marshal(m)
-		return commands, nil
+		return nil, nil
 	}
-}
-
-func simulationTargets(spec simulationSpec, state *sim.State, targets, previous []StrategyAllocation) []sim.Command {
-	var commands []sim.Command
-	pending := map[string]bool{}
-	targetWeights, previousWeights := map[string]float64{}, map[string]float64{}
-	for _, t := range targets {
-		targetWeights[t.Symbol] = t.Weight
-	}
-	for _, t := range previous {
-		previousWeights[t.Symbol] = t.Weight
-	}
-	changed := sim.Hash(targetWeights) != sim.Hash(previousWeights)
-	for _, o := range state.Orders {
-		if o.Status == "submitted" || o.Status == "working" || o.Status == "partially_filled" {
-			if changed {
-				commands = append(commands, sim.Command{CancelID: o.ID})
-			} else {
-				pending[o.Symbol] = true
-			}
-		}
-	}
-	e := &sim.Engine{Config: spec.Config, State: state}
-	equity := e.Metrics()["equity"]
-	weights := map[string]float64{}
-	for _, t := range targets {
-		weights[t.Symbol] = t.Weight
-	}
-	symbols := append([]string(nil), spec.Symbols...)
-	sort.Strings(symbols)
-	gross := 0.0
-	for _, symbol := range symbols {
-		gross += state.Positions[symbol].Qty * state.Quotes[symbol].Price
-	}
-	for _, symbol := range symbols {
-		if pending[symbol] {
-			continue
-		}
-		price := state.Quotes[symbol].Price
-		if price <= 0 {
-			continue
-		}
-		pos := state.Positions[symbol]
-		diff := equity*weights[symbol] - pos.Qty*price
-		if math.Abs(diff) < math.Max(1, equity*0.001) {
-			continue
-		}
-		side := "buy"
-		qty := floor4(math.Abs(diff) / price)
-		if diff < 0 {
-			side = "sell"
-			qty = math.Min(qty, pos.Qty)
-		}
-		if side == "buy" && spec.Policy != nil {
-			if !spec.Policy.Allowed[symbol] || exposureBreach(spec.Policy.Risk, equity, qty*price, pos.Qty*price, gross) != nil {
-				continue
-			}
-			if spec.Policy.Risk.MaxDrawdownPct > 0 && state.Peak > 0 && (equity/state.Peak-1)*100 < -spec.Policy.Risk.MaxDrawdownPct {
-				continue
-			}
-		}
-		if qty > 0 {
-			commands = append(commands, sim.Command{Order: &sim.Order{Symbol: symbol, Side: side, Type: "market", Qty: qty, TIF: "gtc"}})
-		}
-	}
-	return commands
 }
 
 func commitSimulation(db *sql.DB, run *BacktestRun, r *simulationRecord, e *sim.Engine, outputs []sim.Output) error {
@@ -575,12 +497,7 @@ func commitSimulation(db *sql.DB, run *BacktestRun, r *simulationRecord, e *sim.
 			return err
 		}
 	}
-	var strategyState simulationStrategyState
-	_ = json.Unmarshal(e.State.StrategyState, &strategyState)
-	step := strategyState.Step
-	if r.Spec.DecisionMode == "agent" || r.Spec.Strategy["engine"] == "rules" {
-		step = e.State.Cursor
-	}
+	step := e.State.Cursor
 	status := "running"
 	if e.State.Finished {
 		status = "completed"
@@ -745,6 +662,15 @@ func eMetricsAny(m map[string]float64) map[string]any {
 }
 
 func startEventSimulation(run *BacktestRun, one bool) (map[string]any, error) {
+	return startEventSimulationWith(run, one, false)
+}
+
+// runEventSimulationToEnd runs a simulation to completion before returning.
+func runEventSimulationToEnd(run *BacktestRun) (map[string]any, error) {
+	return startEventSimulationWith(run, false, true)
+}
+
+func startEventSimulationWith(run *BacktestRun, one, wait bool) (map[string]any, error) {
 	if err := forbidValidationChild(globalCtx.AppDB(), run.ID); err != nil {
 		return nil, err
 	}
@@ -784,7 +710,7 @@ func startEventSimulation(run *BacktestRun, one bool) (map[string]any, error) {
 		}
 		return out, err
 	}
-	if one && fresh.RunKind != "agent" {
+	if wait || one && fresh.RunKind != "agent" {
 		return work()
 	}
 	go func() { _, _ = work() }()
@@ -970,33 +896,6 @@ func importSimulation(db *sql.DB, project string, portfolioID int64, name string
 		}
 	}
 	return dbGetBacktestRun(db, project, id)
-}
-
-// Legacy runs also execute outside the HTTP request, retaining their original
-// numerical model while allowing the existing UI to pause or cancel them.
-func startLegacyStrategyWorker(run *BacktestRun) (map[string]any, error) {
-	simulationWorkers.Lock()
-	if simulationWorkers.running[run.ID] {
-		simulationWorkers.Unlock()
-		return map[string]any{"backtest": run, "runner_started": false}, nil
-	}
-	simulationWorkers.running[run.ID] = true
-	simulationWorkers.done[run.ID] = make(chan struct{})
-	simulationWorkers.Unlock()
-	go func() {
-		defer func() {
-			simulationWorkers.Lock()
-			delete(simulationWorkers.running, run.ID)
-			close(simulationWorkers.done[run.ID])
-			delete(simulationWorkers.done, run.ID)
-			simulationWorkers.Unlock()
-		}()
-		if _, err := runStrategyBacktestToEnd(run); err != nil {
-			_, _ = globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='failed',error=? WHERE id=? AND status='running'`, err.Error(), run.ID)
-			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
-		}
-	}()
-	return map[string]any{"backtest": run, "runner_started": true}, nil
 }
 
 func waitSimulationWorker(id int64) {

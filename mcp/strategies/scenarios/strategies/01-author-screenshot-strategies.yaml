@@ -19,8 +19,8 @@ setup:
 directive: |
   This is a synthetic strategy-authoring acceptance test. Use Strategies MCP.
   Discover strategy_catalog and its generic rules syntax. Validate and save
-  exactly these three engine=rules strategies, in this order, using the complete
-  matching catalog definition objects exactly, without rearranging their expression
+  exactly these three rule strategies, in this order, using the complete
+  matching catalog rule_presets definition objects exactly, without rearranging their expression
   trees. Copy only each preset.definition, never put its id/name/description or
   simulation fields into program. Do not change the numerical trading rules:
 
@@ -35,7 +35,7 @@ directive: |
      18:00 flatten/cancel, $100 fixed stop risk.
 
   Validate each complete definition before creating it. Fetch each saved
-  strategy and confirm its engine and program. Use returned IDs.
+  strategy and confirm its program and symbols. Use returned IDs.
   Finally update the Donchian definition by adding initial.agent_revision=1,
   preserving the complete original program, and fetch it to verify version 2.
   Leave ATR and Session at version 1. Keep all strategies in draft status.
@@ -71,8 +71,8 @@ assert:
     expect_field_at: strategy.definition.program.initial.agent_revision
     expect_field_eq: 1
   - http: GET /api/apps/strategies/strategies/1
-    expect_field_at: strategy.definition.engine
-    expect_field_eq: rules
+    expect_field_at: strategy.definition.program.symbols.0
+    expect_field_eq: XAUUSD
   - http: GET /api/apps/strategies/strategies/2
     expect_field_at: strategy.definition.program.rules.0.when.args.1.args.0.args.1.args.1.period
     expect_field_eq: 200

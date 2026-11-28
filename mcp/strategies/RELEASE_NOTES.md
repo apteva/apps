@@ -1,3 +1,54 @@
+# Strategies v0.3.0
+
+One rules engine for backtests, validation and live runs. Every strategy is
+now a `trading-rules/1` program; the allocation engine is gone. Requires
+Trading 0.20.0.
+
+- **One format.** A definition is `{"program": {...}}`. A program trades
+  1–500 `symbols`; its symbols and timeframe are the strategy's universe and
+  cadence. Rules can name a symbol, run `for_each` symbol, or read
+  cross-sectional operators (`cs_rank`, `cs_zscore`, `cs_demean`, `cs_count`,
+  `top`, `bottom`, `quantile`). New metrics: `correlation`, `beta`,
+  `day_of_month`, `month`. New operators: `sign`, `log`, `exp`, `sqrt`,
+  `clamp`, `if`.
+- **Target books.** The `target` action holds a signed weight per symbol,
+  normalized as long/short legs, to a gross, or as given, with per-symbol
+  and gross caps and a turnover band. It replaces allocation rules.
+- **Shorts in backtests.** `simulation.shorts` enables spot shorts. Short
+  proceeds go to cash and borrow accrues (25 bps a year by default, with
+  per-symbol overrides). Reg T margin is 50% initial and 30% maintenance,
+  with forced covers. Short metrics come separately: long/short exposure,
+  long/short P&L, borrow cost and margin calls.
+- **Presets** for the research strategies: trend rotation, forecast decile
+  spread, volatility-scaled time-series momentum, factor momentum, news
+  sentiment and KO/PEP pairs. Long/short presets carry the shorts
+  configuration they assume.
+- **Live runs use the same engine.** Each closed bar is evaluated with the
+  portfolio's cash, positions and marks. Variables and latches persist per
+  assignment (migration 030, `strategy_rule_state`). Live runs still refuse:
+  - shorts and protective stops, targets and trails;
+  - limit and stop entries;
+  - features;
+  - triggers other than `bar.close`.
+
+  Validation flags these programs "Backtest only".
+- **Captured backtests for any program.** The captured backtest path builds
+  the rule tape from captured history at the program timeframe. Bars for
+  symbols the program doesn't trade are dropped. US-equity daily bars complete
+  at the session close.
+- **Fixes:**
+  - The validation crash scenario now scales the whole OHLC bar.
+  - The feature-delay scenario moves only feature events.
+  - Resumed validation runs keep their warmup.
+- **Scale.** A 500-symbol × 2,500-bar cross-sectional backtest runs in about
+  17 s. Candles aren't checkpointed: they're rebuilt from the tape. Resolved
+  orders are pruned.
+
+Breaking: definitions in the old allocation format (`universe`, `rules` with
+`when`/`rank`/`allocate`, `risk`, `rebalance_every`) and `engine: rules`
+wrappers no longer validate. Recreate them as programs. The catalog presets
+cover the old templates.
+
 # Strategies v0.2.2
 
 - Remove three symlinked scenario aliases (`scenarios/05`–`07`) left by the

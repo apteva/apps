@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -19,10 +20,7 @@ func createRuleEventBacktest(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy,
 	if err != nil {
 		return nil, err
 	}
-	if def.Engine != "rules" {
-		return nil, errors.New("complete event tapes require engine=rules")
-	}
-	config := sim.Config{Seed: 1, StartingCash: startingCash, Costs: sim.Costs{QtyStep: 0.0001}, BenchmarkSymbol: def.Program.Symbol, NotifyFills: true}
+	config := sim.Config{Seed: 1, StartingCash: startingCash, Costs: sim.Costs{QtyStep: 0.0001}, BenchmarkSymbol: def.Universe[0], NotifyFills: true}
 	if options != nil {
 		config = *options
 		config.StartingCash = startingCash
@@ -31,18 +29,21 @@ func createRuleEventBacktest(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy,
 	if config.StartingCash <= 0 {
 		config.StartingCash = pf.StartingCash
 	}
+	config.PruneResolved = true
 	if config.BenchmarkSymbol == "" {
-		config.BenchmarkSymbol = def.Program.Symbol
+		config.BenchmarkSymbol = def.Universe[0]
 	}
-	if config.BenchmarkSymbol != def.Program.Symbol {
-		return nil, errors.New("rule benchmark must be the program instrument")
+	if !contains(def.Universe, config.BenchmarkSymbol) {
+		return nil, errors.New("benchmark must be one of the program symbols")
 	}
 	_, policy, err := captureReplayPolicy(ctx, pf.ProjectID, pf.ID, def.Universe)
 	if err != nil {
 		return nil, err
 	}
-	if !policy.Allowed[def.Program.Symbol] {
-		return nil, errors.New("program instrument is excluded by the portfolio universe")
+	for _, symbol := range def.Universe {
+		if !policy.Allowed[symbol] {
+			return nil, fmt.Errorf("program symbol %s is excluded by the portfolio universe", symbol)
+		}
 	}
 	risk := policy.Risk
 	config.Risk = sim.RiskLimits{MaxOrderPct: risk.MaxOrderPct, MaxPositionPct: risk.MaxPositionPct, MaxGrossExposurePct: risk.MaxGrossExposurePct, MaxDailyLossPct: risk.MaxDailyLossPct, MaxDrawdownPct: risk.MaxDrawdownPct}

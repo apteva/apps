@@ -1,7 +1,6 @@
 package ruleengine
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -32,74 +31,17 @@ type windowState struct {
 	Complete bool      `json:"complete"`
 	Valid    bool      `json:"valid"`
 }
+
+// Runtime is one symbol's candle state, or a program's variables and fired
+// triggers. It is derived from the tape and never serialized whole.
 type Runtime struct {
-	limits       map[string]int
-	location     *time.Location
-	cacheEnabled bool
-	encodedBars  map[string]json.RawMessage
-	Bars         map[string][]Candle    `json:"bars"`
-	Aggregates   map[string]aggregate   `json:"aggregates"`
-	Windows      map[string]windowState `json:"windows"`
-	Variables    map[string]float64     `json:"variables"`
-	Fired        map[string]string      `json:"fired"`
-}
-
-// Compiled evaluators own their runtime and invalidate a frame on append.
-// Preserve the public checkpoint format while reusing unchanged higher-frame
-// JSON during minute signals. Ordinary Runtime values use uncached encoding.
-func (r *Runtime) MarshalJSON() ([]byte, error) {
-	return r.marshalCheckpoint()
-}
-
-func (r *Runtime) marshalCheckpoint() ([]byte, error) {
-	if !r.cacheEnabled {
-		type plain Runtime
-		return json.Marshal((*plain)(r))
-	}
-	if r.encodedBars == nil {
-		r.encodedBars = map[string]json.RawMessage{}
-	}
-	for frame, bars := range r.Bars {
-		if _, ok := r.encodedBars[frame]; !ok {
-			raw, err := json.Marshal(bars)
-			if err != nil {
-				return nil, err
-			}
-			r.encodedBars[frame] = raw
-		}
-	}
-	rest, err := json.Marshal(struct {
-		Aggregates map[string]aggregate   `json:"aggregates"`
-		Windows    map[string]windowState `json:"windows"`
-		Variables  map[string]float64     `json:"variables"`
-		Fired      map[string]string      `json:"fired"`
-	}{r.Aggregates, r.Windows, r.Variables, r.Fired})
-	if err != nil {
-		return nil, err
-	}
-	frames := make([]string, 0, len(r.Bars))
-	size := len(rest) + 16
-	for frame := range r.Bars {
-		frames = append(frames, frame)
-		size += len(r.encodedBars[frame]) + len(frame) + 4
-	}
-	sort.Strings(frames)
-	// Every reused fragment was produced by encoding/json. Concatenate those
-	// trusted fragments directly instead of validating all hourly history again.
-	out := make([]byte, 0, size)
-	out = append(out, `{"bars":{`...)
-	for i, frame := range frames {
-		if i > 0 {
-			out = append(out, ',')
-		}
-		key, _ := json.Marshal(frame)
-		out = append(out, key...)
-		out = append(out, ':')
-		out = append(out, r.encodedBars[frame]...)
-	}
-	out = append(out, '}', ',')
-	out = append(out, rest[1:]...)
-	return out, nil
+	limits     map[string]int
+	location   *time.Location
+	Bars       map[string][]Candle    `json:"bars"`
+	Aggregates map[string]aggregate   `json:"aggregates"`
+	Windows    map[string]windowState `json:"windows"`
+	Variables  map[string]float64     `json:"variables"`
+	Fired      map[string]string      `json:"fired"`
 }
 
 func (r *Runtime) timezone(p *Program) *time.Location {
@@ -131,7 +73,6 @@ func (r *Runtime) append(frame string, c Candle) {
 		h = h[len(h)-limit:]
 	}
 	r.Bars[frame] = h
-	delete(r.encodedBars, frame)
 }
 
 // Retain only the observations that the declared expression graph can read.
@@ -168,7 +109,7 @@ func historyLimits(p *Program) map[string]int {
 			}
 		}
 		for _, action := range rule.Actions {
-			for _, expr := range []*Expr{action.Price, action.Stop, action.Target, action.Value} {
+			for _, expr := range []*Expr{action.Price, action.Stop, action.Target, action.Value, action.Weight} {
 				if expr != nil {
 					visit(*expr)
 				}
@@ -204,7 +145,7 @@ func frames(p *Program) map[string]bool {
 			}
 		}
 		for _, a := range rule.Actions {
-			for _, e := range []*Expr{a.Price, a.Stop, a.Target, a.Value} {
+			for _, e := range []*Expr{a.Price, a.Stop, a.Target, a.Value, a.Weight} {
 				if e != nil {
 					visit(*e)
 				}
@@ -213,9 +154,9 @@ func frames(p *Program) map[string]bool {
 	}
 	return out
 }
-func (r *Runtime) observe(p *Program, in sim.Input) (map[string]bool, error) {
+func (r *Runtime) observe(p *Program, symbol string, in sim.Input) (map[string]bool, error) {
 	closed := map[string]bool{}
-	if in.Type != "market.bar.close" || in.Symbol != p.Symbol {
+	if in.Type != "market.bar.close" || in.Symbol != symbol {
 		return closed, nil
 	}
 	frame := in.Metadata["timeframe"]
@@ -229,7 +170,12 @@ func (r *Runtime) observe(p *Program, in sim.Input) (map[string]bool, error) {
 	}
 	d, _ := duration(frame)
 	c := Candle{At: in.EventTime, Open: in.Data["open"], High: in.Data["high"], Low: in.Data["low"], Close: in.Data["price"], Volume: in.Data["volume"]}
-	if c.Open <= 0 || c.Low <= 0 || c.High < math.Max(c.Open, c.Close) || c.Low > math.Min(c.Open, c.Close) || in.AvailableAt.Before(c.At.Add(d)) {
+	closesAt := c.At.Add(d)
+	// A session (US equities) can end a candle before its interval does.
+	if t, err := time.Parse(time.RFC3339, in.Metadata[SessionCloseKey]); err == nil && t.After(c.At) && t.Before(closesAt) {
+		closesAt = t
+	}
+	if c.Open <= 0 || c.Low <= 0 || c.High < math.Max(c.Open, c.Close) || c.Low > math.Min(c.Open, c.Close) || in.AvailableAt.Before(closesAt) {
 		return nil, errors.New("rule candles require complete valid OHLC and availability at/after candle close")
 	}
 	h := r.Bars[frame]
@@ -299,11 +245,131 @@ func (r *Runtime) observe(p *Program, in sim.Input) (map[string]bool, error) {
 
 type context struct {
 	program *Program
-	runtime *Runtime
+	runtime *Runtime // variables and fired triggers
+	series  map[string]*Runtime
+	symbol  string
+	memo    map[*Expr]map[string]float64
 	state   *sim.State
 	config  sim.Config
 	lag     int
 	cutoff  time.Time
+}
+
+// bars returns the candle state of the current symbol.
+func (c context) bars() (*Runtime, error) {
+	if c.symbol == "" && len(c.program.Symbols) == 1 {
+		c.symbol = c.program.Symbols[0]
+	}
+	if c.symbol == "" {
+		return nil, errors.New("metric needs a symbol outside for_each rules")
+	}
+	r := c.series[c.symbol]
+	if r == nil {
+		return nil, ErrUnavailable
+	}
+	return r, nil
+}
+
+// crossSection evaluates arg for every program symbol at this moment. A
+// symbol whose value is unavailable is left out. Results are memoized for the
+// current event; set actions clear the memo.
+func (c context) crossSection(arg *Expr) (map[string]float64, []string, error) {
+	values, ok := c.memo[arg]
+	if !ok {
+		values = map[string]float64{}
+		for _, symbol := range ProgramSymbols(c.program) {
+			x := c
+			x.symbol = symbol
+			v, err := x.eval(*arg, 0)
+			if errors.Is(err, ErrUnavailable) {
+				continue
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			values[symbol] = v
+		}
+		if c.memo != nil {
+			c.memo[arg] = values
+		}
+	}
+	symbols := make([]string, 0, len(values))
+	for symbol := range values {
+		symbols = append(symbols, symbol)
+	}
+	// Ascending by value; ties go to symbol order.
+	sort.Slice(symbols, func(i, j int) bool {
+		a, b := values[symbols[i]], values[symbols[j]]
+		if a != b {
+			return a < b
+		}
+		return symbols[i] < symbols[j]
+	})
+	return values, symbols, nil
+}
+
+func (c context) crossSectional(e Expr) (float64, error) {
+	values, order, err := c.crossSection(&e.Args[0])
+	if err != nil {
+		return 0, err
+	}
+	if e.Op == "cs_count" {
+		n := 0
+		for _, v := range values {
+			if v != 0 {
+				n++
+			}
+		}
+		return float64(n), nil
+	}
+	own, ok := values[c.symbol]
+	if !ok {
+		return 0, ErrUnavailable
+	}
+	n := len(order)
+	index := 0
+	for i, symbol := range order {
+		if symbol == c.symbol {
+			index = i
+		}
+	}
+	switch e.Op {
+	case "cs_rank":
+		if n == 1 {
+			return 0.5, nil
+		}
+		return float64(index) / float64(n-1), nil
+	case "cs_zscore", "cs_demean":
+		mean := 0.0
+		for _, v := range values {
+			mean += v
+		}
+		mean /= float64(n)
+		if e.Op == "cs_demean" {
+			return own - mean, nil
+		}
+		variance := 0.0
+		for _, v := range values {
+			variance += (v - mean) * (v - mean)
+		}
+		sd := math.Sqrt(variance / float64(n))
+		if sd == 0 {
+			return 0, nil
+		}
+		return (own - mean) / sd, nil
+	case "top", "bottom":
+		// One total order (value, then symbol), so top and bottom never share
+		// a symbol while n leaves room for both.
+		k := int(*e.Args[1].Value)
+		if e.Op == "bottom" {
+			return truth(index < k), nil
+		}
+		return truth(index >= n-k), nil
+	case "quantile":
+		q := *e.Args[1].Value
+		return math.Min(q-1, math.Floor(float64(index)*q/float64(n))), nil
+	}
+	return 0, errors.New("unknown cross-sectional operator")
 }
 
 var ErrUnavailable = errors.New("calculation data unavailable")
@@ -324,6 +390,19 @@ func (c context) eval(e Expr, depth int) (float64, error) {
 	if e.Metric != "" {
 		return c.metric(e)
 	}
+	if csOp(e.Op) {
+		return c.crossSectional(e)
+	}
+	if e.Op == "if" {
+		cond, err := c.eval(e.Args[0], depth+1)
+		if err != nil {
+			return 0, err
+		}
+		if cond != 0 {
+			return c.eval(e.Args[1], depth+1)
+		}
+		return c.eval(e.Args[2], depth+1)
+	}
 	if e.Op == "crosses_above" || e.Op == "crosses_below" {
 		lhs, err := c.eval(e.Args[0], depth+1)
 		if err != nil {
@@ -333,7 +412,11 @@ func (c context) eval(e Expr, depth int) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		baseHistory := c.runtime.Bars[c.program.Timeframe]
+		base, err := c.crossBars()
+		if err != nil {
+			return 0, err
+		}
+		baseHistory := base.Bars[c.program.Timeframe]
 		if len(baseHistory) < 2 {
 			return 0, ErrUnavailable
 		}
@@ -359,8 +442,40 @@ func (c context) eval(e Expr, depth int) (float64, error) {
 	if e.Op == "not" {
 		return truth(a == 0), nil
 	}
-	if e.Op == "abs" {
+	switch e.Op {
+	case "abs":
 		return math.Abs(a), nil
+	case "sign":
+		return math.Copysign(truth(a != 0), a), nil
+	case "log":
+		if a <= 0 {
+			return 0, ErrUnavailable
+		}
+		return math.Log(a), nil
+	case "sqrt":
+		if a < 0 {
+			return 0, ErrUnavailable
+		}
+		return math.Sqrt(a), nil
+	case "exp":
+		v := math.Exp(a)
+		if !finite(v) {
+			return 0, errors.New("nonfinite expression result")
+		}
+		return v, nil
+	case "clamp":
+		lo, err := c.eval(e.Args[1], depth+1)
+		if err != nil {
+			return 0, err
+		}
+		hi, err := c.eval(e.Args[2], depth+1)
+		if err != nil {
+			return 0, err
+		}
+		if lo > hi {
+			return 0, errors.New("clamp lower bound exceeds upper bound")
+		}
+		return math.Max(lo, math.Min(hi, a)), nil
 	}
 	// Short circuit guards (window_complete, flat, etc.) deliberately avoid
 	// evaluating indicators with missing warmup on the inactive branch.
@@ -427,12 +542,24 @@ func truth(b bool) float64 {
 	return 0
 }
 func (c context) metric(e Expr) (float64, error) {
-	p, r, s := c.program, c.runtime, c.state
-	loc := r.timezone(p)
+	p, s := c.program, c.state
+	if e.Symbol != "" {
+		c.symbol = e.Symbol
+	} else if c.symbol == "" && len(p.Symbols) == 1 {
+		c.symbol = p.Symbols[0]
+	}
+	loc := c.runtime.timezone(p)
 	local := s.Now.In(loc)
 	switch e.Metric {
+	case "minute", "weekday", "day_of_month", "month", "equity":
+	default:
+		if c.symbol == "" && e.Input == nil {
+			return 0, errors.New("metric needs a symbol outside for_each rules")
+		}
+	}
+	switch e.Metric {
 	case "feature":
-		fields, ok := s.Features[p.Symbol+"/"+e.Feature]
+		fields, ok := s.Features[c.symbol+"/"+e.Feature]
 		if !ok {
 			return 0, ErrUnavailable
 		}
@@ -442,28 +569,36 @@ func (c context) metric(e Expr) (float64, error) {
 		}
 		return v, nil
 	case "price":
-		return s.Quotes[p.Symbol].Price, nil
+		return s.Quotes[c.symbol].Price, nil
 	case "bid":
-		return s.Quotes[p.Symbol].Bid, nil
+		return s.Quotes[c.symbol].Bid, nil
 	case "ask":
-		return s.Quotes[p.Symbol].Ask, nil
+		return s.Quotes[c.symbol].Ask, nil
 	case "position_qty":
-		return s.Positions[p.Symbol].Qty, nil
+		return s.Positions[c.symbol].Qty, nil
 	case "minute":
 		return float64(local.Hour()*60 + local.Minute()), nil
 	case "weekday":
 		return float64(local.Weekday()), nil
+	case "day_of_month":
+		return float64(local.Day()), nil
+	case "month":
+		return float64(local.Month()), nil
 	case "equity":
 		return sim.Equity(c.config, s), nil
 	case "entry_count":
 		count := 0
 		for _, o := range s.Orders {
-			if o.Symbol == p.Symbol && !o.ReduceOnly && o.ParentID == "" && !o.FirstFillAt.IsZero() && o.FirstFillAt.In(loc).Format("2006-01-02") == local.Format("2006-01-02") {
+			if o.Symbol == c.symbol && !o.ReduceOnly && o.ParentID == "" && !o.FirstFillAt.IsZero() && o.FirstFillAt.In(loc).Format("2006-01-02") == local.Format("2006-01-02") {
 				count++
 			}
 		}
 		return float64(count), nil
 	case "window_high", "window_low", "window_complete":
+		r, err := c.bars()
+		if err != nil {
+			return 0, err
+		}
 		w := r.Windows[e.Window]
 		if w.Day != local.Format("2006-01-02") {
 			if e.Metric == "window_complete" {
@@ -518,24 +653,13 @@ func (c context) metric(e Expr) (float64, error) {
 		}
 		return math.Sqrt(variance / float64(n)), nil
 	}
-	frame := e.Timeframe
-	if frame == "" {
-		frame = p.Timeframe
+	if e.Metric == "correlation" || e.Metric == "beta" {
+		return c.comovement(e)
 	}
-	h := r.Bars[frame]
-	if !c.cutoff.IsZero() {
-		d, _ := duration(frame)
-		end := len(h)
-		for end > 0 && h[end-1].At.Add(d).After(c.cutoff) {
-			end--
-		}
-		h = h[:end]
+	h, err := c.history(e)
+	if err != nil {
+		return 0, err
 	}
-	offset := e.Offset + c.lag
-	if len(h) <= offset {
-		return 0, ErrUnavailable
-	}
-	h = h[:len(h)-offset]
 	last := h[len(h)-1]
 	switch e.Metric {
 	case "open":
@@ -658,4 +782,90 @@ func (c context) metric(e Expr) (float64, error) {
 		return 100 - 100/(1+a/b), nil
 	}
 	return 0, fmt.Errorf("unknown metric %s", e.Metric)
+}
+
+// history is the current symbol's candle series for e's frame, cut at the
+// crossover cutoff and shifted by offset and lag. It is never empty.
+func (c context) history(e Expr) ([]Candle, error) {
+	r, err := c.bars()
+	if err != nil {
+		return nil, err
+	}
+	frame := e.Timeframe
+	if frame == "" {
+		frame = c.program.Timeframe
+	}
+	h := r.Bars[frame]
+	if !c.cutoff.IsZero() {
+		d, _ := duration(frame)
+		end := len(h)
+		for end > 0 && h[end-1].At.Add(d).After(c.cutoff) {
+			end--
+		}
+		h = h[:end]
+	}
+	offset := e.Offset + c.lag
+	if len(h) <= offset {
+		return nil, ErrUnavailable
+	}
+	return h[:len(h)-offset], nil
+}
+
+// crossBars picks the series whose base candles define a crossover's previous
+// moment: the current symbol, or outside for_each the first symbol with data.
+func (c context) crossBars() (*Runtime, error) {
+	if c.symbol != "" || len(c.program.Symbols) == 1 {
+		return c.bars()
+	}
+	for _, symbol := range ProgramSymbols(c.program) {
+		if r := c.series[symbol]; r != nil && len(r.Bars[c.program.Timeframe]) >= 2 {
+			return r, nil
+		}
+	}
+	return nil, ErrUnavailable
+}
+
+// comovement is the rolling correlation, or beta against e.Against, of
+// close-to-close log returns over e.Period candles. Both series must share
+// the same candle timestamps over the window.
+func (c context) comovement(e Expr) (float64, error) {
+	a, err := c.history(e)
+	if err != nil {
+		return 0, err
+	}
+	other := c
+	other.symbol = e.Against
+	b, err := other.history(e)
+	if err != nil {
+		return 0, err
+	}
+	n := e.Period
+	if len(a) < n+1 || len(b) < n+1 {
+		return 0, ErrUnavailable
+	}
+	a, b = a[len(a)-n-1:], b[len(b)-n-1:]
+	x, y := make([]float64, n), make([]float64, n)
+	mx, my := 0.0, 0.0
+	for i := 0; i < n; i++ {
+		if !a[i+1].At.Equal(b[i+1].At) || !a[i].At.Equal(b[i].At) {
+			return 0, ErrUnavailable
+		}
+		x[i] = math.Log(a[i+1].Close / a[i].Close)
+		y[i] = math.Log(b[i+1].Close / b[i].Close)
+		mx += x[i] / float64(n)
+		my += y[i] / float64(n)
+	}
+	cov, vx, vy := 0.0, 0.0, 0.0
+	for i := 0; i < n; i++ {
+		cov += (x[i] - mx) * (y[i] - my)
+		vx += (x[i] - mx) * (x[i] - mx)
+		vy += (y[i] - my) * (y[i] - my)
+	}
+	if vy == 0 || e.Metric == "correlation" && vx == 0 {
+		return 0, ErrUnavailable
+	}
+	if e.Metric == "beta" {
+		return cov / vy, nil
+	}
+	return cov / math.Sqrt(vx*vy), nil
 }

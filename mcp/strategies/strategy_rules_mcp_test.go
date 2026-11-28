@@ -54,7 +54,7 @@ func TestRuleMCPAgentWorkflow(t *testing.T) {
 	ctx := newTestCtx(t)
 	catalog := callRuleMCP(t, ctx, "strategy_catalog", map[string]any{})
 	engine := catalog["rule_engine"].(map[string]any)
-	if engine["authoring"] == nil || engine["mcp_workflow"] == nil || engine["live_assignment_supported"] != false {
+	if engine["authoring"] == nil || engine["mcp_workflow"] == nil || engine["live_assignment_supported"] != true {
 		t.Fatal("agent discovery lacks authoring guidance or execution limits")
 	}
 	presets := catalog["rule_presets"].([]any)
@@ -72,7 +72,7 @@ func TestRuleMCPAgentWorkflow(t *testing.T) {
 		}
 		created := callRuleMCP(t, ctx, "strategy_create", map[string]any{"name": preset["name"], "definition": definition})["strategy"].(map[string]any)
 		id := created["id"].(float64)
-		if created["version"] != float64(1) || created["definition"].(map[string]any)["engine"] != "rules" {
+		if created["version"] != float64(1) || created["definition"].(map[string]any)["program"] == nil {
 			t.Fatal("rule program was not saved correctly")
 		}
 		definition["program"].(map[string]any)["initial"] = map[string]any{"agent_revision": 1}

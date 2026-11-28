@@ -112,7 +112,7 @@ Example walk-forward strategy grid:
     "expanding": false,
     "selection_metric": "return_pct",
     "parameter_grid": {
-      "rules.0.allocate.0.weight": [0.05, 0.1, 0.2]
+      "program.rules.0.actions.0.weight.value": [0.05, 0.1, 0.2]
     }
   }
 }

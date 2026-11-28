@@ -75,9 +75,13 @@ func run() error {
 	}
 	sources := map[string]bool{}
 	synthetic := false
+	allowed := map[string]bool{}
+	for _, s := range program.Symbols {
+		allowed[s] = true
+	}
 	for _, in := range tape {
 		if in.Type == "market.quote" || in.Type == "market.bar.close" {
-			if in.Symbol != program.Symbol || in.Source == "" {
+			if !allowed[in.Symbol] || in.Source == "" {
 				return errors.New("market events require program symbol and explicit source")
 			}
 			sources[in.Source] = true
@@ -125,7 +129,7 @@ func run() error {
 	if synthetic {
 		dataClass = "synthetic_acceptance"
 	}
-	result := map[string]any{"schema": "apteva.rule-proof/v1", "data_class": dataClass, "declared_sources": names, "engine_version": sim.Version, "rule_version": rules.Version, "execution_source_sha256": sim.SourceHash(), "rule_source_sha256": rules.SourceHash(), "program_sha256": sim.Hash(program), "definition": map[string]any{"engine": "rules", "universe": []string{program.Symbol}, "cadence": program.Timeframe, "program": program}, "simulation": config, "inputs": engine.Inputs, "input_sha256": sim.Hash(engine.Inputs), "outputs": outputs, "output_sha256": sim.Hash(outputs), "metrics": engine.Metrics(), "filled_entries": entries, "terminal_state": engine.State, "execution_notes": "Only observed quotes supply fills. Native OCO cancellation and linear contract accounting are simulation models. Fixed currency conversion; no financing or automatic margin liquidation. Supplied source labels are not independently verified."}
+	result := map[string]any{"schema": "apteva.rule-proof/v1", "data_class": dataClass, "declared_sources": names, "engine_version": sim.Version, "rule_version": rules.Version, "execution_source_sha256": sim.SourceHash(), "rule_source_sha256": rules.SourceHash(), "program_sha256": sim.Hash(program), "definition": map[string]any{"program": program}, "simulation": config, "inputs": engine.Inputs, "input_sha256": sim.Hash(engine.Inputs), "outputs": outputs, "output_sha256": sim.Hash(outputs), "metrics": engine.Metrics(), "filled_entries": entries, "terminal_state": engine.State, "execution_notes": "Only observed quotes supply fills. Native OCO cancellation and linear contract accounting are simulation models. Fixed currency conversion; no financing or automatic margin liquidation. Supplied source labels are not independently verified."}
 	raw, err = json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return err

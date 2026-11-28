@@ -11,13 +11,18 @@ import (
 // never trades, invokes an agent, contributes returns, or starts the benchmark.
 func newSimulationEngine(r *simulationRecord, strategy sim.Strategy) (*sim.Engine, error) {
 	e, err := sim.New(r.Spec.Config, r.Inputs, r.State, strategy)
-	if err != nil || r.State != nil || len(r.Spec.WarmupInputs) == 0 {
-		return e, err
+	if err != nil {
+		return nil, err
+	}
+	// Rule checkpoints rebuild candles from the warmup plus the tape.
+	e.State.Warmup = r.Spec.WarmupInputs
+	if r.State != nil || len(r.Spec.WarmupInputs) == 0 {
+		return e, nil
 	}
 	var observe sim.Strategy
 	if r.Spec.DecisionMode != "agent" {
 		evaluate := simulationStrategy(r.Spec)
-		if def, _, err := validateStrategyDefinition(r.Spec.Strategy); err == nil && def.Engine == "rules" {
+		if def, _, err := validateStrategyDefinition(r.Spec.Strategy); err == nil {
 			observe, err = rules.ObserveOnly(def.Program)
 			if err != nil {
 				return nil, err

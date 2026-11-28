@@ -10,7 +10,7 @@ afterEach(async () => { if (root) await act(async () => root.unmount()); contain
 test("rule builder edits indicators, rearming and monetary risk in the portable definition", async () => {
  let latest: any;
  function Harness() {
-  const [program, setProgram] = useState<any>({version:"trading-rules/1",symbol:"XAUUSD",timeframe:"1m",timezone:"UTC",rules:[]});
+  const [program, setProgram] = useState<any>({version:"trading-rules/1",symbols:["XAUUSD"],timeframe:"1m",timezone:"UTC",rules:[]});
   latest = program;
   return <RuleProgramEditor program={program} onChange={setProgram} />;
  }
@@ -37,4 +37,29 @@ test("rule builder edits indicators, rearming and monetary risk in the portable 
  await click("Add session window"); await click("Add clock schedule");
  expect(latest.windows.window_1).toEqual({start:"08:00",end:"11:00"});
  expect(latest.schedules.clock_1).toBe("18:00");
+});
+
+test("rule builder authors a multi-symbol target book", async () => {
+ let latest: any;
+ function Harness() {
+  const [program, setProgram] = useState<any>({version:"trading-rules/1",symbols:["SPY"],timeframe:"1d",timezone:"UTC",rules:[{id:"book",on:"bar.close",actions:[{kind:"enter",side:"buy",sizing:{mode:"quantity",amount:1}}]}]});
+  latest = program;
+  return <RuleProgramEditor program={program} onChange={setProgram} />;
+ }
+ container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+ await act(async () => root.render(<Harness />));
+ const change = async (label: string, value: string) => act(async () => {
+  const element = container.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
+  const proto = element.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto,"value")!.set!.call(element, value);
+  element.dispatchEvent(new window.Event(element.tagName === "SELECT" ? "change" : "input", {bubbles:true}));
+ });
+ await change("Program symbols", "spy, qqq tlt");
+ expect(latest.symbols).toEqual(["SPY", "QQQ", "TLT"]);
+ await change("Action kind", "target");
+ await change("Expression kind", "operation");
+ await change("Operator", "top");
+ expect(latest.rules[0].actions[0].weight).toEqual({op:"top",args:[{metric:"close"},{value:1}]});
+ await change("Target normalize", "none");
+ expect(latest.rules[0].actions[0].construct.normalize).toBe("none");
 });

@@ -10,7 +10,7 @@ import (
 )
 
 func testProgram() *Program {
-	return &Program{Version: Version, Symbol: "TEST", Timeframe: "1m", Timezone: "Europe/Helsinki", Rules: []Rule{{ID: "noop", On: "bar.close", When: ptr(Number(0)), Actions: []Action{{Kind: "cancel"}}}}}
+	return &Program{Version: Version, Symbols: []string{"TEST"}, Timeframe: "1m", Timezone: "Europe/Helsinki", Rules: []Rule{{ID: "noop", On: "bar.close", When: ptr(Number(0)), Actions: []Action{{Kind: "cancel"}}}}}
 }
 func ptr(e Expr) *Expr { return &e }
 func candle(at time.Time, o, h, l, c float64) sim.Input {
@@ -49,7 +49,7 @@ func ptrFloat(v float64) *float64 { return &v }
 
 func TestLogicalListsAndShortCircuitAvailability(t *testing.T) {
 	p := testProgram()
-	c := context{program: p, runtime: newRuntime(p), state: state()}
+	c := context{program: p, runtime: newRuntime(p), series: map[string]*Runtime{"TEST": newRuntime(p)}, state: state()}
 	missing := Expr{Metric: "sma", Period: 20}
 	for _, tc := range []struct {
 		expr Expr
@@ -137,45 +137,31 @@ func TestRuleTapeRejectsExternalControlAndMissingLiquidity(t *testing.T) {
 func TestCompiledHistoryRetainsDeclaredOffsetsAndHigherFramePeriods(t *testing.T) {
 	p := testProgram()
 	p.Calculations = map[string]Expr{"upper": {Metric: "highest_high", Timeframe: "1h", Period: 175}, "past": {Metric: "close", Offset: 20}}
-	strategy, err := Strategy(p, sim.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := newMultiRuntime(p, historyLimits(p), time.UTC)
 	s := state()
 	start := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 181; i++ {
 		in := candle(start.Add(time.Duration(i-181)*time.Hour), 100, 101+float64(i), 99, 100)
 		in.Metadata["timeframe"] = "1h"
 		in.AvailableAt = in.EventTime.Add(time.Hour)
-		s.Now = in.AvailableAt
-		if _, err := strategy(s, in); err != nil {
+		if err := m.observe(p, in); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < 40; i++ {
 		in := candle(start.Add(time.Duration(i)*time.Minute), 100+float64(i), 101+float64(i), 99+float64(i), 100+float64(i))
 		s.Now = in.AvailableAt
-		if _, err := strategy(s, in); err != nil {
+		if err := m.observe(p, in); err != nil {
 			t.Fatal(err)
 		}
 	}
-	r := newRuntime(p)
-	if err := json.Unmarshal(s.StrategyState, r); err != nil {
-		t.Fatal(err)
-	}
+	r := m.series["TEST"]
 	if len(r.Bars["1m"]) != 23 || len(r.Bars["1h"]) != 177 {
-		t.Fatalf("unnecessary checkpoint history retained: minute=%d hour=%d", len(r.Bars["1m"]), len(r.Bars["1h"]))
+		t.Fatalf("unnecessary history retained: minute=%d hour=%d", len(r.Bars["1m"]), len(r.Bars["1h"]))
 	}
-	c := context{program: p, runtime: r, state: s}
+	c := context{program: p, runtime: m.root, series: m.series, state: s}
 	if v, err := c.eval(Expr{Name: "past"}, 0); err != nil || v != 119 {
 		t.Fatalf("retained offset differs: %v %v", v, err)
-	}
-	before := string(s.StrategyState)
-	if _, err := strategy(s, sim.Input{Type: "market.quote", Symbol: "TEST", AvailableAt: s.Now}); err != nil {
-		t.Fatal(err)
-	}
-	if string(s.StrategyState) != before {
-		t.Fatal("unrelated quote rewrote a candle-only checkpoint")
 	}
 }
 
@@ -253,7 +239,7 @@ func TestOHLCAndHigherTimeframeAvailability(t *testing.T) {
 	start := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 60; i++ {
 		in := candle(start.Add(time.Duration(i)*time.Minute), 100, 101+float64(i), 99, 100)
-		closed, err := r.observe(p, in)
+		closed, err := r.observe(p, "TEST", in)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +248,7 @@ func TestOHLCAndHigherTimeframeAvailability(t *testing.T) {
 		}
 	}
 	s.Now = start.Add(time.Hour)
-	v, err := (context{program: p, runtime: r, state: s}).eval(Expr{Name: "channel"}, 0)
+	v, err := (context{program: p, runtime: r, series: map[string]*Runtime{"TEST": r}, state: s}).eval(Expr{Name: "channel"}, 0)
 	if err != nil || v != 160 {
 		t.Fatalf("hourly high=%v err=%v", v, err)
 	}
@@ -271,7 +257,7 @@ func TestOHLCAndHigherTimeframeAvailability(t *testing.T) {
 		if i == 20 {
 			continue
 		}
-		_, err := incomplete.observe(p, candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100))
+		_, err := incomplete.observe(p, "TEST", candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -281,7 +267,7 @@ func TestOHLCAndHigherTimeframeAvailability(t *testing.T) {
 	}
 	early := candle(start, 100, 101, 99, 100)
 	early.AvailableAt = start
-	if _, err := r.observe(p, early); err == nil {
+	if _, err := r.observe(p, "TEST", early); err == nil {
 		t.Fatal("forming input accepted")
 	}
 }
@@ -295,7 +281,7 @@ func TestSessionWindowsAndDSTSchedules(t *testing.T) {
 		start := day.Add(8 * time.Hour)
 		r := newRuntime(p)
 		for i := 0; i < 180; i++ {
-			if _, err := r.observe(p, candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100)); err != nil {
+			if _, err := r.observe(p, "TEST", candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -323,51 +309,18 @@ func TestSessionWindowsAndDSTSchedules(t *testing.T) {
 		}
 		missing := newRuntime(p)
 		for i := 1; i < 180; i++ {
-			_, _ = missing.observe(p, candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100))
+			_, _ = missing.observe(p, "TEST", candle(start.Add(time.Duration(i)*time.Minute), 100, 101, 99, 100))
 		}
 		if missing.Windows["morning"].Complete {
 			t.Fatal("truncated session treated as complete")
 		}
 	}
 }
-func TestWarmupDoesNotConsumeLatches(t *testing.T) {
-	p := testProgram()
-	p.Initial = map[string]float64{"remembered": 0}
-	p.Rules = []Rule{{ID: "remember", On: "bar.close", Repeat: "until_reset", Reset: ptr(Number(0)), Actions: []Action{{Kind: "set", Name: "remembered", Value: ptr(Number(1))}}}}
-	observe, err := ObserveOnly(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := state()
-	in := candle(time.Unix(0, 0), 100, 101, 99, 100)
-	s.Now = in.AvailableAt
-	if _, err := observe(s, in); err != nil {
-		t.Fatal(err)
-	}
-	var r Runtime
-	_ = json.Unmarshal(s.StrategyState, &r)
-	if r.Variables["remembered"] != 0 || len(r.Fired) != 0 {
-		t.Fatal("warmup consumed an action")
-	}
-	live, err := Strategy(p, sim.Config{StartingCash: 1000})
-	if err != nil {
-		t.Fatal(err)
-	}
-	in = candle(time.Unix(60, 0), 100, 101, 99, 100)
-	s.Now = in.AvailableAt
-	if _, err := live(s, in); err != nil {
-		t.Fatal(err)
-	}
-	_ = json.Unmarshal(s.StrategyState, &r)
-	if r.Variables["remembered"] != 1 || len(r.Fired) != 1 {
-		t.Fatal("first active candle did not act")
-	}
-}
 func TestFlatCandleAndMissingWarmupDoNotInventValues(t *testing.T) {
 	p := testProgram()
 	r := newRuntime(p)
 	r.Bars["1m"] = []Candle{{Open: 100, High: 100, Low: 100, Close: 100}}
-	c := context{program: p, runtime: r, state: state()}
+	c := context{program: p, runtime: r, series: map[string]*Runtime{"TEST": r}, state: state()}
 	for _, e := range []Expr{{Metric: "close_fraction"}, {Metric: "atr", Period: 200}, Operation("/", Number(1), Number(0))} {
 		if _, err := c.eval(e, 0); err == nil {
 			t.Fatal("undefined expression accepted")
@@ -390,7 +343,7 @@ func TestNestedIndicatorsAndPastOnlyFeatures(t *testing.T) {
 		r.Bars["1m"] = append(r.Bars["1m"], Candle{At: time.Unix(int64(i*60), 0), Open: v, High: v + 1, Low: v - 1, Close: v})
 	}
 	s := state()
-	c := context{program: p, runtime: r, state: s}
+	c := context{program: p, runtime: r, series: map[string]*Runtime{"TEST": r}, state: s}
 	macd, err := c.eval(Expr{Name: "macd"}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +372,7 @@ func TestMixedTimeframeCrossoverUsesPreviousSignalAvailability(t *testing.T) {
 	r.Bars["1h"] = []Candle{{At: at.Add(-2 * time.Hour), High: 90, Low: 80, Close: 85}, {At: at.Add(-time.Hour), High: 110, Low: 90, Close: 100}}
 	r.Bars["1m"] = []Candle{{At: at, Close: 109}, {At: at.Add(time.Minute), Close: 111}}
 	expr := Operation("crosses_above", Expr{Metric: "close"}, Expr{Metric: "highest_high", Period: 1, Timeframe: "1h"})
-	c := context{program: p, runtime: r, state: state()}
+	c := context{program: p, runtime: r, series: map[string]*Runtime{"TEST": r}, state: state()}
 	v, err := c.eval(expr, 0)
 	if err != nil || v != 1 {
 		t.Fatalf("mixed-timeframe crossover: %v %v", v, err)

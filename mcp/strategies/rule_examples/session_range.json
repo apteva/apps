@@ -3,14 +3,11 @@
   "name": "Session range breakout",
   "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
   "definition": {
-    "engine": "rules",
-    "universe": [
-      "DE40"
-    ],
-    "cadence": "1m",
     "program": {
       "version": "trading-rules/1",
-      "symbol": "DE40",
+      "symbols": [
+        "DE40"
+      ],
       "timeframe": "1m",
       "timezone": "Europe/Helsinki",
       "windows": {

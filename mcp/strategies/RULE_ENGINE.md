@@ -1,10 +1,12 @@
-# Generic event-driven trading rules
+# The rules engine
 
-Trading retains the existing multi-asset allocation engine (EMA/SMA, RSI,
-MACD, Bollinger, ranking and target weights). Saved definitions can now select
-`engine: rules` to manage individual trades through `trading-rules/1` programs.
-The screenshot examples are ordinary JSON definitions in `rule_examples/`.
-The evaluator and execution engine contain no strategy-name or ticker branches.
+Every strategy is a `trading-rules/1` program. The same program, evaluator and
+simulator run event backtests, validation suites and live assignments. A
+program trades 1–500 symbols: single-instrument trade rules, per-symbol rules,
+pairs, and cross-sectional books that hold target weights (rotation, decile
+spreads, time-series momentum, factor momentum, sentiment). The catalog
+presets and the trade examples in `rule_examples/` are ordinary JSON programs;
+the evaluator and execution engine contain no strategy-name or ticker branches.
 
 ## Supported mechanics
 
@@ -24,22 +26,33 @@ The evaluator and execution engine contain no strategy-name or ticker branches.
 - Named, complete daily windows and deterministic IANA-timezone clock schedules.
 - Opt-in cash-settled linear contracts, long/short positions, multiplier,
   fixed currency conversion, margin checks and reduce-only exits.
+- Multi-symbol programs: `symbols` lists 1–500 instruments; expressions read the
+  rule's current symbol or name one (`{"metric":"close","symbol":"KO"}`); rules
+  with `for_each` run once per symbol. Correlation and beta against a named
+  symbol, calendar metrics (`day_of_month`, `month`), and scalar operators
+  `sign`, `log`, `exp`, `sqrt`, `clamp`, `if`.
+- Cross-sectional operators that evaluate an expression for every symbol at
+  the same moment: `cs_rank`, `cs_zscore`, `cs_demean`, `cs_count`, `top`,
+  `bottom`, `quantile`. Ties break by symbol; symbols without data drop out.
+- The `target` action: a signed weight per symbol, normalized as long and short
+  legs, to a gross, or as given; per-symbol and gross caps; a turnover band.
+  Closes and sales are ordered before buys. Working target orders that already
+  get within a tenth of their size of the new book are kept, not replaced.
+- Opt-in spot shorts (`simulation.shorts`): proceeds to cash, continuous borrow
+  fees (default 25 bps a year, per-symbol overrides), Reg T initial (50%) and
+  maintenance (30%) margin with forced covers, and unshortable symbols.
 
 ## Definition and expression syntax
 
-A saved strategy has `engine`, `universe`, `cadence`, and `program`. A program
-currently manages one instrument. Its symbol and base timeframe must match the
-strategy universe/cadence; separate programs can describe separate instruments.
-Existing multi-instrument allocation strategies remain available.
+A saved strategy definition is `{"program": {...}}`. The program's `symbols`
+and base `timeframe` are the strategy's universe and cadence; nothing else is
+stored. A one-symbol program needs no symbol on its expressions:
 
 ```json
 {
-  "engine": "rules",
-  "universe": ["EXAMPLE"],
-  "cadence": "1h",
   "program": {
     "version": "trading-rules/1",
-    "symbol": "EXAMPLE",
+    "symbols": ["EXAMPLE"],
     "timeframe": "1h",
     "timezone": "UTC",
     "rules": [{
@@ -172,8 +185,9 @@ Agents can author and manage these programs entirely through MCP:
 8. `strategy_update` saves a new definition version. Earlier backtests and
    scorecard evaluations retain the version and policy they actually tested.
 
-`strategy_evaluate` is an allocation-target tool, not historical performance
-evaluation for a trade program. Never label a synthetic fixture as historical
+`strategy_evaluate` previews what the program would do on the latest closed bar
+(target weights and orders, against a portfolio or a cash account); it is not
+historical performance evidence. Never label a synthetic fixture as historical
 or out-of-sample evidence; never weaken a scorecard to turn a loss into a pass.
 
 Tier 3 scenarios under `scenarios/strategies/` exercise real LLM authoring of
@@ -197,17 +211,35 @@ numeric precision and detecting changed contents.
 
 Save a program using the existing strategy API/MCP. `POST
 /portfolios/{id}/backtests` or MCP `strategy_backtest_create` accepts `strategy_id`,
-`inputs` (a complete event tape), and `simulation`. Rule programs with supplied
-market tapes bypass the equity/crypto history fetcher. Runs use the existing
+`simulation`, and either `start_at`/`end_at` (history is captured for the
+program symbols at the program timeframe; `inputs` may add feature events) or
+`inputs` as a complete sourced market tape, which bypasses the history fetcher.
+Captured US-equity daily bars complete at the session close. Runs use the existing
 background worker, event ledger, snapshots, pause/resume and result artifacts.
 Simulation settings preserve captured instrument specifications and schedules.
 
-The Strategies UI offers the rule examples, sourced-event file import, execution
-configuration, and backtest creation. A visual rule builder edits calculation trees, triggers, repeat/reset policies,
-actions, protection and sizing, and named windows/schedules. The advanced JSON
-editor exposes the same program. One-shot allocation
-evaluation, allocation validation and live assignment are disabled for rule
-programs rather than pretending to execute them through the allocation path.
+The Strategies UI offers the presets and trade examples, sourced-event file
+import, execution configuration, backtests, evaluation, validation and
+assignment. A visual rule builder edits symbols, per-symbol rules, calculation
+trees, triggers, repeat/reset policies, enter/target actions, protection and
+sizing, and named windows/schedules. The advanced JSON editor exposes the same
+program.
+
+## Live assignments
+
+A live assignment evaluates each newly closed bar of the program timeframe. It
+loads recent completed bars for every program symbol from Trading, replays them
+through the same evaluator for indicator history, and runs the latest moment
+with the portfolio's cash, positions and marks as account state (a symbol
+without a mark is priced at its latest close). Variables and fired latches
+persist per assignment in `strategy_rule_state`; candles are rebuilt from bars
+each time. Target books go through the existing paper rebalance; entries and
+flattens become revision-checked market orders.
+
+Until Trading supports them, live runs refuse programs that short (sell entries,
+`legs` books with a short leg, or a negative target weight at run time), use
+protective stops/targets/trails, place limit or stop entries, read features, or
+trigger on anything but `bar.close`. Validation warns "Backtest only" for these.
 
 Offline use requires no server or broker:
 
@@ -255,11 +287,14 @@ partial fills, margin, executable-side stops, DST, missing candles, nested
 indicators, invalid definitions, warmup isolation and byte-identical checkpoint
 replay. Synthetic outcomes are **not historical returns or profitability evidence**.
 
-Current boundaries are explicit: one instrument per rule program, no implicit
+Current boundaries are explicit: at most 500 symbols per program, no implicit
 pyramiding, same-day windows, a bounded expression catalog, fixed FX conversion,
-and no financing charges or automatic margin liquidation. Broker/live rule
-execution is not enabled; the app's current cash-only adapters do not implement
-these protected contract capabilities. Existing allocation automation is retained.
+no dividend events (use total-return adjusted bars for shorts), and no
+financing charges or automatic margin liquidation on linear contracts. Live
+execution has the limits listed under Live assignments. A 500-symbol ×
+2,500-bar daily cross-sectional backtest runs in about 17 s on an M-series
+laptop; the input tape itself is most of its ~1.8 GB heap
+(`RUN_SCALE_TESTS=1 go test -run TestScaleCrossSectionalBook ./internal/ruleengine`).
 Real historical proof requires appropriately sourced gold and DE40 OHLC and
 executable quotes, and a correctly specified instrument/execution model.
 

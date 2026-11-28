@@ -1215,7 +1215,7 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
       await api("POST", `/strategies/${strategy.id}/assign`, undefined, {
         portfolio_id: portfolio.id,
         control_mode: "strategy",
-        cadence: strategy.definition?.cadence || "1d",
+        cadence: programTimeframe(strategy.definition),
       });
       await load();
       setError(null);
@@ -1232,7 +1232,7 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
         name: `${strategy.name} validation`,
         start_at: defaultDate(-90),
         end_at: defaultDate(0),
-        interval: strategy.definition?.cadence || "1d",
+        interval: programTimeframe(strategy.definition),
         split_pct: 0.7,
         starting_cash: portfolio.starting_cash || portfolio.cash || 100000,
         fee_bps: 1,
@@ -1269,20 +1269,24 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
     if (!portfolio) return;
     setBusy(true);
     try {
-      if(strategy.definition?.engine === "rules") {
-        const inputs=JSON.parse(ruleTape);const simulation=JSON.parse(ruleSimulation);
-        if(!Array.isArray(inputs)||inputs.length===0)throw new Error("Import an OHLC and quote event tape first.");
+      const simulation = JSON.parse(ruleSimulation || "{}");
+      const inputs = ruleTape.trim() ? JSON.parse(ruleTape) : [];
+      if (!Array.isArray(inputs)) throw new Error("The event tape must be a JSON array.");
+      if (inputs.some((i: { type?: string }) => String(i?.type || "").startsWith("market."))) {
+        // A complete supplied tape replaces captured history.
         await api("POST",`/portfolios/${portfolio.id}/backtests`,undefined,{name:`${strategy.name} rule replay`,strategy_id:strategy.id,starting_cash:portfolio.starting_cash||100000,inputs,simulation});
         setError(null);return;
       }
-      const symbols = cleanSymbolList(strategy.definition?.universe || portfolio.watchlist || []);
+      const symbols = cleanSymbolList(programSymbols(strategy.definition));
       await api<{ backtest: BacktestRun }>("POST", `/portfolios/${portfolio.id}/backtests`, undefined, {
         name: `${strategy.name} replay`,
         strategy_id: strategy.id,
         symbols,
+        simulation,
+        ...(inputs.length ? { inputs } : {}),
         start_at: defaultDate(-90),
         end_at: defaultDate(0),
-        interval: strategy.definition?.cadence || "1d",
+        interval: programTimeframe(strategy.definition),
         starting_cash: portfolio.starting_cash || portfolio.cash || 100000,
         fee_bps: 1,
         slippage_bps: 5,
@@ -1315,7 +1319,7 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
                   <span className="ml-auto text-xs text-text-dim">v{strategy.version}</span>
                 </div>
                 <div className="mt-1 text-xs text-text-dim truncate">
-                  {(strategy.definition?.universe || []).join(", ")}
+                  {programSymbols(strategy.definition).join(", ")}
                 </div>
               </button>
             ))}
@@ -1324,21 +1328,21 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
         {selected && (
           <div className="mt-3">
             <div className="flex flex-wrap gap-2">
-            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
+            <button disabled={busy} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
               Evaluate
             </button>
-            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => assign(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+            <button disabled={busy} onClick={() => assign(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Assign
             </button>
             <button disabled={busy} onClick={() => createBacktest(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Backtest
             </button>
-            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+            <button disabled={busy} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Validate
             </button>
             </div>
-            {selected.definition?.engine === "rules" && <div className="mt-3 grid gap-2 text-xs">
-              <p>Rule strategy backtests use completed OHLC candles and executable quotes. Import sourced events, then configure costs and instrument specifications. Live assignment is unavailable for this execution model.</p>
+            {selected.definition?.program && <div className="mt-3 grid gap-2 text-xs">
+              <p>Backtests capture the last 90 days of the program's symbols at its timeframe. To replay your own data instead, import a sourced OHLC and quote tape; feature events alone are added to captured history. The configuration below sets costs, contracts and shorts. Live assignment evaluates each closed bar with the same engine; programs that short, use protective stops, limit entries or features stay backtest-only.</p>
               <label>Import event tape or result bundle<input type="file" accept=".json,application/json" className="block mt-1" onChange={async(e)=>{const file=e.target.files?.[0];if(!file)return;try{const raw=JSON.parse(await file.text());const inputs=Array.isArray(raw)?raw:raw.inputs;if(!Array.isArray(inputs))throw new Error("File must contain an event array or inputs field.");setRuleTape(JSON.stringify(inputs,null,2));if(raw.simulation||raw.spec?.config)setRuleSimulation(JSON.stringify(raw.simulation||raw.spec.config,null,2));setError(null);}catch(error){setError((error as Error).message)}}}/></label>
               <label>Market and clock events<textarea rows={6} className={`${inputClass} font-mono mt-1`} value={ruleTape} onChange={e=>setRuleTape(e.target.value)}/></label>
               <label>Execution configuration (contract multiplier, currency conversion, margin and costs)<textarea rows={5} className={`${inputClass} font-mono mt-1`} value={ruleSimulation} onChange={e=>setRuleSimulation(e.target.value)}/></label>
@@ -1380,8 +1384,8 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
               <input value={description} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
             </label>
           </div>
-          <button type="button" className="mt-2 px-2 py-1 text-xs rounded border border-border" onClick={()=>setDefinitionText(JSON.stringify({engine:"rules",universe:[portfolio.watchlist?.[0]||"SPY"],cadence:"1h",program:{version:"trading-rules/1",symbol:portfolio.watchlist?.[0]||"SPY",timeframe:"1h",timezone:"UTC",rules:[{id:"entry",on:"bar.close",when:{op:"crosses_above",args:[{metric:"ema",period:20},{metric:"sma",period:50}]},actions:[{kind:"enter",side:"buy",stop_pct:.01,sizing:{mode:"fixed_risk",amount:100}}]}]}},null,2))}>New trade rule strategy</button>
-          {draftDefinition?.engine==="rules" && draftDefinition.program && <details open className="mt-3"><summary className="cursor-pointer text-sm font-semibold">Visual rule builder</summary><div className="mt-2"><RuleProgramEditor program={draftDefinition.program} onChange={program=>setDefinitionText(JSON.stringify({...draftDefinition,universe:[program.symbol],cadence:program.timeframe,program},null,2))}/></div></details>}
+          <button type="button" className="mt-2 px-2 py-1 text-xs rounded border border-border" onClick={()=>setDefinitionText(JSON.stringify({program:{version:"trading-rules/1",symbols:[portfolio.watchlist?.[0]||"SPY"],timeframe:"1h",timezone:"UTC",rules:[{id:"entry",on:"bar.close",when:{op:"crosses_above",args:[{metric:"ema",period:20},{metric:"sma",period:50}]},actions:[{kind:"enter",side:"buy",stop_pct:.01,sizing:{mode:"fixed_risk",amount:100}}]}]}},null,2))}>New trade rule strategy</button>
+          {draftDefinition?.program && <details open className="mt-3"><summary className="cursor-pointer text-sm font-semibold">Visual rule builder</summary><div className="mt-2"><RuleProgramEditor program={draftDefinition.program} onChange={program=>setDefinitionText(JSON.stringify({program},null,2))}/></div></details>}
           <label className="block mt-3 text-xs">
             <FieldLabel>Definition JSON</FieldLabel>
             <textarea
@@ -1482,37 +1486,55 @@ function StrategyValidationPeriodCard({ title, period }: { title: string; period
 }
 
 type IndicatorPreset = {id:string;name:string;description:string;definition:Record<string,unknown>;simulation?:Record<string,unknown>};
-type IndicatorCatalog = {presets:IndicatorPreset[];rule_presets?:IndicatorPreset[];indicators:{name:string;description:string}[];conditions:string;limitations:string;sources:string[]};
+type IndicatorCatalog = {presets:IndicatorPreset[];rule_presets?:IndicatorPreset[];limitations:string;rule_engine?:{authoring?:Record<string,unknown>}};
 export function StrategyPresetPicker({api,symbols,onSelect}:{api:<T>(m:string,p:string,q?:Record<string,string>,b?:unknown)=>Promise<T>;symbols:string[];onSelect:(preset:IndicatorPreset)=>void}) {
  const [catalog,setCatalog]=useState<IndicatorCatalog|null>(null);
  const [error,setCatalogError]=useState("");
  useEffect(()=>{let active=true;api<IndicatorCatalog>("GET","/strategies/catalog",{symbols:symbols.join(",")}).then(r=>{if(active){setCatalog(r);setCatalogError("")}}).catch(e=>{if(active)setCatalogError(e.message)});return()=>{active=false}},[api,symbols.join(",")]);
  return <div className="mb-3 p-3 rounded border border-border bg-bg-input">
   <div className="text-sm font-semibold">Strategy templates</div>
-  <p className="my-2 text-xs text-text-muted">Allocation templates use your watchlist. Trade-rule examples use an explicit instrument and sourced event tape. Load a draft, review the rules and execution assumptions, then backtest.</p>
+  <p className="my-2 text-xs text-text-muted">Templates build on your watchlist; trade examples name their instrument. Load a draft, review the rules and execution assumptions, then backtest.</p>
   {error&&<p className="text-xs text-red">{error}</p>}
   <div className="flex flex-wrap gap-2">{[...(catalog?.presets||[]),...(catalog?.rule_presets||[])].map(p=><button type="button" key={p.id} title={p.description} onClick={()=>onSelect(p)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-hover">{p.name}</button>)}</div>
-  {catalog&&<details className="mt-3 text-xs"><summary className="cursor-pointer">Indicators, formulas and rule syntax</summary><dl className="space-y-2 my-2">{catalog.indicators.map(i=><div key={i.name}><dt className="font-mono font-semibold">{i.name}</dt><dd className="text-text-muted">{i.description}</dd></div>)}</dl><p className="my-2">{catalog.conditions}</p><p className="my-2 text-text-muted">{catalog.limitations}</p><div className="flex flex-wrap gap-2">{catalog.sources.map((url,i)=><a key={url} href={url} target="_blank" rel="noreferrer" className="underline">{["EMA guide","RSI guide","MACD guide","Bollinger guide"][i]}</a>)}</div></details>}
+  {catalog&&<details className="mt-3 text-xs"><summary className="cursor-pointer">Rule syntax</summary><dl className="space-y-2 my-2">{Object.entries(catalog.rule_engine?.authoring||{}).map(([k,v])=><div key={k}><dt className="font-mono font-semibold">{k}</dt><dd className="text-text-muted whitespace-pre-wrap">{typeof v==="string"?v:JSON.stringify(v)}</dd></div>)}</dl><p className="my-2 text-text-muted">{catalog.limitations}</p></details>}
  </div>
 }
 
+type StrategyDefinitionShape = { program?: { symbols?: string[]; timeframe?: string } };
+function programSymbols(def?: StrategyDefinitionShape | Record<string, any>): string[] {
+  return (def as StrategyDefinitionShape | undefined)?.program?.symbols || [];
+}
+function programTimeframe(def?: StrategyDefinitionShape | Record<string, any>): string {
+  return (def as StrategyDefinitionShape | undefined)?.program?.timeframe || "1d";
+}
+
+// A month-end rotation: hold the two strongest symbols by 20-bar return that
+// trade above their 20-bar average, equal weight.
 function defaultStrategyDefinition(symbols: string[]) {
   const clean = cleanSymbolList(symbols.length ? symbols : ["SPY", "QQQ", "TLT"]);
+  const ret = { metric: "return", period: 20 };
   return {
-    universe: clean,
-    cadence: "1d",
-    rules: [
-      {
-        name: "Risk on",
-        when: { symbol: clean[0], indicator: "price", operator: "above", compare: "sma_20" },
-        rank: { symbols: clean, by: "return_20", top: Math.min(2, clean.length), weight: "equal_weight" },
-      },
-      {
-        name: "Risk off",
-        allocate: [{ symbol: clean[clean.length - 1], weight: 1 }],
-      },
-    ],
-    risk: { max_position_weight: 0.6 },
+    program: {
+      version: "trading-rules/1",
+      symbols: clean,
+      timeframe: "1d",
+      timezone: "America/New_York",
+      initial: { last_month: 0 },
+      rules: [{
+        id: "rotate",
+        on: "bar.close",
+        repeat: "always",
+        when: { op: "!=", args: [{ metric: "month" }, { name: "last_month" }] },
+        actions: [
+          {
+            kind: "target",
+            weight: { op: "if", args: [{ op: "and", args: [{ op: "top", args: [ret, { value: Math.min(2, clean.length) }] }, { op: ">", args: [{ metric: "close" }, { metric: "sma", period: 20 }] }] }, { value: 1 }, { value: 0 }] },
+            construct: { normalize: "gross", gross: 1, max_position: 0.6 },
+          },
+          { kind: "set", name: "last_month", value: { metric: "month" } },
+        ],
+      }],
+    },
   };
 }
 

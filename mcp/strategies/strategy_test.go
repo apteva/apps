@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
+	rules "github.com/apteva/apps/mcp/strategies/internal/ruleengine"
 )
 
 type recordingStrategyProvider struct {
@@ -56,34 +59,31 @@ func (p *recordingStrategyProvider) calls() (string, int, []string, bool) {
 	return p.interval, p.limit, append([]string(nil), p.symbols...), p.bars
 }
 
-func testStrategyDefinition() map[string]any {
-	return map[string]any{
-		"universe": []any{"BTC-USD", "ETH-USD"},
-		"cadence":  "1d",
-		"rules": []any{
-			map[string]any{
-				"name": "risk on",
-				"rank": map[string]any{
-					"symbols": []any{"BTC-USD", "ETH-USD"},
-					"by":      "return_1",
-					"top":     float64(1),
-					"weight":  "equal_weight",
-				},
-			},
-		},
-		"risk": map[string]any{"max_position_weight": 0.7},
-	}
+// rotationDefinition holds the top n symbols by period-bar return, equal
+// weight, at most 70% each.
+func rotationDefinition(symbols []string, timeframe string, period, n int) map[string]any {
+	return map[string]any{"program": map[string]any{
+		"version": rules.Version, "symbols": symbols, "timeframe": timeframe, "timezone": "UTC",
+		"rules": []any{map[string]any{"id": "rotate", "on": "bar.close", "repeat": "always", "actions": []any{map[string]any{
+			"kind": "target",
+			"weight": map[string]any{"op": "if", "args": []any{
+				map[string]any{"op": "top", "args": []any{map[string]any{"metric": "return", "period": period}, map[string]any{"value": n}}},
+				map[string]any{"value": 1}, map[string]any{"value": 0},
+			}},
+			"construct": map[string]any{"normalize": "gross", "gross": 1, "max_position": 0.7},
+		}}}},
+	}}
+}
+
+func cashState(cash float64) *TradingState {
+	return &TradingState{Portfolio: &Portfolio{Cash: cash}, Equity: cash, Marks: map[string]*Mark{}}
 }
 
 func TestStrategyValidateAndEvaluate(t *testing.T) {
 	ctx := newTestCtx(t)
-	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID:  "test-proj",
-		Name:       "Crypto momentum",
-		Status:     "active",
-		Definition: testStrategyDefinition(),
-		Version:    1,
-	})
+	provider := &recordingStrategyProvider{}
+	globalEngine.provider = provider
+	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: "Crypto momentum", Status: "active", Definition: rotationDefinition([]string{"BTC-USD", "ETH-USD"}, "1d", 1, 1), Version: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,229 +92,139 @@ func TestStrategyValidateAndEvaluate(t *testing.T) {
 		t.Fatal(err)
 	}
 	def, warnings, err := validateStrategyDefinition(strategy.Definition)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("validate: warnings=%v err=%v", warnings, err)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings=%v, want none", warnings)
-	}
-	market, err := liveStrategyMarket(ctx, def)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eval, err := evaluateStrategy(strategy, market)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(eval.TargetAllocations) != 1 {
-		t.Fatalf("allocations=%#v, want one ranked target", eval.TargetAllocations)
-	}
-	if eval.TargetAllocations[0].Weight > 0.7 {
-		t.Fatalf("weight=%v, want capped at 0.7", eval.TargetAllocations[0].Weight)
-	}
-	if len(eval.Decisions) == 0 {
-		t.Fatal("missing decision explanation")
-	}
-}
-
-func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
-	ctx := newTestCtx(t)
-	provider := &recordingStrategyProvider{}
-	globalEngine.provider = provider
-	def := &StrategyDefinition{
-		Universe: []string{"BTC-USD", "ETH-USD", "SOL-USD"},
-		Cadence:  "1h",
-		Rules: []StrategyRule{{
-			Name: "top 120h momentum",
-			Rank: &StrategyRank{
-				Symbols: []string{"BTC-USD", "ETH-USD", "SOL-USD"},
-				By:      "return_120",
-				Top:     1,
-			},
-		}},
-	}
-
-	market, err := liveStrategyMarket(ctx, def)
+	result, err := evaluateRulesLive(def, cashState(100000), nil, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	interval, limit, symbols, usedChartBars := provider.calls()
-	if usedChartBars {
-		t.Fatal("liveStrategyMarket used chart Bars fallback; want StrategyBars")
+	if usedChartBars || interval != "1d" || limit != rules.RequiredBaseBars(def.Program)+2 || len(symbols) != 2 {
+		t.Fatalf("history request = %s/%d %v chart=%v", interval, limit, symbols, usedChartBars)
 	}
-	if interval != "1h" {
-		t.Fatalf("interval = %q, want 1h", interval)
+	if result.Targets == nil || len(result.Targets.TargetAllocations) != 1 {
+		t.Fatalf("targets = %#v, want one ranked holding", result.Targets)
 	}
-	if limit != 121 {
-		t.Fatalf("limit = %d, want 121 for return_120", limit)
+	if w := result.Targets.TargetAllocations[0].Weight; w > 0.7+1e-9 {
+		t.Fatalf("weight = %v, want capped at 0.7", w)
 	}
-	if len(symbols) != 3 {
-		t.Fatalf("symbols fetched = %v", symbols)
-	}
-	if got := len(market.history["BTC-USD"]); got != 121 {
-		t.Fatalf("BTC history len = %d, want 121", got)
-	}
-	if ret, err := strategyMetric("BTC-USD", "return_120", market); err != nil || ret <= 0 {
-		t.Fatalf("return_120 = %v, %v", ret, err)
+	if len(result.Checkpoint) == 0 || len(result.Targets.Decisions) == 0 {
+		t.Fatal("missing checkpoint or decision explanation")
 	}
 }
 
-func TestLiveStrategyMarketLoadsEnoughBarsForRebalanceSchedule(t *testing.T) {
-	ctx := newTestCtx(t)
-	provider := &recordingStrategyProvider{}
-	globalEngine.provider = provider
-	def := &StrategyDefinition{
-		Universe:       []string{"AAPL"},
-		Cadence:        "1d",
-		RebalanceEvery: 5,
-		Rules: []StrategyRule{{
-			Name: "fixed", Allocate: []StrategyAllocation{{Symbol: "AAPL", Weight: 0.5}},
-		}},
-	}
-	market, err := liveStrategyMarket(ctx, def)
-	if err != nil {
-		t.Fatal(err)
-	}
-	interval, limit, _, _ := provider.calls()
-	if interval != "1d" || limit != 6 {
-		t.Fatalf("history request = %s/%d, want 1d/6 for a five-bar schedule", interval, limit)
-	}
-	if len(market.barTimes) != 6 {
-		t.Fatalf("schedule bars = %d, want 6", len(market.barTimes))
-	}
-}
-
-func TestLiveStrategyMarketFailsClosedOnPartialUniverse(t *testing.T) {
-	ctx := newTestCtx(t)
-	provider := &recordingStrategyProvider{errors: map[string]error{"ETH-USD": errors.New("upstream unavailable")}}
-	globalEngine.provider = provider
-	def := &StrategyDefinition{
-		Universe: []string{"BTC-USD", "ETH-USD"},
-		Cadence:  "1h",
-		Rules: []StrategyRule{{Rank: &StrategyRank{
-			Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1,
-		}}},
-	}
-
-	_, err := liveStrategyMarket(ctx, def)
-	if err == nil || !strings.Contains(err.Error(), "ETH-USD") {
+func TestLiveRuleTapeFailsClosedOnPartialUniverse(t *testing.T) {
+	newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{errors: map[string]error{"ETH-USD": errors.New("upstream unavailable")}}
+	def := mustTargetDefinition([]string{"BTC-USD", "ETH-USD"}, "1h", 0.4)
+	if _, _, err := liveRuleTape(def, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "ETH-USD") {
 		t.Fatalf("error = %v, want ETH-USD history failure", err)
 	}
 }
 
-func TestLiveStrategyMarketFailsClosedOnShortHistory(t *testing.T) {
-	ctx := newTestCtx(t)
-	provider := &recordingStrategyProvider{short: map[string]int{"BTC-USD": 1}}
-	globalEngine.provider = provider
-	def := &StrategyDefinition{
-		Universe: []string{"BTC-USD"},
-		Cadence:  "1h",
-		Rules: []StrategyRule{{Rank: &StrategyRank{
-			Symbols: []string{"BTC-USD"}, By: "return_2", Top: 1,
-		}}},
-	}
-
-	_, err := liveStrategyMarket(ctx, def)
-	if err == nil || !strings.Contains(err.Error(), "need 3 valid closed bars, got 1") {
-		t.Fatalf("error = %v, want incomplete-history detail", err)
-	}
-}
-
-func TestStrategyRankHoldIncludesComputedValues(t *testing.T) {
-	market := strategyMarket{
-		prices: map[string]float64{"BTC-USD": 104.98, "ETH-USD": 99},
-		history: map[string][]float64{
-			"BTC-USD": []float64{100, 104.98},
-			"ETH-USD": []float64{100, 99},
-		},
-	}
-	_, reason, err := evalStrategyRank(StrategyRank{
-		Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1, Min: 5,
-	}, market)
+func TestLiveRuleTapeSkipsFormingBars(t *testing.T) {
+	newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	def := mustTargetDefinition([]string{"BTC-USD"}, "1h", 0.4)
+	tape, latest, err := liveRuleTape(def, time.Unix(3600+2, 0).UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reason, "BTC-USD 4.9800") || !strings.Contains(reason, "ETH-USD -1.0000") {
-		t.Fatalf("reason = %q, want all computed rank values", reason)
+	if !latest.Equal(time.Unix(3600+2, 0).UTC()) {
+		t.Fatalf("latest close = %s, want bar 2", latest)
+	}
+	for _, in := range tape {
+		if in.AvailableAt.After(latest) {
+			t.Fatalf("forming bar in tape: %+v", in)
+		}
+	}
+	if last := tape[len(tape)-1]; last.Type != rules.EvaluateInput {
+		t.Fatalf("tape ends with %s, want an evaluation", last.Type)
 	}
 }
 
-func TestStrategyRankFailsWhenAnySymbolMetricIsUnavailable(t *testing.T) {
-	market := strategyMarket{
-		prices:  map[string]float64{"BTC-USD": 101},
-		history: map[string][]float64{"BTC-USD": []float64{100, 101}},
+func TestLiveRuleCheckpointKeepsLatches(t *testing.T) {
+	newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	def, _, err := validateStrategyDefinition(map[string]any{"program": map[string]any{
+		"version": rules.Version, "symbols": []string{"BTC-USD"}, "timeframe": "1h", "timezone": "UTC",
+		"rules": []any{map[string]any{"id": "once", "on": "bar.close", "repeat": "once_per_day", "actions": []any{
+			map[string]any{"kind": "enter", "side": "buy", "sizing": map[string]any{"mode": "equity_pct", "amount": 0.1}},
+		}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, _, err := evalStrategyRank(StrategyRank{
-		Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1,
-	}, market)
-	if err == nil || !strings.Contains(err.Error(), "ETH-USD") {
-		t.Fatalf("error = %v, want missing ETH-USD metric", err)
+	now := time.Unix(10*3600, 0).UTC()
+	first, err := evaluateRulesLive(def, cashState(1000), nil, now)
+	if err != nil || len(first.Orders) != 1 {
+		t.Fatalf("first evaluation orders=%v err=%v, want one entry", first, err)
+	}
+	again, err := evaluateRulesLive(def, cashState(1000), first.Checkpoint, now.Add(time.Hour))
+	if err != nil || len(again.Orders) != 0 {
+		t.Fatalf("checkpointed evaluation orders=%v err=%v, want latch held", again, err)
+	}
+	fresh, err := evaluateRulesLive(def, cashState(1000), nil, now.Add(time.Hour))
+	if err != nil || len(fresh.Orders) != 1 {
+		t.Fatalf("fresh evaluation orders=%v err=%v, want entry", fresh, err)
 	}
 }
 
-func TestStrategyRequiredBars(t *testing.T) {
-	def := &StrategyDefinition{Rules: []StrategyRule{{
-		When: &StrategyCondition{Indicator: "rsi_14", Compare: "sma_50"},
-		Rank: &StrategyRank{By: "return_120"},
-	}}}
-	if got := strategyRequiredBars(def); got != 121 {
-		t.Fatalf("strategyRequiredBars = %d, want 121", got)
+func TestLiveSupportRefusesBacktestOnlyPrograms(t *testing.T) {
+	short := map[string]any{"program": map[string]any{
+		"version": rules.Version, "symbols": []string{"AAPL"}, "timeframe": "1d", "timezone": "America/New_York",
+		"rules": []any{map[string]any{"id": "short", "on": "bar.close", "actions": []any{map[string]any{"kind": "enter", "side": "sell", "sizing": map[string]any{"mode": "quantity", "amount": 1}}}}},
+	}}
+	feature := targetDefinition([]string{"AAPL"}, "1d", map[string]any{"metric": "feature", "feature": "sentiment", "field": "score"})
+	for name, raw := range map[string]map[string]any{"short entry": short, "feature": feature} {
+		def, warnings, err := validateStrategyDefinition(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if liveSupport(def) == nil || len(warnings) == 0 || !strings.HasPrefix(warnings[0], "Backtest only") {
+			t.Fatalf("%s: live support allowed, warnings=%v", name, warnings)
+		}
+	}
+	if err := liveSupport(mustTargetDefinition([]string{"AAPL"}, "1d", 0.5)); err != nil {
+		t.Fatalf("long target refused live: %v", err)
+	}
+}
+
+func TestLiveTargetRefusesShortWeights(t *testing.T) {
+	newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	def := mustTargetDefinition([]string{"BTC-USD"}, "1h", -0.5)
+	if _, err := evaluateRulesLive(def, cashState(1000), nil, time.Unix(10*3600, 0).UTC()); err == nil || !strings.Contains(err.Error(), "short") {
+		t.Fatalf("error = %v, want short refusal", err)
 	}
 }
 
 func TestStrategyAssignmentUsesImmutableVersion(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Pinned strategy", []string{"crypto"})
-	v1 := map[string]any{
-		"universe": []any{"BTC-USD", "ETH-USD"},
-		"cadence":  "1h",
-		"rules": []any{map[string]any{
-			"name": "BTC allocation", "allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.5}},
-		}},
-	}
-	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj", Name: "Pinned", Status: "active", Definition: v1, Version: 1,
-	})
+	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: "Pinned", Status: "active", Definition: targetDefinition([]string{"BTC-USD"}, "1h", 0.5), Version: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
-		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
-		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
-	}); err != nil {
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID, StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h"}); err != nil {
 		t.Fatal(err)
 	}
-	v2 := map[string]any{
-		"universe": []any{"BTC-USD", "ETH-USD"},
-		"cadence":  "1h",
-		"rules": []any{map[string]any{
-			"name": "ETH allocation", "allocate": []any{map[string]any{"symbol": "ETH-USD", "weight": 0.5}},
-		}},
-	}
-	updated, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", strategyID, &Strategy{Definition: v2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Version != 2 {
-		t.Fatalf("updated version = %d, want 2", updated.Version)
+	updated, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", strategyID, &Strategy{Definition: targetDefinition([]string{"ETH-USD"}, "1h", 0.5)})
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("update = %v, %v; want version 2", updated, err)
 	}
 	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || assignment.StrategyVersion != 1 {
+		t.Fatalf("assignment = %v, %v; want version 1", assignment, err)
 	}
-	if assignment.StrategyVersion != 1 {
-		t.Fatalf("assignment version = %d, want 1", assignment.StrategyVersion)
-	}
-	pinned, err := dbGetStrategyVersion(ctx.AppDB(), "test-proj", strategyID, assignment.StrategyVersion)
+	pinned, err := dbGetStrategyVersion(ctx.AppDB(), "test-proj", strategyID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	def, _, err := validateStrategyDefinition(pinned.Definition)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := def.Rules[0].Allocate[0].Symbol; got != "BTC-USD" {
-		t.Fatalf("pinned allocation = %s, want BTC-USD", got)
+	if err != nil || def.Universe[0] != "BTC-USD" {
+		t.Fatalf("pinned symbols = %v, %v; want BTC-USD", def, err)
 	}
 }
 
@@ -402,24 +312,6 @@ func TestStrategyRuntimeDistinguishesAssignedAndUnassigned(t *testing.T) {
 	}
 	if byID[unassignedID].AssignmentStatus != "unassigned" || len(byID[unassignedID].Assignments) != 0 {
 		t.Fatalf("unassigned strategy = %#v", byID[unassignedID])
-	}
-}
-
-func TestStrategyAssignmentCadenceCountsCompletedBars(t *testing.T) {
-	def := &StrategyDefinition{Cadence: "1d", RebalanceEvery: 5, Universe: []string{"AAPL"}}
-	a := &StrategyAssignment{LastMarketBarAt: "2026-07-02T13:30:00Z"}
-	market := strategyMarket{barTimes: []time.Time{
-		time.Date(2026, 7, 6, 13, 30, 0, 0, time.UTC),
-		time.Date(2026, 7, 7, 13, 30, 0, 0, time.UTC),
-		time.Date(2026, 7, 8, 13, 30, 0, 0, time.UTC),
-		time.Date(2026, 7, 9, 13, 30, 0, 0, time.UTC),
-	}}
-	if strategyAssignmentDueForMarket(a, def, market) {
-		t.Fatal("four completed sessions became due after a weekend")
-	}
-	market.barTimes = append(market.barTimes, time.Date(2026, 7, 10, 13, 30, 0, 0, time.UTC))
-	if !strategyAssignmentDueForMarket(a, def, market) {
-		t.Fatal("five completed sessions did not become due")
 	}
 }
 
@@ -570,240 +462,180 @@ func mustCreateFixedStrategy(t *testing.T, ctx *sdk.AppCtx, name, symbol string,
 	if len(cadence) > 0 {
 		interval = cadence[0]
 	}
-	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj", Name: name, Status: "active", Version: 1,
-		Definition: map[string]any{
-			"universe": []any{symbol}, "cadence": interval,
-			"rules": []any{map[string]any{
-				"name": "fixed allocation", "allocate": []any{map[string]any{"symbol": symbol, "weight": weight}},
-			}},
-		},
-	})
+	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: name, Status: "active", Version: 1, Definition: targetDefinition([]string{symbol}, interval, weight)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return id
 }
 
-func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
+// mustRuleBacktest creates a strategy run over seeded bars, enables its event
+// simulation and returns the run.
+func mustRuleBacktest(t *testing.T, ctx *sdk.AppCtx, portfolioID, strategyID int64, symbols []string, interval string, steps int, seed func(runID int64)) *BacktestRun {
+	t.Helper()
+	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID, RunKind: "strategy", StrategyVersion: 1, Name: "rule replay", Status: "queued", Symbols: symbols, Interval: interval, StartingCash: 100000, FeeBps: 1, SlippageBps: 5, TotalSteps: steps, Summary: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seed != nil {
+		seed(id)
+	} else {
+		seedBacktestMarketBars(t, ctx, id, symbols, steps)
+	}
+	if err := enableEventBacktest(ctx.AppDB(), "test-proj", id, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func mustFinishRuleBacktest(t *testing.T, ctx *sdk.AppCtx, run *BacktestRun) *simulationRecord {
+	t.Helper()
+	if _, err := runEventSimulationToEnd(run); err != nil {
+		t.Fatal(err)
+	}
+	record, err := loadSimulation(ctx.AppDB(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.State.Finished {
+		t.Fatal("simulation did not finish")
+	}
+	return record
+}
+
+func filledOrders(s *sim.State) []*sim.Order {
+	out := []*sim.Order{}
+	for _, o := range s.Orders {
+		if o.FilledQty > 0 {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func TestRuleBacktestHoldsTargetWeight(t *testing.T) {
 	ctx := newTestCtx(t)
 	pid := mustCreatePortfolio(t, ctx, "Strategy BT", []string{"crypto"})
-	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj",
-		Name:      "BTC fixed",
-		Status:    "active",
-		Definition: map[string]any{
-			"universe": []any{"BTC-USD"},
-			"rules": []any{
-				map[string]any{
-					"name":     "always long",
-					"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.5}},
-				},
-			},
-		},
-		Version: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
+	sid := mustCreateFixedStrategy(t, ctx, "BTC fixed", "BTC-USD", 0.5)
+	record := mustFinishRuleBacktest(t, ctx, mustRuleBacktest(t, ctx, pid, sid, []string{"BTC-USD"}, "1h", 8, nil))
+	pos := record.State.Positions["BTC-USD"]
+	price := record.State.Quotes["BTC-USD"].Price
+	equity := record.State.Cash + pos.Qty*price
+	if w := pos.Qty * price / equity; math.Abs(w-0.5) > 0.03 {
+		t.Fatalf("BTC weight = %.4f, want about 0.5", w)
 	}
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       "test-proj",
-		PortfolioID:     pid,
-		StrategyID:      strategyID,
-		RunKind:         "strategy",
-		StrategyVersion: 1,
-		Name:            "BTC strategy replay",
-		Status:          "queued",
-		Symbols:         []string{"BTC-USD"},
-		StartAt:         "2026-01-01",
-		EndAt:           "2026-01-03",
-		Interval:        "1d",
-		StartingCash:    100000,
-		SlippageBps:     5,
-		TotalSteps:      3,
-		Summary:         map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
-	if _, err := startStrategyBacktestRun(run); err != nil {
-		t.Fatal(err)
-	}
-	next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next.RunKind != "strategy" || next.CurrentStep != 1 {
-		t.Fatalf("run kind/step = %s/%d, want strategy/1", next.RunKind, next.CurrentStep)
-	}
-	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snaps) != 2 {
-		t.Fatalf("snapshots=%d, want baseline + step", len(snaps))
-	}
-	if len(snaps[1].Positions) != 0 || len(snaps[1].Orders) != 0 {
-		t.Fatalf("step-one state positions=%#v orders=%#v, want signal only", snaps[1].Positions, snaps[1].Orders)
-	}
-	if _, err := stepStrategyBacktestRun(next); err != nil {
-		t.Fatal(err)
-	}
-	snaps, err = dbListBacktestSnapshots(ctx.AppDB(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snaps[2].Positions) != 1 || len(snaps[2].Orders) != 1 {
-		t.Fatalf("step-two state positions=%#v orders=%#v, want next-open BTC fill", snaps[2].Positions, snaps[2].Orders)
-	}
-	events, err := dbListBacktestEvents(ctx.AppDB(), runID, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events) == 0 {
-		t.Fatal("expected strategy backtest events")
+	if fills := filledOrders(record.State); len(fills) == 0 || fills[0].Side != "buy" {
+		t.Fatalf("fills = %+v, want an opening buy", fills)
 	}
 }
 
 func TestStrategyBacktestUsesPinnedDefinitionAfterUpdate(t *testing.T) {
 	ctx := newTestCtx(t)
-	portfolioID := mustCreatePortfolio(t, ctx, "Pinned backtest", []string{"crypto"})
-	strategyID := mustCreateFixedStrategy(t, ctx, "Pinned replay", "BTC-USD", 0.5, "1d")
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
-		RunKind: "strategy", StrategyVersion: 1, Name: "Pinned replay", Status: "queued",
-		Symbols: []string{"BTC-USD", "ETH-USD"}, StartAt: "2026-01-01", EndAt: "2026-01-03",
-		Interval: "1d", StartingCash: 100000, TotalSteps: 3, Summary: map[string]any{},
-	})
-	if err != nil {
+	pid := mustCreatePortfolio(t, ctx, "Pinned backtest", []string{"crypto"})
+	sid := mustCreateFixedStrategy(t, ctx, "Pinned replay", "BTC-USD", 0.5)
+	if _, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", sid, &Strategy{Definition: targetDefinition([]string{"ETH-USD"}, "1h", 0.5)}); err != nil {
 		t.Fatal(err)
 	}
-	updatedDefinition := map[string]any{
-		"universe": []any{"ETH-USD"}, "cadence": "1h",
-		"rules": []any{map[string]any{
-			"name": "ETH allocation", "allocate": []any{map[string]any{"symbol": "ETH-USD", "weight": 0.5}},
-		}},
-	}
-	if _, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", strategyID, &Strategy{Definition: updatedDefinition}); err != nil {
-		t.Fatal(err)
-	}
-	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
-	if _, err := startStrategyBacktestRun(run); err != nil {
-		t.Fatal(err)
-	}
-	next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stepStrategyBacktestRun(next); err != nil {
-		t.Fatal(err)
-	}
-	snapshots, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	latest := snapshots[len(snapshots)-1]
-	if len(latest.Positions) != 1 || latest.Positions[0].Symbol != "BTC-USD" {
-		t.Fatalf("positions = %#v, want pinned v1 BTC allocation", latest.Positions)
+	record := mustFinishRuleBacktest(t, ctx, mustRuleBacktest(t, ctx, pid, sid, []string{"BTC-USD", "ETH-USD"}, "1h", 4, nil))
+	if record.State.Positions["BTC-USD"].Qty <= 0 || record.State.Positions["ETH-USD"].Qty != 0 {
+		t.Fatalf("positions = %+v, want pinned v1 BTC holding", record.State.Positions)
 	}
 }
 
 func TestStrategyBacktestRunMatchesManualSteps(t *testing.T) {
 	ctx := newTestCtx(t)
 	pid := mustCreatePortfolio(t, ctx, "Strategy BT Compare", []string{"crypto"})
-	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj",
-		Name:      "Crypto momentum compare",
-		Status:    "active",
-		Definition: map[string]any{
-			"universe": []any{"BTC-USD", "ETH-USD", "SOL-USD"},
-			"rules": []any{
-				map[string]any{
-					"name": "BTC trend momentum",
-					"when": map[string]any{
-						"symbol":    "BTC-USD",
-						"indicator": "price",
-						"operator":  "above",
-						"compare":   "sma_20",
-					},
-					"rank": map[string]any{
-						"symbols": []any{"BTC-USD", "ETH-USD", "SOL-USD"},
-						"by":      "return_20",
-						"top":     float64(2),
-					},
-				},
-				map[string]any{
-					"name": "Defensive crypto basket",
-					"allocate": []any{
-						map[string]any{"symbol": "BTC-USD", "weight": 0.4},
-						map[string]any{"symbol": "ETH-USD", "weight": 0.3},
-						map[string]any{"symbol": "SOL-USD", "weight": 0.2},
-					},
-				},
-			},
-			"risk": map[string]any{"max_position_weight": 0.5},
-		},
-		Version: 1,
-	})
+	symbols := []string{"BTC-USD", "ETH-USD", "SOL-USD"}
+	sid, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: "Momentum compare", Status: "active", Definition: rotationDefinition(symbols, "1h", 5, 2), Version: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	slowRun := mustCreateStrategyBacktestRun(t, ctx, pid, strategyID, "manual steps")
-	fastRun := mustCreateStrategyBacktestRun(t, ctx, pid, strategyID, "fast run")
-	seedBacktestMarketBars(t, ctx, slowRun.ID, slowRun.Symbols, slowRun.TotalSteps)
-	seedBacktestMarketBars(t, ctx, fastRun.ID, fastRun.Symbols, fastRun.TotalSteps)
-
-	if _, err := startStrategyBacktestRun(slowRun); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", slowRun.ID)
+	slow := mustRuleBacktest(t, ctx, pid, sid, symbols, "1h", 30, nil)
+	fast := mustRuleBacktest(t, ctx, pid, sid, symbols, "1h", 30, nil)
+	for i := 0; ; i++ {
+		next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", slow.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
+		if next.Status == "completed" {
 			break
 		}
-		if _, err := stepStrategyBacktestRun(next); err != nil {
+		if i > 1000 {
+			t.Fatal("manual stepping did not finish")
+		}
+		if _, err := startEventSimulationWith(next, true, true); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := runStrategyBacktestToEnd(fastRun); err != nil {
+	a, err := loadSimulation(ctx.AppDB(), slow.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	b := mustFinishRuleBacktest(t, ctx, fast)
+	assertClose(t, "cash", a.State.Cash, b.State.Cash)
+	for _, s := range symbols {
+		assertClose(t, s+" qty", a.State.Positions[s].Qty, b.State.Positions[s].Qty)
+	}
+	if len(filledOrders(a.State)) != len(filledOrders(b.State)) || len(filledOrders(b.State)) == 0 {
+		t.Fatalf("fills %d vs %d", len(filledOrders(a.State)), len(filledOrders(b.State)))
+	}
+}
 
-	slowSnap := mustLastBacktestSnapshot(t, ctx, slowRun.ID)
-	fastSnap := mustLastBacktestSnapshot(t, ctx, fastRun.ID)
-	assertClose(t, "equity", fastSnap.Equity, slowSnap.Equity)
-	assertClose(t, "cash", fastSnap.Cash, slowSnap.Cash)
-	assertClose(t, "open pnl", fastSnap.OpenPnL, slowSnap.OpenPnL)
-	assertClose(t, "realized pnl", fastSnap.RealizedPnL, slowSnap.RealizedPnL)
-	if len(fastSnap.Positions) != len(slowSnap.Positions) {
-		t.Fatalf("positions=%d, want %d", len(fastSnap.Positions), len(slowSnap.Positions))
+func TestStrategyBacktestRankThresholdRotates(t *testing.T) {
+	ctx := newTestCtx(t)
+	pid := mustCreatePortfolio(t, ctx, "Winner Shape", []string{"crypto"})
+	ret := map[string]any{"metric": "return", "period": 3}
+	weight := map[string]any{"op": "if", "args": []any{
+		map[string]any{"op": "and", "args": []any{map[string]any{"op": "top", "args": []any{ret, map[string]any{"value": 1}}}, map[string]any{"op": ">", "args": []any{ret, map[string]any{"value": 2}}}}},
+		map[string]any{"value": 1}, map[string]any{"value": 0},
+	}}
+	def := targetDefinition([]string{"BTC-USD", "ETH-USD"}, "1h", weight)
+	def["program"].(map[string]any)["rules"].([]any)[0].(map[string]any)["actions"].([]any)[0].(map[string]any)["construct"] = map[string]any{"normalize": "gross", "max_position": 0.9}
+	sid, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "test-proj", Name: "Gated momentum", Status: "active", Definition: def, Version: 1})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := range slowSnap.Positions {
-		got := fastSnap.Positions[i]
-		want := slowSnap.Positions[i]
-		if got.Symbol != want.Symbol {
-			t.Fatalf("position[%d] symbol=%s, want %s", i, got.Symbol, want.Symbol)
+	run := mustRuleBacktest(t, ctx, pid, sid, []string{"BTC-USD", "ETH-USD"}, "1h", 8, func(id int64) {
+		if err := seedGatedMomentumBars(ctx, id); err != nil {
+			t.Fatal(err)
 		}
-		assertClose(t, got.Symbol+" qty", got.Qty, want.Qty)
-		assertClose(t, got.Symbol+" avg cost", got.AvgCost, want.AvgCost)
-		assertClose(t, got.Symbol+" value", got.MarketValue, want.MarketValue)
+	})
+	record := mustFinishRuleBacktest(t, ctx, run)
+	fills := filledOrders(record.State)
+	if len(fills) < 3 || fills[0].Symbol != "BTC-USD" || fills[0].Side != "buy" {
+		t.Fatalf("fills = %+v, want BTC buy then rotation", fills)
 	}
-	if len(fastSnap.Orders) != len(slowSnap.Orders) {
-		t.Fatalf("orders=%d, want %d", len(fastSnap.Orders), len(slowSnap.Orders))
+	// BTC clears the 2% gate at bar 4 and fills on bar 5; ETH leads at bar 7.
+	if got := fills[0].FirstFillAt.Unix(); got != 1704067200+5*3600 {
+		t.Fatalf("first fill at %d, want bar 5", got)
 	}
+	if record.State.Positions["BTC-USD"].Qty != 0 || record.State.Positions["ETH-USD"].Qty <= 0 {
+		t.Fatalf("positions = %+v, want rotated into ETH", record.State.Positions)
+	}
+}
+
+func TestStrategyBacktestExecutesPriorCloseSignalAtNextOpen(t *testing.T) {
+	ctx := newTestCtx(t)
+	pid := mustCreatePortfolio(t, ctx, "Stock timing", []string{"equity"})
+	sid := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5, "1d")
+	run := mustRuleBacktest(t, ctx, pid, sid, []string{"AAPL"}, "1d", 2, func(id int64) {
+		rows := []*BacktestMarketBar{
+			{Step: 1, Symbol: "AAPL", AssetClass: "equity", T: 1783603800, O: 310, H: 317, L: 309, C: 316.22, Source: "fixture"},
+			{Step: 2, Symbol: "AAPL", AssetClass: "equity", T: 1783690200, O: 300, H: 312, L: 299, C: 310, Source: "fixture"},
+		}
+		if err := dbReplaceBacktestMarketBars(ctx.AppDB(), id, rows); err != nil {
+			t.Fatal(err)
+		}
+	})
+	fills := filledOrders(mustFinishRuleBacktest(t, ctx, run).State)
+	if len(fills) != 1 {
+		t.Fatalf("fills = %+v, want one", fills)
+	}
+	assertClose(t, "next-open fill", fills[0].AvgFillPrice, 300*1.0005)
 }
 
 func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
@@ -814,23 +646,11 @@ func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj",
-		Name:      "Validation momentum",
-		Status:    "active",
-		Definition: map[string]any{
-			"universe": []any{"BTC-USD", "ETH-USD"},
-			"rules": []any{
-				map[string]any{
-					"name": "top one",
-					"rank": map[string]any{
-						"symbols": []any{"BTC-USD", "ETH-USD"},
-						"by":      "return_3",
-						"top":     float64(1),
-					},
-				},
-			},
-		},
-		Version: 1,
+		ProjectID:  "test-proj",
+		Name:       "Validation momentum",
+		Status:     "active",
+		Definition: rotationDefinition([]string{"BTC-USD", "ETH-USD"}, "1d", 3, 1),
+		Version:    1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -886,154 +706,6 @@ func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
 	if verdict := strategyValidationVerdict(train.Metrics, test.Metrics); verdict == "" {
 		t.Fatal("missing validation verdict")
 	}
-}
-
-func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
-	ctx := newTestCtx(t)
-	pid := mustCreatePortfolio(t, ctx, "Winner Shape", []string{"crypto"})
-	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj",
-		Name:      "Hourly gated momentum",
-		Status:    "active",
-		Definition: map[string]any{
-			"universe":        []any{"BTC-USD", "ETH-USD"},
-			"cadence":         "1h",
-			"rebalance_every": float64(3),
-			"rules": []any{
-				map[string]any{
-					"name": "top gated momentum",
-					"rank": map[string]any{
-						"symbols": []any{"BTC-USD", "ETH-USD"},
-						"by":      "return_3",
-						"top":     float64(1),
-						"min":     float64(2),
-					},
-				},
-			},
-		},
-		Version: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       "test-proj",
-		PortfolioID:     pid,
-		StrategyID:      strategyID,
-		RunKind:         "strategy",
-		StrategyVersion: 1,
-		Name:            "cadence gated momentum",
-		Status:          "queued",
-		Symbols:         []string{"BTC-USD", "ETH-USD"},
-		StartAt:         "2026-01-01",
-		EndAt:           "2026-01-01",
-		Interval:        "1h",
-		StartingCash:    100000,
-		FeeBps:          1,
-		SlippageBps:     5,
-		TotalSteps:      8,
-		Summary:         map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := seedGatedMomentumBars(ctx, run.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runStrategyBacktestToEnd(run); err != nil {
-		t.Fatal(err)
-	}
-	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snaps) != 9 {
-		t.Fatalf("snapshots=%d, want baseline + 8 steps", len(snaps))
-	}
-	if len(snaps[4].Orders) != 0 {
-		t.Fatalf("step 4 orders=%d, want signal only", len(snaps[4].Orders))
-	}
-	if len(snaps[5].Orders) != 1 || len(snaps[5].Positions) != 1 {
-		t.Fatalf("step 5 should execute step 4 signal; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
-	}
-	if len(snaps[7].Orders) != 0 || len(snaps[8].Orders) == 0 {
-		t.Fatalf("step 7 should signal and step 8 execute; orders=%d/%d", len(snaps[7].Orders), len(snaps[8].Orders))
-	}
-}
-
-func TestStrategyBacktestExecutesPriorCloseSignalAtNextOpen(t *testing.T) {
-	ctx := newTestCtx(t)
-	portfolioID := mustCreatePortfolio(t, ctx, "Stock timing", []string{"equity"})
-	strategyID := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5, "1d")
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
-		RunKind: "strategy", StrategyVersion: 1, Name: "next-open timing", Status: "queued",
-		Symbols: []string{"AAPL"}, StartAt: "2026-07-09", EndAt: "2026-07-10",
-		Interval: "1d", StartingCash: 100000, SlippageBps: 5, TotalSteps: 2, Summary: map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := []*BacktestMarketBar{
-		{Step: 1, Symbol: "AAPL", AssetClass: "equity", T: 1783603800, O: 310, H: 317, L: 309, C: 316.22, Source: "fixture"},
-		{Step: 2, Symbol: "AAPL", AssetClass: "equity", T: 1783690200, O: 300, H: 312, L: 299, C: 310, Source: "fixture"},
-	}
-	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows); err != nil {
-		t.Fatal(err)
-	}
-	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runStrategyBacktestToEnd(run); err != nil {
-		t.Fatal(err)
-	}
-	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snaps) != 3 || len(snaps[1].Orders) != 0 || len(snaps[2].Orders) != 1 {
-		t.Fatalf("snapshot orders = %#v, want no step-one fill and one step-two fill", snaps)
-	}
-	wantFill := 300.0 * 1.0005
-	assertClose(t, "next-open fill", snaps[2].Orders[0].AvgFillPrice, wantFill)
-	if math.Abs(snaps[2].Orders[0].AvgFillPrice-316.22*1.0005) < 0.0001 {
-		t.Fatal("fill still uses the signal session close")
-	}
-}
-
-func mustCreateStrategyBacktestRun(t *testing.T, ctx *sdk.AppCtx, portfolioID, strategyID int64, name string) *BacktestRun {
-	t.Helper()
-	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       "test-proj",
-		PortfolioID:     portfolioID,
-		StrategyID:      strategyID,
-		RunKind:         "strategy",
-		StrategyVersion: 1,
-		Name:            name,
-		Status:          "queued",
-		Symbols:         []string{"BTC-USD", "ETH-USD", "SOL-USD"},
-		StartAt:         "2026-01-01",
-		EndAt:           "2026-03-31",
-		Interval:        "1d",
-		StartingCash:    100000,
-		FeeBps:          1,
-		SlippageBps:     5,
-		TotalSteps:      90,
-		Summary:         map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return run
 }
 
 func mustLastBacktestSnapshot(t *testing.T, ctx *sdk.AppCtx, runID int64) *BacktestSnapshot {
@@ -1108,5 +780,30 @@ func seedBacktestMarketBars(t *testing.T, ctx *sdk.AppCtx, runID int64, symbols 
 	}
 	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLiveAssignmentPersistsRuleCheckpoint(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	portfolioID := mustCreatePortfolio(t, ctx, "Checkpointed", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Checkpoint BTC", "BTC-USD", 0.5)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID, StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := dbRuleAssignmentState(ctx.AppDB(), assignment.ID)
+	if err != nil || len(state) == 0 {
+		t.Fatalf("rule checkpoint = %q, %v; want saved", state, err)
+	}
+	var cp map[string]any
+	if err := json.Unmarshal(state, &cp); err != nil || cp["variables"] == nil {
+		t.Fatalf("checkpoint = %s, %v", state, err)
 	}
 }
