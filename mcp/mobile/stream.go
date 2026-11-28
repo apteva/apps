@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // Live video: scrcpy-server on the phone encodes H.264; Mobile reads its
@@ -52,6 +55,7 @@ type streamOptions struct {
 
 type streamToken struct {
 	sid, pid string
+	owner    string // "" = any viewer allowed by the project; else one identity
 	expires  time.Time
 }
 
@@ -102,6 +106,19 @@ func (h *streamHub) issue(s Session, args map[string]any) (map[string]any, error
 	if s.Device.Platform != "android" || s.Device.Driver != "adb" {
 		return nil, problem("unsupported", "live video needs an Android phone on the ADB driver; use mode=poll for other devices")
 	}
+	owner := strings.TrimSpace(str(args, "owner"))
+	if len(owner) > 300 || (owner != "" && !strings.Contains(owner, ":")) {
+		return nil, problem("invalid_argument", `owner must look like "user:<id>" or "operator:<id>"`)
+	}
+	if raw := str(args, "token"); raw != "" && owner != "" {
+		h.mu.Lock()
+		t := h.tokens[raw]
+		changed := t != nil && t.owner != owner
+		h.mu.Unlock()
+		if changed {
+			return nil, problem("forbidden", "a renewal cannot change the link's owner")
+		}
+	}
 	opts := streamOptions{MaxSize: integer(args, "max_size", defaultMaxSize), BitRateKbps: integer(args, "bit_rate_kbps", defaultBitRate), ShowTouches: boolean(args, "show_touches")}
 	if opts.MaxSize < 320 || opts.MaxSize > 4096 || opts.BitRateKbps < 250 || opts.BitRateKbps > 50000 {
 		return nil, problem("invalid_argument", "max_size must be 320..4096 and bit_rate_kbps 250..50000")
@@ -116,6 +133,9 @@ func (h *streamHub) issue(s Session, args map[string]any) (map[string]any, error
 		if t == nil || t.sid != s.ID || t.pid != s.ProjectID {
 			return nil, problem("not_found", "stream token not found or expired")
 		}
+		if owner != "" && owner != t.owner {
+			return nil, problem("forbidden", "a renewal cannot change the link's owner")
+		}
 		t.expires = time.Now().Add(streamTokenTTL)
 		return streamTicket(s.ID, raw, t.expires), nil
 	}
@@ -125,7 +145,7 @@ func (h *streamHub) issue(s Session, args map[string]any) (map[string]any, error
 	}
 	token := hex.EncodeToString(b)
 	exp := time.Now().Add(streamTokenTTL)
-	h.tokens[token] = &streamToken{sid: s.ID, pid: s.ProjectID, expires: exp}
+	h.tokens[token] = &streamToken{sid: s.ID, pid: s.ProjectID, owner: owner, expires: exp}
 	if st := h.streams[s.ID]; st != nil {
 		st.setOptions(opts)
 	} else {
@@ -194,27 +214,54 @@ func (h *streamHub) deviceBack(sid string) {
 	}
 }
 
-func (h *streamHub) stream(token, sid, pid string) (*liveStream, error) {
+func (h *streamHub) stream(token, sid, pid string) (*liveStream, string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	t := h.tokens[token]
 	if t == nil || t.sid != sid || t.pid != pid || time.Now().After(t.expires) {
-		return nil, problem("forbidden", "stream token is invalid or expired")
+		return nil, "", problem("forbidden", "stream token is invalid or expired")
 	}
 	st := h.streams[sid]
 	if st == nil {
-		return nil, problem("session_inactive", "the stream has ended")
+		return nil, "", problem("session_inactive", "the stream has ended")
 	}
-	return st, nil
+	return st, t.owner, nil
+}
+
+// closeNotOwner is the WebSocket close code for a viewer who is not the
+// link's owner.
+const closeNotOwner = 4003
+
+// viewerIdentity is who is connecting, as forwarded by the platform proxy:
+// a signed app-user principal ("<subject_type>:<subject_id>") or a validated
+// dashboard operator ("operator:<user_id>"). Sidecar routes require the app
+// token, so these headers only arrive through the platform.
+func viewerIdentity(r *http.Request) string {
+	if p, err := sdk.PrincipalFromRequest(r); err == nil && p != nil && p.SubjectType != "" && p.SubjectID != "" {
+		return p.SubjectType + ":" + p.SubjectID
+	}
+	if op := strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")); op != "" && op != "0" {
+		return "operator:" + op
+	}
+	return ""
 }
 
 var upgrader = websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 64 << 10, CheckOrigin: sameOrigin}
 
 // serveViewer upgrades a viewer connection for session sid.
-func (h *streamHub) serveViewer(w http.ResponseWriter, r *http.Request, pid, sid, token string) {
-	st, err := h.stream(token, sid, pid)
+func (h *streamHub) serveViewer(w http.ResponseWriter, r *http.Request, pid, sid, token, who string) {
+	st, owner, err := h.stream(token, sid, pid)
 	if err != nil {
 		writeFailure(w, err)
+		return
+	}
+	if owner != "" && who != owner {
+		// Refuse after the upgrade so browsers see the reason (4003), not a
+		// bare failed handshake.
+		if conn, err := upgrader.Upgrade(w, r, nil); err == nil {
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeNotOwner, "this stream link belongs to someone else"), time.Now().Add(time.Second))
+			_ = conn.Close()
+		}
 		return
 	}
 	s, err := h.e.session(pid, sid)
@@ -951,8 +998,9 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := strings.TrimPrefix(r.URL.Path, "/api/stream/")
 	token := r.URL.Query().Get("token")
+	who := viewerIdentity(r)
 	if a.local != nil {
-		a.local.streams.serveViewer(w, r, a.project, sid, token)
+		a.local.streams.serveViewer(w, r, a.project, sid, token, who)
 		return
 	}
 	rem, ok := a.executor.(*remote)
@@ -965,7 +1013,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := strings.Replace(strings.Replace(rem.base, "https://", "wss://", 1), "http://", "ws://", 1) +
-		"/v1/stream/" + sid + "?token=" + url.QueryEscape(token) + "&project_id=" + url.QueryEscape(a.project)
+		"/v1/stream/" + sid + "?token=" + url.QueryEscape(token) + "&project_id=" + url.QueryEscape(a.project) + "&viewer=" + url.QueryEscape(who)
 	header := http.Header{"Authorization": {"Bearer " + rem.token}}
 	upstream, res, err := (&websocket.Dialer{HandshakeTimeout: 30 * time.Second}).DialContext(r.Context(), target, header)
 	if err != nil {
@@ -991,7 +1039,14 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		for {
 			kind, data, err := src.ReadMessage()
 			if err != nil {
-				_ = dst.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+				// Pass the runner's close code through (4003 for a viewer who
+				// is not the owner).
+				code, text := websocket.CloseNormalClosure, ""
+				var ce *websocket.CloseError
+				if errors.As(err, &ce) && ce.Code != websocket.CloseNoStatusReceived && ce.Code != websocket.CloseAbnormalClosure {
+					code, text = ce.Code, ce.Text
+				}
+				_ = dst.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, text), time.Now().Add(time.Second))
 				return
 			}
 			if err = dst.WriteMessage(kind, data); err != nil {

@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.11.0
+version: 0.12.0
 description: |
+  v0.12.0 reports lock state (none, swipe, secure) in health and the baseline and adds wake, deepens clean (device admins, accessibility, notification listeners, permissions, Wi-Fi, always-on VPN, all shared-storage files, operator-listed system apps) with a not_undone report, and binds live-video links to an owner.
   v0.11.0 lets a replaced text field wrap its new text and change height (the check before typing still needs its exact box), returns the field's new bounds, and adds the replace_text_resizable capability.
   v0.10.0 adds password references: secure_text takes secret_ref, a name from the encrypted mobile_secrets setting bound to a package and optionally a field and device, so agents never see the password; allow_literal_secure_text=false refuses literal passwords.
   v0.9.1 restarts live video when its phone link breaks during a short USB drop, treats a new adb transport as a reconnect, and reports a stopped action as session_stopped.
@@ -110,7 +111,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.11.0
+    ref: mobile/v0.12.0
     entry: mcp/mobile
   port: 8080
   health_check: /health
@@ -137,4 +138,5 @@ config_schema:
   - { name: blocked_keycodes, type: text, default: "26,223,276", label: Blocked Android keycodes, description: "Comma-separated keycodes that key actions refuse. Default: power, sleep, soft sleep. Use none to allow all." }
   - { name: mobile_secrets, type: secret, label: Password references, description: 'Encrypted JSON map of project IDs to references for secure_text: {"<project_id>":{"bank-login":{"value":"...","package":"com.example.bank","resource_id":"com.example.bank:id/password","device_id":"R5GYC4D9S5M","expires_at":"2027-01-01T00:00:00Z"}}}. value, package and expires_at (RFC3339) are required; resource_id and device_id (inventory ID or serial) narrow where the value may be typed. Agents pass secret_ref and never see the value.' }
   - { name: allow_literal_secure_text, type: bool, default: true, label: Allow literal passwords, description: "When off, secure_text refuses password and accepts only secret_ref, so no password can pass through an agent's context or logs." }
+  - { name: clean_system_apps, type: text, label: System apps clean may clear, description: "Comma-separated system apps whose data mobile_device clean may clear when named in clear_data, e.g. com.android.chrome,com.samsung.android.messaging,com.samsung.android.app.contacts. Clearing them deletes everything in them, including the phone owner's data." }
 upgrade_policy: auto-patch

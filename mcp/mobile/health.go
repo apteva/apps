@@ -22,6 +22,8 @@ type DeviceHealth struct {
 	WifiConnected    *bool    `json:"wifi_connected,omitempty"`
 	SignalLevel      *int     `json:"signal_level,omitempty"` // 0..4
 	ScreenOn         *bool    `json:"screen_on,omitempty"`
+	Keyguard         string   `json:"keyguard,omitempty"` // none, swipe or secure (PIN, pattern or password set)
+	Locked           *bool    `json:"locked,omitempty"`   // the lock screen is showing
 	FreeStorageBytes *int64   `json:"free_storage_bytes,omitempty"`
 	UptimeSeconds    *int64   `json:"uptime_seconds,omitempty"`
 	Error            string   `json:"error,omitempty"`
@@ -331,7 +333,7 @@ func (m *healthMonitor) readAll() {
 	wg.Wait()
 }
 
-const healthScript = `echo @battery; dumpsys battery; echo @thermal; dumpsys thermalservice 2>/dev/null | grep -m1 'Thermal Status'; echo @wifi; cmd wifi status 2>/dev/null | grep -E '^Wifi is (enabled|disabled|connected|not connected)'; echo @signal; dumpsys telephony.registry 2>/dev/null | grep -m1 mSignalStrength; echo @screen; dumpsys power | grep -m1 -E 'mWakefulness='; echo @storage; df -k /data | tail -n 1; echo @uptime; cat /proc/uptime`
+const healthScript = `echo @battery; dumpsys battery; echo @thermal; dumpsys thermalservice 2>/dev/null | grep -m1 'Thermal Status'; echo @wifi; cmd wifi status 2>/dev/null | grep -E '^Wifi is (enabled|disabled|connected|not connected)'; echo @signal; dumpsys telephony.registry 2>/dev/null | grep -m1 mSignalStrength; echo @screen; dumpsys power | grep -m1 -E 'mWakefulness='; echo @storage; df -k /data | tail -n 1; echo @uptime; cat /proc/uptime; ` + lockScript
 
 func (m *healthMonitor) read(serial string) {
 	ctx, cancel := context.WithTimeout(m.e.ctx, 8*time.Second)
@@ -363,6 +365,8 @@ func parseHealth(out string) *DeviceHealth {
 	section := ""
 	charging := false
 	sawPower := false
+	lock := parseLockOutput(out)
+	h.Keyguard, h.Locked = lock.Keyguard, lock.Showing
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.HasPrefix(line, "@") {

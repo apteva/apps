@@ -229,20 +229,20 @@ func TestStreamTokensExpireAndEndWithSession(t *testing.T) {
 	h.tokens["live"] = &streamToken{sid: s.ID, pid: "p", expires: time.Now().Add(time.Minute)}
 	h.mu.Unlock()
 	h.expireTokens()
-	if _, err := h.stream("old", s.ID, "p"); errorCode(err) != "forbidden" {
+	if _, _, err := h.stream("old", s.ID, "p"); errorCode(err) != "forbidden" {
 		t.Fatal("expired token accepted")
 	}
-	if _, err := h.stream("live", s.ID, "other"); errorCode(err) != "forbidden" {
+	if _, _, err := h.stream("live", s.ID, "other"); errorCode(err) != "forbidden" {
 		t.Fatal("token accepted for another project")
 	}
 	h.mu.Lock()
 	h.streams[s.ID] = newLiveStream(h, s, streamOptions{MaxSize: defaultMaxSize, BitRateKbps: defaultBitRate})
 	h.mu.Unlock()
-	if _, err := h.stream("live", s.ID, "p"); err != nil {
+	if _, _, err := h.stream("live", s.ID, "p"); err != nil {
 		t.Fatalf("live token refused: %v", err)
 	}
 	h.end(s.ID, "session closed")
-	if _, err := h.stream("live", s.ID, "p"); err == nil {
+	if _, _, err := h.stream("live", s.ID, "p"); err == nil {
 		t.Fatal("token outlived its session")
 	}
 	ios := s

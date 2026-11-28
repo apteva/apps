@@ -140,3 +140,15 @@ an empty focused password EditText, and no active/finalizing recording. Input
 uses a private stdin pipe and Android accessibility; only secure_input=true and
 verified=true confirms entry. Failures require private inspection, never blind
 replay. Confirm the service's signed-in account separately; stop at challenges.
+
+## Shared phones
+
+Before handing a phone to someone, check `mobile_device` health/verify: a
+`keyguard` of `secure` means a PIN, pattern or password is set. `wake` turns the
+screen on and dismisses a lock screen without a PIN; on `device_locked` ask a
+person to unlock it, never try a PIN. After a user, run
+`clean(confirm=true)` and read `not_undone`: anything listed there (a new PIN,
+Bluetooth pairings, device admins, extra users) needs a person or a factory
+reset before the phone is handed out again. When you open live video for a
+specific person, pass `owner` (their `<subject_type>:<subject_id>`) so nobody
+else can use the link.
