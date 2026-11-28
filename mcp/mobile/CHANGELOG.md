@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.0 — 2026-11-28
+
+- Lock state: device health reports `keyguard` (`none`, `swipe` or `secure`
+  when a PIN, pattern or password is set) and `locked` (lock screen showing),
+  read passively from the phone, never by trying a credential. The baseline
+  records it and `verify_clean` flags `lock_changed`, so a PIN set by the last
+  user is caught.
+- `mobile_device action=wake` turns the screen on and dismisses a lock screen
+  without a PIN. On a secure lock that is showing it refuses with
+  `device_locked`; it never enters a PIN.
+- Wider baseline (coverage 2): saved Wi-Fi networks, accessibility services,
+  notification listeners, device admins, Bluetooth pairing count, always-on
+  VPN and connected VPNs, number of users, and the runtime permissions granted
+  to each third-party app. `verify_clean` also counts files added anywhere on
+  shared storage (outside `Android/`). Older baselines are compared only on
+  what they recorded; capture again to get the new checks.
+- Deeper clean: removes device admins (before uninstalling, since an active
+  admin blocks it), accessibility services and notification listeners added
+  since the baseline; revokes permissions granted since; forgets added Wi-Fi
+  networks; resets always-on VPN; deletes every file added to shared storage
+  outside `Android/` (and empty folders it leaves). `clear_data` also accepts
+  system apps the operator lists in the new `clean_system_apps` setting.
+- The clean report lists `not_undone`: everything still different after the
+  clean (a new PIN, Bluetooth pairings, admins that refused removal, extra
+  users). `clean` is true only when that list is empty, and false with
+  `verify_error` if the phone could not be read afterwards.
+- Live-video links can be bound to one viewer: `mobile_stream owner` takes
+  `<subject_type>:<subject_id>` (a signed-in app user, verified from the
+  platform's signed principal) or `operator:<user_id>`. Anyone else is refused
+  with close code 4003; renewals cannot change the owner. Links opened from the
+  Mobile panel are bound to the operator who opened them. Remote runners get
+  the viewer from the sidecar.
+- New capabilities: `lock_state`, `wake`, `deep_clean`, `stream_owner`.
+
 ## 0.11.0 — 2026-11-28
 
 - Text replacement no longer fails when the field wraps the new text and

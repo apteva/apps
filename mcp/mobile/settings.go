@@ -44,6 +44,16 @@ func operatorSettings(cfg *runnerConfig, get func(string) string) error {
 		}
 		cfg.BlockedKeycodes[n] = true
 	}
+	cfg.CleanSystemApps = nil
+	for _, part := range strings.Split(get("clean_system_apps"), ",") {
+		if part = strings.TrimSpace(part); part == "" {
+			continue
+		}
+		if !appIDPattern.MatchString(part) {
+			return errors.New("clean_system_apps must be a comma-separated list of Android package names")
+		}
+		cfg.CleanSystemApps = append(cfg.CleanSystemApps, part)
+	}
 	return nil
 }
 

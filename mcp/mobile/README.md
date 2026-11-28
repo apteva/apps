@@ -496,6 +496,20 @@ it must be able to reach any preview URL being tested. `localhost` on a phone
 refers to the phone itself.
 
 
+## Shared phones: lock state, clean and stream owners
+
+- Health and the baseline report the lock (`none`, `swipe`, `secure`).
+  `mobile_device action=wake` wakes the phone and dismisses a lock screen
+  without a PIN; it refuses (`device_locked`) on a PIN and never enters one.
+- `baseline_capture` records apps, accounts, settings, Wi-Fi networks,
+  accessibility services, notification listeners, device admins, Bluetooth
+  pairings, VPN state, users, app permissions and lock state.
+  `clean(confirm=true)` undoes what it can and returns `not_undone` for the
+  rest (a PIN, pairings, extra users); `clean` is true only when nothing is
+  left. List system apps whose data clean may clear in `clean_system_apps`.
+- `mobile_stream owner=<subject_type>:<subject_id>` (or `operator:<id>`) binds
+  a live-video link to one viewer; others are refused with close code 4003.
+
 ## Android guarded input
 
 Mobile v0.6.0 supports guarded Android field readback and verified replacement.

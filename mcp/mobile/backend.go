@@ -43,6 +43,9 @@ type runnerConfig struct {
 	StreamViewers int
 	// BlockedKeycodes are Android keycodes mobile_action(key) refuses.
 	BlockedKeycodes map[int]bool
+	// CleanSystemApps are system apps whose data clean may clear when named
+	// in clear_data (browser, messages, contacts, gallery, mail).
+	CleanSystemApps []string
 }
 
 // Device commands never run in a host shell. ADB's *remote* shell still
@@ -223,7 +226,7 @@ func capabilities(driver string) []string {
 		// height; verification matches its shape and returns the new bounds.
 		// selection_state: UI source carries checkable/checked/selected/scrollable
 		// on both the bundled collector and the uiautomator dump fallback.
-		out = append(out, "keep_awake", "replace_text", "replace_text_resizable", "source_only", "secure_text", "selection_state", "long_press", "drag", "keycode", "wait_for", "health", "baseline")
+		out = append(out, "keep_awake", "replace_text", "replace_text_resizable", "lock_state", "wake", "deep_clean", "stream_owner", "source_only", "secure_text", "selection_state", "long_press", "drag", "keycode", "wait_for", "health", "baseline")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:

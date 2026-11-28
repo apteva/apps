@@ -179,7 +179,9 @@ func runnerHandler(e *engine, token string) http.Handler {
 	})
 	mux.HandleFunc("/v1/stream/", func(w http.ResponseWriter, r *http.Request) {
 		sid := strings.TrimPrefix(r.URL.Path, "/v1/stream/")
-		e.streams.serveViewer(w, r, r.URL.Query().Get("project_id"), sid, r.URL.Query().Get("token"))
+		// The sidecar forwards the viewer's platform identity; the runner is
+		// reachable only with the runner token.
+		e.streams.serveViewer(w, r, r.URL.Query().Get("project_id"), sid, r.URL.Query().Get("token"), r.URL.Query().Get("viewer"))
 	})
 	mux.HandleFunc("/v1/artifacts/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
@@ -252,6 +254,7 @@ func runRunner(args []string) error {
 	grace := flags.String("offline-grace-seconds", "", "how long a paused session waits for its phone (default 300)")
 	viewers := flags.String("max-stream-viewers", "", "live-video viewers per session (default 4)")
 	blocked := flags.String("blocked-keycodes", "", "comma-separated Android keycodes refused by key actions (default 26,223,276)")
+	cleanSystem := flags.String("clean-system-apps", "", "comma-separated system apps whose data clean may clear when named in clear_data")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -290,7 +293,7 @@ func runRunner(args []string) error {
 		return err
 	}
 	rc := runnerConfig{AppiumURL: *appium, DevicesJSON: inventory, AndroidDriver: *android, IOSDriver: *iosDriver, IOSTeamID: *iosTeam, ArtifactDir: *artifacts, LockDir: *locks}
-	settings := map[string]string{"offline_grace_seconds": *grace, "max_stream_viewers": *viewers, "blocked_keycodes": *blocked}
+	settings := map[string]string{"offline_grace_seconds": *grace, "max_stream_viewers": *viewers, "blocked_keycodes": *blocked, "clean_system_apps": *cleanSystem}
 	if err = operatorSettings(&rc, func(k string) string { return settings[k] }); err != nil {
 		return err
 	}
