@@ -1,3 +1,11 @@
+# Strategies v0.3.1
+
+- The manifest describes the single rules engine. The app description and
+  the `strategy_catalog`, `strategy_create`, `strategy_evaluate`,
+  `strategy_assign` and `strategy_backtest_create` summaries in 0.3.0 still
+  referred to allocation strategies and research-only rule programs. No code
+  changes.
+
 # Strategies v0.3.0
 
 One rules engine for backtests, validation and live runs. Every strategy is

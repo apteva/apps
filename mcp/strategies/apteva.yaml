@@ -1,9 +1,10 @@
 schema: apteva-app/v1
 name: strategies
 display_name: Strategies
-version: 0.3.0
-description: Automated strategy authoring, scheduling, research, event backtests, validation and performance attribution.
-  Integrates with Trading for market data, authoritative portfolios and order execution. Rule programs remain research-only.
+version: 0.3.1
+description: Rule-program strategies from single-instrument trade rules to 500-symbol long/short books, with one engine
+  for event backtests, validation and live assignments, plus scheduling, research and performance attribution.
+  Integrates with Trading for market data, authoritative portfolios and order execution.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/strategies
 icon: /ui/icon.svg
@@ -62,9 +63,9 @@ provides:
   - name: journal_read
     description: Read journal entries for a portfolio (recent or filtered by kind).
   - name: strategy_catalog
-    description: Discover allocation and trading-rule syntax, workflow and complete examples.
+    description: Discover rule-engine syntax, live limits, workflow, research presets and trade examples.
   - name: strategy_create
-    description: Create an allocation strategy or generic trading-rules/1 trade program; call strategy_catalog first.
+    description: Create a versioned trading-rules/1 strategy program; call strategy_catalog first.
   - name: strategy_update
     description: Update a deterministic strategy; definition changes create a new version.
   - name: strategy_get
@@ -74,16 +75,16 @@ provides:
   - name: strategy_validate
     description: Validate a deterministic strategy definition without saving it.
   - name: strategy_evaluate
-    description: Evaluate current allocation targets. For trade-rule performance use completed backtests, strategy_scorecard_evaluate
-      and validation suites.
+    description: Preview a program's target weights and orders on the latest closed bar. For performance use completed
+      backtests, strategy_scorecard_evaluate and validation suites.
   - name: strategy_assign
-    description: Assign a saved strategy to a portfolio for strategy or hybrid control.
+    description: Assign a saved strategy to a portfolio; live runs evaluate each closed bar with the backtest engine.
   - name: market_data_import
     description: Normalize sourced CSV bid/ask quote and OHLC exports into portable event inputs; explicit timestamps,
       column maps and price basis. No synthetic prices or broker connection.
   - name: strategy_backtest_create
-    description: Create an event backtest; trading-rule programs require a complete sourced OHLC/quote tape and
-      execution configuration.
+    description: Create an event backtest from captured history or a complete sourced OHLC/quote tape, with optional
+      execution configuration and shorts.
   - name: backtest_control
     description: Run, step, pause, cancel or inspect an event simulation.
   - name: backtest_artifact
@@ -182,7 +183,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: strategies/v0.3.0
+    ref: strategies/v0.3.1
     entry: mcp/strategies
   port: 8080
   health_check: /health
