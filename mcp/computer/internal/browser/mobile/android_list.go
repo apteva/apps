@@ -425,26 +425,74 @@ func subsetOf(a, b []string) bool {
 }
 
 // stitch joins the next screen's text onto what was read so far where the two
-// overlap, so text shown on both screens appears once.
+// overlap, so text shown on both screens appears once. Consecutive screens
+// share most of their lines, but not always all of them: a control at the
+// edge scrolls out, or a label loads late. So the overlap is the alignment of
+// acc's last lines with next's first lines that shares the most lines while
+// differing in only a few; with no such alignment next is appended whole.
 func stitch(acc, next []string, direction string) []string {
 	if len(acc) == 0 {
 		return append([]string(nil), next...)
 	}
 	if direction == "up" {
 		// Scrolling up reveals text above: next's tail overlaps acc's head.
-		for k := min(len(acc), len(next)); k > 0; k-- {
-			if slices.Equal(next[len(next)-k:], acc[:k]) {
-				return append(append([]string(nil), next[:len(next)-k]...), acc...)
+		covered := overlapEnd(reversed(acc), reversed(next))
+		return append(append([]string(nil), next[:len(next)-covered]...), acc...)
+	}
+	covered := overlapEnd(acc, next)
+	return append(append([]string(nil), acc...), next[covered:]...)
+}
+
+// overlapEnd returns how many of next's first lines repeat the end of acc:
+// next[:b] aligned with the end of acc as a common subsequence of at least two
+// lines, with at most max(2, shared/4) lines on only one side. The alignment sharing the most lines wins; fewer differences break a
+// tie. It returns 0 when no alignment qualifies.
+func overlapEnd(acc, next []string) int {
+	tail := acc[max(0, len(acc)-len(next)-8):]
+	bestShared, bestDiff, bestEnd := 0, 0, 0
+	for a := range tail {
+		x := tail[a:]
+		// lcs[i][j] is the longest common subsequence of x[:i] and next[:j].
+		lcs := make([][]int, len(x)+1)
+		for i := range lcs {
+			lcs[i] = make([]int, len(next)+1)
+		}
+		for i := 1; i <= len(x); i++ {
+			for j := 1; j <= len(next); j++ {
+				if x[i-1] == next[j-1] {
+					lcs[i][j] = lcs[i-1][j-1] + 1
+				} else {
+					lcs[i][j] = max(lcs[i-1][j], lcs[i][j-1])
+				}
 			}
 		}
-		return append(append([]string(nil), next...), acc...)
-	}
-	for k := min(len(acc), len(next)); k > 0; k-- {
-		if slices.Equal(acc[len(acc)-k:], next[:k]) {
-			return append(acc, next[k:]...)
+		for b := 1; b <= len(next); b++ {
+			shared := lcs[len(x)][b]
+			// next[b-1] must be a shared line, or b-1 is the same alignment
+			// with one difference fewer. An unshared x[0] needs no check: the
+			// next start a+1 gives the same alignment with fewer differences
+			// and wins the tie.
+			if shared < 2 || lcs[len(x)][b-1] == shared {
+				continue
+			}
+			diff := (len(x) - shared) + (b - shared)
+			if diff > max(2, shared/4) {
+				continue
+			}
+			if shared > bestShared || (shared == bestShared && diff < bestDiff) {
+				bestShared, bestDiff, bestEnd = shared, diff, b
+			}
 		}
 	}
-	return append(acc, next...)
+	return bestEnd
+}
+
+func reversed(s []string) []string {
+	out := make([]string, len(s))
+	for i, v := range s {
+		out[len(s)-1-i] = v
+	}
+	return out
 }
 
 // trimToBytes keeps text within limit, dropping from the end that was read

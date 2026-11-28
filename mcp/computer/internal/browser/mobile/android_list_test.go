@@ -321,3 +321,53 @@ func TestReadListKeepsFirstScreenTopRow(t *testing.T) {
 		t.Fatalf("rows = %v %+v", names, res.Rows)
 	}
 }
+
+func TestStitchToleratesLinesOnOneScreen(t *testing.T) {
+	cases := []struct {
+		name            string
+		acc, next, want []string
+		direction       string
+	}{
+		{"exact overlap", []string{"A", "B", "C", "D"}, []string{"C", "D", "E"}, []string{"A", "B", "C", "D", "E"}, "down"},
+		// A card's dismiss control at its top edge scrolls out between screens.
+		{"line only on the earlier screen",
+			[]string{"Intro", "Try it", "Free month", "Dismiss card", "Analytics", "23 views", "3 impressions", "Show all"},
+			[]string{"Try it", "Free month", "Analytics", "23 views", "3 impressions", "Show all", "About", "Bio"},
+			[]string{"Intro", "Try it", "Free month", "Dismiss card", "Analytics", "23 views", "3 impressions", "Show all", "About", "Bio"}, "down"},
+		{"line only on the later screen", []string{"A", "B", "C", "D", "E"}, []string{"C", "Late label", "D", "E", "F", "G"}, []string{"A", "B", "C", "D", "E", "F", "G"}, "down"},
+		{"next already read", []string{"A", "B", "C", "D"}, []string{"B", "C", "D"}, []string{"A", "B", "C", "D"}, "down"},
+		{"no overlap", []string{"A", "B"}, []string{"C", "D"}, []string{"A", "B", "C", "D"}, "down"},
+		// Controls repeated in every entry must not pass for an overlap.
+		{"repeated controls", []string{"Post 1", "Like", "Body 1", "Like"}, []string{"Post 2", "Like", "Body 2", "Like"}, []string{"Post 1", "Like", "Body 1", "Like", "Post 2", "Like", "Body 2", "Like"}, "down"},
+		{"up with a line only on one screen", []string{"C", "D", "E", "F"}, []string{"A", "B", "C", "Late label", "D"}, []string{"A", "B", "C", "D", "E", "F"}, "up"},
+		{"up exact", []string{"C", "D", "E"}, []string{"A", "B", "C", "D"}, []string{"A", "B", "C", "D", "E"}, "up"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			acc := append([]string(nil), c.acc...)
+			got := stitch(acc, c.next, c.direction)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("got %q\nwant %q", got, c.want)
+			}
+			if !slices.Equal(acc, c.acc) {
+				t.Fatal("stitch changed its input")
+			}
+		})
+	}
+}
+
+func TestReadListTextSkipsControlThatScrolledOut(t *testing.T) {
+	line := func(y int, s string) string {
+		return fmt.Sprintf(`<node package="com.example" class="android.widget.TextView" text="%s" %s bounds="[0,%d][100,%d]"/>`, s, attrs, y, y+12)
+	}
+	s1 := feed("me", line(45, "Ana Lopez"), line(60, "Try it"), line(75, "Free month"), line(90, "Dismiss card"), line(105, "Analytics"), line(120, "23 views"), line(135, "3 impressions"), line(150, "Show all"))
+	s2 := feed("me", line(45, "Try it"), line(60, "Free month"), line(75, "Analytics"), line(90, "23 views"), line(105, "3 impressions"), line(120, "Show all"), line(135, "About"), line(150, "Builds things"))
+	res, err := readList(t, listDevice(s1, s2), ListReadOptions{Rows: "text", MaxSwipes: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Ana Lopez", "Try it", "Free month", "Dismiss card", "Analytics", "23 views", "3 impressions", "Show all", "About", "Builds things"}
+	if !slices.Equal(res.Text, want) {
+		t.Fatalf("text=%q", res.Text)
+	}
+}
