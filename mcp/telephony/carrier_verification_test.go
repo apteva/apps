@@ -17,7 +17,7 @@ import (
 func TestTemporaryCarrierVerificationErrors(t *testing.T) {
 	for _, status := range []int{400, 401, 403, 404, 408, 409, 429, 500, 502, 503, 504} {
 		want := status == 408 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
-		for _, err := range []error{&carrierHTTPError{status, "carrier error"}, &sipSetupHTTPError{status: status}} {
+		for _, err := range []error{&carrierHTTPError{status: status, message: "carrier error"}, &sipSetupHTTPError{status: status}} {
 			if temporaryCarrierVerificationError(err) != want {
 				t.Fatalf("status %d: %v", status, err)
 			}
