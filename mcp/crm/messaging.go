@@ -3767,46 +3767,9 @@ func inboxRequestDelegated(r *http.Request) bool {
 // query. The project set always comes from the platform, never the browser;
 // a selected project_id must be in it. Actions stay project-scoped.
 func (a *App) handleHTTPGlobalInbox(w http.ResponseWriter, r *http.Request, args map[string]any) {
-	if inboxRequestDelegated(r) {
-		httpErr(w, http.StatusForbidden, "the All projects inbox is unavailable to delegated application users")
+	scope, ok := resolveGlobalProjects(w, r)
+	if !ok {
 		return
-	}
-	if inboxRequestUser(r) <= 0 {
-		httpErr(w, http.StatusUnauthorized, "authenticated user required")
-		return
-	}
-	ctx := globalCtx.WithUserSession(r)
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		httpErr(w, http.StatusServiceUnavailable, "platform unavailable")
-		return
-	}
-	projects, err := ctx.PlatformAPI().ListProjects()
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "unable to list projects")
-		return
-	}
-	names := map[string]string{}
-	ids := []string{}
-	list := []inboxProject{}
-	for _, project := range projects {
-		id := strings.TrimSpace(project.ID)
-		if id == "" {
-			continue
-		}
-		if _, seen := names[id]; seen {
-			continue
-		}
-		names[id] = project.Name
-		ids = append(ids, id)
-		list = append(list, inboxProject{ID: id, Name: project.Name})
-	}
-	selected := strings.TrimSpace(r.URL.Query().Get("project_id"))
-	if selected != "" {
-		if _, ok := names[selected]; !ok {
-			httpErr(w, http.StatusForbidden, "project is not visible to this user")
-			return
-		}
-		ids = []string{selected}
 	}
 	filters, err := inboxFiltersFromArgs(args)
 	if err != nil {
@@ -3814,18 +3777,76 @@ func (a *App) handleHTTPGlobalInbox(w http.ResponseWriter, r *http.Request, args
 		return
 	}
 	offset := intArg(args, "offset", 0)
-	items, total, err := dbInboxConversationsAcross(ctx.AppDB(), ids, strArg(args, "status"), intArg(args, "limit", 50), offset, filters)
+	items, total, err := dbInboxConversationsAcross(scope.ctx.AppDB(), scope.ids, strArg(args, "status"), intArg(args, "limit", 50), offset, filters)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	for _, item := range items {
-		item.ProjectName = names[item.ProjectID]
+		item.ProjectName = scope.names[item.ProjectID]
 	}
 	httpJSON(w, map[string]any{
 		"inbox": items, "count": len(items), "total": total, "offset": offset,
-		"projects": list, "selected_project_id": selected,
+		"projects": scope.list, "selected_project_id": scope.selected,
 	})
+}
+
+// globalProjects is the project set an All projects (scope=global) request
+// may read: the projects the platform lists for this install, narrowed to the
+// selected project_id when one is given.
+type globalProjects struct {
+	ctx      *sdk.AppCtx
+	ids      []string
+	names    map[string]string
+	list     []inboxProject
+	selected string
+}
+
+// resolveGlobalProjects applies the All projects rules shared by the global
+// inbox and stats: delegated application users 403, no user 401, projects
+// only from PlatformAPI().ListProjects() with the viewer's session, and a
+// selected project_id outside that list 403. It writes the error itself.
+func resolveGlobalProjects(w http.ResponseWriter, r *http.Request) (*globalProjects, bool) {
+	if inboxRequestDelegated(r) {
+		httpErr(w, http.StatusForbidden, "All projects views are unavailable to delegated application users")
+		return nil, false
+	}
+	if inboxRequestUser(r) <= 0 {
+		httpErr(w, http.StatusUnauthorized, "authenticated user required")
+		return nil, false
+	}
+	ctx := globalCtx.WithUserSession(r)
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		httpErr(w, http.StatusServiceUnavailable, "platform unavailable")
+		return nil, false
+	}
+	projects, err := ctx.PlatformAPI().ListProjects()
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "unable to list projects")
+		return nil, false
+	}
+	out := &globalProjects{ctx: ctx, names: map[string]string{}, ids: []string{}, list: []inboxProject{}}
+	for _, project := range projects {
+		id := strings.TrimSpace(project.ID)
+		if id == "" {
+			continue
+		}
+		if _, seen := out.names[id]; seen {
+			continue
+		}
+		out.names[id] = project.Name
+		out.ids = append(out.ids, id)
+		out.list = append(out.list, inboxProject{ID: id, Name: project.Name})
+	}
+	out.selected = strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if out.selected != "" {
+		if _, ok := out.names[out.selected]; !ok {
+			httpErr(w, http.StatusForbidden, "project is not visible to this user")
+			return nil, false
+		}
+		out.ids = []string{out.selected}
+	}
+	return out, true
 }
 
 // handleHTTPRoutingRules — GET /routing-rules (list) / POST (create).

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.10.1
+version: 0.11.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -238,6 +238,36 @@ provides:
             default: 8
             minimum: 4
             maximum: 20
+    - name: crm-activity
+      label: CRM activity
+      description: New contacts, messages received and sent, conversations opened and closed, compared with the previous period, with a daily chart and the latest contacts. On All projects it adds up every project, with a project filter.
+      entry: /ui/CrmActivityWidget.mjs
+      slots: [dashboard.home]
+      dashboard_scopes: [project, global]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [contact.added, contact.activity.added, conversation.status.changed, conversation.message.received]
+      settings_schema:
+        type: object
+        properties:
+          period:
+            type: string
+            title: Period
+            enum: ["7", "30", "90"]
+            enum_names: [Last 7 days, Last 30 days, Last 90 days]
+            default: "7"
+          hide_automated:
+            type: boolean
+            title: Hide automated senders
+            default: true
+          default_metric:
+            type: string
+            title: Chart
+            enum: [messages_received, messages_sent, new_contacts]
+            enum_names: [Messages received, Messages sent, New contacts]
+            default: messages_received
   publishes:
     - name: conversation.draft.changed
       description: A reply or message draft was saved, updated, discarded or its send outcome recorded. Not a sent-message event; inspect status. Contains no draft body or attachments. conversation_id is zero for unsent first outreach.
@@ -519,7 +549,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.10.1
+    ref: crm/v0.11.0
     entry: mcp/crm
   port: 8080
   health_check: /health

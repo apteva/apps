@@ -1,4 +1,13 @@
-# CRM v0.10.1
+# CRM v0.11.0
+
+Release `crm/v0.11.0`: a new `crm-activity` dashboard widget (project and All
+projects Home). It shows new contacts, messages received and sent (with send
+failures), conversations opened and closed, each against the previous period
+of the same length, plus conversations open now, a daily bar chart (received,
+sent or new contacts) and the latest contacts. It reads the new
+`GET /stats?period=7|30|90[&hide_automated=1]` route; with `scope=global` it
+adds up every project `ListProjects` returns for the viewer, with the same
+refusals as the global inbox.
 
 Release `crm/v0.10.1`: on the All projects Home, each Customer inbox row's
 project badge shows the project's colour as a dot next to its name, read from
@@ -359,6 +368,19 @@ Rows link to `/apps/crm/page?tab=inbox` with the conversation and status encoded
 The full panel opens the Inbox tab and selects that conversation, keeping reply
 composition and status mutations in the richer CRM surface. The component is
 read-only and does not send messages or change CRM data.
+
+## Dashboard activity component
+
+The suggested `crm-activity` component shows CRM activity for a period of 7,
+30 or 90 whole UTC days ending today. `GET /stats` returns totals, the previous
+period's totals, open conversations now, one row per day and up to six latest
+contacts. Messages count `email|sms|whatsapp_received` and `_sent` activities;
+`_send_failed` is reported separately. "Opened" uses the conversation's
+`started_at`, "closed" counts conversations now closed whose status changed in
+the window. With `hide_automated` (the default) contacts tagged `automated`
+and their messages and conversations are left out. Global scope polls every
+30 seconds and accepts an optional `project_id` filter; project scope reloads
+on CRM events. The component is read-only.
 
 ## Messaging and automation
 

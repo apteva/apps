@@ -54,12 +54,16 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if len(m.Provides.Publishes) != 27 {
 		t.Errorf("expected 27 published event declarations, got %d", len(m.Provides.Publishes))
 	}
-	if len(m.Provides.UIComponents) != 1 {
-		t.Fatalf("ui components=%d, want 1", len(m.Provides.UIComponents))
+	if len(m.Provides.UIComponents) != 2 {
+		t.Fatalf("ui components=%d, want 2", len(m.Provides.UIComponents))
 	}
 	widget := m.Provides.UIComponents[0]
 	if widget.Name != "customer-inbox" || widget.Entry != "/ui/CrmInboxWidget.mjs" {
 		t.Fatalf("unexpected CRM inbox widget: %+v", widget)
+	}
+	activity := m.Provides.UIComponents[1]
+	if activity.Name != "crm-activity" || activity.Entry != "/ui/CrmActivityWidget.mjs" {
+		t.Fatalf("unexpected CRM activity widget: %+v", activity)
 	}
 	// Surfaces the embedded scopes — should accept project + global.
 	gotScopes := map[string]bool{}

@@ -92,6 +92,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound", Handler: a.handleInbound},
 		// Cross-contact triage queue.
 		{Pattern: "/inbox", Handler: a.handleHTTPInbox},
+		// Activity stats for the CRM activity widget.
+		{Pattern: "/stats", Handler: a.handleHTTPStats},
 		{Pattern: "/drafts", Handler: a.handleHTTPDrafts},
 		{Pattern: "/drafts/", Handler: a.handleHTTPDrafts},
 		// Messaging dependency read surface for the CRM panel. These
