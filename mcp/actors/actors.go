@@ -79,14 +79,16 @@ type actorLimits struct {
 }
 
 type actorStep struct {
-	NativeValues       map[string]string     `json:"native_values,omitempty"`
-	NativeApp          string                `json:"native_app,omitempty"`
-	NativeRequired     []string              `json:"native_required,omitempty"`
-	NativeTarget       string                `json:"native_target,omitempty"`
-	NativeChecked      map[string]bool       `json:"native_checked,omitempty"`
-	NativeState        *bool                 `json:"native_state,omitempty"`
-	NativeContainer    string                `json:"native_container,omitempty"`
-	MaxSwipes          int                   `json:"max_swipes,omitempty"`
+	NativeValues    map[string]string `json:"native_values,omitempty"`
+	NativeApp       string            `json:"native_app,omitempty"`
+	NativeRequired  []string          `json:"native_required,omitempty"`
+	NativeTarget    string            `json:"native_target,omitempty"`
+	NativeChecked   map[string]bool   `json:"native_checked,omitempty"`
+	NativeState     *bool             `json:"native_state,omitempty"`
+	NativeContainer string            `json:"native_container,omitempty"`
+	MaxSwipes       int               `json:"max_swipes,omitempty"`
+	// NativeRows is native_read_list's grouping: items, clickable or text.
+	NativeRows         string                `json:"native_rows,omitempty"`
 	X                  any                   `json:"x,omitempty"`
 	Y                  any                   `json:"y,omitempty"`
 	ToX                any                   `json:"to_x,omitempty"`
@@ -745,7 +747,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if err := validateWaitStep(step); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
-		case "open", "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
+		case "open", "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to", "native_read_list":
 			if err := validateScreenStep(step, true); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}

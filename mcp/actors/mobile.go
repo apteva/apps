@@ -57,6 +57,19 @@ func validateScreenStep(step actorStep, templates bool) error {
 	if step.Action == "native_read" && (step.VerifiedField == "" || !operationNamePattern.MatchString(step.VerifiedField) || step.Text != "") {
 		return errors.New("native_read requires verified_field and no input text")
 	}
+	if step.Action == "native_read_list" {
+		if step.VerifiedField == "" || !operationNamePattern.MatchString(step.VerifiedField) || step.Text != "" || step.NativeTarget != "" {
+			return errors.New("native_read_list requires verified_field, a native_container and no native_target or input text")
+		}
+		if step.MaxItems < 0 || step.MaxItems > maxNativeListItems || step.MinItems < 0 || (step.MinItems > nativeListItemLimit(step)) {
+			return fmt.Errorf("native_read_list max_items must be 1–%d and min_items at most max_items", maxNativeListItems)
+		}
+		if step.NativeRows == "text" && (step.MaxItems != 0 || step.MinItems > 1) {
+			return errors.New("native_read_list with native_rows=text returns one text; max_items does not apply")
+		}
+	} else if step.NativeRows != "" {
+		return errors.New("native_rows is only valid for native_read_list")
+	}
 	if err := validateNativeSelection(step); err != nil {
 		return err
 	}
@@ -65,7 +78,7 @@ func validateScreenStep(step actorStep, templates bool) error {
 	}
 	keypadSecret := step.Action == "native_type_private" && step.Mode == "keypad"
 	switch step.Action {
-	case "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
+	case "native_read", "native_read_list", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
 		if strings.TrimSpace(step.NativeApp) == "" || len(step.NativeRequired) == 0 || len(step.NativeRequired) > 12 {
 			return errors.New("native screen requires native_app and 1–12 native_required markers")
 		}
@@ -74,14 +87,17 @@ func validateScreenStep(step actorStep, templates bool) error {
 				return errors.New("native screen marker must contain 1–500 bytes")
 			}
 		}
-		if step.Action != "native_assert" && step.Action != "native_wait" && !keypadSecret && strings.TrimSpace(step.NativeTarget) == "" {
+		if step.Action != "native_assert" && step.Action != "native_wait" && step.Action != "native_read_list" && !keypadSecret && strings.TrimSpace(step.NativeTarget) == "" {
 			return errors.New("native input requires an exact native_target")
 		}
 		if step.Action == "native_type_private" && step.Mode != "" && (!keypadSecret || step.NativeTarget != "") {
 			return errors.New("private input mode must be keypad with screen markers and no native_target")
 		}
-		if (step.Action == "native_type" || step.Action == "native_replace") && (step.Text == "" || len(step.Text) > 256 || strings.ContainsAny(step.Text, "\r\n\t\b")) {
-			return errors.New("native text input requires 1–256 bytes of single-line text")
+		if step.Action == "native_type" && (step.Text == "" || len(step.Text) > 256 || strings.ContainsAny(step.Text, "\r\n\t\b")) {
+			return errors.New("native_type requires 1–256 bytes of single-line text")
+		}
+		if step.Action == "native_replace" && (step.Text == "" || len(step.Text) > maxNativeReplaceBytes || strings.ContainsAny(step.Text, "\r\n\t\b")) {
+			return fmt.Errorf("native_replace requires 1–%d bytes of single-line text", maxNativeReplaceBytes)
 		}
 		if step.Action == "native_wait" {
 			n, ok := actorNumber(step.Duration)
@@ -117,7 +133,7 @@ func validateMobileActor(def actorDefinition, templates bool) error {
 			return errors.New("browser.target and device_id require backend=mobile")
 		}
 		for _, s := range def.Steps {
-			if s.Action == "open" || s.Action == "native_read" || s.Action == "native_assert" || s.Action == "native_wait" || screenInputAction(s.Action) {
+			if s.Action == "open" || s.Action == "native_read" || s.Action == "native_read_list" || s.Action == "native_assert" || s.Action == "native_wait" || screenInputAction(s.Action) {
 				return errors.New("screen actions require backend=mobile")
 			}
 		}
@@ -151,7 +167,7 @@ func validateMobileActor(def actorDefinition, templates bool) error {
 			return errors.New("Mobile session opening and capability checks cannot be optional")
 		}
 		switch s.Action {
-		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_select", "native_scroll_to":
+		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs", "native_read", "native_read_list", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_select", "native_scroll_to":
 		case "native_type_secret", "native_type_private":
 			if !def.PrivateScreen || strings.TrimSpace(b.ContextID) == "" {
 				return errors.New("native secret input requires private_screen and a saved context_id")
@@ -333,7 +349,7 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			args["to_x"], args["to_y"] = x, y
 		}
 	}
-	if step.Action == "native_read" || step.Action == "native_assert" || step.Action == "native_wait" || step.Action == "native_tap" || step.Action == "native_tap_badged" || step.Action == "native_tap_if_present" || step.Action == "native_type" || step.Action == "native_replace" || step.Action == "native_clear" || step.Action == "native_select" || step.Action == "native_scroll_to" || nativeSecretAction(step.Action) {
+	if step.Action == "native_read" || step.Action == "native_read_list" || step.Action == "native_assert" || step.Action == "native_wait" || step.Action == "native_tap" || step.Action == "native_tap_badged" || step.Action == "native_tap_if_present" || step.Action == "native_type" || step.Action == "native_replace" || step.Action == "native_clear" || step.Action == "native_select" || step.Action == "native_scroll_to" || nativeSecretAction(step.Action) {
 		args["native_app"] = step.NativeApp
 		args["native_required"] = step.NativeRequired
 		if len(step.NativeValues) > 0 {
@@ -345,13 +361,21 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 		if step.Action == "native_select" && step.NativeState != nil {
 			args["native_state"] = *step.NativeState
 		}
-		if step.Action == "native_scroll_to" {
+		if step.Action == "native_scroll_to" || step.Action == "native_read_list" {
 			args["native_container"] = step.NativeContainer
 			if step.Direction != "" {
 				args["direction"] = step.Direction
 			}
 			if step.MaxSwipes > 0 {
 				args["max_swipes"] = step.MaxSwipes
+			}
+		}
+		if step.Action == "native_read_list" {
+			if step.NativeRows != "" {
+				args["native_rows"] = step.NativeRows
+			}
+			if step.NativeRows != "text" {
+				args["max_items"] = nativeListItemLimit(step)
 			}
 		}
 		if step.Action == "native_wait" {
@@ -394,6 +418,9 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 	}
 	if step.Action == "native_read" {
 		return e.recordNativeRead(step, out)
+	}
+	if step.Action == "native_read_list" {
+		return e.recordNativeReadList(step, out)
 	}
 	return nil
 }
@@ -452,12 +479,12 @@ func validateNativeSelection(step actorStep) error {
 	if step.NativeState != nil && step.Action != "native_select" {
 		return errors.New("native_state is only valid for native_select")
 	}
-	if step.Action != "native_scroll_to" {
+	if step.Action != "native_scroll_to" && step.Action != "native_read_list" {
 		if step.NativeContainer != "" || step.MaxSwipes != 0 {
-			return errors.New("native_container and max_swipes are only valid for native_scroll_to")
+			return errors.New("native_container and max_swipes are only valid for native_scroll_to and native_read_list")
 		}
 		if native && step.Direction != "" {
-			return errors.New("direction on a native step is only valid for native_scroll_to")
+			return errors.New("direction on a native step is only valid for native_scroll_to and native_read_list")
 		}
 	}
 	switch step.Action {
@@ -477,6 +504,19 @@ func validateNativeSelection(step actorStep) error {
 		}
 		if step.Text != "" {
 			return errors.New("native_scroll_to does not accept input text")
+		}
+	case "native_read_list":
+		if strings.TrimSpace(step.NativeContainer) == "" || len(step.NativeContainer) > 500 {
+			return errors.New("native_read_list requires a native_container of 1–500 bytes")
+		}
+		if step.Direction != "" && step.Direction != "up" && step.Direction != "down" {
+			return errors.New("native_read_list direction must be up or down")
+		}
+		if step.MaxSwipes < 0 || step.MaxSwipes > maxNativeListSwipes {
+			return fmt.Errorf("native_read_list max_swipes must be 0–%d", maxNativeListSwipes)
+		}
+		if step.NativeRows != "" && step.NativeRows != "items" && step.NativeRows != "clickable" && step.NativeRows != "text" {
+			return errors.New("native_rows must be items, clickable or text")
 		}
 	}
 	return nil

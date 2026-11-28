@@ -212,6 +212,17 @@ selectors like `"{{name}} >> android.widget.RadioButton"` to pick a row by its
 label; templates render in guard keys. Guard a final submit tap with
 `native_checked` so the run cannot submit a default or stale selection.
 
+List reads (Actors 0.12.0, Computer 0.17.0, Android): `native_read_list`
+reads the visible text of one `native_container` list without tapping and
+saves one dataset item per row in `verified_field` (row strings joined by
+newlines). Pick `native_rows`: `items` for list entries such as feed posts,
+`clickable` for tappable rows such as search results, `text` for one item with
+the whole list such as a profile. Page with `max_swipes` (0–10) and
+`direction`; bound with `max_items` (1–50, default 20); use `min_items` to fail
+on an empty or short list. A screen change while paging fails the step and
+saves nothing. `native_replace` now takes up to 4096 bytes of single-line
+Unicode (Computer 0.17.0, Mobile 0.11.0); `native_type` stays at 256 bytes.
+
 
 ### Platform variants
 

@@ -842,7 +842,7 @@ func (e *actorExecution) runStep(step actorStep) error {
 	switch step.Action {
 	case "open":
 		return e.gotoURL("")
-	case "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to":
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_read", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_clear", "native_type_secret", "native_type_private", "native_select", "native_scroll_to", "native_read_list":
 		return e.screenInteract(step)
 	case "prepare_upload":
 		return e.prepareUpload(step)
