@@ -364,19 +364,6 @@ runtime:
     entry: mcp/workspaces
   port: 8080
   health_check: /health
-  artifacts:
-    linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.4/workspaces-v0.12.4-linux-amd64.tar.gz
-      sha256: 643a7a188527d6e56226b0a1e8d2195224d3ba79089ba190d3ead24b2288f382
-    linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.4/workspaces-v0.12.4-linux-arm64.tar.gz
-      sha256: e14f57293d1c2d370bbc0a62b0522fa76afa76ad244f34f37770f0cd726a5136
-    darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.4/workspaces-v0.12.4-darwin-arm64.tar.gz
-      sha256: c66b140cfbee3bc518d3cf211ffe955e90a35563e43d05eb1aa684c7d71c73ce
-    darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.12.4/workspaces-v0.12.4-darwin-amd64.tar.gz
-      sha256: b19c5a534c57d5457ac6bd9cfc7102c0ac9bb6f638efb07646480dd6a2a9a456
 
 db:
   driver: sqlite
