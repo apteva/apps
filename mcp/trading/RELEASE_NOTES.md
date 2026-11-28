@@ -1,3 +1,26 @@
+# Trading v0.19.0
+
+Trading no longer ships the strategy research engine. Strategies has owned
+strategies, backtests and validation since the split; Trading only kept a
+hidden copy of that code.
+
+- Remove the unreachable strategy, backtest, validation and rule-engine code,
+  its tests and CLIs, and the hidden strategy and backtest screens in the
+  Trading panel. About 23,000 lines removed.
+- Remove the legacy strategy scorecard gate and per-strategy P&L attribution
+  from `order_place` and the fill path. `order_place` never advertised
+  `strategy_id`; Strategies gates its own orders and tags them
+  `external_strategy_id`.
+- A working order that still carries legacy Trading strategy provenance now
+  fails closed instead of being re-checked against legacy tables.
+- Keep the Strategies boundary: `portfolio_research_snapshot`,
+  `market_bars_capture`, `backtest_market_step` and `research_legacy_export`.
+  Legacy research tables stay until every install has imported into
+  Strategies. A contract test checks every tool and `order_place` field
+  listed in Strategies' `trading_contract.json`.
+
+No migrations, no new permissions, no changes to public tools.
+
 # Trading v0.14.0
 
 Realized and open P&L is now attributed to the strategy that traded it, and two dashboard widgets read that attribution.
@@ -73,8 +96,8 @@ idealized next-open approximation. Execution behavior is unchanged; use finer
 captured quotes to study latency. Monte Carlo samples execution uncertainty on
 the captured path, not synthetic future market paths.
 
-See [Indicator strategies](INDICATOR_STRATEGIES.md),
-[Validation suites](VALIDATION.md), and [Event backtesting](EVENT_BACKTESTING.md)
+See [Indicator strategies](../strategies/INDICATOR_STRATEGIES.md),
+[Validation suites](../strategies/VALIDATION.md), and [Event backtesting](../strategies/EVENT_BACKTESTING.md)
 for formulas, examples and simulation semantics.
 
 ## Release verification

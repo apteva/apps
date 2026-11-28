@@ -773,31 +773,8 @@ func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb
 		if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
 			ctx.Logger().Warn("import accounting rebuild failed", "err", err)
 		}
-		if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
-			ctx.Logger().Warn("import strategy attribution rebuild failed", "err", err)
-		}
 	}
 	return wrote
-}
-
-// safeBrokerIDShort — crops a long broker id (Alpaca UUIDs are 36 chars)
-// to something the orders.id column can carry alongside our prefix.
-// Strip non-alphanumeric so the resulting id is URL-safe for the
-// /orders/{id}/cancel route.
-func safeBrokerIDShort(s string) string {
-	var b strings.Builder
-	for _, c := range s {
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-			b.WriteRune(c)
-			if b.Len() >= 16 {
-				break
-			}
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
 }
 
 func registeredSlugs() []string {
@@ -1717,12 +1694,6 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 		orderPlacementMu.Unlock()
 		return rejectStruct("insufficient_position", "sell exceeds unreserved long holdings"), nil
 	}
-	if sid := int64Arg(args, "strategy_id", 0); sid > 0 {
-		if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), pf, sid); !allowed {
-			orderPlacementMu.Unlock()
-			return rejectStruct("strategy_gate", reason), nil
-		}
-	}
 	if breach, checkErr := preTradeRiskCheck(ctx.AppDB(), pf, symbol, side, qty, riskPrice); checkErr != nil {
 		orderPlacementMu.Unlock()
 		return nil, checkErr
@@ -1802,9 +1773,6 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 				err = errors.New("paper decision changed before order commit")
 			}
 		}
-	}
-	if err == nil && strategyID > 0 {
-		_, err = tx.Exec(`UPDATE orders SET strategy_id=?,strategy_version=(SELECT version FROM strategies WHERE id=?) WHERE id=?`, strategyID, strategyID, o.ID)
 	}
 	if err != nil {
 		tx.Rollback()

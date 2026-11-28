@@ -242,23 +242,6 @@ func TestMarketCalendar_PrefersStoredAuthoritativeSession(t *testing.T) {
 	}
 }
 
-func TestReferenceManifest_ReportsForwardOnlyUniverseCoverage(t *testing.T) {
-	ctx := newTestCtx(t)
-	security := &Security{ID: "sec-test", AssetClass: "equity", Name: "Test", Status: "active", Source: "fixture"}
-	if err := dbUpsertSecurity(ctx.AppDB(), security, &SecurityListing{Venue: "NYSE", Symbol: "TEST", Active: true, ValidFrom: "2026-01-01", Source: "fixture"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	_, _ = ctx.AppDB().Exec(`INSERT INTO universe_memberships(universe_id,security_id,valid_from,source) VALUES(?,?,?,?)`, referenceUniverseAlpaca, security.ID, "2026-01-01", "fixture")
-	before := referenceManifest(ctx.AppDB(), []string{"TEST"}, "2025-01-01", "2025-12-31", "total_return")
-	if before["survivorship_safe"] != false {
-		t.Fatalf("before=%v", before)
-	}
-	after := referenceManifest(ctx.AppDB(), []string{"TEST"}, "2026-02-01", "2026-03-01", "total_return")
-	if after["survivorship_safe"] != false {
-		t.Fatalf("after=%v", after)
-	}
-}
-
 func TestSecurityMaster_PreservesIdentityAcrossSymbolListings(t *testing.T) {
 	ctx := newTestCtx(t)
 	securityID, err := resolveSecurityID(ctx.AppDB(), "fixture", "asset-1", "", "037833100", "NASDAQ", "OLD")
@@ -354,14 +337,6 @@ func TestReferenceHTTP_ExposesNormalizedLatestRevision(t *testing.T) {
 	}
 	if len(response.CorporateActions) != 1 || response.CorporateActions[0].ProviderEventID != "http-action" {
 		t.Fatalf("response=%+v", response.CorporateActions)
-	}
-}
-
-func TestReferenceManifest_FlagsRawPriceDiscontinuity(t *testing.T) {
-	ctx := newTestCtx(t)
-	manifest := referenceManifest(ctx.AppDB(), []string{"AAPL"}, "2026-01-01", "2026-12-31", "raw")
-	if manifest["economic_continuity"] != false || manifest["warning"] == "" {
-		t.Fatalf("manifest=%v", manifest)
 	}
 }
 

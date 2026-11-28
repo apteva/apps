@@ -113,10 +113,8 @@ func TestEngine_TickFills_Market(t *testing.T) {
 func TestEngine_DoesNotExecuteStrategyAssignments(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Agent-owned portfolio", []string{"crypto"})
-	sid := mustCreateFixedStrategy(t, ctx, "Legacy assignment", "BTC-USD", 0.1)
-	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: id, StrategyID: sid, StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h"}); err != nil {
-		t.Fatal(err)
-	}
+	sid := legacyStrategy(t, ctx, "test-proj", "Legacy assignment", "BTC-USD", 0.1)
+	legacyAssignment(t, ctx, id, sid)
 	globalEngine.provider = newMockProvider()
 	if err := markTick(context.Background(), ctx); err != nil {
 		t.Fatal(err)

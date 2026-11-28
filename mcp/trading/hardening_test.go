@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"sync"
 	"testing"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -250,67 +249,6 @@ func TestPolymarketSellClosesSelectedOutcome(t *testing.T) {
 	pos, err := dbGetPosition(ctx.AppDB(), pid, "POLY:btc-100k-2026", "YES")
 	if err != nil || pos != nil {
 		t.Fatalf("YES position still open: %+v err=%v", pos, err)
-	}
-}
-
-func TestStrategyRotationSellsBeforeBuying(t *testing.T) {
-	run := &BacktestRun{PortfolioID: 1, Symbols: []string{"BTC-USD", "ETH-USD"}, StartingCash: 1000}
-	state := &strategyBacktestState{Cash: 0, Positions: map[string]*Position{"ETH-USD": {Symbol: "ETH-USD", AssetClass: "crypto", Qty: 10, AvgCost: 100}}}
-	orders := applyStrategyTargets(run, state, []StrategyAllocation{{Symbol: "BTC-USD", Weight: 1}}, []map[string]any{{"symbol": "BTC-USD", "price": 100.0}, {"symbol": "ETH-USD", "price": 100.0}})
-	if len(orders) != 2 || orders[0].Side != "sell" || orders[1].Side != "buy" {
-		t.Fatalf("rotation order=%+v", orders)
-	}
-	if state.Positions["BTC-USD"] == nil || state.Positions["BTC-USD"].Qty < 9.9 {
-		t.Fatalf("BTC target not funded after sale: %+v cash=%v", state.Positions, state.Cash)
-	}
-}
-
-func TestValidationBarsIncludeWarmupBeforeOutOfSample(t *testing.T) {
-	rows := []*BacktestMarketBar{}
-	for step := 1; step <= 10; step++ {
-		rows = append(rows, &BacktestMarketBar{Step: step, Symbol: "BTC-USD", C: float64(step)})
-	}
-	got := reindexValidationMarketBars(rows, 6, 10, 3)
-	if len(got) != 8 || got[0].Step != -2 || got[3].Step != 1 {
-		t.Fatalf("warmup reindex=%+v", got)
-	}
-}
-
-func TestFinalAgentStepStaysRunningUntilFinalized(t *testing.T) {
-	platform := &hardeningPlatform{}
-	ctx := newHardeningCtx(t, platform)
-	pid := mustCreatePortfolio(t, ctx, "agent", []string{"crypto"})
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: pid, SourceAgentID: 1, Name: "one step", Status: "queued", Symbols: []string{"BTC-USD"}, StartAt: "2026-01-01", EndAt: "2026-01-01", Interval: "1h", StartingCash: 1000, TotalSteps: 1, EnvironmentID: "env", EnvironmentAgentID: 2, EnvironmentPortfolioID: 3, Summary: map[string]any{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	barTime := time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)
-	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, []*BacktestMarketBar{{RunID: runID, Step: 1, Symbol: "BTC-USD", AssetClass: "crypto", T: barTime.Unix(), O: 100, H: 100, L: 100, C: 100, Source: "test"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := dbUpdateBacktestEnvironment(ctx.AppDB(), runID, "env", 2, 3); err != nil {
-		t.Fatal(err)
-	}
-	if err := dbSetBacktestStatus(ctx.AppDB(), runID, "running", ""); err != nil {
-		t.Fatal(err)
-	}
-	run, _ := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if _, err := stepBacktestRun(run); err != nil {
-		t.Fatal(err)
-	}
-	defer stopBacktestRunner(runID)
-	next, _ := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if next.Status != "running" {
-		t.Fatalf("final step completed before agent settlement: %s", next.Status)
-	}
-	if got := backtestReplayTime(next, 1); !got.Equal(barTime) {
-		t.Fatalf("replay time=%s want captured %s", got, barTime)
-	}
-	stopBacktestRunner(runID)
-	finalizeAgentBacktest(next)
-	completed, _ := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-	if completed.Status != "completed" {
-		t.Fatalf("finalized status=%s", completed.Status)
 	}
 }
 

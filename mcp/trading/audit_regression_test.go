@@ -126,44 +126,6 @@ func TestAuditRebuildLosesSeededRealizedPnL(t *testing.T) {
 	}
 }
 
-func TestAuditScorecardApprovalSurvivesStrategyVersionChange(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "gate", []string{"crypto"})
-	sid := mustCreateTestStrategy(t, ctx, "BTC-USD")
-	policy := defaultScorecardPolicy(id, sid, "test-proj")
-	policy.EnforcementEnabled = true
-	policy.RequireOutOfSample = false
-	policy.Criteria = []ScorecardCriterion{{Metric: "return_pct", Operator: "min", Threshold: 0, Required: true}}
-	policy, err := dbUpsertStrategyScorecardPolicy(ctx.AppDB(), *policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rid, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: id, StrategyID: sid, StrategyVersion: 1, RunKind: "strategy", Name: "v1", Status: "completed", Symbols: []string{"BTC-USD"}, StartAt: "2026-01-01", EndAt: "2026-02-01", Interval: "1d", StartingCash: 100000, TotalSteps: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dbUpsertBacktestSnapshot(ctx.AppDB(), &BacktestSnapshot{RunID: rid, Step: 1, Equity: 110000, Cash: 110000}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := evaluateAndStoreStrategyScorecard(ctx.AppDB(), "test-proj", id, sid, rid); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", sid, &Strategy{Definition: governanceStrategyDefinition("ETH-USD")}); err != nil {
-		t.Fatal(err)
-	}
-	for _, stage := range []string{"paper_candidate", "paper", "live_candidate", "live"} {
-		policy, err = promoteStrategyScorecard(ctx.AppDB(), policy, stage)
-		if err != nil {
-			return
-		} // Correct: stale evidence cannot promote v2.
-	}
-	pf := mustPortfolio(t, ctx, id)
-	pf.ExecutionEnvironment = "broker_live"
-	if allowed, _ := scorecardAllowsExecution(ctx.AppDB(), pf, sid); allowed {
-		t.Errorf("untested strategy v2 allowed live using only v1 evidence")
-	}
-}
-
 func TestAuditQuoteMarksOldTradeFresh(t *testing.T) {
 	ctx := newTestCtx(t)
 	old := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
@@ -284,31 +246,6 @@ func TestAuditOldRESTMarkOverwritesNewStreamMark(t *testing.T) {
 	}
 }
 
-func TestAuditOutOfSampleLabelLost(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "validation", []string{"crypto"})
-	sid := mustCreateTestStrategy(t, ctx, "BTC-USD")
-	strategy, err := dbGetStrategy(ctx.AppDB(), "test-proj", sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	def, _, err := validateStrategyDefinition(strategy.Definition)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bars := []*BacktestMarketBar{}
-	for i := 1; i <= 4; i++ {
-		bars = append(bars, &BacktestMarketBar{Step: i, Symbol: "BTC-USD", AssetClass: "crypto", T: time.Date(2026, 1, i, 0, 0, 0, 0, time.UTC).Unix(), O: 100, H: 100 + float64(i), L: 100, C: 100 + float64(i)})
-	}
-	period, err := (&App{}).createCompletedStrategyValidationRun(ctx, mustPortfolio(t, ctx, id), strategy, def, strategyValidationRunSpec{Label: "out_of_sample", Name: "test", Interval: "1d", StartingCash: 100000, MarketSource: "test", AdjustmentMode: "provider_adjusted", Bars: bars})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := scorecardScope(period.Run); got != "out_of_sample" {
-		t.Errorf("completed out-of-sample validation has scope=%s, summary=%v", got, period.Run.Summary)
-	}
-}
-
 func TestAuditMissingMarkDisagreesOnEquity(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "valuation", []string{"equity"})
@@ -326,23 +263,5 @@ func TestAuditMissingMarkDisagreesOnEquity(t *testing.T) {
 	}
 	if eq != snap.Equity {
 		t.Errorf("risk engine equity=%v while displayed equity=%v", eq, snap.Equity)
-	}
-}
-
-func TestAuditStrategyRotationRejectsBuyBeforeSellSettles(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "rotation", []string{"crypto"})
-	mark, _ := dbGetMark(ctx.AppDB(), "BTC-USD")
-	if err := dbInsertPositionRaw(ctx.AppDB(), "test-proj", id, "BTC-USD", "crypto", "", 1, mark.Price); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ctx.AppDB().Exec(`UPDATE portfolios SET cash=0 WHERE id=?`, id); err != nil {
-		t.Fatal(err)
-	}
-	sid := mustCreateTestStrategy(t, ctx, "BTC-USD", "ETH-USD")
-	s, _ := dbGetStrategy(ctx.AppDB(), "test-proj", sid)
-	orders, pending, err := placeStrategyPaperOrders(globalEngine, ctx, mustPortfolio(t, ctx, id), s, &StrategyAssignment{ID: 1}, &StrategyEvaluation{TargetAllocations: []StrategyAllocation{{Symbol: "ETH-USD", Weight: 1}}})
-	if err != nil {
-		t.Errorf("100%% BTC -> 100%% ETH rotation failed with %d already-created orders pending=%v: %v", len(orders), pending, err)
 	}
 }

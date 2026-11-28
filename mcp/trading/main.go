@@ -72,9 +72,6 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
 		return err
 	}
-	if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
-		return err
-	}
 	// Engine bootstrap — pricing provider, then the shared engine
 	// pointer the workers read.
 	provider := newProvider(ctx.Config().Get("pricing_provider"))

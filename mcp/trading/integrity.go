@@ -14,8 +14,6 @@ import (
 
 var brokerBindingMu sync.Mutex
 var orderRequestMu sync.Mutex
-var rebalanceMu sync.Mutex
-var strategyReplayMu sync.Mutex
 
 func pinBroker(ctx *sdk.AppCtx, pf *Portfolio, connectionID int64) error {
 	if pf.ID == 0 {
@@ -93,15 +91,6 @@ func workingPortfolioOrders(db *sql.DB, id int64) ([]*Order, error) {
 	return dbListOrdersInternal(db, id, "working", -1)
 }
 
-func persistRebalance(db *sql.DB, pf *Portfolio, s *Strategy, a *StrategyAssignment, eval *StrategyEvaluation) error {
-	raw, err := json.Marshal(eval.TargetAllocations)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`INSERT INTO strategy_rebalances(assignment_id,portfolio_id,strategy_id,strategy_version,targets_json) VALUES(?,?,?,?,?) ON CONFLICT(assignment_id) DO UPDATE SET targets_json=excluded.targets_json,strategy_version=excluded.strategy_version,status='pending',updated_at=CURRENT_TIMESTAMP WHERE strategy_rebalances.status='completed' OR strategy_rebalances.strategy_version!=excluded.strategy_version`, a.ID, pf.ID, s.ID, s.Version, string(raw))
-	return err
-}
-
 func validateWorkingPolicy(db *sql.DB, pf *Portfolio, o *Order) error {
 	if isBuySide(o.Side) {
 		v, err := portfolioUniverseViolation(db, pf, o.Symbol)
@@ -113,24 +102,15 @@ func validateWorkingPolicy(db *sql.DB, pf *Portfolio, o *Order) error {
 		}
 	}
 	var sid int64
-	var version int
-	if err := db.QueryRow(`SELECT strategy_id,strategy_version FROM orders WHERE id=?`, o.ID).Scan(&sid, &version); err != nil {
+	if err := db.QueryRow(`SELECT strategy_id FROM orders WHERE id=?`, o.ID).Scan(&sid); err != nil {
 		return err
 	}
-	if o.Source == "strategy" && sid == 0 {
-		return errors.New("strategy order provenance unavailable")
-	}
-	if sid > 0 {
-		s, err := dbGetStrategy(db, pf.ProjectID, sid)
-		if err != nil {
-			return err
-		}
-		if s.Version != version {
-			return errors.New("strategy version changed")
-		}
-		if allowed, reason := scorecardAllowsExecution(db, pf, sid); !allowed {
-			return errors.New(reason)
-		}
+	// Strategy automation lives in the Strategies app, which gates its own
+	// orders before calling order_place and tags them external_strategy_id.
+	// A working order still carrying Trading's legacy strategy provenance has
+	// no gate left to re-check it here, so fail closed.
+	if o.Source == "strategy" || sid > 0 {
+		return errors.New("legacy Trading strategy order; strategy automation moved to the Strategies app")
 	}
 	return nil
 }
@@ -222,33 +202,6 @@ func applyAccountSnapshot(db *sql.DB, pf *Portfolio, acct *brokerAccount, comple
 	return tx.Commit()
 }
 
-func commitStrategyStep(db *sql.DB, runID int64, step int, summary map[string]any, status string, snap *BacktestSnapshot) error {
-	raw, err := json.Marshal(summary)
-	if err != nil {
-		return err
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE backtest_runs SET current_step=?,summary_json=json_patch(COALESCE(summary_json,'{}'),?),status=?,updated_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ?='completed' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND status='running' AND current_step=?`, step, string(raw), status, status, runID, step-1)
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return errors.New("backtest step cancelled, paused, or already committed")
-	}
-	if err := dbUpsertBacktestSnapshot(tx, snap); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 func historicalQuantity(db *sql.DB, portfolioID int64, symbol, date string) (float64, error) {
 	var qty float64
 	err := db.QueryRow(`SELECT qty FROM position_history WHERE portfolio_id=? AND symbol=? AND outcome='' AND julianday(observed_at)<julianday(?) ORDER BY julianday(observed_at) DESC,id DESC LIMIT 1`, portfolioID, symbol, date+"T00:00:00Z").Scan(&qty)
@@ -258,41 +211,6 @@ func historicalQuantity(db *sql.DB, portfolioID int64, symbol, date string) (flo
 	return qty, err
 }
 
-type replayExecutionPolicy struct {
-	Risk        *PortfolioRiskPolicy             `json:"risk"`
-	Allowed     map[string]bool                  `json:"allowed"`
-	Profiles    map[string]VenueExecutionProfile `json:"profiles"`
-	Instruments map[string]*Instrument           `json:"instruments"`
-}
-
-func captureReplayPolicy(db *sql.DB, pf *Portfolio, symbols []string) (*replayExecutionPolicy, error) {
-	risk, err := dbGetPortfolioRiskPolicy(db, pf)
-	if err != nil {
-		return nil, err
-	}
-	p := &replayExecutionPolicy{Risk: risk, Allowed: map[string]bool{}, Profiles: map[string]VenueExecutionProfile{}, Instruments: map[string]*Instrument{}}
-	for _, symbol := range symbols {
-		v, err := portfolioUniverseViolation(db, pf, symbol)
-		if err != nil {
-			return nil, err
-		}
-		p.Allowed[symbol] = v == nil && contains(pf.AllowedClasses, inferAssetClass(symbol))
-		p.Profiles[symbol] = resolveVenueProfile(db, pf, symbol, inferAssetClass(symbol))
-		p.Instruments[symbol], _ = dbGetInstrument(db, symbol)
-	}
-	return p, nil
-}
-func decodeReplayPolicy(run *BacktestRun) *replayExecutionPolicy {
-	raw, err := json.Marshal(run.Summary["execution_policy"])
-	if err != nil {
-		return nil
-	}
-	var p replayExecutionPolicy
-	if json.Unmarshal(raw, &p) != nil || p.Risk == nil {
-		return nil
-	}
-	return &p
-}
 func exposureBreach(policy *PortfolioRiskPolicy, equity, orderNotional, symbolValue, gross float64) *RiskBreach {
 	if equity <= 0 {
 		return &RiskBreach{Code: "risk_no_equity", Detail: "positive equity required"}
@@ -424,31 +342,6 @@ func (a *App) toolPortfolioBrokerBind(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	return map[string]any{"portfolio_id": pf.ID, "connection_id": connectionID, "live_armed": false}, nil
-}
-
-func replayPolicyHash(policy *replayExecutionPolicy) string {
-	raw, _ := json.Marshal(policy)
-	var value any
-	_ = json.Unmarshal(raw, &value)
-	var strip func(any)
-	strip = func(v any) {
-		switch x := v.(type) {
-		case map[string]any:
-			for _, k := range []string{"updated_at", "created_at", "received_at", "runtime"} {
-				delete(x, k)
-			}
-			for _, child := range x {
-				strip(child)
-			}
-		case []any:
-			for _, child := range x {
-				strip(child)
-			}
-		}
-	}
-	strip(value)
-	raw, _ = json.Marshal(value)
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 func executionTime(db *sql.DB, portfolioID int64) time.Time {

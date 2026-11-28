@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -172,15 +171,6 @@ func TestValidateBacktestHistoryAcceptsLatestCompletedCurrentDayBar(t *testing.T
 	}
 }
 
-func TestResolveBacktestRangeRejectsInvalidInput(t *testing.T) {
-	if _, _, err := resolveBacktestRange("not-a-date", "2025-01-01"); err == nil {
-		t.Fatal("expected invalid start error")
-	}
-	if _, _, err := resolveBacktestRange("2025-02-01", "2025-01-01"); err == nil {
-		t.Fatal("expected reversed range error")
-	}
-}
-
 func TestDefaultBacktestBudgetSupportsYearScaleIntradayData(t *testing.T) {
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)
@@ -192,98 +182,4 @@ func TestDefaultBacktestBudgetSupportsYearScaleIntradayData(t *testing.T) {
 	if fiveSymbols <= defaultBacktestMaxMarketRows {
 		t.Fatalf("five-symbol year estimate %d should require an explicit budget increase", fiveSymbols)
 	}
-}
-
-func TestRealProvidersSupportYearScaleHourlyBacktests(t *testing.T) {
-	if os.Getenv("RUN_TRADING_PROVIDER_TESTS") != "1" {
-		t.Skip("set RUN_TRADING_PROVIDER_TESTS=1 for real Binance/Yahoo history checks")
-	}
-	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC)
-
-	t.Run("crypto", func(t *testing.T) {
-		bars, err := newBinancePublic().BacktestBarsContext(context.Background(), "BTC-USD", "1h", start, end, 8760)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(bars) != 8760 {
-			t.Fatalf("BTC hourly bars = %d, want 8760", len(bars))
-		}
-		t.Logf("loaded %d completed BTC-USD hourly bars", len(bars))
-	})
-	t.Run("equity", func(t *testing.T) {
-		bars, steps, source, err := captureBacktestMarketBars(context.Background(), []string{"AAPL"}, "1h", start, end)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if source != "yahoo-finance" || steps < 1500 || len(bars) != steps {
-			t.Fatalf("source=%s AAPL hourly steps=%d rows=%d", source, steps, len(bars))
-		}
-		t.Logf("captured %d completed AAPL hourly replay steps", steps)
-	})
-	t.Run("capture-and-persist", func(t *testing.T) {
-		marketBars, steps, source, err := captureBacktestMarketBars(context.Background(), []string{"BTC-USD", "ETH-USD"}, "1h", start, end)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if source != "binance-public" || steps != 8760 || len(marketBars) != 2*steps {
-			t.Fatalf("source=%s steps=%d rows=%d", source, steps, len(marketBars))
-		}
-		ctx := newTestCtx(t)
-		portfolioID := mustCreatePortfolio(t, ctx, "year-scale", []string{"crypto"})
-		strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-			ProjectID: "test-proj", Name: "year-scale fixed strategy", Status: "active", Version: 1,
-			Definition: map[string]any{
-				"universe":        []any{"BTC-USD", "ETH-USD"},
-				"cadence":         "1h",
-				"rebalance_every": 24,
-				"rules": []any{map[string]any{
-					"name":     "balanced crypto",
-					"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.5}, map[string]any{"symbol": "ETH-USD", "weight": 0.5}},
-				}},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-			ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID, StrategyVersion: 1, RunKind: "strategy",
-			Name: "year-scale", Status: "queued", Symbols: []string{"BTC-USD", "ETH-USD"},
-			StartAt: "2025-01-01", EndAt: "2025-12-31", Interval: "1h",
-			StartingCash: 100000, TotalSteps: steps,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, marketBars); err != nil {
-			t.Fatal(err)
-		}
-		var stored int
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM backtest_market_bars WHERE run_id = ?`, runID).Scan(&stored); err != nil {
-			t.Fatal(err)
-		}
-		if stored != len(marketBars) {
-			t.Fatalf("stored rows = %d, want %d", stored, len(marketBars))
-		}
-		lastMarks, err := dbBacktestMarketMarks(ctx.AppDB(), runID, steps, []string{"BTC-USD", "ETH-USD"})
-		if err != nil || len(lastMarks) != 2 {
-			t.Fatalf("last replay step marks=%d err=%v", len(lastMarks), err)
-		}
-		run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		started := time.Now()
-		if _, err := runStrategyBacktestToEnd(run); err != nil {
-			t.Fatal(err)
-		}
-		completed, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if completed.Status != "completed" || completed.CurrentStep != steps {
-			t.Fatalf("completed status=%s step=%d/%d", completed.Status, completed.CurrentStep, steps)
-		}
-		t.Logf("captured and persisted %d rows, then executed %d replay steps in %s", stored, steps, time.Since(started))
-	})
 }

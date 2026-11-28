@@ -60,4 +60,4 @@ indicator seeds are bounded. FX is fixed per contract. Overnight financing and
 automatic margin liquidation are excluded. Quote replay models fills and native
 OCO, not guaranteed real broker execution. Broker-specific contract settings,
 chart price basis, costs, timezone and data coverage require explicit selection.
-See [RULE_ENGINE.md](RULE_ENGINE.md) for the complete contract and commands.
+See [RULE_ENGINE.md](../strategies/RULE_ENGINE.md) for the complete contract and commands.

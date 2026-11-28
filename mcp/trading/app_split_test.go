@@ -98,14 +98,9 @@ func TestTradingAgentCannotForgeAppAttribution(t *testing.T) {
 func TestTradingResearchExportIsProjectScopedAndAppOnly(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Legacy portfolio", []string{"crypto"})
-	sid := mustCreateFixedStrategy(t, ctx, "Saved research", "BTC-USD", .1)
-	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: id, StrategyID: sid, StrategyVersion: 1, ControlMode: "strategy"}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := dbCreateStrategy(ctx.AppDB(), &Strategy{ProjectID: "other-project", Name: "Private", Definition: map[string]any{}, Version: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	sid := legacyStrategy(t, ctx, "test-proj", "Saved research", "BTC-USD", .1)
+	legacyAssignment(t, ctx, id, sid)
+	legacyStrategy(t, ctx, "other-project", "Private", "BTC-USD", .1)
 	snap, err := exportLegacyResearchSnapshot(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)

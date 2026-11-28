@@ -466,7 +466,7 @@ func paperTestRecordPartialFill(t *testing.T, ctx *sdk.AppCtx, order *Order, qty
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if err := dbInsertFill(tx, "test-proj", order.ID, order.PortfolioID, qty, price, 0); err != nil {
+	if err := dbInsertFillDetailed(tx, "test-proj", order.ID, order.PortfolioID, qty, price, 0, FillCostDetails{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := dbApplyFill(tx, order.PortfolioID, "test-proj", order, qty, price); err != nil {

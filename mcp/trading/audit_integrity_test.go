@@ -230,56 +230,6 @@ func TestIntegrityNonFiniteAndUnsupportedOrdersRejected(t *testing.T) {
 	}
 }
 
-func TestIntegrityRebalanceResumesAfterSellSettlement(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "Rotate", []string{"crypto"})
-	mark, _ := dbGetMark(ctx.AppDB(), "BTC-USD")
-	dbInsertPositionRaw(ctx.AppDB(), "test-proj", id, "BTC-USD", "crypto", "", 1, mark.Price)
-	ctx.AppDB().Exec(`UPDATE portfolios SET cash=0 WHERE id=?`, id)
-	sid := mustCreateTestStrategy(t, ctx, "BTC-USD", "ETH-USD")
-	s, _ := dbGetStrategy(ctx.AppDB(), "test-proj", sid)
-	a := &StrategyAssignment{ID: 1}
-	eval := &StrategyEvaluation{TargetAllocations: []StrategyAllocation{{Symbol: "ETH-USD", Weight: 1}}}
-	sells, pending, err := placeStrategyPaperOrders(globalEngine, ctx, mustPortfolio(t, ctx, id), s, a, eval)
-	if err != nil || !pending || len(sells) != 1 || sells[0].Side != "sell" {
-		t.Fatalf("sell phase %v %v %v", sells, pending, err)
-	}
-	for _, o := range sells {
-		if err := tryFill(globalEngine, o); err != nil {
-			t.Fatal(err)
-		}
-	}
-	buys, _, err := placeStrategyPaperOrders(globalEngine, ctx, mustPortfolio(t, ctx, id), s, a, eval)
-	if err != nil || len(buys) != 1 || buys[0].Symbol != "ETH-USD" {
-		t.Fatalf("buy phase %v %v", buys, err)
-	}
-	for _, o := range buys {
-		if err := tryFill(globalEngine, o); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if pos, _ := dbGetPosition(ctx.AppDB(), id, "ETH-USD", ""); pos == nil || pos.Qty <= 0 {
-		t.Fatal("rotation failed to establish replacement")
-	}
-}
-
-func TestIntegrityBacktestPauseCannotCommitSnapshot(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "Replay", []string{"crypto"})
-	rid, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: id, Name: "Replay", Symbols: []string{"BTC-USD"}, Status: "paused", StartingCash: 100000, TotalSteps: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := commitStrategyStep(ctx.AppDB(), rid, 1, map[string]any{}, "running", &BacktestSnapshot{RunID: rid, Step: 1, Equity: 100000}); err == nil {
-		t.Fatal("paused run committed")
-	}
-	var count int
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM backtest_snapshots WHERE run_id=?`, rid).Scan(&count)
-	if count != 0 {
-		t.Fatal("snapshot leaked from failed step")
-	}
-}
-
 func TestIntegrityCorporateActionsUseEffectiveDateHoldings(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Actions", []string{"equity"})
@@ -326,24 +276,6 @@ func TestIntegrityObjectiveFreezesBeforeDeadline(t *testing.T) {
 	objectiveProgress(ctx.AppDB(), pf, obj, &Portfolio{Equity: 500000})
 	if obj.Achieved {
 		t.Fatal("final result changed")
-	}
-}
-
-func TestIntegrityReplayPolicyRejectsExcludedSymbolsAndExcessExposure(t *testing.T) {
-	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "Replay rules", []string{"crypto"})
-	pf := mustPortfolio(t, ctx, id)
-	policy := defaultUniversePolicy(pf)
-	policy.ExcludeSymbols = []string{"BTC-USD"}
-	dbUpsertPortfolioUniversePolicy(ctx.AppDB(), pf, *policy)
-	run := &BacktestRun{ProjectID: "test-proj", PortfolioID: id, Name: "policy", Symbols: []string{"BTC-USD"}, StartingCash: 100000}
-	if _, err := dbCreateBacktestRun(ctx.AppDB(), run); err != nil {
-		t.Fatal(err)
-	}
-	state := &strategyBacktestState{Cash: 100000, Positions: map[string]*Position{}}
-	orders := applyStrategyTargets(run, state, []StrategyAllocation{{Symbol: "BTC-USD", Weight: 1}}, []map[string]any{{"symbol": "BTC-USD", "price": 100.0}})
-	if len(orders) != 0 || state.Cash != 100000 {
-		t.Fatal("replay bypassed universe")
 	}
 }
 
