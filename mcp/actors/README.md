@@ -523,8 +523,10 @@ markers that must all be on screen before Computer acts:
 - `native_assert` and `native_wait` (`duration_ms`, 1–28000) only check markers.
 - `native_tap`, `native_tap_badged` and `native_tap_if_present` tap the exact
   `native_target`.
-- `native_type` and `native_replace` enter 1–256 bytes of single-line `text`
-  into `native_target`.
+- `native_type` enters 1–256 bytes of single-line `text` into
+  `native_target`. `native_replace` replaces the field's text with 1–4096
+  bytes of single-line `text`; Unicode or text over 256 bytes needs
+  Computer 0.17.0+ and Mobile 0.11.0+.
 - `native_select` (Android, Computer 0.15.0+) sets a checkable `native_target`
   to `native_state` (default `true`), tapping only when needed and confirming
   the state afterwards.
@@ -532,6 +534,18 @@ markers that must all be on screen before Computer acts:
   `native_container` list `direction` `down` (default) or `up`, at most
   `max_swipes` times (1–20, default 8), until `native_target` is visible. It
   never taps.
+- `native_read_list` (Android, Actors 0.12.0, Computer 0.17.0+) reads the
+  visible text of the one `native_container` list and saves one dataset item
+  per row: the row's strings joined by newlines in `verified_field`.
+  `native_rows` groups the list as `items` (default; one row per list entry
+  such as a feed post), `clickable` (one row per tappable row such as a search
+  result) or `text` (the whole list as one item, such as a profile).
+  `max_swipes` (0–10, default 0: the current screen only) and `direction`
+  page through the list; `max_items` (1–50, default 20) bounds the rows and
+  `min_items` fails the step when fewer were read. It never taps, skips
+  text-entry and password fields, and is allowed in `read_only` operations.
+  Markers and guards are rechecked on every screen; if they stop matching
+  while paging, the step fails and saves nothing.
 - `native_type_secret` enters a `secret_ref` into `native_target`;
   `native_type_private` with `mode: "keypad"` taps a numeric secret digit by
   digit.

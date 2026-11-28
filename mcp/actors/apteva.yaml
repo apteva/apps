@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.11.0
+version: 0.12.0
 description: |
+  v0.12.0 adds a native_read_list step (Android, Computer 0.17.0+): it reads the visible text of one named native list without tapping, grouped as items, clickable rows or one text, optionally swiping 0-10 times, and saves one dataset item per row in verified_field; a screen change while paging fails the step and saves nothing. native_replace accepts up to 4096 bytes of single-line Unicode text (native_type stays at 256 bytes).
   v0.11.0 waits for inspect_views pages to show item rows or their verified empty state before judging them (page chrome alone no longer counts as ready; a list that never renders fails as "did not finish loading"), and adds opens on open_configuration clicks: wait for the dialog or picker, check again, and click once more if it never appeared on the same page.
   v0.10.0 adds a read_video_frames step that saves frames of a page video at exact times or a fixed interval through Computer 0.16.0 video_frames (inline JPEG, one retry for frames still loading), and an actors_run_frames tool that returns a run's saved frames to an agent as image blocks, a page at a time.
   v0.9.0 passes Android selection steps to Computer 0.15.0: native_select (native_state), native_scroll_to (native_container, direction, max_swipes) and native_checked guards on any native step, with {{input}} selectors rendered in guard keys.
@@ -193,7 +194,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: actors/v0.11.0
+    ref: actors/v0.12.0
     entry: mcp/actors
   port: 8080
   health_check: /health
