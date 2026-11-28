@@ -56,39 +56,6 @@ func marketSessionAt(calendar string, at time.Time) (*MarketSession, error) {
 	}
 }
 
-// storedUSEquitySessionAt prefers provider-published sessions. The rules engine
-// below remains an explicit degraded-mode fallback for unbound/fresh installs.
-func storedUSEquitySessionAt(at time.Time) *MarketSession {
-	if globalCtx == nil || globalCtx.AppDB() == nil {
-		return nil
-	}
-	location, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		return nil
-	}
-	date := at.In(location).Format("2006-01-02")
-	var openAt, closeAt, status string
-	err = globalCtx.AppDB().QueryRow(`SELECT open_at,close_at,status FROM exchange_sessions WHERE venue='US_EQUITY' AND session_date=? AND session_type='regular' ORDER BY CASE source WHEN 'alpaca' THEN 0 ELSE 1 END LIMIT 1`, date).Scan(&openAt, &closeAt, &status)
-	if err != nil {
-		return nil
-	}
-	out := &MarketSession{Calendar: calendarUSEquity, Timezone: "America/New_York", EvaluatedAt: at.UTC().Format(time.RFC3339Nano), OpenDay: status == "open", Reason: "authoritative_session"}
-	open, openErr := time.Parse(time.RFC3339, openAt)
-	closeAtTime, closeErr := time.Parse(time.RFC3339, closeAt)
-	if out.OpenDay && openErr == nil && closeErr == nil {
-		out.OpenAt = open.UTC().Format(time.RFC3339)
-		out.CloseAt = closeAtTime.UTC().Format(time.RFC3339)
-		out.IsOpen = !at.Before(open) && at.Before(closeAtTime)
-	}
-	if !out.IsOpen {
-		var next string
-		if globalCtx.AppDB().QueryRow(`SELECT open_at FROM exchange_sessions WHERE venue='US_EQUITY' AND status='open' AND open_at>? ORDER BY open_at LIMIT 1`, at.UTC().Format(time.RFC3339)).Scan(&next) == nil {
-			out.NextOpenAt = next
-		}
-	}
-	return out
-}
-
 type usEquitySession struct {
 	Open    time.Time
 	Close   time.Time

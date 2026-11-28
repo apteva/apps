@@ -4,18 +4,18 @@ import (
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
-	tk "github.com/apteva/app-sdk/testkit"
 )
 
+// newHardeningCtx backs a scripted platform with the fake Trading for every
+// call the script does not handle itself.
 func newHardeningCtx(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
 	t.Helper()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(platform))
-	globalCtx = ctx
-	globalEngine = &engine{db: ctx.AppDB(), provider: newMockProvider(), logger: ctx.Logger(), platform: platform}
-	for _, mark := range globalEngine.provider.Universe() {
-		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
-			t.Fatal(err)
-		}
+	if p, ok := platform.(*eventAgentPlatform); ok && p.PlatformClient == nil {
+		p.PlatformClient = newFixtureTrading(t)
 	}
+	ctx := newTestCtxWith(t, platform)
+	globalEngine.platform = platform
 	return ctx
 }
+
+func (p *eventAgentPlatform) fixture() *fixtureTrading { return p.PlatformClient.(*fixtureTrading) }

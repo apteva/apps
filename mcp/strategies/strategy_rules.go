@@ -37,7 +37,7 @@ func createRuleEventBacktest(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy,
 	if config.BenchmarkSymbol != def.Program.Symbol {
 		return nil, errors.New("rule benchmark must be the program instrument")
 	}
-	policy, err := captureReplayPolicy(ctx.AppDB(), pf, def.Universe)
+	_, policy, err := captureReplayPolicy(ctx, pf.ProjectID, pf.ID, def.Universe)
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +66,7 @@ func createRuleEventBacktest(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy,
 	}
 	start, end := inputs[0].AvailableAt, inputs[len(inputs)-1].AvailableAt
 	run := &BacktestRun{ProjectID: pf.ProjectID, PortfolioID: pf.ID, StrategyID: strategy.ID, StrategyVersion: strategy.Version, RunKind: "strategy", Name: nonEmpty(name, strategy.Name+" rule backtest"), Status: "queued", Symbols: def.Universe, Interval: def.Program.Timeframe, StartingCash: config.StartingCash, StartAt: start.Format(time.RFC3339), EndAt: end.Format(time.RFC3339), TotalSteps: len(inputs), FeeBps: config.Costs.FeeBps, SlippageBps: config.Costs.SlippageBps, Summary: map[string]any{"strategy_name": strategy.Name, "market_source": "supplied_event_tape", "data_identity": sim.Hash(inputs)}}
+	run.Summary["execution_policy"] = policy
 	id, err := dbCreateBacktestRun(ctx.AppDB(), run)
 	if err != nil {
 		return nil, err

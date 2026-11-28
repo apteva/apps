@@ -254,10 +254,6 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := accrueStrategyExecutionCost(tx, pf.ID, o, fee, estimate.SpreadCost, estimate.SlippageCost); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
 	if fee != 0 {
 		if _, err := tx.Exec(`UPDATE portfolios SET cash = cash - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, fee, pf.ID); err != nil {
 			_ = tx.Rollback()

@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	tk "github.com/apteva/app-sdk/testkit"
 	"testing"
 )
 
@@ -44,10 +43,8 @@ func (p *pagedLegacyFixture) CallAppResult(app, tool string, args map[string]any
 }
 
 func TestPagedLegacyImportResumesAndChecksCounts(t *testing.T) {
-	p := &pagedLegacyFixture{failOnce: true}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(p))
-	globalCtx = ctx
-	p.ctx = ctx
+	p := &pagedLegacyFixture{legacyTradingFixture: legacyTradingFixture{fixtureTrading: *newFixtureTrading(t)}, failOnce: true}
+	ctx := newTestCtxWith(t, p)
 	p.legacy.Tables = map[string][]map[string]any{"strategies": {{"id": int64(41), "project_id": "test-proj", "name": "one", "definition_json": "{}", "status": "active"}, {"id": int64(42), "project_id": "test-proj", "name": "two", "definition_json": "{}", "status": "draft"}, {"id": int64(43), "project_id": "test-proj", "name": "three", "definition_json": "{}", "status": "archived"}}}
 	args := map[string]any{"paged": true, "max_pages": 1}
 	first, err := (&App{}).importLegacyResearch(ctx, args)

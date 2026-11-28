@@ -349,6 +349,11 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		if startingCash <= 0 {
 			startingCash = pf.StartingCash
 		}
+		manifest, err := referenceManifest(globalCtx, projectID, symbols, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode)
+		if err != nil {
+			httpErr(w, 502, err.Error())
+			return
+		}
 		id, err := dbCreateBacktestRun(globalCtx.AppDB(), &BacktestRun{
 			ProjectID:         projectID,
 			PortfolioID:       pf.ID,
@@ -366,7 +371,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			FeeBps:            body.FeeBps,
 			SlippageBps:       body.SlippageBps,
 			AdjustmentMode:    adjustmentMode,
-			ReferenceManifest: referenceManifest(globalCtx.AppDB(), symbols, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+			ReferenceManifest: manifest,
 			TotalSteps:        steps,
 			Summary: map[string]any{
 				"portfolio_name":   pf.Name,
@@ -454,7 +459,7 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return nil, fmt.Errorf("create environment: %w", err)
 	}
 
-	pf, err := dbGetPortfolio(globalCtx.AppDB(), run.ProjectID, run.PortfolioID)
+	pf, err := tradingPortfolio(globalCtx, run.ProjectID, run.PortfolioID)
 	if err != nil {
 		return nil, err
 	}

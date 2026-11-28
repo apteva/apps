@@ -321,16 +321,16 @@ func TestStrategyAssignmentUsesImmutableVersion(t *testing.T) {
 func TestStockStrategyExecutionWaitsForRegularSession(t *testing.T) {
 	def := &StrategyDefinition{Universe: []string{"AAPL", "SPY"}}
 	e := &engine{provider: &recordingStrategyProvider{}}
-	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)) {
+	if stockStrategyExecutionReady(e, nil, def, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)) {
 		t.Fatal("stock strategy became executable before the US regular session")
 	}
-	if !stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)) {
+	if !stockStrategyExecutionReady(e, nil, def, time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)) {
 		t.Fatal("stock strategy did not become executable during the US regular session")
 	}
-	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+	if stockStrategyExecutionReady(e, nil, def, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
 		t.Fatal("stock strategy became executable on a weekend")
 	}
-	if !stockStrategyExecutionReady(e, &StrategyDefinition{Universe: []string{"BTC-USD"}}, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+	if !stockStrategyExecutionReady(e, nil, &StrategyDefinition{Universe: []string{"BTC-USD"}}, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
 		t.Fatal("crypto strategy should not be constrained by the stock session")
 	}
 }
@@ -340,7 +340,7 @@ func TestStockStrategyExecutionHonorsUSHolidaysAndEarlyClose(t *testing.T) {
 	e := &engine{provider: &recordingStrategyProvider{}}
 
 	holiday := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
-	if usEquityRegularSession(holiday) || stockStrategyExecutionReady(e, def, holiday) {
+	if usEquityRegularSession(holiday) || stockStrategyExecutionReady(e, nil, def, holiday) {
 		t.Fatal("stock strategy became executable on observed Independence Day")
 	}
 	if _, ok := strategyAssignmentCheckSlot(def, holiday); ok {
@@ -472,7 +472,7 @@ func TestStrategyAssignmentUpgradeInitializesBarClockWithoutTrading(t *testing.T
 	if assignment.LastMarketBarAt == "" || assignment.LastSeenBarAt == "" || assignment.LastCheckedAt == "" {
 		t.Fatalf("bar scheduler was not initialized: %#v", assignment)
 	}
-	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
+	filled, err := dbListOrders(tradingDB(ctx), portfolioID, "filled", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestStrategyFullAllocationReservesFeesAndSlippage(t *testing.T) {
 	provider := &recordingStrategyProvider{}
 	globalEngine.provider = provider
 	portfolioID := mustCreatePortfolio(t, ctx, "Full allocation", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 1.0, "slippage_bps": 5.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -502,14 +502,14 @@ func TestStrategyFullAllocationReservesFeesAndSlippage(t *testing.T) {
 	if got, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil || got != 1 {
 		t.Fatalf("strategy orders = %d, want 1, err = %v", got, err)
 	}
-	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
+	filled, err := dbListOrders(tradingDB(ctx), portfolioID, "filled", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(filled) != 1 {
 		t.Fatalf("filled orders = %d, want 1", len(filled))
 	}
-	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", portfolioID)
+	pf, err := dbGetPortfolio(tradingDB(ctx), "test-proj", portfolioID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,9 +536,9 @@ func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ctx.AppDB().Exec(`
+	if _, err := tradingDB(ctx).Exec(`
 		CREATE TRIGGER force_strategy_insufficient_cash
-		AFTER INSERT ON orders WHEN NEW.source = 'strategy'
+		AFTER INSERT ON orders WHEN NEW.source = 'app:strategies'
 		BEGIN
 			UPDATE portfolios SET cash = 0 WHERE id = NEW.portfolio_id;
 		END`); err != nil {
@@ -548,7 +548,7 @@ func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
 	if got, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil || got != 1 {
 		t.Fatalf("strategy orders = %d, want 1, err = %v", got, err)
 	}
-	rejected, err := dbListOrders(ctx.AppDB(), portfolioID, "cancelled", 10)
+	rejected, err := dbListOrders(tradingDB(ctx), portfolioID, "cancelled", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestStrategyBacktestRunMatchesManualSteps(t *testing.T) {
 func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
 	ctx := newTestCtx(t)
 	pid := mustCreatePortfolio(t, ctx, "Strategy Validation", []string{"crypto"})
-	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", pid)
+	pf, err := dbGetPortfolio(tradingDB(ctx), "test-proj", pid)
 	if err != nil {
 		t.Fatal(err)
 	}

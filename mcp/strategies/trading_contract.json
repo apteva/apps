@@ -2,9 +2,12 @@
   "description": "Every Trading tool and order_place field Strategies depends on. Strategies' tests fail if it calls a Trading tool or forwards an order field not listed here; Trading's tests fail if Trading stops providing one. Change both apps together.",
   "app_only_tools": [
     "backtest_market_step",
+    "fills_feed",
     "market_bars_capture",
-    "portfolio_research_snapshot",
-    "research_legacy_export"
+    "portfolio_policy_check",
+    "portfolio_state",
+    "research_legacy_export",
+    "research_reference"
   ],
   "tools": [
     "account_summary",
@@ -25,6 +28,7 @@
     "external_strategy_id",
     "external_strategy_version",
     "idempotency_key",
+    "if_revision",
     "limit_price",
     "outcome",
     "portfolio_id",

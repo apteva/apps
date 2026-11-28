@@ -20,7 +20,21 @@ func fillStrategyOrder(
 	id, symbol, side string, qty, mark float64,
 ) {
 	t.Helper()
-	db := ctx.AppDB()
+	insertFilledOrder(t, ctx, portfolioID, id, symbol, side, qty, mark,
+		`UPDATE orders SET origin_app='strategies', external_strategy_id=?, external_strategy_version=1 WHERE id=? AND ?>0`, strategyID)
+	if err := syncStrategyFills(ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// insertFilledOrder writes and fills one order on the Trading side. tag
+// stamps its origin before the fill, the way Trading records it at placement.
+func insertFilledOrder(
+	t *testing.T, ctx *sdk.AppCtx, portfolioID int64,
+	id, symbol, side string, qty, mark float64, tag string, strategyID int64,
+) {
+	t.Helper()
+	db := tradingDB(ctx)
 	if err := dbUpsertMark(db, &Mark{
 		Symbol: symbol, AssetClass: "crypto", Price: mark,
 		MarkedAt: time.Now().UTC().Format(time.RFC3339),
@@ -35,14 +49,21 @@ func fillStrategyOrder(
 	if err := dbInsertOrder(db, order, "test-proj"); err != nil {
 		t.Fatal(err)
 	}
-	if strategyID > 0 {
-		if _, err := db.Exec(`UPDATE orders SET strategy_id=?, strategy_version=1 WHERE id=?`, strategyID, id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tryFill(globalEngine, order); err != nil {
+	if _, err := db.Exec(tag, strategyID, id, strategyID); err != nil {
 		t.Fatal(err)
 	}
+	if err := tryFill(tradingEngine(ctx), order); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func attributionRowCount(t *testing.T, db *sql.DB, strategyID int64) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM strategy_position_accounting WHERE strategy_id=?`, strategyID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func mustCreateStrategy(t *testing.T, ctx *sdk.AppCtx, name string) int64 {
@@ -92,7 +113,7 @@ func assertNear(t *testing.T, label string, got, want float64) {
 func TestStrategyClosesAgainstItsOwnLotsNotThePortfolioBlend(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Shared symbol desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 0.0, "slippage_bps": 0.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -118,13 +139,13 @@ func TestStrategyClosesAgainstItsOwnLotsNotThePortfolioBlend(t *testing.T) {
 	assertNear(t, "mean reversion realized", meanRevRow.gross, 0)
 }
 
-// Rebuilding from the append-only fills ledger must land on exactly the
-// numbers incremental accrual produced, or a restart would silently restate
-// P&L.
-func TestStrategyAttributionRebuildMatchesIncrementalAccrual(t *testing.T) {
+// Replaying Trading's append-only fills feed from the start must land on
+// exactly the numbers incremental sync produced, and syncing again (a
+// restart) must fold nothing twice.
+func TestStrategyFillCursorIsIdempotentAndReplays(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Rebuild desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 10.0, "slippage_bps": 25.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -136,47 +157,47 @@ func TestStrategyAttributionRebuildMatchesIncrementalAccrual(t *testing.T) {
 	fillStrategyOrder(t, ctx, portfolioID, strategyID, "rb-sell", "BTC-USD", "sell", 15, 130)
 
 	before := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
-
 	assertNear(t, "incremental open qty", before.openQty, 5)
-	if before.gross <= 0 {
-		t.Fatalf("expected a realized gain, got %v", before.gross)
+	if before.gross <= 0 || before.fees <= 0 || before.slippage <= 0 {
+		t.Fatalf("expected gain, fees and slippage on the strategy book: %+v", before)
+	}
+	if before.fillCount != 3 {
+		t.Fatalf("fill count = %d, want 3", before.fillCount)
 	}
 
-	if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
+	for i := 0; i < 2; i++ {
+		if err := syncStrategyFills(ctx, "test-proj"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
+	if again != before {
+		t.Fatalf("repeat sync changed the book: %+v -> %+v", before, again)
+	}
+
+	if err := resetStrategyFills(ctx.AppDB(), "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncStrategyFills(ctx, "test-proj"); err != nil {
 		t.Fatal(err)
 	}
 	after := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
-	assertNear(t, "rebuilt realized", after.gross, before.gross)
-	assertNear(t, "rebuilt open qty", after.openQty, before.openQty)
-	assertNear(t, "rebuilt avg cost", after.avgCost, before.avgCost)
-	assertNear(t, "rebuilt fees", after.fees, before.fees)
-
-	assertNear(t, "rebuilt spread", after.spread, before.spread)
-	assertNear(t, "rebuilt slippage", after.slippage, before.slippage)
-	if before.slippage <= 0 {
-		t.Fatal("expected slippage cost to accrue to the strategy book")
-	}
+	assertNear(t, "replayed realized", after.gross, before.gross)
+	assertNear(t, "replayed open qty", after.openQty, before.openQty)
+	assertNear(t, "replayed avg cost", after.avgCost, before.avgCost)
+	assertNear(t, "replayed fees", after.fees, before.fees)
+	assertNear(t, "replayed spread", after.spread, before.spread)
+	assertNear(t, "replayed slippage", after.slippage, before.slippage)
 	if after.fillCount != before.fillCount {
-		t.Fatalf("rebuilt fill count = %d, want %d", after.fillCount, before.fillCount)
+		t.Fatalf("replayed fill count = %d, want %d", after.fillCount, before.fillCount)
 	}
-	if before.fees <= 0 {
-		t.Fatal("expected fees to accrue to the strategy book")
-	}
-
-	if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
-		t.Fatal(err)
-	}
-	twice := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
-	assertNear(t, "idempotent realized", twice.gross, before.gross)
-	assertNear(t, "idempotent fees", twice.fees, before.fees)
 }
 
-// Manual and agent orders carry no strategy. They must land in bucket 0 so
-// the strategy books plus that bucket reconcile against the portfolio book.
-func TestUnattributedFillsReconcileWithPortfolioAccounting(t *testing.T) {
+// Manual and agent orders are Trading's alone: Strategies never sees them.
+func TestManualFillsStayOutOfStrategyBooks(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Mixed desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 0.0, "slippage_bps": 0.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -189,15 +210,54 @@ func TestUnattributedFillsReconcileWithPortfolioAccounting(t *testing.T) {
 	fillStrategyOrder(t, ctx, portfolioID, 0, "mix-m-sell", "BTC-USD", "sell", 6, 150)
 
 	strategyRow := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
-	manualRow := readAttribution(t, ctx.AppDB(), portfolioID, 0, "BTC-USD")
 	assertNear(t, "strategy realized", strategyRow.gross, 200)
-	assertNear(t, "unattributed realized", manualRow.gross, 300)
+	if strategyRow.fillCount != 2 {
+		t.Fatalf("strategy fill count = %d, want 2", strategyRow.fillCount)
+	}
+	if n := attributionRowCount(t, ctx.AppDB(), 0); n != 0 {
+		t.Fatalf("manual fills created %d strategy rows", n)
+	}
+}
 
-	portfolioRealized, _, err := dbPortfolioAccounting(ctx.AppDB(), portfolioID)
-	if err != nil {
+// Trading-era strategy orders carry strategy_id but no origin_app. After a
+// legacy import they still belong to the imported strategy's book.
+func TestLegacyStrategyFillsCountOnlyAfterImport(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Legacy desk", []string{"crypto"})
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
+		"fee_bps": 0.0, "slippage_bps": 0.0,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	assertNear(t, "books reconcile to portfolio", strategyRow.gross+manualRow.gross, portfolioRealized)
+	strategyID := mustCreateStrategy(t, ctx, "Imported")
+	// Trading now refuses to fill an order of this shape, so the history is
+	// stamped after the fills, as it sits in a pre-split install.
+	none := `SELECT ?, ?, ?`
+	insertFilledOrder(t, ctx, portfolioID, "legacy-buy", "BTC-USD", "buy", 2, 100, none, strategyID)
+	insertFilledOrder(t, ctx, portfolioID, "legacy-sell", "BTC-USD", "sell", 2, 130, none, strategyID)
+	if _, err := tradingDB(ctx).Exec(`UPDATE orders SET origin_app='', strategy_id=?, strategy_version=1 WHERE id IN ('legacy-buy','legacy-sell')`, strategyID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncStrategyFills(ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if n := attributionRowCount(t, ctx.AppDB(), strategyID); n != 0 {
+		t.Fatalf("legacy fills counted without an import: %d rows", n)
+	}
+
+	if _, err := ctx.AppDB().Exec(`INSERT INTO research_imports(source_install_id,project_id) VALUES(7,'test-proj')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetStrategyFills(ctx.AppDB(), "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncStrategyFills(ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	row := readAttribution(t, ctx.AppDB(), portfolioID, strategyID, "BTC-USD")
+	assertNear(t, "legacy realized", row.gross, 60)
+	assertNear(t, "legacy open qty", row.openQty, 0)
 }
 
 // A strategy may be handed a position it did not open, or have one closed out
@@ -205,7 +265,7 @@ func TestUnattributedFillsReconcileWithPortfolioAccounting(t *testing.T) {
 func TestStrategySellBeyondItsOwnBookDoesNotOverRealize(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Handover desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 0.0, "slippage_bps": 0.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -230,7 +290,7 @@ func TestStrategySellBeyondItsOwnBookDoesNotOverRealize(t *testing.T) {
 func TestStrategyLiveRowsReportPnLPositionsAndSharing(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Rollup desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 0.0, "slippage_bps": 0.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -248,14 +308,14 @@ func TestStrategyLiveRowsReportPnLPositionsAndSharing(t *testing.T) {
 	fillStrategyOrder(t, ctx, portfolioID, beta, "lr-b-buy", "BTC-USD", "buy", 5, 100)
 	fillStrategyOrder(t, ctx, portfolioID, alpha, "lr-a-sell", "BTC-USD", "sell", 10, 120)
 	fillStrategyOrder(t, ctx, portfolioID, alpha, "lr-a-eth", "ETH-USD", "buy", 2, 50)
-	if err := dbUpsertMark(ctx.AppDB(), &Mark{
+	if err := dbUpsertMark(tradingDB(ctx), &Mark{
 		Symbol: "ETH-USD", AssetClass: "crypto", Price: 75,
 		MarkedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	rows, err := dbStrategyLiveRows(ctx.AppDB(), "test-proj", false)
+	rows, err := dbStrategyLiveRows(ctx, "test-proj")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +325,7 @@ func TestStrategyLiveRowsReportPnLPositionsAndSharing(t *testing.T) {
 			alphaRow = row
 		}
 		if row.StrategyID == 0 {
-			t.Fatal("unattributed bucket leaked into the default rollup")
+			t.Fatal("unattributed bucket leaked into the rollup")
 		}
 	}
 	if alphaRow == nil {
@@ -307,13 +367,6 @@ func TestStrategyLiveRowsReportPnLPositionsAndSharing(t *testing.T) {
 		t.Fatalf("beta assignment status = %q, want unassigned", betaRow.AssignmentStatus)
 	}
 
-	withBucket, err := dbStrategyLiveRows(ctx.AppDB(), "test-proj", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(withBucket) != len(rows) {
-		t.Fatalf("no unattributed fills exist, so the bucket must add no rows: %d vs %d", len(withBucket), len(rows))
-	}
 }
 
 // The route the widget calls, including the filters it passes.
@@ -321,7 +374,7 @@ func TestStrategiesLiveEndpointFiltersAndTotals(t *testing.T) {
 	ctx := newTestCtx(t)
 	globalCtx = ctx
 	portfolioID := mustCreatePortfolio(t, ctx, "Endpoint desk", []string{"crypto"})
-	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+	if err := dbUpdatePortfolioConfig(tradingDB(ctx), portfolioID, map[string]any{
 		"fee_bps": 0.0, "slippage_bps": 0.0,
 	}); err != nil {
 		t.Fatal(err)
@@ -350,19 +403,12 @@ func TestStrategiesLiveEndpointFiltersAndTotals(t *testing.T) {
 	body := get("")
 	rows := body["strategies"].([]any)
 	if len(rows) != 1 {
-		t.Fatalf("default rollup should hide the unattributed bucket, got %d rows", len(rows))
+		t.Fatalf("manual fills must not appear in the rollup, got %d rows", len(rows))
 	}
 	first := rows[0].(map[string]any)
 	assertNear(t, "endpoint realized", first["realized_pnl"].(float64), 200)
 	totals := body["totals"].(map[string]any)
 	assertNear(t, "endpoint totals", totals["realized_pnl"].(float64), 200)
-
-	withBucket := get("&include_unattributed=true")
-	if len(withBucket["strategies"].([]any)) != 2 {
-		t.Fatal("include_unattributed must surface the manual bucket")
-	}
-	assertNear(t, "totals include manual P&L",
-		withBucket["totals"].(map[string]any)["realized_pnl"].(float64), 210)
 
 	liveOnly := get("&scope=live")
 	if len(liveOnly["strategies"].([]any)) != 0 {

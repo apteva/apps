@@ -242,7 +242,7 @@ func TestScreenshotSessionRange(t *testing.T) {
 func TestRuleBacktestAPIAndReplay(t *testing.T) {
 	ctx := newTestCtx(t)
 	pid := mustCreatePortfolio(t, ctx, "Rules", []string{"equity"})
-	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", pid)
+	pf, err := dbGetPortfolio(tradingDB(ctx), "test-proj", pid)
 	if err != nil {
 		t.Fatal(err)
 	}

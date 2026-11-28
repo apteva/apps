@@ -9,25 +9,30 @@ import (
 
 func newTestCtx(t *testing.T) *sdk.AppCtx {
 	t.Helper()
-	platform := &fixtureTrading{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "10"), tk.WithPlatform(platform))
-	platform.ctx = ctx
-	globalCtx = ctx
+	return newTestCtxWith(t, newFixtureTrading(t))
+}
 
-	globalEngine = &engine{
-		db:       ctx.AppDB(),
-		provider: newMockProvider(),
-		logger:   ctx.Logger(),
-	}
-	for _, m := range globalEngine.provider.Universe() {
-		_ = dbUpsertMark(ctx.AppDB(), m)
+// newTestCtxWith wires a Strategies AppCtx to a fake Trading. Strategies'
+// database holds only Strategies data; account state lives in the fake's.
+func newTestCtxWith(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
+	t.Helper()
+	fake := platform.(tradingFixtureOwner).fixture()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "10"), tk.WithPlatform(platform))
+	fake.ctx = ctx
+	globalCtx = ctx
+	resetTradingBackoff()
+	provider := newMockProvider()
+	globalEngine = &engine{db: ctx.AppDB(), provider: provider, logger: ctx.Logger()}
+	fake.engine = &engine{db: fake.db, provider: provider, logger: ctx.Logger()}
+	for _, m := range provider.Universe() {
+		_ = dbUpsertMark(fake.db, m)
 	}
 	return ctx
 }
 
 func mustCreatePortfolio(t *testing.T, ctx *sdk.AppCtx, name string, classes []string) int64 {
 	t.Helper()
-	id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
+	id, err := dbCreatePortfolio(tradingDB(ctx), &Portfolio{
 		ProjectID: "test-proj", Name: name, AllowedClasses: classes,
 		StartingCash: 100_000,
 	})

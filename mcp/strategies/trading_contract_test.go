@@ -149,7 +149,7 @@ func TestTradingCallsAreInContract(t *testing.T) {
 
 func TestOrderPlaceFieldsMatchContract(t *testing.T) {
 	c := loadTradingContract(t)
-	sent := append(append([]string{}, orderPlaceForwardedFields...), "external_strategy_id", "external_strategy_version", "decision_ref")
+	sent := append(append([]string{}, orderPlaceForwardedFields...), "external_strategy_id", "external_strategy_version", "decision_ref", "if_revision")
 	sort.Strings(sent)
 	want := append([]string{}, c.OrderPlaceFields...)
 	sort.Strings(want)

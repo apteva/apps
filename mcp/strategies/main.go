@@ -57,19 +57,6 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-// providerHealthSnapshot — read the live provider's per-class health
-// when present; otherwise return a minimal "all-mock" view so the UI
-// always gets a consistent shape.
-func providerHealthSnapshot() map[string]any {
-	var out struct {
-		Providers map[string]any `json:"providers"`
-	}
-	if err := callTrading(globalCtx, "market_source", map[string]any{}, &out); err != nil {
-		return map[string]any{"trading": map[string]any{"stale": true, "error": err.Error()}}
-	}
-	return out.Providers
-}
-
 func resolveProjectFromArgs(args map[string]any) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil

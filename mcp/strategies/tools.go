@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"errors"
-	"fmt"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -15,26 +14,26 @@ func (a *App) researchTools() []sdk.Tool {
 
 		{Name: "portfolio_list", Description: "List portfolios visible in this project.",
 			InputSchema: schemaObject(nil, nil),
-			Handler:     a.toolPortfolioList},
+			Handler:     nil},
 
 		{Name: "portfolio_get", Description: "Snapshot of one portfolio (mandate, equity, cash, status, watchlist).",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
 			}, []string{"portfolio_id"}),
-			Handler: a.toolPortfolioGet},
+			Handler: nil},
 
 		{Name: "account_summary", Description: "Equity, cash, buying power, day + open P&L for one portfolio.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
 			}, []string{"portfolio_id"}),
-			Handler: a.toolAccountSummary},
+			Handler: nil},
 
 		{Name: "positions_list", Description: "Open positions for one portfolio.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
 				"asset_class":  map[string]any{"type": "string"},
 			}, []string{"portfolio_id"}),
-			Handler: a.toolPositionsList},
+			Handler: nil},
 
 		{Name: "orders_list", Description: "Working / filled / cancelled orders for one portfolio. Default status filter = working.",
 			InputSchema: schemaObject(map[string]any{
@@ -42,24 +41,24 @@ func (a *App) researchTools() []sdk.Tool {
 				"status":       map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
 			}, []string{"portfolio_id"}),
-			Handler: a.toolOrdersList},
+			Handler: nil},
 
 		{Name: "market_quote", Description: "Latest mark for a symbol — equity/crypto USD price or polymarket YES/NO probabilities.",
 			InputSchema: schemaObject(map[string]any{
 				"symbol": map[string]any{"type": "string"},
 			}, []string{"symbol"}),
-			Handler: a.toolMarketQuote},
+			Handler: nil},
 
 		{Name: "market_history", Description: "OHLCV bars / probability history for a symbol. range: 1D | 5D | 1M | 3M | 1Y | ALL.",
 			InputSchema: schemaObject(map[string]any{
 				"symbol": map[string]any{"type": "string"},
 				"range":  map[string]any{"type": "string"},
 			}, []string{"symbol"}),
-			Handler: a.toolMarketHistory},
+			Handler: nil},
 
 		{Name: "market_source", Description: "Report the live data source per asset class — name (binance-public / polymarket-public / mock), last_ok_at, errors_60s, stale. Lets the agent self-report whether it's reasoning on real prices or the offline mock.",
 			InputSchema: schemaObject(nil, nil),
-			Handler:     a.toolMarketSource},
+			Handler:     nil},
 
 		{Name: "journal_read", Description: "Read recent journal entries for a portfolio.",
 			InputSchema: schemaObject(map[string]any{
@@ -68,7 +67,7 @@ func (a *App) researchTools() []sdk.Tool {
 				"since":        map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
 			}, []string{"portfolio_id"}),
-			Handler: a.toolJournalRead},
+			Handler: nil},
 
 		{Name: "strategy_create", Description: "Create a versioned strategy: allocation rules or engine=rules with a trading-rules/1 program. Call strategy_catalog for generic trade examples and syntax, and strategy_validate to check a definition before saving.",
 			InputSchema: schemaObject(map[string]any{
@@ -235,248 +234,6 @@ func (a *App) researchTools() []sdk.Tool {
 	}
 	return definitions
 
-}
-
-func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	pfs, err := dbListPortfolios(ctx.AppDB(), pid)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]map[string]any, 0, len(pfs))
-	for _, p := range pfs {
-		snap, _ := snapshotPortfolio(ctx.AppDB(), p)
-		out = append(out, map[string]any{
-			"id": snap.ID, "name": snap.Name, "mandate": snap.Mandate,
-			"allowed_classes": snap.AllowedClasses, "status": snap.Status,
-			"mode": snap.Mode, "execution_environment": normalizeExecutionEnvironment(snap.ExecutionEnvironment, snap.Mode, snap.BrokerSlug),
-			"live_armed": snap.LiveArmed, "broker_slug": snap.BrokerSlug,
-			"equity": snap.Equity, "cash": snap.Cash,
-			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
-			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
-			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid, "funding_paid": snap.FundingPaid,
-			"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
-		})
-	}
-	return map[string]any{"portfolios": out}, nil
-}
-
-func (a *App) toolPortfolioGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	id := int64Arg(args, "portfolio_id", 0)
-	if id == 0 {
-		return nil, errors.New("portfolio_id required")
-	}
-	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil {
-		return nil, fmt.Errorf("portfolio %d not found in project", id)
-	}
-	snap, _ := snapshotPortfolio(ctx.AppDB(), p)
-	return map[string]any{"portfolio": snap}, nil
-}
-
-func (a *App) toolAccountSummary(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	id := int64Arg(args, "portfolio_id", 0)
-	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil {
-		return nil, fmt.Errorf("portfolio %d not found", id)
-	}
-	snap, _ := snapshotPortfolio(ctx.AppDB(), p)
-	return map[string]any{
-		"equity": snap.Equity, "cash": snap.Cash, "buying_power": snap.BuyingPower,
-		"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
-		"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
-		"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid, "funding_paid": snap.FundingPaid,
-		"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
-		"status": snap.Status, "mode": snap.Mode,
-	}, nil
-}
-
-func (a *App) toolPositionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	id := int64Arg(args, "portfolio_id", 0)
-	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil {
-		return nil, fmt.Errorf("portfolio %d not found", id)
-	}
-	snap, _ := snapshotPortfolio(ctx.AppDB(), p)
-	pos, _ := dbListPositions(ctx.AppDB(), id)
-	classFilter, _ := args["asset_class"].(string)
-	out := make([]*Position, 0, len(pos))
-	for _, q := range pos {
-
-		mark, _ := dbGetMark(ctx.AppDB(), q.Symbol)
-		if mark != nil {
-			q.MarketPrice = markPriceForSide(mark, q.Outcome)
-		} else {
-			q.MarketPrice = q.AvgCost
-		}
-		q.MarketValue = q.MarketPrice * q.Qty
-		q.UnrealizedPnL = (q.MarketPrice - q.AvgCost) * q.Qty
-		if q.AvgCost > 0 && q.Qty > 0 {
-			q.UnrealizedPnLPct = (q.MarketPrice/q.AvgCost - 1) * 100
-		}
-		if snap.Equity > 0 {
-			q.WeightPct = q.MarketValue / snap.Equity * 100
-		}
-		if classFilter != "" && q.AssetClass != classFilter {
-			continue
-		}
-		out = append(out, q)
-	}
-	return map[string]any{"positions": out}, nil
-}
-
-func (a *App) toolOrdersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	id := int64Arg(args, "portfolio_id", 0)
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, id); err != nil {
-		return nil, fmt.Errorf("portfolio %d not found", id)
-	}
-	status, _ := args["status"].(string)
-	if status == "" {
-		status = "working"
-	}
-	limit := intArg(args, "limit", 50)
-	rows, err := dbListOrders(ctx.AppDB(), id, status, limit)
-	if err != nil {
-		return nil, err
-	}
-	if rows == nil {
-		rows = []*Order{}
-	}
-	return map[string]any{"orders": rows, "count": len(rows)}, nil
-}
-
-func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	symbol := canonicalSymbol(strArg(args, "symbol"))
-	if symbol == "" {
-		return nil, errors.New("symbol required")
-	}
-	mark, err := dbGetMark(ctx.AppDB(), symbol)
-	if err != nil {
-
-		if globalEngine != nil {
-			mark, err = globalEngine.provider.Quote(symbol)
-			if err == nil && mark != nil {
-				err = dbUpsertMark(ctx.AppDB(), mark)
-			}
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	out := map[string]any{
-		"symbol": mark.Symbol, "asset_class": mark.AssetClass,
-		"marked_at": mark.MarkedAt, "received_at": mark.ReceivedAt,
-		"timestamp_kind": mark.TimestampKind, "source": mark.Source,
-	}
-	if mark.Instrument != nil {
-		out["instrument"] = mark.Instrument
-	}
-	if mark.AssetClass == "polymarket" {
-		out["yes_price"] = mark.Price
-		if mark.NoPrice != nil {
-			out["no_price"] = *mark.NoPrice
-		}
-	} else {
-		out["price"] = mark.Price
-		if mark.PrevClose != nil {
-			out["prev_close"] = *mark.PrevClose
-			out["change_pct_24h"] = (mark.Price/(*mark.PrevClose) - 1) * 100
-		}
-	}
-	if mark.Volume24h != nil {
-		out["volume_24h"] = *mark.Volume24h
-		out["volume_unit"] = mark.VolumeUnit
-	}
-	return out, nil
-}
-
-func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if globalEngine == nil {
-		return nil, errors.New("engine not ready")
-	}
-	symbol := canonicalSymbol(strArg(args, "symbol"))
-	rng, _ := args["range"].(string)
-	if rng == "" {
-		rng = "1D"
-	}
-	bars, err := globalEngine.provider.Bars(symbol, rng)
-	if err != nil {
-		return nil, err
-	}
-	instrument, _ := dbGetInstrument(ctx.AppDB(), symbol)
-	source := "mock"
-	if instrument != nil && instrument.Source != "" {
-		source = instrument.Source
-	}
-	bars, err = normalizeBars(symbol, source, bars)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]any{
-		"symbol": symbol, "range": rng, "bars": bars, "source": source,
-		"timestamp_format": "unix_seconds_utc", "adjustment_mode": "provider_adjusted",
-	}
-	if source == alpacaMarketDataSlug {
-		out["adjustment_mode"] = "total_return"
-	}
-	if instrument != nil {
-		out["instrument"] = instrument
-		out["volume_unit"] = instrument.VolumeUnit
-	}
-	return out, nil
-}
-
-func (a *App) toolMarketSource(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out := map[string]any{
-		"providers": providerHealthSnapshot(),
-	}
-	if globalEngine != nil {
-		metrics := globalEngine.snapshotMetrics()
-		out["last_tick_at"] = metrics["last_tick_at"]
-		out["ticks"] = metrics["ticks"]
-	}
-	return out, nil
-}
-
-func (a *App) toolJournalRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	id := int64Arg(args, "portfolio_id", 0)
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, id); err != nil {
-		return nil, fmt.Errorf("portfolio %d not found", id)
-	}
-	kind, _ := args["kind"].(string)
-	since, _ := args["since"].(string)
-	limit := intArg(args, "limit", 50)
-	entries, err := dbReadJournal(ctx.AppDB(), id, kind, since, limit)
-	if err != nil {
-		return nil, err
-	}
-	if entries == nil {
-		entries = []*JournalEntry{}
-	}
-	return map[string]any{"entries": entries}, nil
 }
 
 func contains(xs []string, x string) bool {

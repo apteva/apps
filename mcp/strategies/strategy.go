@@ -1024,14 +1024,7 @@ func enrichStrategyRuntime(db *sql.DB, projectID string, strategies []*Strategy,
 	if err != nil {
 		return err
 	}
-	portfolios, err := dbListPortfolios(db, projectID)
-	if err != nil {
-		return err
-	}
-	portfolioNames := map[int64]string{}
-	for _, portfolio := range portfolios {
-		portfolioNames[portfolio.ID] = portfolio.Name
-	}
+	portfolioNames := tradingPortfolioNames(projectID, len(assignments) > 0)
 	byStrategy := map[int64][]*StrategyAssignment{}
 	for _, assignment := range assignments {
 		assignment.PortfolioName = portfolioNames[assignment.PortfolioID]
@@ -1115,7 +1108,7 @@ func decorateStrategyAssignmentSchedule(assignment *StrategyAssignment, def *Str
 			if class != "equity" && class != "etf" {
 				continue
 			}
-			mark, err := dbGetMark(globalEngine.db, symbol)
+			mark, err := globalEngine.provider.Quote(symbol)
 			if err != nil || !markFresh(mark, now.UTC()) {
 				assignment.Eligibility = "waiting"
 				assignment.EligibilityReason = "waiting_for_fresh_market_data"
@@ -1204,10 +1197,6 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if portfolioID <= 0 || strategyID <= 0 {
 		return nil, errors.New("portfolio_id and strategy_id required")
 	}
-	portfolio, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
-	if err != nil {
-		return nil, err
-	}
 	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
 	if err != nil {
 		return nil, err
@@ -1219,10 +1208,15 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if def.Engine == "rules" {
 		return nil, errors.New("rule programs are available in event backtests; current live adapters do not support protected rule execution or linear contracts")
 	}
-	if err := validateStrategyUniverseForPortfolio(ctx.AppDB(), portfolio, def); err != nil {
+	state, err := newTradingReader(ctx).State(pid, portfolioID, def.Universe)
+	if err != nil {
 		return nil, err
 	}
-	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategy.ID); !allowed {
+	portfolio := state.Portfolio
+	if err := validateStrategyUniverse(portfolio, def, state.Violations); err != nil {
+		return nil, err
+	}
+	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), state, strategy.ID); !allowed {
 		return nil, fmt.Errorf("strategy scorecard gate: %s", reason)
 	}
 	cadence := strings.TrimSpace(strArg(args, "cadence"))
@@ -1253,7 +1247,7 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	if portfolioID <= 0 || strategyID <= 0 {
 		return nil, errors.New("portfolio_id and strategy_id required")
 	}
-	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	pf, err := tradingPortfolio(ctx, pid, portfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -1314,6 +1308,10 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	if name == "" {
 		name = fmt.Sprintf("%s strategy backtest", strategy.Name)
 	}
+	manifest, err := referenceManifest(ctx, pid, def.Universe, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode)
+	if err != nil {
+		return nil, err
+	}
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
 		ProjectID:         pid,
 		PortfolioID:       portfolioID,
@@ -1330,7 +1328,7 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 		FeeBps:            floatArg(args, "fee_bps", 0),
 		SlippageBps:       floatArg(args, "slippage_bps", defaultSlippageBps),
 		AdjustmentMode:    adjustmentMode,
-		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+		ReferenceManifest: manifest,
 		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name": pf.Name,
@@ -1388,7 +1386,7 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	if portfolioID <= 0 || strategyID <= 0 {
 		return nil, errors.New("portfolio_id and strategy_id required")
 	}
-	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	pf, err := tradingPortfolio(ctx, pid, portfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -1502,6 +1500,10 @@ func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfoli
 	}
 	startAt, endAt := marketBarDateRange(spec.Bars)
 	steps := maxBacktestMarketStep(spec.Bars)
+	manifest, err := referenceManifest(ctx, pf.ProjectID, def.Universe, startAt, endAt, spec.AdjustmentMode)
+	if err != nil {
+		return nil, err
+	}
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
 		ProjectID:         pf.ProjectID,
 		PortfolioID:       pf.ID,
@@ -1518,7 +1520,7 @@ func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfoli
 		FeeBps:            spec.FeeBps,
 		SlippageBps:       spec.SlippageBps,
 		AdjustmentMode:    spec.AdjustmentMode,
-		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt, endAt, spec.AdjustmentMode),
+		ReferenceManifest: manifest,
 		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name":    pf.Name,
@@ -2394,4 +2396,26 @@ func backtestPriceMap(prices []map[string]any) map[string]float64 {
 		}
 	}
 	return out
+}
+
+// tradingPortfolioNames labels assignments with Trading's portfolio names.
+// Names are decoration: when Trading is unreachable the list still renders.
+func tradingPortfolioNames(projectID string, needed bool) map[int64]string {
+	names := map[int64]string{}
+	if !needed || globalCtx == nil {
+		return names
+	}
+	var out struct {
+		Portfolios []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"portfolios"`
+	}
+	if err := callTrading(globalCtx, "portfolio_list", map[string]any{"_project_id": projectID}, &out); err != nil {
+		return names
+	}
+	for _, portfolio := range out.Portfolios {
+		names[portfolio.ID] = portfolio.Name
+	}
+	return names
 }

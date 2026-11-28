@@ -48,13 +48,47 @@ func (p *missingTrading) CallAppResult(app, tool string, args map[string]any, ou
 	}
 	return errors.New("Trading unavailable")
 }
-func TestStrategySubmissionFailsWhenTradingObservationFails(t *testing.T) {
-	platform := &missingTrading{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(platform))
-	globalCtx = ctx
-	_, err := (&App{}).toolOrderPlace(ctx, map[string]any{"portfolio_id": 1, "strategy_id": 1})
-	if err == nil || platform.orders != 0 {
-		t.Fatal("strategy submitted an order without a current portfolio observation")
+func TestLiveTickFailsClosedWhenTradingIsUnavailable(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	platform := ctx.PlatformAPI().(*fixtureTrading)
+	portfolioID := mustCreatePortfolio(t, ctx, "Outage", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Daily BTC", "BTC-USD", .1, "1d")
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID, StrategyVersion: 1, ControlMode: "strategy", Cadence: "1d"}); err != nil {
+		t.Fatal(err)
+	}
+	platform.stateErr = errors.New("Trading timed out")
+	now := time.Date(2026, 7, 13, 15, 0, 0, 0, time.UTC)
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.orderRequests) != 0 || len(platform.observedPortfolios) != 1 {
+		t.Fatalf("tick did not fail closed: state reads %v, orders %v", platform.observedPortfolios, platform.orderRequests)
+	}
+	// The failed read backs off instead of hammering Trading every tick.
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.observedPortfolios) != 1 {
+		t.Fatalf("deferred portfolio was read again during backoff: %v", platform.observedPortfolios)
+	}
+	platform.stateErr = nil
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, now.Add(31*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.observedPortfolios) != 2 {
+		t.Fatalf("tick did not retry after the backoff: %v", platform.observedPortfolios)
+	}
+}
+
+func TestStrategyOrderRequiresTheStateItWasSizedFrom(t *testing.T) {
+	ctx := newTestCtx(t)
+	platform := ctx.PlatformAPI().(*fixtureTrading)
+	id := mustCreatePortfolio(t, ctx, "Gate", []string{"crypto"})
+	sid := mustCreateFixedStrategy(t, ctx, "Gate strategy", "BTC-USD", .01)
+	args := map[string]any{"_project_id": "test-proj", "portfolio_id": id, "strategy_id": sid, "symbol": "BTC-USD", "side": "buy", "type": "market", "qty": .001, "rationale": "A small allocation testing the order gate."}
+	if _, err := (&App{}).submitStrategyOrder(ctx, nil, args); err == nil || len(platform.orderRequests) != 0 {
+		t.Fatal("strategy submitted an order without a portfolio state")
 	}
 }
 
@@ -70,10 +104,8 @@ func (p *legacyTradingFixture) CallAppResult(app, tool string, args map[string]a
 	return p.fixtureTrading.CallAppResult(app, tool, args, out)
 }
 func TestLegacyResearchImportsPausedAndOnlyOnce(t *testing.T) {
-	platform := &legacyTradingFixture{}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(platform))
-	globalCtx = ctx
-	platform.ctx = ctx
+	platform := &legacyTradingFixture{fixtureTrading: *newFixtureTrading(t)}
+	ctx := newTestCtxWith(t, platform)
 	id := mustCreatePortfolio(t, ctx, "Preserved portfolio", []string{"crypto"})
 	definition := map[string]any{"universe": []string{"BTC-USD"}, "cadence": "1d", "rules": []any{map[string]any{"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": .1}}}}}
 	raw, _ := json.Marshal(definition)
@@ -107,13 +139,17 @@ func TestStrategyRetriesKeepThePersistedOrderIntent(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Retry portfolio", []string{"crypto"})
 	sid := mustCreateFixedStrategy(t, ctx, "Retry strategy", "BTC-USD", .01)
-	args := map[string]any{"portfolio_id": id, "strategy_id": sid, "assignment_id": int64(1), "symbol": "BTC-USD", "side": "buy", "type": "market", "qty": .001, "rationale": "A small allocation testing the exact persisted order intent.", "idempotency_key": "durable-intent"}
-	if _, err := (&App{}).toolOrderPlace(ctx, args); err != nil {
+	pf, err := newTradingReader(ctx).State("test-proj", id, []string{"BTC-USD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"_project_id": "test-proj", "portfolio_id": id, "strategy_id": sid, "assignment_id": int64(1), "symbol": "BTC-USD", "side": "buy", "type": "market", "qty": .001, "rationale": "A small allocation testing the exact persisted order intent.", "idempotency_key": "durable-intent"}
+	if _, err := (&App{}).submitStrategyOrder(ctx, pf, args); err != nil {
 		t.Fatal(err)
 	}
 	args["qty"] = .002
 	args["rationale"] = "This changed proposal must not replace an already submitted intent."
-	if _, err := (&App{}).toolOrderPlace(ctx, args); err != nil {
+	if _, err := (&App{}).submitStrategyOrder(ctx, pf, args); err != nil {
 		t.Fatal(err)
 	}
 	platform := ctx.PlatformAPI().(*fixtureTrading)
@@ -200,34 +236,5 @@ func TestStrategySchedulerObservesOnlyPortfoliosWithWork(t *testing.T) {
 	var status string
 	if err := db.QueryRow(`SELECT status FROM strategy_rebalances WHERE assignment_id=?`, pending.ID).Scan(&status); err != nil || status != "completed" {
 		t.Fatalf("pending rebalance status = %q, want completed, err = %v", status, err)
-	}
-}
-
-func TestResearchSnapshotUpdatesOnlyChangedSecurityMetadata(t *testing.T) {
-	ctx := newTestCtx(t)
-	tx, err := ctx.AppDB().Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`
-		CREATE TRIGGER forbid_security_id_updates BEFORE UPDATE OF id ON securities
-		BEGIN SELECT RAISE(ABORT, 'security ID included in UPDATE'); END;
-		CREATE TRIGGER forbid_unchanged_security_updates BEFORE UPDATE ON securities
-		WHEN OLD.name IS NEW.name
-		BEGIN SELECT RAISE(ABORT, 'unchanged security updated'); END;`); err != nil {
-		t.Fatal(err)
-	}
-
-	security := map[string]any{"id": "security-1", "asset_class": "equity", "name": "Original", "source": "test"}
-	for _, name := range []string{"Original", "Original", "Renamed"} {
-		security["name"] = name
-		if err := writeResearchRows(tx, "securities", []map[string]any{security}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var name string
-	if err := tx.QueryRow(`SELECT name FROM securities WHERE id='security-1'`).Scan(&name); err != nil || name != "Renamed" {
-		t.Fatalf("security name = %q, want Renamed, err = %v", name, err)
 	}
 }

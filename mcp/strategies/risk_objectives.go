@@ -1,9 +1,6 @@
 package main
 
-import (
-	"database/sql"
-	"errors"
-)
+import ()
 
 type PortfolioRiskPolicy struct {
 	PortfolioID         int64   `json:"portfolio_id"`
@@ -15,26 +12,6 @@ type PortfolioRiskPolicy struct {
 	MaxGrossExposurePct float64 `json:"max_gross_exposure_pct"`
 	MaxOrderPct         float64 `json:"max_order_pct"`
 	UpdatedAt           string  `json:"updated_at,omitempty"`
-}
-
-func legacyRiskPolicy(portfolio *Portfolio) *PortfolioRiskPolicy {
-	daily := configuredDailyLossHaltPct()
-	return &PortfolioRiskPolicy{RiskLevel: "custom", MaxDailyLossPct: daily, MaxDrawdownPct: 100, MaxPositionPct: 100, MaxGrossExposurePct: 100, MaxOrderPct: 100}
-}
-
-func dbGetPortfolioRiskPolicy(db *sql.DB, portfolio *Portfolio) (*PortfolioRiskPolicy, error) {
-	if portfolio == nil {
-		return nil, errors.New("portfolio required")
-	}
-	p := legacyRiskPolicy(portfolio)
-	p.PortfolioID, p.ProjectID = portfolio.ID, portfolio.ProjectID
-	err := db.QueryRow(`SELECT risk_level,max_daily_loss_pct,max_drawdown_pct,max_position_pct,max_gross_exposure_pct,max_order_pct,updated_at
-		FROM portfolio_risk_policies WHERE portfolio_id=? AND project_id=?`, portfolio.ID, portfolio.ProjectID).
-		Scan(&p.RiskLevel, &p.MaxDailyLossPct, &p.MaxDrawdownPct, &p.MaxPositionPct, &p.MaxGrossExposurePct, &p.MaxOrderPct, &p.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return p, nil
-	}
-	return p, err
 }
 
 type RiskBreach struct {

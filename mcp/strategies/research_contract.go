@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -59,11 +58,6 @@ func writeResearchRows(tx *sql.Tx, table string, records []map[string]any) error
 				names = append(names, name)
 				slots = append(slots, "?")
 				values = append(values, value)
-				// Updating the parent key makes SQLite check referencing rows,
-				// including the backtest bars, even when the ID stays the same.
-				if table == "securities" && column == "id" {
-					continue
-				}
 				updates = append(updates, name+"=excluded."+name)
 				changes = append(changes, `"`+table+`".`+name+" IS NOT excluded."+name)
 			}
@@ -82,12 +76,4 @@ func writeResearchRows(tx *sql.Tx, table string, records []map[string]any) error
 		}
 	}
 	return nil
-}
-
-func decodeResearchValue(value any, out any) error {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, out)
 }

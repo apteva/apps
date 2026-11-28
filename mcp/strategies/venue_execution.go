@@ -1,9 +1,6 @@
 package main
 
 import (
-	"database/sql"
-
-	"errors"
 	"fmt"
 	"math"
 
@@ -128,104 +125,6 @@ func stringIn(value string, allowed ...string) bool {
 	}
 	return false
 }
-
-func scanVenueProfile(scanner interface{ Scan(...any) error }) (*VenueExecutionProfile, error) {
-	var p VenueExecutionProfile
-	var postOnly, reduceOnly int
-	err := scanner.Scan(&p.VenueSlug, &p.AssetClass, &p.Symbol, &p.Status, &p.Calendar,
-		&p.SessionPolicy, &p.MakerFeeBps, &p.TakerFeeBps, &p.FeeCurrency, &p.SpreadModel,
-		&p.FallbackSpreadBps, &p.SlippageModel, &p.SlippageBps, &p.MinQty, &p.MinNotional,
-		&p.QtyStep, &p.PriceTick, &p.FundingRateBps, &p.FundingIntervalHours,
-		&postOnly, &reduceOnly, &p.Source, &p.UpdatedAt)
-	p.SupportsPostOnly, p.SupportsReduceOnly = postOnly != 0, reduceOnly != 0
-	return &p, err
-}
-
-const venueProfileColumns = `venue_slug,asset_class,symbol,status,calendar,session_policy,
-	maker_fee_bps,taker_fee_bps,fee_currency,spread_model,fallback_spread_bps,
-	slippage_model,slippage_bps,min_qty,min_notional,qty_step,price_tick,
-	funding_rate_bps,funding_interval_hours,supports_post_only,supports_reduce_only,source,updated_at`
-
-func dbVenueProfile(db *sql.DB, venue, class, symbol string) (*VenueExecutionProfile, error) {
-	venue, class, symbol = strings.ToLower(strings.TrimSpace(venue)), strings.ToLower(strings.TrimSpace(class)), canonicalSymbol(symbol)
-	for _, candidate := range []string{symbol, "*"} {
-		if candidate == "" {
-			continue
-		}
-		p, err := scanVenueProfile(db.QueryRow(`SELECT `+venueProfileColumns+` FROM venue_execution_profiles
-			WHERE venue_slug=? AND asset_class=? AND symbol=?`, venue, class, candidate))
-		if err == nil {
-			return p, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
-	}
-	return nil, sql.ErrNoRows
-}
-
-func resolveVenueProfile(db *sql.DB, pf *Portfolio, symbol, class string) VenueExecutionProfile {
-	venue := executionVenue(pf)
-	p := defaultVenueProfile(venue, class)
-	if stored, err := dbVenueProfile(db, venue, class, symbol); err == nil {
-		p = *stored
-	}
-	if instrument, err := dbGetInstrument(db, symbol); err == nil && instrumentRulesMatchVenue(instrument, venue) {
-		if instrument.Calendar != "" {
-			p.Calendar = instrument.Calendar
-		}
-		if instrument.TickSize > 0 {
-			p.PriceTick = instrument.TickSize
-		}
-		if instrument.LotSize > 0 {
-			p.QtyStep = instrument.LotSize
-		}
-		if instrument.MinQty > 0 {
-			p.MinQty = instrument.MinQty
-		}
-		if instrument.MinNotional > 0 {
-			p.MinNotional = instrument.MinNotional
-		}
-		if instrument.QuoteCurrency != "" {
-			p.FeeCurrency = instrument.QuoteCurrency
-		}
-	}
-
-	settings := dbPortfolioExecutionSettings(db, pf.ID)
-	if cfg, err := dbPortfolioConfig(db, pf.ID); err == nil {
-		if _, ok := cfg["fee_bps"]; ok {
-			p.MakerFeeBps, p.TakerFeeBps = settings.FeeBps, settings.FeeBps
-		}
-		if _, ok := cfg["slippage_bps"]; ok {
-			p.SlippageBps = settings.SlippageBps
-		}
-	}
-	p.Runtime = ptrVenueRuntime(venueRuntimeSnapshot(venue))
-	return p
-}
-
-func instrumentRulesMatchVenue(instrument *Instrument, venue string) bool {
-	if instrument == nil {
-		return false
-	}
-	venue = strings.ToLower(strings.TrimSpace(venue))
-	if venue == "simulation" {
-		return true
-	}
-	source, exchange := strings.ToLower(instrument.Source), strings.ToLower(instrument.Exchange)
-	switch venue {
-	case "binance-trading":
-		return strings.Contains(source, "binance") || strings.Contains(exchange, "binance")
-	case "alpaca-trading":
-		return strings.Contains(source, "alpaca") || instrument.AssetClass == "equity" || instrument.AssetClass == "etf"
-	case "polymarket-clob":
-		return strings.Contains(source, "polymarket") || strings.Contains(exchange, "polymarket")
-	default:
-		return strings.Contains(source, venue) || strings.Contains(exchange, venue)
-	}
-}
-
-func ptrVenueRuntime(v VenueRuntimeHealth) *VenueRuntimeHealth { return &v }
 
 func validateExecutionOrderAt(profile VenueExecutionProfile, instrument *Instrument, mark *Mark, qty, price float64, at time.Time) *executionViolation {
 	if profile.Status == "maintenance" || profile.Status == "outage" {
@@ -358,10 +257,4 @@ func venueCircuitOpen(venue string, now time.Time) (bool, time.Time) {
 		return false, retry
 	}
 	return true, retry
-}
-
-func dbFundingPaid(db *sql.DB, portfolioID int64) float64 {
-	var amount float64
-	_ = db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM execution_costs WHERE portfolio_id=? AND kind='funding'`, portfolioID).Scan(&amount)
-	return amount
 }

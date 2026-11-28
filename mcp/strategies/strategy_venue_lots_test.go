@@ -15,25 +15,28 @@ func TestStrategyOrdersRespectVenueLots(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := newTestCtx(t)
 			pid := mustCreatePortfolio(t, ctx, "Venue lot strategy", []string{"crypto"})
-			if err := dbUpdatePortfolioConfig(ctx.AppDB(), pid, map[string]any{"fee_bps": tc.fee}); err != nil {
+			if err := dbUpdatePortfolioConfig(tradingDB(ctx), pid, map[string]any{"fee_bps": tc.fee}); err != nil {
 				t.Fatal(err)
 			}
-			_, err := (&App{}).toolVenueProfileUpdate(ctx, map[string]any{"venue_slug": "simulation", "asset_class": "crypto", "symbol": "ETH-USD", "qty_step": .003})
-			if err != nil {
+			profile := defaultVenueProfile("simulation", "crypto")
+			profile.Symbol, profile.QtyStep = "ETH-USD", .003
+			if err := dbUpsertVenueProfile(tradingDB(ctx), &profile); err != nil {
 				t.Fatal(err)
 			}
-			mark, err := dbGetMark(ctx.AppDB(), "ETH-USD")
+			mark, err := dbGetMark(tradingDB(ctx), "ETH-USD")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if tc.held > 0 {
-				if err = dbInsertPositionRaw(ctx.AppDB(), "test-proj", pid, "ETH-USD", "crypto", "", tc.held, mark.Price); err != nil {
+				if err = dbInsertPositionRaw(tradingDB(ctx), "test-proj", pid, "ETH-USD", "crypto", "", tc.held, mark.Price); err != nil {
 					t.Fatal(err)
 				}
 			}
-			pf := mustPortfolio(t, ctx, pid)
-			profile := resolveVenueProfile(ctx.AppDB(), pf, "ETH-USD", "crypto")
-			if profile.QtyStep != .003 {
+			state, err := newTradingReader(ctx).State("test-proj", pid, []string{"ETH-USD"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile := state.Profile("ETH-USD"); profile.QtyStep != .003 {
 				t.Fatalf("fixture qty step %v", profile.QtyStep)
 			}
 			sid := mustCreateTestStrategy(t, ctx, "ETH-USD")
@@ -41,7 +44,7 @@ func TestStrategyOrdersRespectVenueLots(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			orders, _, err := placeStrategyPaperOrders(globalEngine, ctx, pf, s, &StrategyAssignment{ID: 1}, &StrategyEvaluation{TargetAllocations: []StrategyAllocation{{Symbol: "ETH-USD", Weight: tc.weight}}})
+			orders, _, err := placeStrategyPaperOrders(globalEngine, ctx, state, s, &StrategyAssignment{ID: 1}, &StrategyEvaluation{TargetAllocations: []StrategyAllocation{{Symbol: "ETH-USD", Weight: tc.weight}}})
 			if err != nil || len(orders) != 1 {
 				t.Fatalf("orders=%v err=%v", orders, err)
 			}
@@ -55,10 +58,7 @@ func TestStrategyOrdersRespectVenueLots(t *testing.T) {
 			if tc.held == 0 && o.Side != "buy" {
 				t.Fatalf("expected buy %+v", o)
 			}
-			if err = tryFill(globalEngine, o); err != nil {
-				t.Fatal(err)
-			}
-			filled, err := dbGetOrder(ctx.AppDB(), "test-proj", o.ID)
+			filled, err := dbGetOrder(tradingDB(ctx), "test-proj", o.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

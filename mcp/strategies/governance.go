@@ -9,7 +9,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -84,95 +83,9 @@ type StrategyScorecardEvaluation struct {
 	EvaluatedAt     string                   `json:"evaluated_at"`
 }
 
-func defaultUniversePolicy(portfolio *Portfolio) *PortfolioUniversePolicy {
-	p := &PortfolioUniversePolicy{SelectionMode: "all_allowed_classes", IncludeSymbols: []string{}, ExcludeSymbols: []string{}, EnforcementEnabled: true}
-	if portfolio != nil {
-		p.PortfolioID, p.ProjectID = portfolio.ID, portfolio.ProjectID
-	}
-	return p
-}
-
-func dbGetPortfolioUniversePolicy(db *sql.DB, portfolio *Portfolio) (*PortfolioUniversePolicy, error) {
-	p := defaultUniversePolicy(portfolio)
-	var includes, excludes string
-	var requireActive, enabled int
-	err := db.QueryRow(`SELECT selection_mode,include_symbols,exclude_symbols,reference_universe_id,require_active_listing,enforcement_enabled,updated_at
-		FROM portfolio_universe_policies WHERE portfolio_id=? AND project_id=?`, portfolio.ID, portfolio.ProjectID).
-		Scan(&p.SelectionMode, &includes, &excludes, &p.ReferenceUniverseID, &requireActive, &enabled, &p.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return p, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	_ = json.Unmarshal([]byte(includes), &p.IncludeSymbols)
-	_ = json.Unmarshal([]byte(excludes), &p.ExcludeSymbols)
-	p.RequireActiveListing, p.EnforcementEnabled = requireActive != 0, enabled != 0
-	return p, nil
-}
-
-func portfolioUniverseViolation(db *sql.DB, portfolio *Portfolio, symbol string) (*UniverseViolation, error) {
-	policy, err := dbGetPortfolioUniversePolicy(db, portfolio)
-	if err != nil || !policy.EnforcementEnabled {
-		return nil, err
-	}
-	symbol = canonicalSymbol(symbol)
-	if contains(policy.ExcludeSymbols, symbol) {
-		return &UniverseViolation{Code: "universe_symbol_excluded", Detail: fmt.Sprintf("%s is explicitly excluded by the portfolio universe policy", symbol)}, nil
-	}
-	included := contains(policy.IncludeSymbols, symbol)
-	switch policy.SelectionMode {
-	case "symbol_allowlist":
-		if !included {
-			return &UniverseViolation{Code: "universe_not_allowed", Detail: fmt.Sprintf("%s is not in the portfolio symbol allowlist", symbol)}, nil
-		}
-	case "reference_universe":
-		member, err := referenceUniverseContainsSymbol(db, policy.ReferenceUniverseID, symbol, time.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
-		if !member && !included {
-			return &UniverseViolation{Code: "universe_not_member", Detail: fmt.Sprintf("%s is not an active member of reference universe %s", symbol, policy.ReferenceUniverseID)}, nil
-		}
-	}
-	if policy.RequireActiveListing {
-		active, err := activeListingExists(db, symbol, time.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
-		if !active {
-			return &UniverseViolation{Code: "universe_inactive_listing", Detail: fmt.Sprintf("%s has no active security-master listing", symbol)}, nil
-		}
-	}
-	return nil, nil
-}
-
-func activeListingExists(db *sql.DB, symbol string, asOf time.Time) (bool, error) {
-	var one int
-	day := asOf.Format("2006-01-02")
-	err := db.QueryRow(`SELECT 1 FROM security_listings WHERE symbol=? AND active=1
-		AND (valid_from='' OR valid_from<=?) AND (valid_to='' OR valid_to>?) LIMIT 1`, canonicalSymbol(symbol), day, day).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-func referenceUniverseContainsSymbol(db *sql.DB, universeID, symbol string, asOf time.Time) (bool, error) {
-	var one int
-	day := asOf.Format("2006-01-02")
-	err := db.QueryRow(`SELECT 1 FROM universe_memberships u JOIN security_listings l ON l.security_id=u.security_id
-		WHERE u.universe_id=? AND l.symbol=? AND l.active=1
-		AND u.valid_from<=? AND (u.valid_to='' OR u.valid_to>?)
-		AND (l.valid_from='' OR l.valid_from<=?) AND (l.valid_to='' OR l.valid_to>?) LIMIT 1`,
-		universeID, canonicalSymbol(symbol), day, day, day, day).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-func validateStrategyUniverseForPortfolio(db *sql.DB, portfolio *Portfolio, def *StrategyDefinition) error {
+// validateStrategyUniverse checks a strategy's symbols against the
+// portfolio's allowed classes and Trading's universe violations for them.
+func validateStrategyUniverse(portfolio *Portfolio, def *StrategyDefinition, violations map[string]*UniverseViolation) error {
 	if portfolio == nil || def == nil {
 		return errors.New("portfolio and strategy definition required")
 	}
@@ -181,11 +94,7 @@ func validateStrategyUniverseForPortfolio(db *sql.DB, portfolio *Portfolio, def 
 		if !contains(portfolio.AllowedClasses, class) {
 			return fmt.Errorf("strategy symbol %s has class %s outside portfolio allowed_classes", symbol, class)
 		}
-		violation, err := portfolioUniverseViolation(db, portfolio, symbol)
-		if err != nil {
-			return err
-		}
-		if violation != nil {
+		if violation := violations[canonicalSymbol(symbol)]; violation != nil {
 			return fmt.Errorf("strategy universe: %s", violation.Detail)
 		}
 	}
@@ -343,9 +252,8 @@ func scorecardPolicyHash(policy *StrategyScorecardPolicy) string {
 }
 
 func evaluateAndStoreStrategyScorecard(db *sql.DB, projectID string, portfolioID, strategyID, runID int64) (*StrategyScorecardEvaluation, error) {
-	portfolio, err := dbGetPortfolio(db, projectID, portfolioID)
-	if err != nil {
-		return nil, err
+	if portfolioID <= 0 {
+		return nil, errors.New("portfolio_id required")
 	}
 	if _, err := dbGetStrategy(db, projectID, strategyID); err != nil {
 		return nil, err
@@ -354,7 +262,7 @@ func evaluateAndStoreStrategyScorecard(db *sql.DB, projectID string, portfolioID
 	if err != nil {
 		return nil, err
 	}
-	if run.PortfolioID != portfolio.ID || run.StrategyID != strategyID {
+	if run.PortfolioID != portfolioID || run.StrategyID != strategyID {
 		return nil, errors.New("backtest run does not belong to this portfolio and strategy")
 	}
 	if run.Status != "completed" {
@@ -458,7 +366,11 @@ func scorecardStageRank(stage string) int {
 	}
 }
 
-func scorecardAllowsExecution(db *sql.DB, portfolio *Portfolio, strategyID int64) (bool, string) {
+// scorecardAllowsExecution gates a strategy on its own scorecard. state is
+// Trading's portfolio_state for the strategy's universe; passing evidence must
+// have been captured under the portfolio's current execution policy.
+func scorecardAllowsExecution(db *sql.DB, state *TradingState, strategyID int64) (bool, string) {
+	portfolio := state.Portfolio
 	policy, err := dbGetStrategyScorecardPolicy(db, portfolio.ProjectID, portfolio.ID, strategyID)
 	if err != nil {
 		return false, err.Error()
@@ -480,7 +392,7 @@ func scorecardAllowsExecution(db *sql.DB, portfolio *Portfolio, strategyID int64
 		return false, fmt.Sprintf("strategy stage %s is below the required stage for %s", policy.PromotionStage, portfolio.ExecutionEnvironment)
 	}
 	if required > 0 {
-		count, err := currentPassingRuns(db, policy)
+		count, err := currentPassingRuns(db, policy, state)
 		if err != nil || count < policy.MinCompletedRuns {
 			return false, "current strategy version lacks passing evidence"
 		}
@@ -488,7 +400,7 @@ func scorecardAllowsExecution(db *sql.DB, portfolio *Portfolio, strategyID int64
 	return true, "scorecard gate passed"
 }
 
-func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, target string) (*StrategyScorecardPolicy, error) {
+func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, target string, state *TradingState) (*StrategyScorecardPolicy, error) {
 	if policy == nil {
 		return nil, errors.New("scorecard policy required")
 	}
@@ -518,7 +430,7 @@ func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, targe
 	if targetRank != currentRank+1 {
 		return nil, errors.New("promotion must advance one stage at a time")
 	}
-	passingRuns, err := currentPassingRuns(db, policy)
+	passingRuns, err := currentPassingRuns(db, policy, state)
 	if err != nil {
 		return nil, err
 	}
@@ -529,10 +441,9 @@ func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, targe
 	return dbUpsertStrategyScorecardPolicy(db, *policy)
 }
 
-func currentPassingRuns(db *sql.DB, policy *StrategyScorecardPolicy) (int, error) {
-	pf, err := dbGetPortfolio(db, policy.ProjectID, policy.PortfolioID)
-	if err != nil {
-		return 0, err
+func currentPassingRuns(db *sql.DB, policy *StrategyScorecardPolicy, state *TradingState) (int, error) {
+	if state == nil || state.Portfolio == nil || state.Portfolio.ID != policy.PortfolioID {
+		return 0, errors.New("current Trading state required for scorecard evidence")
 	}
 	strategy, err := dbGetStrategy(db, policy.ProjectID, policy.StrategyID)
 	if err != nil {
@@ -542,10 +453,7 @@ func currentPassingRuns(db *sql.DB, policy *StrategyScorecardPolicy) (int, error
 	if err != nil {
 		return 0, err
 	}
-	current, err := captureReplayPolicy(db, pf, def.Universe)
-	if err != nil {
-		return 0, err
-	}
+	current := replayPolicyFromState(state, def.Universe)
 	currentHash := replayPolicyHash(current)
 	rows, err := db.Query(`SELECT DISTINCT e.backtest_run_id,b.summary_json FROM strategy_scorecard_evaluations e JOIN backtest_runs b ON b.id=e.backtest_run_id
  WHERE e.project_id=? AND e.portfolio_id=? AND e.strategy_id=? AND e.policy_hash=? AND e.passed=1 AND e.strategy_version=? AND b.status='completed'`, policy.ProjectID, policy.PortfolioID, policy.StrategyID, scorecardPolicyHash(policy), strategy.Version)
@@ -585,7 +493,7 @@ func (a *App) toolStrategyScorecardGet(ctx *sdk.AppCtx, args map[string]any) (an
 		return nil, err
 	}
 	portfolioID, strategyID := int64Arg(args, "portfolio_id", 0), int64Arg(args, "strategy_id", 0)
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+	if _, err := tradingPortfolio(ctx, pid, portfolioID); err != nil {
 		return nil, err
 	}
 	if _, err := dbGetStrategy(ctx.AppDB(), pid, strategyID); err != nil {
@@ -609,7 +517,7 @@ func (a *App) toolStrategyScorecardUpdate(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	portfolioID, strategyID := int64Arg(args, "portfolio_id", 0), int64Arg(args, "strategy_id", 0)
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+	if _, err := tradingPortfolio(ctx, pid, portfolioID); err != nil {
 		return nil, err
 	}
 	if _, err := dbGetStrategy(ctx.AppDB(), pid, strategyID); err != nil {
@@ -661,7 +569,7 @@ func (a *App) toolStrategyPromotionUpdate(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	portfolioID, strategyID := int64Arg(args, "portfolio_id", 0), int64Arg(args, "strategy_id", 0)
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+	if _, err := tradingPortfolio(ctx, pid, portfolioID); err != nil {
 		return nil, err
 	}
 	if _, err := dbGetStrategy(ctx.AppDB(), pid, strategyID); err != nil {
@@ -671,7 +579,11 @@ func (a *App) toolStrategyPromotionUpdate(ctx *sdk.AppCtx, args map[string]any) 
 	if err != nil {
 		return nil, err
 	}
-	saved, err := promoteStrategyScorecard(ctx.AppDB(), policy, strArg(args, "promotion_stage"))
+	state, err := strategyTradingState(ctx, pid, portfolioID, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	saved, err := promoteStrategyScorecard(ctx.AppDB(), policy, strArg(args, "promotion_stage"), state)
 	if err != nil {
 		return nil, err
 	}
@@ -696,4 +608,18 @@ func boolValue(value any) (bool, bool) {
 		return v != 0, true
 	}
 	return false, false
+}
+
+// strategyTradingState reads Trading's state for a portfolio over the
+// strategy's universe, the scope a replay execution policy is captured for.
+func strategyTradingState(ctx *sdk.AppCtx, pid string, portfolioID, strategyID int64) (*TradingState, error) {
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	return newTradingReader(ctx).State(pid, portfolioID, def.Universe)
 }

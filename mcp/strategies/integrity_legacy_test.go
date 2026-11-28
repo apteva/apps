@@ -18,25 +18,14 @@ func validateWorkingPolicy(db *sql.DB, pf *Portfolio, o *Order) error {
 			return errors.New(v.Detail)
 		}
 	}
+	// Trading 0.19.0 fails legacy strategy provenance closed; Strategies
+	// gates its own orders before they reach Trading.
 	var sid int64
-	var version int
-	if err := db.QueryRow(`SELECT strategy_id,strategy_version FROM orders WHERE id=?`, o.ID).Scan(&sid, &version); err != nil {
+	if err := db.QueryRow(`SELECT strategy_id FROM orders WHERE id=?`, o.ID).Scan(&sid); err != nil {
 		return err
 	}
-	if o.Source == "strategy" && sid == 0 {
-		return errors.New("strategy order provenance unavailable")
-	}
-	if sid > 0 {
-		s, err := dbGetStrategy(db, pf.ProjectID, sid)
-		if err != nil {
-			return err
-		}
-		if s.Version != version {
-			return errors.New("strategy version changed")
-		}
-		if allowed, reason := scorecardAllowsExecution(db, pf, sid); !allowed {
-			return errors.New(reason)
-		}
+	if o.Source == "strategy" || sid > 0 {
+		return errors.New("legacy Trading strategy order")
 	}
 	return nil
 }

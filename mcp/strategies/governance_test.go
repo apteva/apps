@@ -29,7 +29,7 @@ func mustCreateTestStrategy(t *testing.T, ctx interface{ AppDB() *sql.DB }, symb
 
 func TestStrategyScorecardPersistsEvaluationAndGatesPromotion(t *testing.T) {
 	ctx := newTestCtx(t)
-	portfolioID, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
+	portfolioID, err := dbCreatePortfolio(tradingDB(ctx), &Portfolio{
 		ProjectID: "test-proj", Name: "paper gate", AllowedClasses: []string{"crypto"}, StartingCash: 100_000,
 		Mode: "paper", ExecutionEnvironment: "broker_paper", BrokerSlug: "alpaca-trading",
 	})
@@ -77,12 +77,15 @@ func TestStrategyScorecardPersistsEvaluationAndGatesPromotion(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].BacktestRunID != runID {
 		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
-	portfolio, _ := dbGetPortfolio(ctx.AppDB(), "test-proj", portfolioID)
+	portfolio, err := strategyTradingState(ctx, "test-proj", portfolioID, strategyID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if allowed, _ := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategyID); allowed {
 		t.Fatal("broker paper execution allowed before promotion")
 	}
 	for _, stage := range []string{"paper_candidate", "paper"} {
-		policy, err = promoteStrategyScorecard(ctx.AppDB(), policy, stage)
+		policy, err = promoteStrategyScorecard(ctx.AppDB(), policy, stage, portfolio)
 		if err != nil {
 			t.Fatalf("promote %s: %v", stage, err)
 		}
@@ -90,7 +93,7 @@ func TestStrategyScorecardPersistsEvaluationAndGatesPromotion(t *testing.T) {
 	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategyID); !allowed {
 		t.Fatalf("paper stage blocked: %s", reason)
 	}
-	_, err = promoteStrategyScorecard(ctx.AppDB(), policy, "live")
+	_, err = promoteStrategyScorecard(ctx.AppDB(), policy, "live", portfolio)
 	if err == nil {
 		t.Fatal("promotion skipped live_candidate")
 	}
@@ -105,10 +108,10 @@ func TestStrategyScorecardPersistsEvaluationAndGatesPromotion(t *testing.T) {
 	if policy.PolicyHash == evaluation.PolicyHash {
 		t.Fatal("material policy change retained the old policy hash")
 	}
-	if _, err = promoteStrategyScorecard(ctx.AppDB(), policy, "live_candidate"); err == nil {
+	if _, err = promoteStrategyScorecard(ctx.AppDB(), policy, "live_candidate", portfolio); err == nil {
 		t.Fatal("promotion reused an evaluation from a superseded scorecard policy")
 	}
-	policy, err = promoteStrategyScorecard(ctx.AppDB(), policy, "suspended")
+	policy, err = promoteStrategyScorecard(ctx.AppDB(), policy, "suspended", portfolio)
 	if err != nil || policy.PromotionStage != "suspended" {
 		t.Fatalf("suspend=%#v err=%v", policy, err)
 	}

@@ -106,14 +106,6 @@ func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty,
 		outcome = polyOutcome(o)
 	}
 
-	strategyID, err := dbOrderStrategyID(tx, o.ID)
-	if err != nil {
-		return err
-	}
-	if err := dbAccrueStrategyFillTx(tx, portfolioID, strategyID, o.Symbol, outcome, o.Side, qty, price, 0, 0, 0); err != nil {
-		return err
-	}
-
 	row := tx.QueryRow(`
 		SELECT id, qty, avg_cost, realized_pnl
 		FROM positions WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ?`,

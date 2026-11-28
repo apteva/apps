@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	sdk "github.com/apteva/app-sdk"
 	"net/http"
 	"sort"
 	"strings"
@@ -88,8 +89,7 @@ func dbListStrategyAccounting(db *sql.DB, projectID string) ([]strategyAccountin
 		       a.gross_realized_pnl, a.fees_paid, a.spread_cost, a.slippage_cost,
 		       a.notional_traded, a.fill_count, COALESCE(a.last_fill_at, '')
 		FROM strategy_position_accounting a
-		JOIN portfolios p ON p.id = a.portfolio_id
-		WHERE p.project_id = ?`, projectID)
+		WHERE a.project_id = ?`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,15 +150,9 @@ func dbStrategyRunHealth(db *sql.DB, projectID string) (map[[2]int64]*strategyRu
 
 // dbStrategyLiveRows assembles the rollup. Strategies that have traded appear
 // even once their assignment is gone — a retired strategy still owns its P&L.
-func dbStrategyLiveRows(db *sql.DB, projectID string, includeUnattributed bool) ([]*StrategyLiveRow, error) {
-	portfolios, err := dbListPortfolios(db, projectID)
-	if err != nil {
-		return nil, err
-	}
-	byPortfolio := map[int64]*Portfolio{}
-	for _, p := range portfolios {
-		byPortfolio[p.ID] = p
-	}
+// Portfolio details and marks come from one Trading read per portfolio.
+func dbStrategyLiveRows(ctx *sdk.AppCtx, projectID string) ([]*StrategyLiveRow, error) {
+	db := ctx.AppDB()
 	strategies, err := dbListStrategies(db, projectID, "")
 	if err != nil {
 		return nil, err
@@ -183,9 +177,22 @@ func dbStrategyLiveRows(db *sql.DB, projectID string, includeUnattributed bool) 
 	if err != nil {
 		return nil, err
 	}
-	marks, err := dbMarksBySymbol(db)
-	if err != nil {
-		return nil, err
+	openSymbols := map[int64][]string{}
+	for _, r := range accounting {
+		symbols := openSymbols[r.portfolioID]
+		if r.openQty > strategyLotEpsilon {
+			symbols = append(symbols, r.symbol)
+		}
+		openSymbols[r.portfolioID] = symbols
+	}
+	states := map[int64]*TradingState{}
+	reader := newTradingReader(ctx)
+	for portfolioID, symbols := range openSymbols {
+		state, err := reader.State(projectID, portfolioID, symbols)
+		if err != nil {
+			return nil, err
+		}
+		states[portfolioID] = state
 	}
 
 	owners := map[[2]interface{}]map[int64]bool{}
@@ -202,20 +209,18 @@ func dbStrategyLiveRows(db *sql.DB, projectID string, includeUnattributed bool) 
 
 	rowsByKey := map[[2]int64]*StrategyLiveRow{}
 	for _, r := range accounting {
-		if r.strategyID == 0 && !includeUnattributed {
+		state := states[r.portfolioID]
+		if r.strategyID == 0 || state == nil {
 			continue
 		}
-		portfolio := byPortfolio[r.portfolioID]
-		if portfolio == nil {
-			continue
-		}
+		portfolio := state.Portfolio
 		key := [2]int64{r.portfolioID, r.strategyID}
 		row := rowsByKey[key]
 		if row == nil {
 			row = &StrategyLiveRow{
 				StrategyID:           r.strategyID,
-				StrategyName:         "Unattributed",
-				StrategyStatus:       "unattributed",
+				StrategyName:         "Unknown strategy",
+				StrategyStatus:       "unknown",
 				PortfolioID:          portfolio.ID,
 				PortfolioName:        portfolio.Name,
 				Mode:                 portfolio.Mode,
@@ -271,7 +276,7 @@ func dbStrategyLiveRows(db *sql.DB, projectID string, includeUnattributed bool) 
 				AvgCost: r.avgCost,
 				Shared:  shared,
 			}
-			if mark := marks[r.symbol]; mark != nil && mark.Price > 0 {
+			if mark := state.Mark(r.symbol); mark != nil && mark.Price > 0 {
 				position.Mark = mark.Price
 				position.MarketValue = r.openQty * mark.Price
 				position.UnrealizedPnL = (mark.Price - r.avgCost) * r.openQty
@@ -328,10 +333,9 @@ func (a *App) handleHTTPStrategiesLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	includeUnattributed := strings.EqualFold(query.Get("include_unattributed"), "true")
-	rows, err := dbStrategyLiveRows(globalCtx.AppDB(), pid, includeUnattributed)
+	rows, err := dbStrategyLiveRows(globalCtx, pid)
 	if err != nil {
-		httpErr(w, 500, err.Error())
+		httpErr(w, 502, err.Error())
 		return
 	}
 	if scope := strings.ToLower(strings.TrimSpace(query.Get("scope"))); scope == "live" {

@@ -1,22 +1,16 @@
 package main
 
 import (
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	sdk "github.com/apteva/app-sdk"
 
 	"sync"
 )
 
 var rebalanceMu sync.Mutex
 var strategyReplayMu sync.Mutex
-
-func workingPortfolioOrders(db *sql.DB, id int64) ([]*Order, error) {
-
-	return dbListOrdersInternal(db, id, "working", -1)
-}
 
 func persistRebalance(db *sql.DB, pf *Portfolio, s *Strategy, a *StrategyAssignment, eval *StrategyEvaluation) error {
 	raw, err := json.Marshal(eval.TargetAllocations)
@@ -54,78 +48,24 @@ func commitStrategyStep(db *sql.DB, runID int64, step int, summary map[string]an
 	return tx.Commit()
 }
 
-type replayExecutionPolicy struct {
-	Risk        *PortfolioRiskPolicy             `json:"risk"`
-	Allowed     map[string]bool                  `json:"allowed"`
-	Profiles    map[string]VenueExecutionProfile `json:"profiles"`
-	Instruments map[string]*Instrument           `json:"instruments"`
+// captureReplayPolicy reads the portfolio's execution policy for symbols
+// from Trading. Backtests freeze it into their summary.
+func captureReplayPolicy(ctx *sdk.AppCtx, pid string, portfolioID int64, symbols []string) (*TradingState, *replayExecutionPolicy, error) {
+	state, err := newTradingReader(ctx).State(pid, portfolioID, symbols)
+	if err != nil {
+		return nil, nil, err
+	}
+	return state, replayPolicyFromState(state, symbols), nil
 }
 
-func captureReplayPolicy(db *sql.DB, pf *Portfolio, symbols []string) (*replayExecutionPolicy, error) {
-	risk, err := dbGetPortfolioRiskPolicy(db, pf)
-	if err != nil {
-		return nil, err
-	}
-	p := &replayExecutionPolicy{Risk: risk, Allowed: map[string]bool{}, Profiles: map[string]VenueExecutionProfile{}, Instruments: map[string]*Instrument{}}
+func replayPolicyFromState(state *TradingState, symbols []string) *replayExecutionPolicy {
+	pf := state.Portfolio
+	p := &replayExecutionPolicy{Risk: state.RiskPolicy, Allowed: map[string]bool{}, Profiles: map[string]VenueExecutionProfile{}, Instruments: map[string]*Instrument{}}
 	for _, symbol := range symbols {
-		v, err := portfolioUniverseViolation(db, pf, symbol)
-		if err != nil {
-			return nil, err
-		}
-		p.Allowed[symbol] = v == nil && contains(pf.AllowedClasses, inferAssetClass(symbol))
-		p.Profiles[symbol] = resolveVenueProfile(db, pf, symbol, inferAssetClass(symbol))
-		p.Instruments[symbol], _ = dbGetInstrument(db, symbol)
+		key := canonicalSymbol(symbol)
+		p.Allowed[symbol] = state.Violations[key] == nil && contains(pf.AllowedClasses, inferAssetClass(symbol))
+		p.Profiles[symbol] = state.Profile(symbol)
+		p.Instruments[symbol] = state.Instruments[key]
 	}
-	return p, nil
-}
-func decodeReplayPolicy(run *BacktestRun) *replayExecutionPolicy {
-	raw, err := json.Marshal(run.Summary["execution_policy"])
-	if err != nil {
-		return nil
-	}
-	var p replayExecutionPolicy
-	if json.Unmarshal(raw, &p) != nil || p.Risk == nil {
-		return nil
-	}
-	return &p
-}
-func exposureBreach(policy *PortfolioRiskPolicy, equity, orderNotional, symbolValue, gross float64) *RiskBreach {
-	if equity <= 0 {
-		return &RiskBreach{Code: "risk_no_equity", Detail: "positive equity required"}
-	}
-	checks := []struct {
-		actual, limit float64
-		code          string
-	}{{orderNotional / equity * 100, policy.MaxOrderPct, "risk_max_order"}, {(symbolValue + orderNotional) / equity * 100, policy.MaxPositionPct, "risk_max_position"}, {(gross + orderNotional) / equity * 100, policy.MaxGrossExposurePct, "risk_max_gross_exposure"}}
-	for _, c := range checks {
-		if c.actual > c.limit+1e-9 {
-			return &RiskBreach{Code: c.code, Detail: fmt.Sprintf("projected %.2f%% exceeds %.2f%% maximum", c.actual, c.limit), ActualPct: c.actual, LimitPct: c.limit}
-		}
-	}
-	return nil
-}
-
-func replayPolicyHash(policy *replayExecutionPolicy) string {
-	raw, _ := json.Marshal(policy)
-	var value any
-	_ = json.Unmarshal(raw, &value)
-	var strip func(any)
-	strip = func(v any) {
-		switch x := v.(type) {
-		case map[string]any:
-			for _, k := range []string{"updated_at", "created_at", "received_at", "runtime"} {
-				delete(x, k)
-			}
-			for _, child := range x {
-				strip(child)
-			}
-		case []any:
-			for _, child := range x {
-				strip(child)
-			}
-		}
-	}
-	strip(value)
-	raw, _ = json.Marshal(value)
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
+	return p
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,26 +40,12 @@ type engine struct {
 	lastEmitted map[string]float64
 }
 
-func (e *engine) snapshotMetrics() map[string]any {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return map[string]any{
-		"last_tick_at":         e.lastTickAt,
-		"ticks":                e.ticks,
-		"fills_this_run":       e.fillsThisRun,
-		"last_working_seen":    e.lastWorkingSeen,
-		"last_fills_this_tick": e.lastFillsThisTick,
-		"last_marks_refreshed": e.lastMarksRefreshed,
-	}
-}
-
 var globalEngine *engine
 
 const (
-	defaultSlippageBps = 1.0  // 1 bp default; sells fill below mark, buys above
-	defaultFeeBps      = 0.0  // paper default unless a portfolio overrides it
-	defaultLossHalt    = -5.0 // %
-	priceTolerance     = 1e-9
+	defaultSlippageBps = 1.0 // 1 bp default; sells fill below mark, buys above
+	// paper default unless a portfolio overrides it
+	// %
 )
 
 func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) (int, error) {
@@ -103,13 +88,19 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if !hasPendingRebalance && (!ok || !strategyAssignmentCheckDue(a, checkSlot)) {
 			continue
 		}
-		if err := syncTradingPortfolio(app, a.ProjectID, a.PortfolioID); err != nil {
-			if !errors.Is(err, errTradingObservationDeferred) {
-				e.logger.Warn("Trading observation unavailable", "portfolio_id", a.PortfolioID, "err", err)
-			}
+		// One Trading read per due assignment; everything below sizes from it.
+		if tradingReadDeferred(a.PortfolioID, now) {
 			continue
 		}
-		// An assignment can change while waiting for Trading's snapshot.
+		state, err := newTradingReader(app).State(a.ProjectID, a.PortfolioID, runtimeDef.Universe)
+		recordTradingRead(a.PortfolioID, now, err)
+		if err != nil {
+			e.logger.Warn("Trading unavailable; strategy run deferred", "portfolio_id", a.PortfolioID, "assignment_id", a.ID, "err", err)
+			app.Emit("strategy.run.deferred", map[string]any{"schema_version": 1, "portfolio_id": a.PortfolioID, "assignment_id": a.ID,
+				"strategy_id": a.StrategyID, "reason": "trading_unavailable", "error": err.Error()})
+			continue
+		}
+		// An assignment can change while waiting for Trading.
 		current, err := dbActiveStrategyAssignment(e.db, a.ProjectID, a.PortfolioID)
 		if err != nil || *current != *a {
 			continue
@@ -117,31 +108,27 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if latest, err := dbGetStrategy(e.db, a.ProjectID, strategy.ID); err != nil || latest.Status != "active" || latest.Version != strategy.Version {
 			continue
 		}
-		pf, err := dbGetPortfolio(e.db, a.ProjectID, a.PortfolioID)
-		if err != nil {
-			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
-			continue
-		}
-		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) || portfolioUsesBacktestPricing(e.db, pf.ID) {
+		pf := state.Portfolio
+		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) || state.UsesBacktestPricing() {
 			continue
 		}
 		if hasPendingRebalance {
 			var targets []StrategyAllocation
 			if json.Unmarshal([]byte(pendingTargets), &targets) == nil {
-				_, _, err := placeStrategyPaperOrders(e, app, pf, strategy, a, &StrategyEvaluation{TargetAllocations: targets, Decisions: []string{"Resume pending rebalance"}})
+				_, _, err := placeStrategyPaperOrders(e, app, state, strategy, a, &StrategyEvaluation{TargetAllocations: targets, Decisions: []string{"Resume pending rebalance"}})
 				if err != nil {
 					e.logger.Warn("rebalance pending", "assignment_id", a.ID, "err", err)
 				}
 			}
 			continue
 		}
-		if err := validateStrategyUniverseForPortfolio(e.db, pf, def); err != nil {
+		if err := validateStrategyUniverse(pf, def, state.Violations); err != nil {
 			continue
 		}
-		if allowed, _ := scorecardAllowsExecution(e.db, pf, strategy.ID); !allowed {
+		if allowed, _ := scorecardAllowsExecution(e.db, state, strategy.ID); !allowed {
 			continue
 		}
-		if !stockStrategyExecutionReady(e, runtimeDef, now) {
+		if !stockStrategyExecutionReady(e, state, runtimeDef, now) {
 			continue
 		}
 		market, err := liveStrategyMarket(app, runtimeDef)
@@ -194,7 +181,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano),
 			"decisions":     eval.Decisions, "target_allocations": eval.TargetAllocations,
 		})
-		created, pending, err := placeStrategyPaperOrders(e, app, pf, strategy, a, eval)
+		created, pending, err := placeStrategyPaperOrders(e, app, state, strategy, a, eval)
 		if err != nil {
 			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			app.Emit("strategy.run.failed", map[string]any{"schema_version": 1, "portfolio_id": pf.ID,
@@ -236,7 +223,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 	return totalOrders, nil
 }
 
-func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Time) bool {
+func stockStrategyExecutionReady(e *engine, state *TradingState, def *StrategyDefinition, now time.Time) bool {
 	stockSymbols := []string{}
 	for _, symbol := range def.Universe {
 		class := inferAssetClass(symbol)
@@ -254,8 +241,7 @@ func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Ti
 		return true
 	}
 	for _, symbol := range stockSymbols {
-		mark, err := dbGetMark(e.db, symbol)
-		if err != nil || !markFresh(mark, now.UTC()) {
+		if !markFresh(state.Mark(symbol), now.UTC()) {
 			return false
 		}
 	}
@@ -265,16 +251,6 @@ func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Ti
 func usEquityRegularSession(now time.Time) bool {
 	session := usEquitySessionAt(now)
 	return session.OpenDay && !now.Before(session.Open) && now.Before(session.Close)
-}
-
-func portfolioUsesBacktestPricing(db *sql.DB, portfolioID int64) bool {
-	cfg, err := dbPortfolioConfig(db, portfolioID)
-	if err != nil {
-		return false
-	}
-	return fmt.Sprint(cfg["source_override"]) == "backtest" ||
-		fmt.Sprint(cfg["pricing_mode"]) == "backtest" ||
-		fmt.Sprint(cfg["source"]) == "backtest"
 }
 
 func strategyAssignmentDefinition(a *StrategyAssignment, def *StrategyDefinition) *StrategyDefinition {
@@ -347,29 +323,26 @@ func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.T
 	return open.Add(time.Duration(int64(elapsed) / int64(duration) * int64(duration))).UTC(), true
 }
 
-func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
-	rebalanceMu.Lock()
-	defer rebalanceMu.Unlock()
-	equity, err := computeEquity(e.db, pf)
-	if err != nil {
-		return nil, false, err
-	}
-	if equity <= 0 {
-		return nil, false, nil
-	}
-	positions, err := dbListPositions(e.db, pf.ID)
-	if err != nil {
-		return nil, false, err
-	}
-	working, err := workingPortfolioOrders(e.db, pf.ID)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(working) > 0 {
-		return nil, true, nil
-	}
+type strategyOrderPlan struct {
+	symbol  string
+	side    string
+	qty     float64
+	price   float64
+	qtyStep float64
+}
 
-	targets := map[string]float64{}
+// planStrategyOrders sizes one rebalance step from Trading's state: sells
+// first, then buys scaled to the cash they leave. pending means Trading still
+// has working orders, so nothing new is sized on top of them.
+func planStrategyOrders(state *TradingState, eval *StrategyEvaluation) (plans []strategyOrderPlan, sells bool, targets map[string]float64, pending bool, err error) {
+	pf, equity := state.Portfolio, state.Equity
+	targets = map[string]float64{}
+	if equity <= 0 {
+		return nil, false, targets, false, nil
+	}
+	if len(state.WorkingOrders) > 0 {
+		return nil, false, targets, true, nil
+	}
 	for _, a := range eval.TargetAllocations {
 		symbol := strings.ToUpper(strings.TrimSpace(a.Symbol))
 		if symbol == "" || a.Weight <= 0 {
@@ -382,21 +355,12 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 		symbols[symbol] = true
 	}
 	currentQty := map[string]float64{}
-	for _, p := range positions {
+	for _, p := range state.Positions {
 		symbol := strings.ToUpper(p.Symbol)
 		symbols[symbol] = true
 		currentQty[symbol] += p.Qty
 	}
-
-	type plan struct {
-		symbol  string
-		side    string
-		qty     float64
-		price   float64
-		qtyStep float64
-	}
-	sells := []plan{}
-	buys := []plan{}
+	sellPlans, buyPlans := []strategyOrderPlan{}, []strategyOrderPlan{}
 	threshold := math.Max(1, equity*0.001)
 	orderedSymbols := make([]string, 0, len(symbols))
 	for symbol := range symbols {
@@ -404,92 +368,135 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 	}
 	sort.Strings(orderedSymbols)
 	for _, symbol := range orderedSymbols {
-		mark, err := dbGetMark(e.db, symbol)
-		if err != nil || mark == nil || mark.Price <= 0 {
-			return nil, false, fmt.Errorf("executable mark unavailable for %s", symbol)
+		mark := state.Mark(symbol)
+		if mark == nil || mark.Price <= 0 {
+			return nil, false, targets, false, fmt.Errorf("executable mark unavailable for %s", symbol)
 		}
-		profile := resolveVenueProfile(e.db, pf, symbol, inferAssetClass(symbol))
+		profile := state.Profile(symbol)
 		curValue := currentQty[symbol] * mark.Price
-		targetValue := equity * targets[symbol]
-		diff := targetValue - curValue
+		diff := equity*targets[symbol] - curValue
 		if math.Abs(diff) < threshold {
 			continue
 		}
 		if diff > 0 {
-			qty := floorStrategyOrderQuantity(diff/mark.Price, profile.QtyStep)
-			if qty > 0 {
-				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
+			if qty := floorStrategyOrderQuantity(diff/mark.Price, profile.QtyStep); qty > 0 {
+				buyPlans = append(buyPlans, strategyOrderPlan{symbol: symbol, side: "buy", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 			}
 			continue
 		}
-		qty := floorStrategyOrderQuantity(math.Min(currentQty[symbol], -diff/mark.Price), profile.QtyStep)
-		if qty > 0 {
-			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
+		if qty := floorStrategyOrderQuantity(math.Min(currentQty[symbol], -diff/mark.Price), profile.QtyStep); qty > 0 {
+			sellPlans = append(sellPlans, strategyOrderPlan{symbol: symbol, side: "sell", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 		}
 	}
-	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
+	settings := state.ExecutionSettings
 	budget := pf.Cash
 	if pf.AvailableCash != nil && *pf.AvailableCash < budget {
 		budget = *pf.AvailableCash
 	}
-	for _, p := range sells {
+	for _, p := range sellPlans {
 		fillPrice := applySlippage(p.price, p.side, settings.SlippageBps)
 		budget += p.qty*fillPrice - fillFee(p.qty, fillPrice, settings.FeeBps)
 	}
 	var desiredBuyCost float64
-	for _, p := range buys {
+	for _, p := range buyPlans {
 		fillPrice := applySlippage(p.price, p.side, settings.SlippageBps)
 		desiredBuyCost += p.qty*fillPrice + fillFee(p.qty, fillPrice, settings.FeeBps)
 	}
 	if desiredBuyCost > budget && desiredBuyCost > 0 {
 		scale := math.Max(0, budget/desiredBuyCost)
-		for i := range buys {
-			buys[i].qty = floorStrategyOrderQuantity(buys[i].qty*scale, buys[i].qtyStep)
+		for i := range buyPlans {
+			buyPlans[i].qty = floorStrategyOrderQuantity(buyPlans[i].qty*scale, buyPlans[i].qtyStep)
 		}
 	}
-	if err := persistRebalance(e.db, pf, strategy, assignment, eval); err != nil {
-		return nil, false, err
+	if len(sellPlans) > 0 {
+		return sellPlans, true, targets, false, nil
 	}
-	plans := buys
-	if len(sells) > 0 {
-		plans = sells
+	return buyPlans, false, targets, false, nil
+}
+
+// strategyReplans bounds how often one tick re-reads Trading after an order
+// was rejected because the account moved; past that the next tick resumes.
+const strategyReplans = 2
+
+func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, state *TradingState, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
+	rebalanceMu.Lock()
+	defer rebalanceMu.Unlock()
+	pf := state.Portfolio
+	created := []*Order{}
+	persisted := false
+	for replan := 0; ; replan++ {
+		plans, sells, targets, pending, err := planStrategyOrders(state, eval)
+		if err != nil || pending {
+			return created, pending, err
+		}
+		if !persisted {
+			if err := persistRebalance(e.db, pf, strategy, assignment, eval); err != nil {
+				return created, false, err
+			}
+			persisted = true
+		}
+		// Chain the batch on the revision each accepted order returns, so
+		// every order is checked against the state it was sized from.
+		revision, chained, stale := state.Revision, true, false
+		for _, p := range plans {
+			if p.qty <= 0 {
+				continue
+			}
+			if !chained {
+				stale = true
+				break
+			}
+			rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
+			out, err := (&App{}).submitStrategyOrder(app, state, map[string]any{
+				"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
+				"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
+				"rationale": rationale, "strategy_id": strategy.ID,
+				"assignment_id": assignment.ID, "target_weight": targets[p.symbol], "if_revision": revision,
+			})
+			if err != nil {
+				return created, false, err
+			}
+			if fmt.Sprint(out["status"]) == "rejected" {
+				if fmt.Sprint(out["code"]) == "stale_state" {
+					stale = true
+					break
+				}
+				return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(out["detail"]))
+			}
+			orderID := strings.TrimSpace(fmt.Sprint(out["order_id"]))
+			if orderID == "" || orderID == "<nil>" {
+				return created, false, errors.New("strategy order returned no order_id")
+			}
+			created = append(created, &Order{ID: orderID, PortfolioID: pf.ID, Symbol: p.symbol, Side: p.side, Qty: p.qty, Status: fmt.Sprint(out["status"])})
+			next, ok := out["revision"].(float64)
+			revision, chained = int64(next), ok
+		}
+		if !stale {
+			if sells {
+				return created, true, nil
+			}
+			if _, err := e.db.Exec(`UPDATE strategy_rebalances SET status='completed' WHERE assignment_id=?`, assignment.ID); err != nil {
+				return created, false, err
+			}
+			return created, false, nil
+		}
+		if replan >= strategyReplans {
+			return created, true, nil
+		}
+		// Re-read the same scope: the scorecard gate compares execution policy
+		// over the strategy's universe, which the first read covered.
+		symbols := make([]string, 0, len(state.Profiles)+len(targets))
+		for symbol := range state.Profiles {
+			symbols = append(symbols, symbol)
+		}
+		for symbol := range targets {
+			symbols = append(symbols, symbol)
+		}
+		if state, err = newTradingReader(app).State(pf.ProjectID, pf.ID, symbols); err != nil {
+			return created, true, nil
+		}
+		pf = state.Portfolio
 	}
-	created := make([]*Order, 0, len(plans))
-	for _, p := range plans {
-		if p.qty <= 0 {
-			continue
-		}
-		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
-		out, err := (&App{}).toolOrderPlace(app, map[string]any{
-			"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
-			"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
-			"rationale": rationale, "source_override": "strategy", "strategy_id": strategy.ID,
-			"assignment_id": assignment.ID, "target_weight": targets[p.symbol],
-		})
-		if err != nil {
-			return created, false, err
-		}
-		result, _ := out.(map[string]any)
-		if fmt.Sprint(result["status"]) == "rejected" {
-			return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(result["detail"]))
-		}
-		orderID := strings.TrimSpace(fmt.Sprint(result["order_id"]))
-		if orderID == "" {
-			return created, false, errors.New("strategy order returned no order_id")
-		}
-		order, err := dbGetOrder(e.db, pf.ProjectID, orderID)
-		if err != nil {
-			return created, false, err
-		}
-		created = append(created, order)
-	}
-	if len(sells) > 0 {
-		return created, true, nil
-	}
-	if _, err := e.db.Exec(`UPDATE strategy_rebalances SET status='completed' WHERE assignment_id=?`, assignment.ID); err != nil {
-		return created, false, err
-	}
-	return created, false, nil
 }
 
 // Strategy orders use the same quantity grid as the venue pre-trade check.
@@ -505,35 +512,6 @@ func floor4(v float64) float64 {
 	return math.Floor(v*10_000+1e-9) / 10_000
 }
 
-func (e *engine) bumpFillCounter() {
-	e.mu.Lock()
-	e.fillsThisRun++
-	e.fillsPending++
-	e.mu.Unlock()
-}
-
-func (e *engine) takeFillCounter() int {
-	e.mu.Lock()
-	n := e.fillsPending
-	e.fillsPending = 0
-	e.mu.Unlock()
-	return int(n)
-}
-
-// configuredDailyLossHaltPct returns the install-wide compatibility default.
-func configuredDailyLossHaltPct() float64 {
-	if globalCtx == nil {
-		return -defaultLossHalt
-	}
-	cfgRaw := globalCtx.Config().Get("daily_loss_halt_pct")
-	if cfgRaw != "" {
-		if v, err := strconv.ParseFloat(cfgRaw, 64); err == nil && v > 0 {
-			return v
-		}
-	}
-	return -defaultLossHalt
-}
-
 func markFresh(mark *Mark, now time.Time) bool {
 	if mark == nil {
 		return false
@@ -544,42 +522,4 @@ func markFresh(mark *Mark, now time.Time) bool {
 	}
 	age := now.Sub(markedAt)
 	return age >= -time.Minute && age <= staleAfter
-}
-
-// polyOutcome — small helper so dbGetPosition can find a polymarket
-// position via its YES/NO leg. Empty string for non-poly orders.
-func polyOutcome(o *Order) string {
-	if o.AssetClass == "polymarket" {
-		if outcome := strings.ToUpper(strings.TrimSpace(o.Outcome)); outcome != "" {
-			return outcome
-		}
-		if o.Side == "yes" || o.Side == "no" {
-			return strings.ToUpper(o.Side)
-		}
-	}
-	return ""
-}
-
-// applySlippage — sells fill below mark, buys above. The trader always
-// pays the spread.
-func applySlippage(mark float64, side string, bps float64) float64 {
-	bp := bps / 10_000.0
-	switch side {
-	case "buy", "yes", "no":
-		return mark + mark*bp
-	case "sell":
-		return mark - mark*bp
-	}
-	return mark
-}
-
-func fillFee(qty, price, bps float64) float64 {
-	if qty <= 0 || price <= 0 || bps == 0 || !finite(bps) {
-		return 0
-	}
-	return qty * price * bps / 10_000.0
-}
-
-func isBuySide(side string) bool {
-	return side == "buy" || side == "yes" || side == "no"
 }

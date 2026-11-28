@@ -57,7 +57,7 @@ func (a *App) importLegacyResearchPaged(ctx *sdk.AppCtx, args map[string]any) (a
 			}
 		}
 		for _, id := range manifest.PortfolioIDs {
-			if err = syncTradingPortfolio(ctx, pid, id); err != nil {
+			if _, err = tradingPortfolio(ctx, pid, id); err != nil {
 				return nil, err
 			}
 		}
@@ -95,6 +95,9 @@ func (a *App) importLegacyResearchPaged(ctx *sdk.AppCtx, args map[string]any) (a
 			if _, err = ctx.AppDB().Exec("INSERT INTO research_imports(source_install_id,project_id)VALUES(?,?)", manifest.SourceInstallID, pid); err != nil {
 				return nil, err
 			}
+			if err = resetStrategyFills(ctx.AppDB(), pid); err != nil {
+				return nil, err
+			}
 			return map[string]any{"status": "imported", "rows_imported": total, "assignments": "paused"}, nil
 		}
 		table := legacyImportTables[index]
@@ -123,10 +126,10 @@ func (a *App) importLegacyResearchPaged(ctx *sdk.AppCtx, args map[string]any) (a
 		if err != nil {
 			return nil, err
 		}
-		if table == "backtest_market_bars" && len(page.LegacySecurities) > 0 {
-			if err := writeResearchRows(tx, "securities", page.LegacySecurities); err != nil {
-				tx.Rollback()
-				return nil, err
+		if table == "backtest_market_bars" {
+			// Trading owns securities; a frozen bar keeps its symbol.
+			for _, row := range rows {
+				delete(row, "security_id")
 			}
 		}
 		if err = writeResearchRows(tx, table, rows); err == nil {

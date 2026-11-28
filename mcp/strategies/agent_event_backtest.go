@@ -508,7 +508,7 @@ func (a *App) toolAgentBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	pf, err := dbGetPortfolio(ctx.AppDB(), project, int64Arg(args, "portfolio_id", 0))
+	pf, err := tradingPortfolio(ctx, project, int64Arg(args, "portfolio_id", 0))
 	if err != nil {
 		return nil, err
 	}
@@ -557,10 +557,11 @@ func (a *App) toolAgentBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err := normalizeAgentSimulation(&request.Agent, run); err != nil {
 		return nil, err
 	}
-	policy, err := captureReplayPolicy(ctx.AppDB(), pf, symbols)
+	_, policy, err := captureReplayPolicy(ctx, project, pf.ID, symbols)
 	if err != nil {
 		return nil, err
 	}
+	run.Summary["execution_policy"] = policy
 	config := sim.Config{StartingCash: cash, Seed: 1, BenchmarkSymbol: symbols[0]}
 	if request.Simulation != nil {
 		config = *request.Simulation

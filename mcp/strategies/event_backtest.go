@@ -35,14 +35,17 @@ type simulationSpec struct {
 	Policy            *replayExecutionPolicy `json:"execution_policy,omitempty"`
 }
 
-// Pin local builds as well as release builds in portable artifacts.
+// Pin local builds as well as release builds in portable artifacts. Only
+// the files that decide a simulation's result are hashed: the live data-access
+// layer (exec.go, integrity.go, pricing.go) talks to Trading and stays out, so
+// changing it never strands a paused simulation or an exported artifact.
 //
-//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go internal/backtest/contracts.go internal/backtest/protection.go internal/ruleengine/schema.go internal/ruleengine/market.go internal/ruleengine/runtime.go internal/ruleengine/schedule.go strategy_rules.go rule_examples/*.json event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
+//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go internal/backtest/contracts.go internal/backtest/protection.go internal/ruleengine/schema.go internal/ruleengine/market.go internal/ruleengine/runtime.go internal/ruleengine/schedule.go strategy_rules.go rule_examples/*.json event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go simulation_kernel.go
 var simulationSources embed.FS
 
 func simulationSourceHash() string {
 	files := map[string]string{}
-	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "internal/backtest/contracts.go", "internal/backtest/protection.go", "internal/ruleengine/schema.go", "internal/ruleengine/market.go", "internal/ruleengine/runtime.go", "internal/ruleengine/schedule.go", "strategy_rules.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
+	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "internal/backtest/contracts.go", "internal/backtest/protection.go", "internal/ruleengine/schema.go", "internal/ruleengine/market.go", "internal/ruleengine/runtime.go", "internal/ruleengine/schedule.go", "strategy_rules.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "simulation_kernel.go"} {
 		data, _ := simulationSources.ReadFile(name)
 		files[name] = string(data)
 	}
@@ -882,7 +885,7 @@ func importSimulation(db *sql.DB, project string, portfolioID int64, name string
 	if a == nil || a.Schema != "apteva.backtest/v1" || a.Spec.Version != sim.Version || a.Spec.SourceHash != simulationSourceHash() {
 		return nil, errors.New("unsupported artifact schema or engine version")
 	}
-	if _, err := dbGetPortfolio(db, project, portfolioID); err != nil {
+	if _, err := tradingPortfolio(globalCtx, project, portfolioID); err != nil {
 		return nil, err
 	}
 	if a.InputHash != sim.Hash(struct {

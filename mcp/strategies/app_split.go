@@ -1,23 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
-	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-var tradingObservationMu sync.Mutex
 var legacyImportMu sync.Mutex
 
 func isResearchTool(name string) bool {
@@ -104,17 +99,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				err := callTrading(ctx, name, cloned, &out)
 				return out, err
 			}
-			pid, err := resolveProjectFromArgs(cloned)
-			if err != nil {
+			if _, err := resolveProjectFromArgs(cloned); err != nil {
 				return nil, err
-			}
-			if id := int64Arg(cloned, "portfolio_id", 0); id > 0 {
-				cloned["_observation_history"] = strings.Contains(name, "backtest") && strings.HasSuffix(name, "create")
-				err = syncTradingPortfolio(ctx, pid, id, cloned)
-				delete(cloned, "_observation_history")
-				if err != nil {
-					return nil, err
-				}
 			}
 			if original.HandlerCtx != nil {
 				return original.HandlerCtx(call, ctx, cloned)
@@ -147,7 +133,11 @@ func (a *App) MCPTools() []sdk.Tool {
 // and decision_ref itself. trading_contract.json lists the full set.
 var orderPlaceForwardedFields = []string{"portfolio_id", "symbol", "side", "outcome", "type", "qty", "limit_price", "stop_price", "tif", "rationale", "idempotency_key"}
 
-func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+// submitStrategyOrder gates an automated order on the strategy's own
+// scorecard, records the intent and forwards it to Trading's order_place.
+// state is the portfolio_state the order was sized from;
+// if_revision ties the order to that state.
+func (a *App) submitStrategyOrder(ctx *sdk.AppCtx, state *TradingState, args map[string]any) (map[string]any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -157,19 +147,10 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if strategyID <= 0 {
 		return nil, errors.New("automated order requires a strategy")
 	}
-
-	// Keep another snapshot attempt from marking the observation stale
-	// between the pre-order refresh and submission.
-	tradingObservationMu.Lock()
-	defer tradingObservationMu.Unlock()
-	if err = syncTradingPortfolioLocked(ctx, pid, portfolioID, args); err != nil {
-		return nil, err
+	if state == nil || state.Portfolio == nil || state.Portfolio.ID != portfolioID || state.Portfolio.ProjectID != pid {
+		return nil, errors.New("automated order requires the portfolio state it was sized from")
 	}
-	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
-	if err != nil {
-		return nil, err
-	}
-	if allowed, why := scorecardAllowsExecution(ctx.AppDB(), pf, strategyID); !allowed {
+	if allowed, why := scorecardAllowsExecution(ctx.AppDB(), state, strategyID); !allowed {
 		return nil, fmt.Errorf("strategy scorecard gate: %s", why)
 	}
 	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
@@ -184,7 +165,6 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	forwarded["external_strategy_id"] = strategy.ID
 	forwarded["external_strategy_version"] = strategy.Version
-	forwarded["decision_ref"] = fmt.Sprintf("assignment:%d:%s", int64Arg(args, "assignment_id", 0), strArg(args, "idempotency_key"))
 	assignmentID := int64Arg(args, "assignment_id", 0)
 	signal := strArg(args, "signal_at")
 	if signal == "" {
@@ -214,85 +194,21 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err = json.Unmarshal([]byte(stored), &forwarded); err != nil {
 		return nil, err
 	}
+	// The stored intent is replayed exactly; only the state guard is fresh.
+	if revision, ok := args["if_revision"]; ok {
+		forwarded["if_revision"] = revision
+	}
 	var out map[string]any
 	if err = callTrading(ctx, "order_place", forwarded, &out); err != nil {
 		return nil, err
 	}
-
-	if fmt.Sprint(out["status"]) != "rejected" {
-		if err = syncTradingPortfolioLocked(ctx, pid, portfolioID, args); err != nil {
-			return nil, fmt.Errorf("order submitted; refresh Trading observation before retry: %w", err)
+	// Trading placed nothing, so the next attempt may size this intent anew.
+	if fmt.Sprint(out["status"]) == "rejected" && fmt.Sprint(out["code"]) == "stale_state" {
+		if _, err = ctx.AppDB().Exec(`DELETE FROM strategy_order_intents WHERE request_key=? AND project_id=? AND portfolio_id=?`, key, pid, portfolioID); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
-}
-
-func refreshTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64, args map[string]any) error {
-	pages, err := fetchTradingObservation(ctx, pid, id, args)
-	if err != nil {
-		return err
-	}
-	sourceID := pages[0].SourceInstallID
-	tx, err := ctx.AppDB().Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	var source int64
-	err = tx.QueryRow(`SELECT source_install_id FROM trading_observation_sources WHERE project_id=?`, pid).Scan(&source)
-	if err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	if err == nil && source != sourceID {
-		return errors.New("Trading binding changed; use a new Strategies installation to preserve research portfolio identities")
-	}
-	if _, err = tx.Exec(`INSERT INTO trading_observation_sources(project_id,source_install_id) VALUES(?,?) ON CONFLICT DO NOTHING`, pid, sourceID); err != nil {
-		return err
-	}
-	var legacyImported int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM research_imports WHERE project_id=? AND source_install_id=?`, pid, sourceID).Scan(&legacyImported); err != nil {
-		return err
-	}
-
-	tables := []string{"portfolios", "securities", "security_identifiers", "security_listings", "exchange_sessions", "universe_memberships", "marks", "instruments", "venue_execution_profiles", "portfolio_risk_policies", "portfolio_risk_state", "portfolio_universe_policies", "positions", "orders", "fills", "execution_costs", "position_accounting", "watchlist", "day_baselines"}
-	localInstall, _ := strconv.ParseInt(os.Getenv("APTEVA_INSTALL_ID"), 10, 64)
-	for _, table := range tables {
-		if table == "positions" || table == "watchlist" || table == "day_baselines" {
-			if _, err = tx.Exec(`DELETE FROM "`+table+`" WHERE portfolio_id=?`, id); err != nil {
-				return err
-			}
-		}
-		for _, page := range pages {
-			rawRows := page.Tables[table]
-			if len(rawRows) == 0 {
-				continue
-			}
-			records := make([]map[string]any, len(rawRows))
-			for i, raw := range rawRows {
-				if err := json.Unmarshal(raw, &records[i]); err != nil {
-					return fmt.Errorf("decode Trading observation %s: %w", table, err)
-				}
-				if table == "orders" {
-					order := records[i]
-					if legacyImported == 0 || strArg(order, "origin_app") != "" {
-						order["strategy_id"], order["strategy_version"] = 0, 0
-					}
-					if strArg(order, "origin_app") == "strategies" && int64Arg(order, "origin_install_id", 0) == localInstall {
-						order["strategy_id"] = order["external_strategy_id"]
-						order["strategy_version"] = order["external_strategy_version"]
-					}
-				}
-			}
-			if err = writeResearchRows(tx, table, records); err != nil {
-				return err
-			}
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	return dbRebuildStrategyAttribution(ctx.AppDB())
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -359,19 +275,9 @@ func (a *App) handleResearchPortfolio(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "Use Trading for portfolio operations")
 		return
 	}
-	request, err := observationHTTPRequest(w, r)
+	pf, err := tradingPortfolio(globalCtx, pid, id)
 	if err != nil {
-		httpErr(w, 400, err.Error())
-		return
-	}
-	request["_observation_history"] = r.Method == http.MethodPost
-	if err = syncTradingPortfolio(globalCtx, pid, id, request); err != nil {
 		httpErr(w, 502, err.Error())
-		return
-	}
-	pf, err := dbGetPortfolio(globalCtx.AppDB(), pid, id)
-	if err != nil {
-		httpErr(w, 404, err.Error())
 		return
 	}
 	a.handleHTTPPortfolioBacktests(w, r, pf, pid)
@@ -416,12 +322,10 @@ func (a *App) importLegacyResearch(ctx *sdk.AppCtx, args map[string]any) (any, e
 		}
 	}
 	for id := range portfolios {
-		if err = syncTradingPortfolio(ctx, pid, id); err != nil {
+		if _, err = tradingPortfolio(ctx, pid, id); err != nil {
 			return nil, err
 		}
 	}
-	tradingObservationMu.Lock()
-	defer tradingObservationMu.Unlock()
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -436,13 +340,12 @@ func (a *App) importLegacyResearch(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 
 	for _, table := range []string{"strategies", "strategy_versions", "portfolio_strategy_assignments", "strategy_scorecard_policies", "backtest_runs", "backtest_events", "backtest_snapshots", "backtest_market_bars", "backtest_simulations", "backtest_simulation_outputs", "backtest_agent_decisions", "strategy_scorecard_evaluations", "strategy_run_events", "strategy_rebalances", "validation_suites", "validation_cases"} {
-		if table == "backtest_market_bars" && len(snap.LegacySecurities) > 0 {
-			if err := writeResearchRows(tx, "securities", snap.LegacySecurities); err != nil {
-				return nil, err
-			}
-		}
 		records := snap.Tables[table]
 		for _, row := range records {
+			if table == "backtest_market_bars" {
+				// Trading owns securities; a frozen bar keeps its symbol.
+				delete(row, "security_id")
+			}
 			if table == "portfolio_strategy_assignments" {
 				row["status"] = "paused"
 			}
@@ -458,6 +361,11 @@ func (a *App) importLegacyResearch(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	// Imported strategies own Trading-era fills the cursor may already have
+	// passed; replay the feed so they land in their books.
+	if err = resetStrategyFills(ctx.AppDB(), pid); err != nil {
 		return nil, err
 	}
 	return map[string]any{"status": "imported", "strategies": len(snap.Tables["strategies"]), "backtests": len(snap.Tables["backtest_runs"]), "assignments": "paused"}, nil
@@ -489,68 +397,21 @@ func (p *tradingProvider) StrategyBars(symbol, interval string, limit int) ([]Ba
 	return out.Bars, err
 }
 
+// observeResearchHTTP brings the strategy lot book up to date before the
+// live rollup is served. Other research routes read Trading when they need it.
 func (a *App) observeResearchHTTP(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		pid, err := resolveProjectFromRequest(r)
-		if err != nil {
-			httpErr(w, 400, err.Error())
-			return
-		}
-		request, err := observationHTTPRequest(w, r)
-		if err != nil {
-			httpErr(w, 400, err.Error())
-			return
-		}
-		if id := int64Arg(request, "portfolio_id", 0); id > 0 {
-			if err = syncTradingPortfolio(globalCtx, pid, id, request); err != nil {
+		if r.URL.Path == "/strategies/live" {
+			pid, err := resolveProjectFromRequest(r)
+			if err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+			if err = syncStrategyFills(globalCtx, pid); err != nil {
 				httpErr(w, 502, err.Error())
 				return
 			}
 		}
-		if r.URL.Path == "/strategies/live" {
-			observed, err := dbListPortfolios(globalCtx.AppDB(), pid)
-			if err != nil {
-				httpErr(w, 500, err.Error())
-				return
-			}
-			for _, portfolio := range observed {
-				if err = syncTradingPortfolio(globalCtx, pid, portfolio.ID); err != nil {
-					httpErr(w, 502, err.Error())
-					return
-				}
-			}
-		}
 		next(w, r)
 	}
-}
-
-func observationHTTPRequest(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
-	request := map[string]any{}
-	for _, key := range []string{"portfolio_id", "strategy_id", "backtest_id", "start_at", "end_at"} {
-		if value := r.URL.Query().Get(key); value != "" {
-			request[key] = value
-		}
-	}
-	if r.Method != http.MethodGet && r.Body != nil {
-		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 128<<20))
-		if err != nil {
-			return nil, err
-		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-		var body map[string]any
-		if json.Unmarshal(raw, &body) == nil {
-			for key, value := range body {
-				if key != "portfolio_id" || int64Arg(body, key, 0) > 0 {
-					request[key] = value
-				}
-			}
-		}
-	}
-	if rest, ok := strings.CutPrefix(r.URL.Path, "/strategies/"); ok {
-		segment, _, _ := strings.Cut(rest, "/")
-		if id, err := strconv.ParseInt(segment, 10, 64); err == nil && id > 0 {
-			request["strategy_id"] = id
-		}
-	}
-	return request, nil
 }

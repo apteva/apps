@@ -1,3 +1,43 @@
+# Strategies v0.2.0
+
+Strategies reads Trading instead of copying it. Requires Trading 0.20.0.
+
+- Stop copying 19 Trading tables before research calls and automated orders.
+  Strategies keeps only its own data: strategies, assignments, run events,
+  scorecards, backtests, validation suites and the inputs frozen into each
+  run.
+- Live ticks read one `portfolio_state` per assignment and size orders from
+  it. Orders go out with `if_revision`; if the account moved, Trading
+  rejects with `stale_state` and Strategies re-reads and re-sizes, up to two
+  times. If Trading is unreachable, the tick fails closed with a
+  `trading_unavailable` run event and backs off.
+- Backtests and validations build their replay policy and reference manifest
+  from `portfolio_state` and `research_reference`. Universe checks use
+  Trading's `portfolio_policy_check`.
+- Strategy P&L is kept incrementally from Trading's `fills_feed`, with a
+  cursor per project that advances in the same transaction as the lots. The
+  book is rebuilt from the feed on first read after the upgrade, and again
+  after a legacy import so Trading-era strategy fills are counted.
+- Manual and agent fills no longer appear as an unattributed row in strategy
+  P&L; `include_unattributed` is gone from `/strategies/live`. The
+  portfolio-level figure stays in Trading.
+- The "Trading binding changed" guard reads a single `trading_binding` row,
+  seeded from the old observation sources.
+- Migration 028 rebuilds Strategies' own tables without foreign keys to the
+  copied `portfolios` table and recreates `strategy_position_accounting`
+  empty. The copied tables stay in place, unused, until 0.2.1.
+- Legacy import no longer writes Trading securities; imported market bars keep
+  their symbol and drop `security_id`.
+- Remove the local portfolio, position, order, journal and market read tools
+  (they already forwarded to Trading) and their store helpers.
+- The simulation fingerprint now covers only the files that decide a result.
+  Live data-access files (`exec.go`, `integrity.go`, `pricing.go`) leave the
+  hash; the pure policy, cost and symbol rules move to the hashed
+  `simulation_kernel.go`. The hash changes once in this release: paused or
+  running simulations and validation suites from 0.1.x cannot resume, and
+  exported 0.1.x artifacts no longer import. Check that none are paused or
+  running before upgrading.
+
 # Strategies v0.1.5
 
 - Remove unreachable Trading execution and pricing code carried over by the
