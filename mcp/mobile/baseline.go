@@ -530,14 +530,16 @@ func (d *drivers) cleanPhone(ctx context.Context, serial string, b Baseline, arg
 		}
 	}
 	// Clipboard, then files added to shared storage since the baseline. Files
-	// that were there at capture time are part of the baseline and kept.
+	// that were there at capture time are part of the baseline and kept. The
+	// empty-folder pass filters Android/ by path: find ignores -prune under
+	// -depth, and top-level folders (depth 1) are never removed.
 	_, _ = d.adb(ctx, serial, "shell", "cmd clipboard clear-primary-clip >/dev/null 2>&1 || service call clipboard 3 >/dev/null 2>&1; true")
 	removed := 0
 	if b.PhoneTime > 0 {
 		t := strconv.FormatInt(b.PhoneTime, 10)
 		find := fmt.Sprintf(sharedFilesFind, b.PhoneTime)
 		out, _ := d.adb(ctx, serial, "shell", "n=$("+find+" | wc -l); "+find+" | while IFS= read -r f; do rm -f \"$f\"; done; "+
-			"find /sdcard/ -mindepth 2 -path /sdcard/Android -prune -o -depth -type d -empty -newermt @"+t+" -print 2>/dev/null | while IFS= read -r f; do rmdir \"$f\" 2>/dev/null; done; echo $n")
+			"find /sdcard/ -mindepth 2 -depth -type d -empty -newermt @"+t+" ! -path '/sdcard/Android/*' -print 2>/dev/null | while IFS= read -r f; do rmdir \"$f\" 2>/dev/null; done; echo $n")
 		removed, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 	} else {
 		report["files_note"] = "baseline has no phone time; capture it again to clean files"

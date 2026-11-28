@@ -199,7 +199,7 @@ func TestCleanUndoesAddedStateAndReportsTheRest(t *testing.T) {
 	}
 	// Files outside Android/ only; the baseline's phone time bounds them.
 	joined := strings.Join(phone.commands, "\n")
-	if !strings.Contains(joined, "-path /sdcard/Android -prune") || !strings.Contains(joined, "-newermt @1795784000") {
+	if !strings.Contains(joined, "-path /sdcard/Android -prune") || !strings.Contains(joined, "-newermt @1795784000") || !strings.Contains(joined, "! -path '/sdcard/Android/*'") || strings.Contains(joined, "-prune -o -depth") {
 		t.Fatalf("file clean: %s", joined)
 	}
 }
