@@ -211,6 +211,7 @@ func (a *App) executionTools() []sdk.Tool {
 		{Name: "order_place", Description: "Place a paper order. Required rationale ≥ 30 chars; subject to mandate + size cap + daily-loss halt.",
 			InputSchema: schemaObject(map[string]any{
 				"idempotency_key":           map[string]any{"type": "string", "description": "Stable unique key for retrying this exact order intent"},
+				"if_revision":               map[string]any{"type": "integer", "description": "Reject with stale_state unless the portfolio's account revision still equals this value (from portfolio_state or a previous order_place)"},
 				"decision_ref":              map[string]any{"type": "string"},
 				"external_strategy_id":      map[string]any{"type": "integer"},
 				"external_strategy_version": map[string]any{"type": "integer"},
@@ -1690,6 +1691,17 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 		orderPlacementMu.Unlock()
 		return rejectStruct("desk_approval_required", "paper desk cannot execute a broker/live order"), nil
 	}
+	if raw, ok := args["if_revision"]; ok && raw != nil {
+		current, revErr := accountRevision(ctx.AppDB(), pf.ID)
+		if revErr != nil {
+			orderPlacementMu.Unlock()
+			return nil, revErr
+		}
+		if want := int64Arg(args, "if_revision", -1); current != want {
+			orderPlacementMu.Unlock()
+			return rejectStruct("stale_state", fmt.Sprintf("account revision is %d, order was sized at %d; re-read portfolio_state", current, want)), nil
+		}
+	}
 	if side == "sell" && !portfolioCanReducePosition(ctx.AppDB(), pf.ID, symbol, outcome, qty) {
 		orderPlacementMu.Unlock()
 		return rejectStruct("insufficient_position", "sell exceeds unreserved long holdings"), nil
@@ -1773,6 +1785,12 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 				err = errors.New("paper decision changed before order commit")
 			}
 		}
+	}
+	// The revision right after this insert, so a caller can chain several
+	// orders sized from one portfolio_state read.
+	var revision int64
+	if err == nil {
+		err = tx.QueryRow(`SELECT COALESCE((SELECT revision FROM portfolio_revisions WHERE portfolio_id=?),0)`, pf.ID).Scan(&revision)
 	}
 	if err != nil {
 		tx.Rollback()
@@ -1910,6 +1928,7 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 				"code":      code,
 				"detail":    detail,
 				"note":      "broker response was ambiguous; order remains supervised; adapters without client-ID recovery require account reconciliation",
+				"revision":  revision,
 			}, nil
 		}
 		if callErr != nil || res == nil || !res.Success {
@@ -1978,6 +1997,7 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 			"status":          o.Status, // updated by applyBrokerProgress
 			"filled_qty":      o.FilledQty,
 			"avg_fill_price":  o.AvgFillPrice,
+			"revision":        revision,
 		}, nil
 	}
 
@@ -2009,7 +2029,7 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 			"id": entryID, "portfolio_id": pf.ID, "kind": "rationale", "body": rationale,
 		})
 	}
-	return map[string]any{"order_id": o.ID, "status": "working"}, nil
+	return map[string]any{"order_id": o.ID, "status": "working", "revision": revision}, nil
 }
 
 func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {

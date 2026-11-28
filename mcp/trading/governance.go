@@ -119,6 +119,10 @@ func portfolioUniverseViolation(db *sql.DB, portfolio *Portfolio, symbol string)
 }
 
 func universeViolation(db *sql.DB, policy *PortfolioUniversePolicy, symbol string) (*UniverseViolation, error) {
+	return universeViolationAt(db, policy, symbol, time.Now().UTC())
+}
+
+func universeViolationAt(db *sql.DB, policy *PortfolioUniversePolicy, symbol string, at time.Time) (*UniverseViolation, error) {
 	if !policy.EnforcementEnabled {
 		return nil, nil
 	}
@@ -133,7 +137,7 @@ func universeViolation(db *sql.DB, policy *PortfolioUniversePolicy, symbol strin
 			return &UniverseViolation{Code: "universe_not_allowed", Detail: fmt.Sprintf("%s is not in the portfolio symbol allowlist", symbol)}, nil
 		}
 	case "reference_universe":
-		member, err := referenceUniverseContainsSymbol(db, policy.ReferenceUniverseID, symbol, time.Now().UTC())
+		member, err := referenceUniverseContainsSymbol(db, policy.ReferenceUniverseID, symbol, at)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +146,7 @@ func universeViolation(db *sql.DB, policy *PortfolioUniversePolicy, symbol strin
 		}
 	}
 	if policy.RequireActiveListing {
-		active, err := activeListingExists(db, symbol, time.Now().UTC())
+		active, err := activeListingExists(db, symbol, at)
 		if err != nil {
 			return nil, err
 		}

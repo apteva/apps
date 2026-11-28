@@ -30,6 +30,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 		out = append(out, tool)
 	}
+	out = append(out, a.appReadTools()...)
 	out = append(out,
 		sdk.Tool{Name: "portfolio_research_snapshot", Exposure: sdk.ToolExposureAppOnly, Description: "Read a bounded portfolio observation. Use paged=true and continue with the returned revision and next page number.", InputSchema: schemaObject(map[string]any{
 			"portfolio_id":  map[string]any{"type": "integer"},

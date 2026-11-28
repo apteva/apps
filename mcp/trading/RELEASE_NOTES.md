@@ -1,3 +1,31 @@
+# Trading v0.20.0
+
+Apps that automate trading can read the account state they need instead of
+copying Trading's tables. Each read is scoped to the calling app's project,
+and fills are limited to orders the calling app placed.
+
+- Add four app-only tools:
+  - `portfolio_state`: cash, equity, day baseline, positions, working orders,
+    marks, instruments, venue profiles, risk and universe policy, universe
+    violations, the account revision and the Trading install ID for one
+    portfolio. No history.
+  - `portfolio_policy_check`: universe and listing violations for symbols at
+    a point in time.
+  - `research_reference`: paged exchange sessions, corporate actions,
+    listings and universe memberships for a research window.
+  - `fills_feed`: keyset-paged fills of the calling app's orders, with fees,
+    spread and slippage cost and the order's external strategy tags.
+    Strategies can pass `include_legacy` to also receive fills of Trading-era
+    strategy orders, so imported strategies keep their P&L.
+- `order_place` takes an optional `if_revision`. If the account revision has
+  moved, the order is rejected with `stale_state`. Accepted orders return the
+  revision right after their insert, so a caller can chain orders sized from
+  one state read.
+- Migration 026 bumps the account revision when an order is placed or its
+  status or filled quantity changes.
+- `portfolio_research_snapshot` stays for one release; it is removed once
+  every install runs Strategies 0.2.0 or later.
+
 # Trading v0.19.0
 
 Trading no longer ships the strategy research engine. Strategies has owned

@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.19.0
+version: 0.20.0
 description: Portfolio management and paper or broker-backed trade execution for humans, agents and connected apps.
   Owns balances, positions, orders, fills, performance, market data, broker connections and enforced portfolio risk
   limits. Automated strategies and research are provided by the separate Strategies app.
@@ -242,6 +242,24 @@ provides:
     exposure: app_only
     requires: trading.admin
     resource_from: portfolio/{arg.portfolio_id}
+  - name: portfolio_state
+    description: Current account state of one portfolio for automated sizing, with the account revision. App callers only.
+    exposure: app_only
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: portfolio_policy_check
+    description: Universe and listing policy check for symbols at a point in time. App callers only.
+    exposure: app_only
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: research_reference
+    description: Paged exchange sessions, corporate actions, listings and universe memberships for a research window. App callers only.
+    exposure: app_only
+    requires: trading.admin
+  - name: fills_feed
+    description: Paged fills of orders the calling app placed. App callers only.
+    exposure: app_only
+    requires: trading.admin
   - name: research_legacy_export
     description: Internal Strategies integration tool.
     exposure: app_only
@@ -405,7 +423,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: trading/v0.19.0
+    ref: trading/v0.20.0
     entry: mcp/trading
   port: 8080
   health_check: /health
