@@ -2,8 +2,17 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.55
+version: 0.1.56
 description: |
+  v0.1.56 adds TikTok Ads as the fifth network, through TikTok Marketing API
+  v1.3: advertiser discovery, campaigns, ad groups and ads, image and video
+  upload, delivery activation and daily reports. A TikTok ad carries its
+  creative, so ad_create takes the creative fields directly, and new ads are
+  paused until activated. Identities and custom audiences are discovered;
+  lookalikes can be created, and audiences renamed or deleted. TikTok
+  customer lists and member sync are not supported yet. TikTok's 40100
+  throttling code joins the shared provider cooldown. Requires platform
+  v0.100.35 or newer for TikTok's advertiser login.
   v0.1.55 stops excess provider calls. A rate-limit response now closes one
   cooldown per provider account (connection and native account), shared by
   every project bound to it and persisted across restarts; no request is sent
@@ -313,7 +322,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.55
+    ref: ads/v0.1.56
     entry: mcp/ads
   port: 8080
   health_check: /health
