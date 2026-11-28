@@ -23,43 +23,6 @@ type researchSnapshot struct {
 	LegacySecurities []map[string]any            `json:"legacy_securities,omitempty"`
 }
 
-type researchQueryer interface {
-	Query(string, ...any) (*sql.Rows, error)
-}
-
-func readResearchRows(db researchQueryer, query string, args ...any) ([]map[string]any, error) {
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	columns, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	out := []map[string]any{}
-	for rows.Next() {
-		values := make([]any, len(columns))
-		ptrs := make([]any, len(columns))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err = rows.Scan(ptrs...); err != nil {
-			return nil, err
-		}
-		row := map[string]any{}
-		for i, key := range columns {
-			value := values[i]
-			if b, ok := value.([]byte); ok {
-				value = string(b)
-			}
-			row[key] = value
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
-}
-
 func writeResearchRows(tx *sql.Tx, table string, records []map[string]any) error {
 	rows, err := tx.Query(`PRAGMA table_info("` + table + `")`)
 	if err != nil {

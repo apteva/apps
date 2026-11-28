@@ -7,41 +7,8 @@ import (
 )
 
 const (
-	cacheTTL           = 30 * time.Second
-	healthRecentWindow = 60 * time.Second
-	staleAfter         = 90 * time.Second
-	polyDiscoveryTTL   = 30 * time.Second
-	polyMissingTTL     = 15 * time.Minute
-	polyMaxBackoff     = 15 * time.Minute
+	staleAfter = 90 * time.Second
 )
-
-func completedYahooStrategyBars(bars []Bar, interval string, now time.Time) []Bar {
-	now = now.UTC()
-	out := make([]Bar, 0, len(bars))
-	if interval == "1d" {
-		location, err := time.LoadLocation("America/New_York")
-		if err != nil {
-			location = time.UTC
-		}
-		nowDate := now.In(location).Format("2006-01-02")
-		for _, bar := range bars {
-			if time.Unix(bar.T, 0).In(location).Format("2006-01-02") < nowDate {
-				out = append(out, bar)
-			}
-		}
-		return out
-	}
-	dur, ok := strategyCadenceDuration(interval)
-	if !ok {
-		dur = 24 * time.Hour
-	}
-	for _, bar := range bars {
-		if !time.Unix(bar.T, 0).UTC().Add(dur).After(now) {
-			out = append(out, bar)
-		}
-	}
-	return out
-}
 
 func strategyClosedCandleBoundary(now time.Time, interval string) time.Time {
 	now = now.UTC()

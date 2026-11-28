@@ -27,8 +27,6 @@ const (
 	backtestTelemetryPollInterval = 2 * time.Second
 	backtestTelemetryFallbackWait = 30 * time.Second
 	defaultBacktestMaxMarketRows  = 500_000
-	backtestHistoryFetchTimeout   = 5 * time.Minute
-	backtestHistoryConcurrency    = 4
 )
 
 var (
@@ -1124,10 +1122,6 @@ func backtestSeriesWithBaseline(run *BacktestRun, snapshots []*BacktestSnapshot)
 	return out
 }
 
-func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot) map[string]float64 {
-	return backtestPerformanceMetricsWithOrders(run, series, current, nil)
-}
-
 func backtestPerformanceMetricsWithOrders(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot, orders []*Order) map[string]float64 {
 	metrics := map[string]float64{
 		"starting_cash": run.StartingCash,
@@ -1227,10 +1221,6 @@ func returnMoments(returns []float64) (mean, volatility, downside float64) {
 	volatility = math.Sqrt(volatility / float64(len(returns)-1))
 	downside = math.Sqrt(downside / float64(len(returns)))
 	return
-}
-
-func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
-	return backtestSharpeRatioWithPeriods(series, backtestPeriodsPerYear(interval))
 }
 
 func backtestSharpeRatioWithPeriods(series []*BacktestSnapshot, periods float64) (float64, bool) {
@@ -1343,10 +1333,6 @@ func backtestMarks(run *BacktestRun, step int) ([]map[string]any, error) {
 	return dbBacktestMarketMarks(globalCtx.AppDB(), run.ID, step, run.Symbols)
 }
 
-func captureBacktestMarketBars(parent context.Context, symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
-	return captureBacktestMarketBarsAdjusted(parent, symbols, interval, startAt, endAt, "provider_adjusted")
-}
-
 func captureBacktestMarketBarsAdjusted(parent context.Context, symbols []string, interval string, startAt, endAt time.Time, adjustmentMode string) ([]*BacktestMarketBar, int, string, error) {
 	var out struct {
 		Bars   []*BacktestMarketBar `json:"bars"`
@@ -1387,119 +1373,6 @@ func backtestMarketBarsChecksum(bars []*BacktestMarketBar) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-type historicalBacktestBarsProvider interface {
-	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
-}
-
-type historicalAdjustedBacktestBarsProvider interface {
-	BacktestBarsContextAdjustment(ctx context.Context, symbol, interval string, start, end time.Time, limit int, adjustmentMode string) ([]Bar, error)
-}
-
-func estimateBacktestBarsLimit(startAt, endAt time.Time, interval string) int {
-	if endAt.Before(startAt) {
-		return 0
-	}
-	duration := backtestIntervalDuration(interval)
-	if duration <= 0 {
-		duration = 24 * time.Hour
-	}
-	end := inclusiveBacktestEnd(endAt, interval)
-	return int(end.Sub(startAt)/duration) + 1
-}
-
-func estimateBacktestMarketRows(source string, startAt, endAt time.Time, interval string, symbols int) int {
-	if symbols <= 0 {
-		return 0
-	}
-	perSymbol := estimateBacktestBarsLimit(startAt, endAt, interval)
-	if source == "yahoo-finance" {
-		perSymbol = estimateBacktestSteps(startAt, endAt, interval)
-	}
-	if perSymbol > math.MaxInt/symbols {
-		return math.MaxInt
-	}
-	return perSymbol * symbols
-}
-
-func configuredBacktestMaxMarketRows() int {
-	if globalCtx == nil {
-		return defaultBacktestMaxMarketRows
-	}
-	raw := strings.TrimSpace(globalCtx.Config().Get("backtest_max_market_rows"))
-	if raw == "" {
-		return defaultBacktestMaxMarketRows
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
-		return defaultBacktestMaxMarketRows
-	}
-	return value
-}
-
-func validateBacktestHistory(symbol, source, interval string, startAt, endAt time.Time, bars []Bar, now time.Time) ([]Bar, error) {
-	duration := backtestIntervalDuration(interval)
-	if duration <= 0 {
-		return nil, fmt.Errorf("unsupported backtest interval %q", interval)
-	}
-	normalized, err := normalizeBars(symbol, source, bars)
-	if err != nil {
-		return nil, err
-	}
-	if source == "yahoo-finance" {
-		normalized = completedYahooStrategyBars(normalized, interval, now)
-	} else {
-		completed := normalized[:0]
-		for _, bar := range normalized {
-			if !time.Unix(bar.T, 0).UTC().Add(duration).After(now) {
-				completed = append(completed, bar)
-			}
-		}
-		normalized = completed
-	}
-	if len(normalized) == 0 {
-		return nil, errors.New("provider returned no completed priced bars")
-	}
-
-	first := time.Unix(normalized[0].T, 0).UTC()
-	last := time.Unix(normalized[len(normalized)-1].T, 0).UTC()
-	startTolerance := duration
-	endTolerance := duration
-	if source == "yahoo-finance" {
-		startTolerance = 7 * 24 * time.Hour
-		endTolerance = 7 * 24 * time.Hour
-		if interval == "1w" {
-			startTolerance = 14 * 24 * time.Hour
-			endTolerance = 14 * 24 * time.Hour
-		}
-	}
-	if first.After(startAt.UTC().Add(startTolerance)) {
-		return nil, fmt.Errorf(
-			"history begins at %s, later than requested start %s; this provider does not cover the full range",
-			first.Format(time.RFC3339), startAt.UTC().Format(time.RFC3339))
-	}
-	targetEnd := inclusiveBacktestEnd(endAt, interval)
-	if targetEnd.After(now) {
-		targetEnd = strategyClosedCandleBoundary(now, interval)
-	}
-	if last.Before(targetEnd.Add(-endTolerance)) {
-		return nil, fmt.Errorf(
-			"history ends at %s, earlier than requested end %s; this provider returned incomplete data",
-			last.Format(time.RFC3339), targetEnd.UTC().Format(time.RFC3339))
-	}
-	if source == "binance-public" {
-		for i := 1; i < len(normalized); i++ {
-			previous := time.Unix(normalized[i-1].T, 0).UTC()
-			current := time.Unix(normalized[i].T, 0).UTC()
-			if current.Sub(previous) > duration+time.Second {
-				return nil, fmt.Errorf(
-					"history has a gap between %s and %s",
-					previous.Format(time.RFC3339), current.Format(time.RFC3339))
-			}
-		}
-	}
-	return normalized, nil
-}
-
 func summarizeBacktestMarketCapture(bars []*BacktestMarketBar, symbols []string, requestedStart, requestedEnd time.Time) map[string]any {
 	summary := map[string]any{
 		"requested_start_at": requestedStart.UTC().Format(time.RFC3339),
@@ -1536,22 +1409,6 @@ func summarizeBacktestMarketCapture(bars []*BacktestMarketBar, symbols []string,
 	return summary
 }
 
-func inclusiveBacktestEnd(endAt time.Time, interval string) time.Time {
-	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "1m", "5m", "15m", "1h", "4h":
-		return time.Date(endAt.Year(), endAt.Month(), endAt.Day(), 23, 59, 59, 0, time.UTC)
-	default:
-		return endAt
-	}
-}
-
-func nonZeroBarPrice(value, fallback float64) float64 {
-	if value > 0 {
-		return value
-	}
-	return fallback
-}
-
 func resolveBacktestRange(start, end string) (time.Time, time.Time, error) {
 	now := time.Now().UTC()
 	endAt := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
@@ -1576,35 +1433,11 @@ func resolveBacktestRange(start, end string) (time.Time, time.Time, error) {
 	return startAt, endAt, nil
 }
 
-func defaultBacktestRange(start, end string) (time.Time, time.Time) {
-	startAt, endAt, err := resolveBacktestRange(start, end)
-	if err != nil {
-		now := time.Now().UTC()
-		return now.AddDate(0, -3, 0), now
-	}
-	return startAt, endAt
-}
-
 func parseDateOr(value string, fallback time.Time) time.Time {
 	if t, err := time.Parse("2006-01-02", strings.TrimSpace(value)); err == nil {
 		return t
 	}
 	return fallback
-}
-
-func estimateBacktestSteps(start, end time.Time, interval string) int {
-	if end.Before(start) {
-		return 0
-	}
-	days := int(end.Sub(start).Hours()/24) + 1
-	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "1m", "5m", "15m", "1h", "4h":
-		return days * backtestStepsPerSession(interval)
-	case "1w":
-		return int(math.Ceil(float64(days) / 7))
-	default:
-		return days
-	}
 }
 
 func normalizeBacktestInterval(interval string) (string, error) {
@@ -1617,23 +1450,6 @@ func normalizeBacktestInterval(interval string) (string, error) {
 		return v, nil
 	default:
 		return "", fmt.Errorf("unsupported backtest interval %q; use 1m, 5m, 15m, 1h, 4h, 1d, or 1w", interval)
-	}
-}
-
-func backtestStepsPerSession(interval string) int {
-	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "1m":
-		return 390
-	case "5m":
-		return 78
-	case "15m":
-		return 26
-	case "1h":
-		return 7
-	case "4h":
-		return 2
-	default:
-		return 1
 	}
 }
 

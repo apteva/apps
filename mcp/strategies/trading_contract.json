@@ -1,0 +1,39 @@
+{
+  "description": "Every Trading tool and order_place field Strategies depends on. Strategies' tests fail if it calls a Trading tool or forwards an order field not listed here; Trading's tests fail if Trading stops providing one. Change both apps together.",
+  "app_only_tools": [
+    "backtest_market_step",
+    "market_bars_capture",
+    "portfolio_research_snapshot",
+    "research_legacy_export"
+  ],
+  "tools": [
+    "account_summary",
+    "journal_read",
+    "market_history",
+    "market_quote",
+    "market_source",
+    "order_place",
+    "orders_list",
+    "portfolio_create",
+    "portfolio_get",
+    "portfolio_list",
+    "positions_list",
+    "watchlist_add"
+  ],
+  "order_place_fields": [
+    "decision_ref",
+    "external_strategy_id",
+    "external_strategy_version",
+    "idempotency_key",
+    "limit_price",
+    "outcome",
+    "portfolio_id",
+    "qty",
+    "rationale",
+    "side",
+    "stop_price",
+    "symbol",
+    "tif",
+    "type"
+  ]
+}

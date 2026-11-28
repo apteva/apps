@@ -47,25 +47,6 @@ func TestWaitBacktestAgentSettled_UsesTelemetryQuietWindow(t *testing.T) {
 	}
 }
 
-func TestBacktestIntervalEstimates(t *testing.T) {
-	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 1, 6, 0, 0, 0, 0, time.UTC)
-	cases := map[string]int{
-		"5m":  156,
-		"15m": 52,
-		"1h":  14,
-		"4h":  4,
-		"1d":  2,
-		"1w":  1,
-	}
-	for interval, want := range cases {
-		got := estimateBacktestSteps(start, end, interval)
-		if got != want {
-			t.Fatalf("estimateBacktestSteps(%s)=%d, want %d", interval, got, want)
-		}
-	}
-}
-
 func TestNormalizeBacktestInterval(t *testing.T) {
 	got, err := normalizeBacktestInterval("")
 	if err != nil {

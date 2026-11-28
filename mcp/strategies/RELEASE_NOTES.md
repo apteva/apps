@@ -1,3 +1,15 @@
+# Strategies v0.1.5
+
+- Remove unreachable Trading execution and pricing code carried over by the
+  split. Test fixtures that replay old Trading behaviour keep their helpers in
+  test-only files.
+- Add `trading_contract.json`, the list of Trading tools and `order_place`
+  fields Strategies depends on, with a test that fails when the source calls
+  anything outside it.
+- No hashed engine source changed, so the event-simulation fingerprint is
+  unchanged: paused simulations, validation suites and exported artifacts
+  still resume and import.
+
 # Strategies v0.1.4
 
 - Request symbol-scoped Trading observations and apply a complete revision in one transaction.

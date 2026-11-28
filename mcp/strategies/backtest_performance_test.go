@@ -60,7 +60,7 @@ func TestBacktestSnapshots_UpsertAndMetrics(t *testing.T) {
 	if len(series) != 3 || series[0].Step != 0 || series[0].Equity != 100000 {
 		t.Fatalf("series baseline wrong: %#v", series)
 	}
-	metrics := backtestPerformanceMetrics(run, series, rows[1])
+	metrics := backtestPerformanceMetricsWithOrders(run, series, rows[1], nil)
 	if metrics["total_pnl"] != -500 {
 		t.Fatalf("total_pnl=%v, want -500", metrics["total_pnl"])
 	}

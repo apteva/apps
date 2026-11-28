@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	alpacaTradingSlug       = "alpaca-trading"
 	referenceProviderAlpaca = "alpaca"
 	referenceUniverseAlpaca = "ALPACA_TRADABLE_US"
 )

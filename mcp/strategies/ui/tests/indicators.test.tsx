@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { StrategyPresetPicker, SimulationControls } from "../../TradingPanel.tsx";
+import { StrategyPresetPicker, SimulationControls } from "../StrategiesPanel.tsx";
 let root:Root;let container:HTMLElement;
 afterEach(async()=>{if(root)await act(async()=>root.unmount());container?.remove()});
 function mount(){container=document.createElement("div");document.body.append(container);root=createRoot(container)}

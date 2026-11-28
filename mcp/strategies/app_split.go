@@ -142,6 +142,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return out
 }
 
+// orderPlaceForwardedFields are the caller fields Strategies passes through to
+// Trading's order_place; it adds external_strategy_id, external_strategy_version
+// and decision_ref itself. trading_contract.json lists the full set.
+var orderPlaceForwardedFields = []string{"portfolio_id", "symbol", "side", "outcome", "type", "qty", "limit_price", "stop_price", "tif", "rationale", "idempotency_key"}
+
 func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -172,7 +177,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	forwarded := map[string]any{}
-	for _, key := range []string{"_project_id", "portfolio_id", "symbol", "side", "outcome", "type", "qty", "limit_price", "stop_price", "tif", "rationale", "idempotency_key"} {
+	for _, key := range append([]string{"_project_id"}, orderPlaceForwardedFields...) {
 		if v, ok := args[key]; ok {
 			forwarded[key] = v
 		}

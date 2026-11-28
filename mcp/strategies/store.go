@@ -303,17 +303,6 @@ func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) 
 	return scanPortfolio(row)
 }
 
-// dbGetPortfolioAnyProject is for the engine (which doesn't carry a
-// project context) — every other read uses the project-scoped variant.
-func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
-	row := db.QueryRow(`
-		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''),
-		       execution_environment, live_armed, created_at, updated_at
-		FROM portfolios WHERE id = ?`, id)
-	return scanPortfolio(row)
-}
-
 func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import React, { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { RuleProgramEditor } from "../../RuleProgramEditor.tsx";
+import { RuleProgramEditor } from "../RuleProgramEditor.tsx";
 
 let root: Root;
 let container: HTMLElement;
