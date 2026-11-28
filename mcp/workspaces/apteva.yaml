@@ -99,7 +99,8 @@ description: |
   token each time the preview starts), shown in the widgets and the panel.
   Preview pages are served with a Content-Security-Policy sandbox (an opaque
   origin), so the agent's code cannot act with the Apteva session of whoever
-  opens it; pages cannot use cookies or localStorage. Previews started
+  opens it; pages cannot use cookies or localStorage, and requests that
+  need a CORS preflight do not pass the platform yet. Previews started
   before 0.13.0 get a link when they are started again. Docker workspaces
   created without a preview port say so plainly.
   v0.3.0 gives each workspace a persistent

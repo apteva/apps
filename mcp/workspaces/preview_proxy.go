@@ -36,7 +36,7 @@ func (a *App) handlePreviewProxy(w http.ResponseWriter, r *http.Request) {
 			p, _ = getPreview(db, ws.ID)
 		}
 	}
-	if p == nil || p.AccessToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(p.AccessToken)) != 1 {
+	if p == nil || ws.LifecycleStatus == statusDestroyed || p.AccessToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(p.AccessToken)) != 1 {
 		http.Error(w, "preview link not found or no longer valid (it changes each time the preview starts)", http.StatusNotFound)
 		return
 	}

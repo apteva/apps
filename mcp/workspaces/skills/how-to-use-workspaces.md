@@ -151,9 +151,12 @@ no Apteva sign-in needed; share it instead of `local_url` (the address on the
 Apteva machine). The link changes each time the preview starts. The app is
 served under that path prefix, so prefer relative asset links, or read the
 `X-Forwarded-Prefix` request header. Pages run sandboxed in an opaque origin:
-scripts, forms, fetches to the app's own relative URLs and websockets work,
-but cookies and `localStorage` do not, so keep demo state in memory or on the
-server.
+scripts, forms, websockets and simple fetches to the app's own relative URLs
+(GET, or POST with a form or `text/plain` body) work. Cookies and
+`localStorage` do not, and requests that need a CORS preflight (a JSON
+`Content-Type` or custom headers) are refused through the link for now, so
+keep demo state in memory or on the server, and send JSON as `text/plain`
+when a preview must post it.
 `workspace_preview_logs` shows server output. `workspace_preview_stop` ends the server and keeps the workspace
 running; pass `keep_workspace_running=false` to stop the container too. A
 preview runs outside your shell session, so it does not block commands.
