@@ -478,8 +478,11 @@ export class TelephonyClient {
     await this.mediaPost(this.path(`/softphone/release/${callID(session.call_id)}`), { session_token: session.session_token });
   }
 
-  async hangup(id: string): Promise<void> {
-    await this.post(this.path(`/calls/${callID(id)}/hangup`), {});
+  /** Ends the call. While an inbound call is ringing or being picked up,
+   * Telephony ends it only for the session that claimed it, so pass that
+   * session's token; any other client only declines its own ringing. */
+  async hangup(id: string, sessionToken?: string): Promise<void> {
+    await this.post(this.path(`/calls/${callID(id)}/hangup`), sessionToken ? { session_token: sessionToken } : {});
   }
 
   /** Keep the same carrier call connected. Requires configured hold music. */

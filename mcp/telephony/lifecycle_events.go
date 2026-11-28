@@ -33,6 +33,10 @@ type lifecycleFacts struct {
 	TerminationCause     string
 	TerminationCode      string
 	TerminationInitiator string
+	// TerminationPath and TerminationSession say which request ended the call
+	// and from which browser session (see hangupActor).
+	TerminationPath    string
+	TerminationSession string
 	// Synthesized marks a progress event Telephony derived itself, for example
 	// ringing for a carrier that never reports it.
 	Synthesized bool
@@ -376,6 +380,8 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	}
 	payload["media"] = media
 	if termination := terminationPublic(call); len(termination) > 0 {
+		addOptionalString(termination, "path", facts.TerminationPath)
+		addOptionalString(termination, "session_generation", facts.TerminationSession)
 		payload["termination"] = termination
 	}
 	return payload

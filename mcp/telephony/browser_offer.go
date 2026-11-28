@@ -94,13 +94,12 @@ func (a *App) softphoneOfferResponse(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE call_offers SET status='declined',declined_at=? WHERE id=? AND call_id=? AND status='offered' AND expires_at>? AND EXISTS(SELECT 1 FROM calls WHERE id=? AND status='pending')`, now, selected.ID, callID, now, callID)
+	declined, err := declineRingOfferTx(tx, callID, selected.ID, time.Now())
 	if err != nil {
 		http.Error(w, "decline unavailable", 500)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if !declined {
 		http.Error(w, "offer expired", 409)
 		return
 	}

@@ -27,7 +27,7 @@ var (
 // turn on it instead of five. Everything read before the writes is read first,
 // because the transaction holds that connection. claimed is false when the
 // call is no longer available to claim.
-func (a *App) claimSoftphoneAnswer(row *callRow, p *phonePrincipal, dest string, correlation audioSessionCorrelation) (claim *softphoneClaim, claimed bool, err error) {
+func (a *App) claimSoftphoneAnswer(row *callRow, p *phonePrincipal, dest string, correlation audioSessionCorrelation, attachWindow time.Duration) (claim *softphoneClaim, claimed bool, err error) {
 	var capacity destinationCapacity
 	principal, revision := "", int64(0)
 	if p != nil {
@@ -72,7 +72,13 @@ func (a *App) claimSoftphoneAnswer(row *callRow, p *phonePrincipal, dest string,
 	if err = attachHumanCallOn(tx, row.ID, bridgeURL, peerToken); err != nil {
 		return nil, false, err
 	}
-	current.PeerToken, current.AudioBridgeURL = peerToken, bridgeURL
+	// The claiming browser must attach within the window; the lifecycle worker
+	// otherwise returns the call to routing (releaseUnattachedClaim).
+	expires := time.Now().Add(attachWindow).UTC().Format(time.RFC3339Nano)
+	if _, err = tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=? AND status='answering'`, expires, row.ID); err != nil {
+		return nil, false, err
+	}
+	current.PeerToken, current.AudioBridgeURL, current.StateExpiresAt = peerToken, bridgeURL, expires
 	var token string
 	var issued audioSessionCorrelation
 	if p != nil {

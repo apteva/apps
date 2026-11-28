@@ -355,6 +355,12 @@ func (a *App) expireCallAt(ctx *sdk.AppCtx, row *callRow, now time.Time) error {
 	if reasonCode == "" {
 		return nil
 	}
+	// A browser pick-up that never attached returns the call to routing.
+	if reasonCode == "state_timeout" {
+		if handled, err := a.releaseUnattachedClaim(fresh); handled || err != nil {
+			return err
+		}
+	}
 
 	row = fresh
 	if reasonCode == terminationTimeLimit {

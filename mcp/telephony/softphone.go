@@ -1599,7 +1599,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		}
 		standby = a.softphoneStandbys.reserve(callID, request.StandbyID, principal)
 	}
-	claim, claimed, err := a.claimSoftphoneAnswer(row, p, request.DestinationID, audioSessionCorrelation{InitiatingAction: "answer"})
+	attachWindow := manualAnswerAttachWindow
+	if request.AutoAnswerSession != "" {
+		attachWindow = automaticAnswerAttachWindow
+	}
+	claim, claimed, err := a.claimSoftphoneAnswer(row, p, request.DestinationID, audioSessionCorrelation{InitiatingAction: "answer"}, attachWindow)
 	if err != nil || !claimed {
 		a.softphoneStandbys.release(standby)
 	}

@@ -206,7 +206,7 @@ func (a *App) reconcileRingLeg(ctx *sdk.AppCtx, childID, parentID, offerID strin
 			return err
 		}
 		if offerStatus == "claimed" && !isTerminalStatus(parent.Status) {
-			if _, message := a.hangupCall(ctx, parent.ID, 0, parent.ProjectID, hangupActor{Initiator: terminationByTelephony, Action: "answered_leg_ended"}); message != "" {
+			if _, message := a.hangupCall(ctx, parent.ID, 0, parent.ProjectID, hangupActor{Initiator: terminationByTelephony, Action: "answered_leg_ended", Path: "ring_leg"}); message != "" {
 				return errors.New(message)
 			}
 		}

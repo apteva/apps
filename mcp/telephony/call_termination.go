@@ -28,10 +28,15 @@ type hangupActor struct {
 	Principal string // user identity key or agent:<id>; kept in the audit only
 	Action    string // recorded as the termination cause
 	RequestID string
+	// Path names how the request arrived (hangup, agent_tool, completion,
+	// transfer, ring_leg); Session is the browser session generation that
+	// sent it, when it sent a valid one. Both show on the termination event.
+	Path    string
+	Session string
 }
 
 func (a hangupActor) facts() lifecycleFacts {
-	return lifecycleFacts{Source: "telephony", TerminationInitiator: a.Initiator, TerminationCause: a.Action}
+	return lifecycleFacts{Source: "telephony", TerminationInitiator: a.Initiator, TerminationCause: a.Action, TerminationPath: a.Path, TerminationSession: a.Session}
 }
 
 // hangupResult is the call as it ended. AlreadyEnded is true when the call

@@ -32,7 +32,7 @@ func (a *App) completeAgentFromCore(ctx *sdk.AppCtx, row *callRow, err error) er
 	if isTerminalStatus(current.Status) {
 		return nil
 	}
-	if _, message := a.hangupCall(ctx, row.ID, row.AgentID, row.ProjectID, hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", row.AgentID), Action: "agent_completed"}); message != "" {
+	if _, message := a.hangupCall(ctx, row.ID, row.AgentID, row.ProjectID, hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", row.AgentID), Action: "agent_completed", Path: "completion"}); message != "" {
 		return fmt.Errorf("agent completion hangup failed: %s", message)
 	}
 	return nil
