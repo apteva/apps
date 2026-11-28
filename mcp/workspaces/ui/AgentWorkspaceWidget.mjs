@@ -23,6 +23,13 @@ import{useEffect as t,useMemo as a,useState as i}from"react";import{useCallback 
 .wsw-row{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;min-width:0}
 .wsw-row:hover{background:var(--color-bg-input,#1a1f26)}
 .wsw-dot{flex-shrink:0}
+/* Hosts may style bare svg (size, fill, stroke). Class rules outrank that,
+   so every widget svg states its own box and paint here. */
+.wsw svg{flex-shrink:0;display:block}
+.wsw-dot{width:8px;height:8px;stroke:none}
+.wsw-icon svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5}
+.wsw-empty svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.5}
+.wsw-bar{width:60px;height:12px;stroke:none}
 .wsw-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .wsw-line{display:flex;align-items:baseline;gap:6px;min-width:0}
 .wsw-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
@@ -36,7 +43,7 @@ import{useEffect as t,useMemo as a,useState as i}from"react";import{useCallback 
 .wsw-pill{border:1px solid var(--color-border,#2a2f36);border-radius:999px;padding:1px 7px;font-size:11px;color:var(--color-text-muted,#9aa4ae);white-space:nowrap}
 .wsw-link{color:var(--color-accent,#f59e0b)!important}
 .wsw-link:hover{text-decoration:underline!important}
-.wsw-act{display:grid;grid-template-columns:14px minmax(0,auto) minmax(0,1fr) auto;align-items:center;gap:6px;padding:3px 6px;border-radius:6px}
+.wsw-act{display:grid;grid-template-columns:14px minmax(0,auto) minmax(0,1fr) auto;align-items:center;gap:8px;padding:3px 6px;border-radius:6px}
 .wsw-act:hover{background:var(--color-bg-input,#1a1f26)}
 .wsw-act .wsw-icon{color:var(--color-text-muted,#9aa4ae);display:flex}
 .wsw-act.error .wsw-icon,.wsw-act.error .wsw-what{color:var(--color-red,#f87171)}
@@ -54,4 +61,4 @@ import{useEffect as t,useMemo as a,useState as i}from"react";import{useCallback 
 `).slice(-G).join(`
 `).trimEnd();if(!z.preview&&!z.projectId)return X("section",{className:"wsw",children:[J("style",{children:D}),J("div",{className:"wsw-card wsw-empty",children:"Select a project to see agent workspaces."})]});if(!z.preview&&!R)return X("section",{className:"wsw",children:[J("style",{children:D}),J("div",{className:"wsw-card wsw-empty",children:"Open an agent or a thread to see its workspace."})]});let v=N.error||O.error,L=H?j(H.expires_at,M):{label:"",soon:!1};return X("section",{className:"wsw","aria-label":"Agent workspace",children:[J("style",{children:D}),X("header",{className:"wsw-head",children:[X("div",{style:{minWidth:0},children:[J("h2",{children:"Workspace"}),H?X("p",{className:"wsw-trunc",children:[J("a",{href:k(z,H.id),children:H.name})," · ",H.host_label]}):J("p",{children:$?"This thread":"This agent"})]}),Z.length>1&&H&&J("select",{className:"wsw-select","aria-label":"Choose workspace",value:H.id,onChange:(P)=>Y(P.target.value),children:Z.map((P)=>X("option",{value:P.id,children:[P.name," (",P.status,")"]},P.id))})]}),v&&J("div",{className:"wsw-banner",role:"alert",children:v}),!H&&N.loaded&&!N.error&&X("div",{className:"wsw-card wsw-empty",children:[J(u,{}),J("span",{children:$?"No workspace for this thread yet.":"No workspace for this agent yet."})]}),!H&&!N.loaded&&!z.preview&&J("div",{className:"wsw-card wsw-empty wsw-dim",children:"Loading workspace…"}),H&&X(e,{children:[J("div",{className:"wsw-card",children:X("div",{className:"wsw-ws-top",children:[J(x,{status:H.status}),J("span",{className:"wsw-main",children:X("span",{className:"wsw-line",children:[J("span",{children:H.status==="busy"?"Running a command":H.status}),H.status==="failed"&&H.last_error&&J("span",{className:"wsw-error wsw-trunc",children:H.last_error})]})}),X("span",{className:"wsw-side",children:[H.preview?.status==="live"&&H.preview.url&&J("a",{className:"wsw-pill wsw-link",href:H.preview.url,target:"_blank",rel:"noreferrer",children:"Preview"}),H.preview?.status==="crashed"&&J("span",{className:"wsw-pill wsw-error",children:"Preview crashed"}),H.lifecycle_status==="running"&&L.label&&J("span",{className:`wsw-pill ${L.soon?"wsw-warn":""}`,children:L.label})]})]})}),T&&X("div",{className:"wsw-card",children:[J("h3",{children:"Running now"}),X("div",{className:"wsw-line",children:[J("span",{className:"wsw-mono wsw-trunc",children:T.display_command}),J("span",{className:"wsw-when",children:f(T,M)})]}),J("div",{className:"wsw-dim",style:{marginTop:2},children:"Output appears when the command finishes."})]}),V&&G>0&&X("div",{className:"wsw-card",children:[X("h3",{children:["Last output · ",J("span",{className:"wsw-mono wsw-trunc",style:{textTransform:"none",letterSpacing:0,fontWeight:400},children:V.display_command})]}),J("pre",{className:"wsw-output",children:d||(h.loaded||z.preview?"No output.":"Loading…")})]}),B>0&&q.length>0&&X("div",{className:"wsw-card",children:[J("h3",{children:"Recent commands"}),J("ul",{className:"wsw-list",children:q.slice(0,B).map((P)=>{let _=P.status!=="succeeded";return X("li",{className:"wsw-act",style:{gridTemplateColumns:"minmax(0,1fr) auto auto"},children:[J("span",{className:`wsw-mono wsw-trunc ${_?"wsw-error":""}`,title:P.display_command,children:P.display_command}),J("span",{className:_?"wsw-error":"wsw-dim",children:P.exit_code!=null?`exit ${P.exit_code}`:P.status.replace("_"," ")}),J("span",{className:"wsw-when",children:f(P,M)})]},P.id)})})]})]})]})}export{s as default};
 
-//# debugId=A101A80FEEEA3C0464756E2164756E21
+//# debugId=A6AB56EC8D76915664756E2164756E21

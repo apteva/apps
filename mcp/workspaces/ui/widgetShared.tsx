@@ -334,6 +334,13 @@ export const widgetCSS = `
 .wsw-row{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;min-width:0}
 .wsw-row:hover{background:var(--color-bg-input,#1a1f26)}
 .wsw-dot{flex-shrink:0}
+/* Hosts may style bare svg (size, fill, stroke). Class rules outrank that,
+   so every widget svg states its own box and paint here. */
+.wsw svg{flex-shrink:0;display:block}
+.wsw-dot{width:8px;height:8px;stroke:none}
+.wsw-icon svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5}
+.wsw-empty svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.5}
+.wsw-bar{width:60px;height:12px;stroke:none}
 .wsw-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .wsw-line{display:flex;align-items:baseline;gap:6px;min-width:0}
 .wsw-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
@@ -347,7 +354,7 @@ export const widgetCSS = `
 .wsw-pill{border:1px solid var(--color-border,#2a2f36);border-radius:999px;padding:1px 7px;font-size:11px;color:var(--color-text-muted,#9aa4ae);white-space:nowrap}
 .wsw-link{color:var(--color-accent,#f59e0b)!important}
 .wsw-link:hover{text-decoration:underline!important}
-.wsw-act{display:grid;grid-template-columns:14px minmax(0,auto) minmax(0,1fr) auto;align-items:center;gap:6px;padding:3px 6px;border-radius:6px}
+.wsw-act{display:grid;grid-template-columns:14px minmax(0,auto) minmax(0,1fr) auto;align-items:center;gap:8px;padding:3px 6px;border-radius:6px}
 .wsw-act:hover{background:var(--color-bg-input,#1a1f26)}
 .wsw-act .wsw-icon{color:var(--color-text-muted,#9aa4ae);display:flex}
 .wsw-act.error .wsw-icon,.wsw-act.error .wsw-what{color:var(--color-red,#f87171)}
