@@ -177,7 +177,7 @@ func TestListFiltersAndPreviewOnRows(t *testing.T) {
 		}
 		if w["name"] == "one" {
 			preview := w["preview"].(map[string]any)
-			if preview["status"] != "live" || preview["url"] != "http://127.0.0.1:41000/" {
+			if preview["status"] != "live" || preview["url"] != nil || preview["local_url"] != "http://127.0.0.1:41000/" {
 				t.Fatalf("preview on row: %v", preview)
 			}
 		} else if w["preview"] != nil {

@@ -72,6 +72,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/workspaces/", Handler: a.handleWorkspaceItem},
 		{Pattern: "/api/profiles", Handler: a.handleProfiles},
 		{Pattern: "/api/activity", Handler: a.handleActivity},
+		// Token-gated: a preview link opens without an Apteva session, and
+		// must not get one (see handlePreviewProxy).
+		{Pattern: "/p/", Handler: a.handlePreviewProxy, NoAuth: true},
 	}
 }
 
@@ -99,11 +102,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_archive_base64"] = strSchema()
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
-	return append(a.previewTools(), []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, as a sandboxed folder on the Apteva machine (driver local, the default without the Containers app), on local Docker, or on an Instances host (instance_id); Docker and Instances hosts need the Containers app. Set preview_port to publish one container port for workspace_preview_start; remote previews are reached through an Instances tunnel.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+	return append(append(a.previewTools(), a.processTools()...), []sdk.Tool{
+		{Name: "workspaces_create", Description: "Create a workspace from an approved profile with an optional allowlisted, digest-pinned image override, as a sandboxed folder on the Apteva machine (driver local, the default without the Containers app), on local Docker, or on an Instances host (instance_id); Docker and Instances hosts need the Containers app. Docker workspaces need preview_port at creation to publish a port for workspace_preview_start (remote previews are reached through an Instances tunnel); local workspaces can preview on any port and default to the default_preview_port setting (3000).", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
-		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host or the local driver each command runs on its own, so cd and exported variables do not carry over (use working_directory). The workspace's capabilities.sessions says which.", InputSchema: schemaObject(map[string]any{
+		{Name: "workspace_command_start", Description: "Run one asynchronous command. On local Docker it runs in the workspace's persistent PTY shell session; on an Instances host or the local driver each command runs on its own, so cd and exported variables do not carry over (use working_directory). The workspace's capabilities.sessions says which. Install missing tools with a command: `pkg add nodejs npm` (or any Alpine package) when capabilities.system_packages is pkg, the image's apt-get/apk when it is root; npm -g, pip in a venv and go install work without root.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema(), "maxItems": 256},
 			"shell_command": strSchema(), "working_directory": strSchema(), "timeout_s": intSchema(), "idempotency_key": strSchema(),
 			"user":    map[string]any{"type": "string", "enum": []string{"builder", "runner"}, "description": "Test workspaces only. Default runner."},
@@ -494,6 +497,9 @@ func (a *App) workspaceDetail(app *sdk.AppCtx, w *Workspace) (map[string]any, er
 		}
 	}
 	result := map[string]any{"workspace": w, "runtime": runtime, "commands": commands, "activity": activity, "usage": usage}
+	if preview, err := getPreview(app.AppDB(), w.ID); err == nil && preview != nil {
+		result["preview"] = preview
+	}
 	if runtimeErr != nil {
 		result["runtime_error"] = runtimeErr.Error()
 	}

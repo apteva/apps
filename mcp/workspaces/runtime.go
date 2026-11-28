@@ -42,6 +42,11 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
+	if driver == driverLocal && previewPort == 0 {
+		// Free on the local driver (no port mapping): record the default so
+		// workspace_preview_start works without arguments.
+		previewPort = configInt(app, "default_preview_port", 3000)
+	}
 	name, err := normalizeWorkspaceName(strArg(args, "name"))
 	if err != nil {
 		return nil, err

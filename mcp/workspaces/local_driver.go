@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -62,16 +63,20 @@ var (
 )
 
 type localWorkload struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Status    string            `json:"status"`
-	Ports     []ContainerPort   `json:"ports"`
-	Env       map[string]string `json:"env"`
-	Sandbox   sandboxKind       `json:"sandbox,omitempty"`
-	Network   string            `json:"network,omitempty"`
-	UID       int               `json:"uid,omitempty"`
-	CreatedAt string            `json:"created_at"`
-	UpdatedAt string            `json:"updated_at"`
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Status  string            `json:"status"`
+	Ports   []ContainerPort   `json:"ports"`
+	Env     map[string]string `json:"env"`
+	Sandbox sandboxKind       `json:"sandbox,omitempty"`
+	Network string            `json:"network,omitempty"`
+	UID     int               `json:"uid,omitempty"`
+	// PkgToken authorises the workload's `pkg` requests; Packages are the
+	// system packages it asked for (container mode).
+	PkgToken  string   `json:"pkg_token,omitempty"`
+	Packages  []string `json:"packages,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 type localExec struct {
@@ -109,6 +114,18 @@ type localDriver struct {
 	running map[string]*localProc
 	usage   map[string]localUsage
 	allocMu sync.Mutex // serialises uid allocation
+
+	maxProcs    int  // RLIMIT_NPROC per workload uid in container mode; 0 = none
+	packagesOff bool // setting local_packages off
+	pkg         pkgService
+	replayed    map[string]bool
+}
+
+// setLimits applies the process cap and package settings.
+func (d *localDriver) setLimits(maxProcs int, packages bool) {
+	d.mu.Lock()
+	d.maxProcs, d.packagesOff = maxProcs, !packages
+	d.mu.Unlock()
 }
 
 // setMode changes the sandbox and network used for new workloads.
@@ -154,7 +171,7 @@ func newLocalDriver(root string, sandbox sandboxKind, network string) *localDriv
 	if real, err := filepath.EvalSymlinks(root); err == nil {
 		root = real
 	}
-	return &localDriver{root: root, sandbox: sandbox, network: network, running: map[string]*localProc{}, usage: map[string]localUsage{}}
+	return &localDriver{root: root, sandbox: sandbox, network: network, running: map[string]*localProc{}, usage: map[string]localUsage{}, maxProcs: 512, replayed: map[string]bool{}}
 }
 
 // Call runs one operation and decodes its result into out, like CallAppResult.
@@ -186,6 +203,12 @@ func (d *localDriver) Call(tool string, input map[string]any, out any) error {
 		result, err = d.volumeExport(input)
 	case "containers_usage_get":
 		result, err = d.usageGet(input)
+	case "containers_port_set":
+		result, err = d.portSet(input)
+	case "containers_processes":
+		result, err = d.processes(input)
+	case "containers_process_kill":
+		result, err = d.processKill(input)
 	default:
 		return fmt.Errorf("%s is %w", tool, errLocalUnsupported)
 	}
@@ -247,6 +270,44 @@ func (d *localDriver) run(input map[string]any) (any, error) {
 	return map[string]any{"workload": d.view(wl)}, nil
 }
 
+// prepareExec makes sure a workload has what its commands expect: the pkg
+// command and, in container mode, a pkg token and a passwd entry (both are
+// lost when the container is reset, and workloads from before 0.13.0 have
+// neither).
+func (d *localDriver) prepareExec(wl *localWorkload, kind sandboxKind) error {
+	if kind == sandboxContainer {
+		if wl.PkgToken == "" {
+			wl.PkgToken = randomHex(24)
+			if err := d.saveWorkload(wl); err != nil {
+				return err
+			}
+		}
+		if err := ensureWorkspaceUser(wl.UID, filepath.Join(d.workspaceDir(wl.ID), ".home")); err != nil {
+			return fmt.Errorf("add the workspace user to /etc/passwd: %w", err)
+		}
+	}
+	return d.writePkgScript(wl)
+}
+
+// portSet records the preview port of a local workload. There is no port
+// mapping: the process listens on that port on the machine itself.
+func (d *localDriver) portSet(input map[string]any) (any, error) {
+	wl, err := d.loadWorkload(input)
+	if err != nil {
+		return nil, err
+	}
+	port := intIn(input, "container_port", 0)
+	if port < 1 || port > 65535 {
+		return nil, errors.New("container_port must be 1-65535")
+	}
+	wl.Ports = []ContainerPort{{Protocol: "tcp", ContainerPort: port, HostPort: port, BindAddr: "127.0.0.1"}}
+	wl.UpdatedAt = nowUTC()
+	if err := d.saveWorkload(wl); err != nil {
+		return nil, err
+	}
+	return map[string]any{"workload": d.view(wl)}, nil
+}
+
 // createContainerWorkload allocates the workload's uid and lays out its
 // folder: the workload folder and exec/ belong to root, workspace/, cache/
 // and tmp/ to the workload's uid, each 0700.
@@ -279,6 +340,10 @@ func (d *localDriver) createContainerWorkload(wl *localWorkload) error {
 		if err := os.Chmod(target, 0o700); err != nil {
 			return err
 		}
+	}
+	wl.PkgToken = randomHex(24)
+	if err := ensureWorkspaceUser(uid, filepath.Join(dir, "workspace", ".home")); err != nil {
+		return fmt.Errorf("add the workspace user to /etc/passwd: %w", err)
 	}
 	// Saved while allocMu is held, so the next allocation sees this uid.
 	return d.saveWorkload(wl)
@@ -383,6 +448,7 @@ func (d *localDriver) destroy(input map[string]any) (any, error) {
 	d.killWorkload(id, "cancelled")
 	if wl, err := d.loadWorkload(input); err == nil && wl.UID > 0 {
 		killUID(wl.UID)
+		removeWorkspaceUser(wl.UID)
 	}
 	if err := os.RemoveAll(d.workloadDir(id)); err != nil {
 		return nil, err
@@ -481,6 +547,21 @@ func (d *localDriver) execStart(input map[string]any) (any, error) {
 		realArgv = append([]string{"/bin/sh", "-c", `umask "$0"; exec "$@"`, umask}, realArgv...)
 	}
 	kind, network := d.workloadMode(wl)
+	if err := d.prepareExec(wl, kind); err != nil {
+		return nil, err
+	}
+	if kind == sandboxContainer {
+		d.mu.Lock()
+		maxProcs := d.maxProcs
+		d.mu.Unlock()
+		if maxProcs > 0 {
+			// RLIMIT_NPROC counts per real uid, and each workload has its own.
+			// The command lowers its own limit after the switch to the
+			// workspace user; setting it from root on another uid's process
+			// would need CAP_SYS_RESOURCE, which containers usually drop.
+			realArgv = append([]string{"/bin/sh", "-c", `ulimit -u "$0" || exit 126; exec "$@"`, strconv.Itoa(maxProcs)}, realArgv...)
+		}
+	}
 	full, err := sandboxArgv(kind, d.workloadDir(wl.ID), network, realDir, realArgv)
 	if err != nil {
 		return nil, err
@@ -495,6 +576,9 @@ func (d *localDriver) execStart(input map[string]any) (any, error) {
 	output, err := newCappedFile(logPath, localMaxLogBytes)
 	if err != nil {
 		return nil, err
+	}
+	if kind == sandboxContainer {
+		d.replayPackages(wl, output)
 	}
 	cmd := exec.Command(full[0], full[1:]...)
 	cmd.Dir = realDir
@@ -696,7 +780,11 @@ func (d *localDriver) commandEnv(wl *localWorkload, kind sandboxKind, paths path
 	if kind == sandboxContainer {
 		// Not Apteva's own identity: the command runs as the workspace user.
 		inherit = []string{"PATH", "LANG", "LC_ALL"}
-		env["USER"], env["LOGNAME"], env["SHELL"] = "workspace", "workspace", "/bin/sh"
+		user := "workspace"
+		if wl.UID >= localUIDBase {
+			user = workspaceUserName(wl.UID)
+		}
+		env["USER"], env["LOGNAME"], env["SHELL"] = user, user, "/bin/sh"
 	}
 	for _, key := range inherit {
 		if value := os.Getenv(key); value != "" {
@@ -709,6 +797,19 @@ func (d *localDriver) commandEnv(wl *localWorkload, kind sandboxKind, paths path
 	for key, value := range extra {
 		env[key] = paths.toReal(value)
 	}
+	for key, value := range d.pkgEnv(wl) {
+		env[key] = value
+	}
+	// pkg, then tools the user installs without root: npm -g, pip --user,
+	// go install.
+	path := []string{filepath.Join(d.workloadDir(wl.ID), "bin")}
+	if home := env["HOME"]; home != "" {
+		if _, set := env["NPM_CONFIG_PREFIX"]; !set {
+			env["NPM_CONFIG_PREFIX"] = filepath.Join(home, ".local")
+		}
+		path = append(path, filepath.Join(home, ".local", "bin"), filepath.Join(home, "go", "bin"))
+	}
+	env["PATH"] = strings.Join(append(path, firstNonEmpty(env["PATH"], "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")), ":")
 	env["TMPDIR"] = filepath.Join(d.workloadDir(wl.ID), "tmp")
 	env["APTEVA_WORKSPACE_DIR"] = d.workspaceDir(wl.ID)
 	keys := make([]string, 0, len(env))

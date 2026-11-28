@@ -162,11 +162,11 @@ func TestRemotePreviewUsesInstancesTunnel(t *testing.T) {
 	}
 	preview := out.(map[string]any)["preview"].(*Preview)
 	want := "http://127.0.0.1:" + strconv.Itoa(p.tunnelPort) + "/"
-	if preview.InstanceID != 7 || preview.HostPort != 41000 || preview.URL != want || p.opens != 1 {
+	if preview.InstanceID != 7 || preview.HostPort != 41000 || preview.LocalURL != want || p.opens != 1 {
 		t.Fatalf("preview not tunnelled: %+v opens=%d", preview, p.opens)
 	}
 	preview, err = a.refreshPreview(ctx, w)
-	if err != nil || preview.Status != "live" || preview.URL != want {
+	if err != nil || preview.Status != "live" || preview.LocalURL != want {
 		t.Fatalf("tunnelled preview not live: %+v %v", preview, err)
 	}
 	// Instances restarted: the tunnel comes back on another port.

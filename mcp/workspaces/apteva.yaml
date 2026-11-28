@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.12.4
+version: 0.13.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -81,6 +81,27 @@ description: |
   capabilities.resource_limits false, and shared_resources (what the
   surrounding container or machine has); the panel shows "Not enforced" and
   counts only Docker workspaces in its limits total.
+  v0.13.0 makes a local workspace a general-purpose machine for agents.
+  System packages: in container mode every command has a pkg command
+  (pkg add nodejs npm python3 git build-base, pkg del, pkg list, pkg search)
+  that asks Workspaces to install Alpine packages with apk --no-scripts;
+  installed files lose setuid/setgid bits and file capabilities, and each
+  workspace's packages are installed again after the container is reset
+  (setting local_packages). npm -g, pip --user and go install write to the
+  workspace's home and are on PATH. Each container-mode workspace user has a
+  passwd entry (ws<uid>), so whoami, git and npm no longer see an unknown
+  user, and a process cap (local_max_processes, default 512). New tool
+  workspace_processes lists a local workspace's processes and signals one or
+  all of them. Previews: local workspaces get a preview port by default
+  (default_preview_port, 3000), workspace_preview_start takes port, and
+  every preview has a link anyone who has it can open, without an Apteva
+  session (/api/apps/workspaces/_install/<id>/p/<workspace>/<token>/; a new
+  token each time the preview starts), shown in the widgets and the panel.
+  Preview pages are served with a Content-Security-Policy sandbox (an opaque
+  origin), so the agent's code cannot act with the Apteva session of whoever
+  opens it; pages cannot use cookies or localStorage. Previews started
+  before 0.13.0 get a link when they are started again. Docker workspaces
+  created without a preview port say so plainly.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -116,14 +137,19 @@ provides:
     - name: workspaces.write
       description: Create and operate workspaces and their commands.
   http_routes:
+    - prefix: /p/
+      no_auth: true
     - prefix: /
   mcp_tools:
     - name: workspace_preview_start
-      description: "Start a persistent HTTP preview on a workspace created with preview_port; argv must bind 0.0.0.0. Args: workspace_id, argv, env?."
+      description: "Start a persistent HTTP preview and get a link people can open. Local workspaces take any port (default 3000); Docker workspaces need preview_port at creation and argv must bind 0.0.0.0. Args: workspace_id, argv, port?, env?."
       requires: workspaces.write
     - name: workspace_preview_get
-      description: "Fetch preview readiness and its published loopback URL. Args: workspace_id."
+      description: "Fetch preview readiness, its url (a link through Apteva) and local_url. Args: workspace_id."
       requires: workspaces.read
+    - name: workspace_processes
+      description: "List a local workspace's processes and optionally signal one (kill: pid) or all (kill_all). Args: workspace_id, kill?, kill_all?, signal?."
+      requires: workspaces.write
     - name: workspace_preview_logs
       description: "Tail bounded preview logs. Args: workspace_id, tail?."
       requires: workspaces.read
@@ -418,6 +444,21 @@ config_schema:
     default: ""
     label: Local driver folder
     description: Absolute folder for local workspaces. Defaults to ~/apteva-workspaces/install-<id>, or /var/lib/apteva-workspaces/install-<id> in container mode (every parent folder must let other users through). Must not contain spaces or sit inside ~/.apteva, ~/.ssh or another folder the sandbox hides.
+  - name: local_packages
+    type: boolean
+    default: true
+    label: System packages in local workspaces
+    description: In container mode, lets workspace commands install Alpine packages with the pkg command (apk add --no-scripts as root, setuid bits removed). Packages are installed for the whole Apteva container, so every workspace on it can use them. Turn off to keep the container's system unchanged.
+  - name: local_max_processes
+    type: text
+    default: "512"
+    label: Process limit per local workspace
+    description: Most processes one container-mode workspace user may run at once (RLIMIT_NPROC). 0 removes the limit.
+  - name: default_preview_port
+    type: text
+    default: "3000"
+    label: Default preview port
+    description: Port a local workspace's preview listens on when neither workspaces_create preview_port nor workspace_preview_start port gives one.
   - name: default_cpu
     type: text
     default: "2"

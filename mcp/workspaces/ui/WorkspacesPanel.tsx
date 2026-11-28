@@ -34,7 +34,7 @@ interface Workspace {
   driver?: string;
   instance_id?: number;
   sandbox?: string;
-  capabilities?: { isolation: string; sandbox?: string; hardened: boolean; sessions: boolean; preview: boolean; images: boolean; resource_limits?: boolean };
+  capabilities?: { isolation: string; sandbox?: string; hardened: boolean; sessions: boolean; preview: boolean; images: boolean; resource_limits?: boolean; system_packages?: string };
   shared_resources?: { cpu: number; memory_mb: number; source: string };
   network_policy: string;
   cpu: number;
@@ -88,6 +88,14 @@ interface Detail {
   activity: Activity[];
   destroy_risk?: string;
   runtime_error?: string;
+  preview?: PreviewInfo;
+}
+
+interface PreviewInfo {
+  status: string;
+  url?: string;
+  error?: string;
+  container_port?: number;
 }
 
 interface Driver {
@@ -436,7 +444,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
             ))}
           </nav>
           <main className="ws-detail-main">
-            {tab === "overview" && <Overview workspace={selected} runtime={detail?.runtime} runtimeError={detail?.runtime_error} />}
+            {tab === "overview" && <Overview workspace={selected} runtime={detail?.runtime} runtimeError={detail?.runtime_error} preview={detail?.preview} />}
             {tab === "commands" && (
               <section className="ws-card ws-command-card">
                 <div className="ws-card-head"><div><h2>Terminal</h2><p>Commands share one persistent PTY shell. The current directory, exported variables, installed tools, files, and services carry into later commands.</p></div></div>
@@ -521,7 +529,24 @@ function Status({ value }: { value: string }) {
   return <span className={`ws-status ws-status-${value || "unknown"}`}><i />{statusLabel(value)}</span>;
 }
 
-function Overview({ workspace, runtime, runtimeError }: { workspace: Workspace; runtime?: Runtime; runtimeError?: string }) {
+function packagesText(workspace: Workspace) {
+  switch (workspace.capabilities?.system_packages) {
+    case "pkg": return "pkg add <name> (Alpine packages)";
+    case "root": return "Image package manager (root)";
+  }
+  return workspace.driver === "local" ? "Machine tools only" : "Unknown";
+}
+
+function PreviewRow({ preview }: { preview?: PreviewInfo }) {
+  if (!preview) return <Row label="Preview" value="Not started" sub="workspace_preview_start" />;
+  const port = preview.container_port ? `Port ${preview.container_port}` : undefined;
+  if (preview.status === "live" && preview.url) {
+    return <div><dt>Preview</dt><dd><a href={preview.url} target="_blank" rel="noreferrer">Open preview</a>{port && <small>{port}</small>}</dd></div>;
+  }
+  return <Row label="Preview" value={preview.status} sub={preview.error || port} />;
+}
+
+function Overview({ workspace, runtime, runtimeError, preview }: { workspace: Workspace; runtime?: Runtime; runtimeError?: string; preview?: PreviewInfo }) {
   return (
     <div className="ws-overview-grid">
       <section className="ws-card">
@@ -533,6 +558,8 @@ function Overview({ workspace, runtime, runtimeError }: { workspace: Workspace; 
           <Row label="Profile" value={workspace.profile} sub={workspace.driver === "local" ? "Machine toolchains" : workspace.image} mono />
           <Row label="Host" value={workspace.host_label} sub={workspace.workload_id} mono />
           <Row label="Isolation" value={isolationText(workspace)} />
+          <Row label="Packages" value={packagesText(workspace)} />
+          <PreviewRow preview={preview} />
           <Row label="Created" value={exactTime(workspace.created_at)} />
           <Row label="Expires" value={`${relativeTime(workspace.expires_at)} · ${exactTime(workspace.expires_at)}`} />
           <Row label="Auto-delete" value={`${relativeTime(workspace.delete_at)} · ${exactTime(workspace.delete_at)}`} />

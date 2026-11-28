@@ -107,14 +107,54 @@ transferred.
 
 Use `grep -rn` or `rg` through a command to search file contents.
 
+## Install what you need
+
+A workspace is a general-purpose machine: install the tools a task needs
+instead of giving up when one is missing. `capabilities.system_packages` says
+how:
+
+- `pkg` (local workspace, container mode): run `pkg add <names>` as an
+  ordinary command, for example `pkg add nodejs npm`, `pkg add python3
+  py3-pip`, `pkg add git build-base`, `pkg add go`. Names are Alpine packages;
+  `pkg search <term>` finds them, `pkg list` shows what this workspace added,
+  `pkg del <name>` removes one. Packages are shared by every workspace on the
+  machine and come back by themselves after a restart. Commands still run as
+  the workspace's own user, not root.
+- `root` (Docker workspace): commands run as root in the image, so use its
+  package manager directly (`apt-get update && apt-get install -y …` on the
+  Debian-based profile images, `apk add …` on Alpine images).
+- empty (local workspace under the macOS or Linux OS sandbox): system packages
+  cannot be installed; use what the machine has, or create a Docker workspace.
+
+Language packages need no root anywhere: `npm install` (and `npm install -g`,
+which goes to `~/.local`), `pip install` inside a virtualenv (`python3 -m venv
+.venv`), `go install` (to `~/go/bin`) and `bun add` all write to the
+workspace, and those bin folders are on `PATH`.
+
+## Processes
+
+A command may leave a server or watcher running. `workspace_processes` lists
+the processes of a local workspace (pid, parent, memory, run time, command);
+pass `kill` with a pid, or `kill_all`, with an optional `signal` (default
+TERM), to stop them. In a Docker workspace use `ps aux` and `kill` as commands.
+
 ## Preview a web app
 
-Create the workspace with `preview_port` (the port your server will listen on)
-to publish it on the host. Start the server with `workspace_preview_start`
-(`argv` such as `["bun","run","dev","--host","0.0.0.0"]`); it must bind
-`0.0.0.0`. Poll `workspace_preview_get` until `status` is `live`, then use its
-`url` (a loopback address on the Apteva host). `workspace_preview_logs` shows
-server output. `workspace_preview_stop` ends the server and keeps the workspace
+Start the server with `workspace_preview_start` (`argv` such as
+`["bun","run","dev","--host","0.0.0.0","--port","3000"]`). Local workspaces
+take any `port` (default 3000) and the server may bind `127.0.0.1` or
+`0.0.0.0`. A Docker workspace publishes its port when it is created, so create
+it with `preview_port` and bind `0.0.0.0`; one created without it cannot
+preview, so create a new one. Poll `workspace_preview_get` until `status` is
+`live`. Its `url` is a link through Apteva that anyone who has it can open,
+no Apteva sign-in needed; share it instead of `local_url` (the address on the
+Apteva machine). The link changes each time the preview starts. The app is
+served under that path prefix, so prefer relative asset links, or read the
+`X-Forwarded-Prefix` request header. Pages run sandboxed in an opaque origin:
+scripts, forms, fetches to the app's own relative URLs and websockets work,
+but cookies and `localStorage` do not, so keep demo state in memory or on the
+server.
+`workspace_preview_logs` shows server output. `workspace_preview_stop` ends the server and keeps the workspace
 running; pass `keep_workspace_running=false` to stop the container too. A
 preview runs outside your shell session, so it does not block commands.
 

@@ -45,6 +45,11 @@ type Capabilities struct {
 	// ResourceLimits says cpu and memory_mb are enforced. The local driver
 	// enforces none; its workspaces report shared_resources instead.
 	ResourceLimits bool `json:"resource_limits"`
+	// SystemPackages is how commands install system packages: "pkg" (the
+	// workspace's pkg command, container mode with apk), "root" (the image's
+	// own package manager; commands run as root in Docker), or "" (none:
+	// install tools on the machine itself).
+	SystemPackages string `json:"system_packages,omitempty"`
 }
 
 func capabilitiesFor(w *Workspace) Capabilities {
@@ -52,13 +57,17 @@ func capabilitiesFor(w *Workspace) Capabilities {
 	case w.Driver == driverLocal:
 		if w.Sandbox == string(sandboxContainer) {
 			// Not an OS sandbox: a separate user inside Apteva's container.
-			return Capabilities{Isolation: "separate_user", Sandbox: w.Sandbox, Preview: true}
+			caps := Capabilities{Isolation: "separate_user", Sandbox: w.Sandbox, Preview: true}
+			if _, err := os.Stat(apkPath); err == nil {
+				caps.SystemPackages = "pkg"
+			}
+			return caps
 		}
 		return Capabilities{Isolation: "os_sandbox", Sandbox: w.Sandbox, Preview: true}
 	case w.InstanceID > 0:
-		return Capabilities{Isolation: "container", Hardened: true, Preview: true, Images: true, ResourceLimits: true}
+		return Capabilities{Isolation: "container", Hardened: true, Preview: true, Images: true, ResourceLimits: true, SystemPackages: "root"}
 	default:
-		return Capabilities{Isolation: "container", Hardened: true, Sessions: true, Preview: true, Images: true, ResourceLimits: true}
+		return Capabilities{Isolation: "container", Hardened: true, Sessions: true, Preview: true, Images: true, ResourceLimits: true, SystemPackages: "root"}
 	}
 }
 
@@ -250,6 +259,7 @@ func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
 		// Settings can change while running: new workspaces use the current
 		// sandbox; existing ones keep the one recorded when they were made.
 		r.driver.setMode(kind, network)
+		r.driver.setLimits(configInt(app, "local_max_processes", 512), configBool(app, "local_packages", true))
 		return r.driver, nil
 	}
 	root := configString(app, "local_root", "")
@@ -292,6 +302,7 @@ func (r *localRegistry) get(app *sdk.AppCtx) (*localDriver, error) {
 		}
 	}
 	r.driver = newLocalDriver(root, kind, network)
+	r.driver.setLimits(configInt(app, "local_max_processes", 512), configBool(app, "local_packages", true))
 	return r.driver, nil
 }
 

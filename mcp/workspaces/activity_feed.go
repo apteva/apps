@@ -195,7 +195,7 @@ func activityBucketsFor(db *sql.DB, projectID string, now time.Time) (map[string
 }
 
 func listProjectPreviews(db *sql.DB, projectID string) (map[string]*Preview, error) {
-	rows, err := db.Query(`SELECT p.workspace_id,p.execution_id,p.container_port,p.host_port,p.instance_id,p.tunnel_port,p.status,p.error,p.started_at
+	rows, err := db.Query(`SELECT p.workspace_id,p.execution_id,p.container_port,p.host_port,p.instance_id,p.tunnel_port,p.status,p.error,p.started_at,p.access_token
 		FROM workspace_previews p JOIN workspaces w ON w.id=p.workspace_id WHERE w.project_id=?`, projectID)
 	if err != nil {
 		return nil, err
@@ -204,7 +204,7 @@ func listProjectPreviews(db *sql.DB, projectID string) (map[string]*Preview, err
 	out := map[string]*Preview{}
 	for rows.Next() {
 		p := &Preview{}
-		if err := rows.Scan(&p.WorkspaceID, &p.ExecutionID, &p.ContainerPort, &p.HostPort, &p.InstanceID, &p.TunnelPort, &p.Status, &p.Error, &p.StartedAt); err != nil {
+		if err := rows.Scan(&p.WorkspaceID, &p.ExecutionID, &p.ContainerPort, &p.HostPort, &p.InstanceID, &p.TunnelPort, &p.Status, &p.Error, &p.StartedAt, &p.AccessToken); err != nil {
 			return nil, err
 		}
 		p.setURL()
