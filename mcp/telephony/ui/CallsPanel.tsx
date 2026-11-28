@@ -1290,9 +1290,11 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
     setEnding(call.id);
     try {
-      if (phone?.getSnapshot().callId === call.id) await phone.hangup();
-      else await telephony.hangup(call.id);
-      setStatus("call ended");
+      if (phone?.getSnapshot().callId === call.id) { await phone.hangup(); setStatus("call ended"); }
+      else {
+        const result = await telephony.hangup(call.id);
+        setStatus(result?.offer_declined ? "call declined" : result?.ignored ? (result.reason === "no_active_offer" ? "call is still ringing" : "call is being picked up") : "call ended");
+      }
       await loadCalls();
     } catch (e) { setStatus((e as Error).message || "Hangup failed"); }
     finally { setEnding(""); }

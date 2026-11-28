@@ -1,5 +1,5 @@
 export { TelephonyClient, TelephonyOfferExpiredError, telephonyExtension, isTerminalCall, isIncomingBrowserCall } from "./client";
-export type { TelephonyClientOptions, Call, CallSession, CallTermination, DialRequest, AnswerRequest, WatchCallsOptions } from "./client";
+export type { TelephonyClientOptions, Call, CallSession, CallTermination, DialRequest, AnswerRequest, WatchCallsOptions, HangupResult } from "./client";
 export { HeadlessSoftphone, phaseForStatus } from "./softphone";
 export type { SoftphoneSnapshot, SoftphoneOptions, SoftphonePhase, RingbackOptions } from "./softphone";
 export type { AudioRuntime, AudioConnection, MicrophoneDevice, MicrophonePreview } from "./audio";

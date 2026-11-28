@@ -75,6 +75,19 @@ export interface Call {
   /** Present while a transfer of this connected call rings. */
   transfer?: CallTransfer;
 }
+/** A hang-up's outcome. `ignored` means the call goes on: it is being picked
+ * up by another session (`answering_elsewhere`, `no_session_token`) or rings
+ * with no offer of yours (`no_active_offer`). `offer_declined` means your
+ * ringing offer was declined and the call rings on elsewhere. */
+export interface HangupResult {
+  ok?: boolean;
+  call_id?: string;
+  status?: string;
+  ignored?: boolean;
+  reason?: "answering_elsewhere" | "no_session_token" | "no_active_offer" | string;
+  offer_declined?: boolean;
+}
+
 export interface CallControlResult {
   call_id: string;
   hold_state: NonNullable<Call["hold_state"]>;
@@ -480,9 +493,10 @@ export class TelephonyClient {
 
   /** Ends the call. While an inbound call is ringing or being picked up,
    * Telephony ends it only for the session that claimed it, so pass that
-   * session's token; any other client only declines its own ringing. */
-  async hangup(id: string, sessionToken?: string): Promise<void> {
-    await this.post(this.path(`/calls/${callID(id)}/hangup`), sessionToken ? { session_token: sessionToken } : {});
+   * session's token; any other client only declines its own ringing. The
+   * result says when the call was left running. */
+  hangup(id: string, sessionToken?: string): Promise<HangupResult> {
+    return this.post<HangupResult>(this.path(`/calls/${callID(id)}/hangup`), sessionToken ? { session_token: sessionToken } : {});
   }
 
   /** Keep the same carrier call connected. Requires configured hold music. */

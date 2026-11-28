@@ -294,7 +294,7 @@ export class HeadlessSoftphone {
       return placed.call_id;
     } catch (error) {
       if (placed && (this.current(generation) || !attached || this.disposed)) {
-        await this.recoverStartup(placed, generation, () => this.client.hangup(placed!.call_id));
+        await this.recoverStartup(placed, generation, async () => { await this.client.hangup(placed!.call_id); });
       }
       if (this.current(generation)) this.update({ detail: message(error) });
       throw error;
