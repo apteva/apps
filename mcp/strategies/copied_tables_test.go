@@ -43,3 +43,34 @@ func TestCopiedTradingTablesAreUnused(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationsDropTradingCopies(t *testing.T) {
+	ctx := newTestCtx(t)
+	db := ctx.AppDB()
+	for _, table := range append(append([]string{}, copiedTradingTables...), "journal", "trading_observation_sources", "trading_observation_failures") {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("Strategies schema still has Trading table %s", table)
+		}
+	}
+	var dangling int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master m, pragma_foreign_key_list(m.name) p
+		WHERE m.type='table' AND p."table" NOT IN (SELECT name FROM sqlite_master WHERE type='table')`).Scan(&dangling); err != nil {
+		t.Fatal(err)
+	}
+	if dangling != 0 {
+		t.Fatalf("%d foreign keys point at dropped tables", dangling)
+	}
+	pid := mustCreatePortfolio(t, ctx, "Migrated", []string{"equity"})
+	run, err := dbCreateBacktestRun(db, &BacktestRun{ProjectID: "test-proj", PortfolioID: pid, StrategyID: mustCreateStrategy(t, ctx, "Migrated"), StrategyVersion: 1,
+		RunKind: "strategy", Symbols: []string{"AAPL"}, Interval: "1h", StartingCash: 1000, TotalSteps: 1, Name: "migrated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO backtest_market_bars(run_id,step,symbol,asset_class,t,o,h,l,c,source,security_id) VALUES(?,0,'AAPL','equity',1,1,1,1,1,'test','sec-aapl')`, run); err != nil {
+		t.Fatalf("frozen bar with a Trading security id: %v", err)
+	}
+}

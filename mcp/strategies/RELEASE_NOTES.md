@@ -1,3 +1,13 @@
+# Strategies v0.2.1
+
+- Migration 029 drops the 19 Trading tables 0.1.x copied, the rest of the
+  pre-split Trading schema that came with them (journal, alerts, corporate
+  actions, objectives and the like) and the old `trading_observation_*`
+  bookkeeping. Strategies' schema now holds only its own tables.
+- `backtest_market_bars` keeps `security_id` as plain text; its foreign key to
+  the dropped `securities` table goes.
+- Install 0.2.1 only after 0.2.0 has run on that install.
+
 # Strategies v0.2.0
 
 Strategies reads Trading instead of copying it. Requires Trading 0.20.0.
