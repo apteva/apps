@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +143,44 @@ func TestTrendRotationPresetRunsLive(t *testing.T) {
 		if a.Weight > 0.25+1e-9 {
 			t.Fatalf("weight %v over the 25%% cap", a.Weight)
 		}
+	}
+}
+
+// The catalog's simulation block names only what a template changes, and a
+// validated target action carries no empty sizing.
+func TestCatalogJSONIsMinimal(t *testing.T) {
+	raw, err := json.Marshal(strategyCatalog(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog struct {
+		Presets []struct {
+			ID         string                     `json:"id"`
+			Simulation map[string]json.RawMessage `json:"simulation"`
+		} `json:"presets"`
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	shorts := 0
+	for _, p := range catalog.Presets {
+		if p.Simulation == nil {
+			continue
+		}
+		shorts++
+		if len(p.Simulation) != 1 || p.Simulation["shorts"] == nil {
+			t.Fatalf("%s simulation = %v, want only shorts", p.ID, p.Simulation)
+		}
+	}
+	if shorts == 0 {
+		t.Fatal("no preset carries a simulation block")
+	}
+	def := mustTargetDefinition([]string{"BTC-USD", "ETH-USD"}, "1d", 0.5)
+	out, err := json.Marshal(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"sizing"`) {
+		t.Fatalf("target definition echoes empty sizing: %s", out)
 	}
 }

@@ -16,7 +16,7 @@ type strategyPreset struct {
 	Shorts      bool               `json:"shorts,omitempty"` // backtest with simulation.shorts enabled
 	Source      string             `json:"source,omitempty"`
 	Definition  StrategyDefinition `json:"definition"`
-	Simulation  *sim.Config        `json:"simulation,omitempty"` // backtest configuration the template assumes
+	Simulation  map[string]any     `json:"simulation,omitempty"` // simulation fields the template assumes; the rest keep their defaults
 }
 
 func num(v float64) rules.Expr                   { return rules.Number(v) }
@@ -94,7 +94,7 @@ func strategyCatalog(symbols []string) map[string]any {
 	presets := strategyPresets(symbols)
 	for i := range presets {
 		if presets[i].Shorts {
-			presets[i].Simulation = &sim.Config{Shorts: sim.DefaultShorts()}
+			presets[i].Simulation = map[string]any{"shorts": sim.DefaultShorts()}
 		}
 	}
 	return map[string]any{

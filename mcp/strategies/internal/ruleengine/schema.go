@@ -85,7 +85,7 @@ type Action struct {
 	TargetPct          float64    `json:"target_pct,omitempty"`
 	TrailActivationPct float64    `json:"trail_activation_pct,omitempty"`
 	TrailDistancePct   float64    `json:"trail_distance_pct,omitempty"`
-	Sizing             Sizing     `json:"sizing,omitempty"`
+	Sizing             Sizing     `json:"sizing,omitzero"`
 	Group              string     `json:"group,omitempty"`
 }
 

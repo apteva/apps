@@ -195,7 +195,7 @@ func simulationExecutionNotes(spec simulationSpec, inputs []sim.Input) string {
 		if spec.Config.Shorts != nil && spec.Config.Shorts.Enabled {
 			note += " Spot shorts pay borrow and Reg T margin; the simulator has no dividend events, so short results assume total-return adjusted prices."
 			if spec.AdjustmentMode != "" && spec.AdjustmentMode != "total_return" {
-				note += " Warning: this run's bars are " + spec.AdjustmentMode + "-adjusted, so shorts do not pay dividends here."
+				note += " Warning: this run's price adjustment is " + spec.AdjustmentMode + ", not total_return, so shorts do not pay dividends here."
 			}
 		}
 		return note

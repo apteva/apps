@@ -1,3 +1,13 @@
+# Strategies v0.3.2
+
+- `strategy_catalog` presets with shorts list only `{"shorts": ...}` under
+  `simulation`, not every simulator field at zero.
+- The adjustment warning in backtest execution notes reads "price adjustment
+  is provider_adjusted, not total_return" instead of
+  "provider_adjusted-adjusted".
+- Validated rule actions no longer echo an empty `sizing` object on
+  `target` actions.
+
 # Strategies v0.3.1
 
 - The manifest describes the single rules engine. The app description and
