@@ -25,6 +25,7 @@ var platformResourceKinds = map[string][]string{
 	"google": {resourceConversionAction, resourceLeadForm, resourceAudience},
 	"x":      {resourceIdentity, resourceFundingSource, resourceAudience},
 	"reddit": {resourceIdentity, resourceTrackingSource, resourceFundingSource, resourceLeadForm, resourceAudience},
+	"tiktok": {resourceIdentity, resourceAudience},
 }
 
 type discoveredResource struct {
@@ -384,6 +385,9 @@ func (a *App) discoverResources(ctx *sdk.AppCtx, acct *adAccount, kind string) (
 	}
 	if acct.Platform == "reddit" {
 		return a.discoverRedditResources(ctx, acct, kind)
+	}
+	if acct.Platform == "tiktok" {
+		return a.discoverTikTokResources(ctx, acct, kind)
 	}
 	return nil, mcpError("resource discovery unsupported for " + acct.Platform)
 }

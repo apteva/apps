@@ -378,6 +378,7 @@ const PROVIDERS: Record<string, { name: string; integration: string; mark: strin
   google: { name: "Google Ads", integration: "Google Ads", mark: "G", markClass: "bg-white text-blue" },
   x: { name: "X Ads", integration: "X Ads", mark: "X", markClass: "bg-text text-bg" },
   reddit: { name: "Reddit Ads", integration: "Reddit Ads", mark: "R", markClass: "bg-[#ff4500] text-white" },
+  tiktok: { name: "TikTok Ads", integration: "TikTok Ads", mark: "T", markClass: "bg-text text-bg" },
 };
 
 function providerInfo(platform: string) {
@@ -527,6 +528,8 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   reddit_funding_instrument: "Reddit funding source",
   reddit_lead_form: "Reddit lead form",
   reddit_custom_audience: "Reddit audience",
+  tiktok_identity: "TikTok identity",
+  tiktok_audience: "TikTok audience",
 };
 
 const LEAD_QUESTION_OPTIONS = [

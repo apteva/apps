@@ -317,6 +317,8 @@ func (a *App) fetchAnalyticsPoints(ctx *sdk.AppCtx, acct *adAccount, request *ge
 		return a.fetchXAnalytics(ctx, acct, request)
 	case "reddit":
 		return a.fetchRedditAnalytics(ctx, acct, request)
+	case "tiktok":
+		return a.fetchTikTokAnalytics(ctx, acct, request)
 	default:
 		return nil, mcpError("performance reporting is not supported for " + acct.Platform)
 	}
