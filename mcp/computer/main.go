@@ -67,8 +67,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.16.2
+version: 0.17.0
 description: |
+  v0.17.0 adds native_read_list (Android, Mobile 0.8.0+): reads the visible
+  text of one named scrollable list as rows (items, clickable) or one text,
+  optionally swiping 0-10 times, never tapping; guards are rechecked on every
+  screen and text-entry/password fields are skipped. native_replace accepts
+  up to 4096 bytes of Unicode without line breaks (needs Mobile 0.11.0+ for
+  Unicode or text over 256 bytes); native_type stays ASCII up to 256 bytes.
+  After typing, Computer confirms the focused field it typed into holds the
+  text, so placeholder-based targets verify once the placeholder is gone.
   v0.16.2 labels each video_frames image ("Frame N at X.XX s") and marks it
   to be kept across turns (MCP _meta io.apteva/label + io.apteva/retention
   keep). Cores that support it keep the frames after the agent's next
@@ -329,7 +337,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.16.2
+    ref: computer/v0.17.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -818,11 +826,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"native_values":    map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Exact expected values for uniquely identified screen fields, e.g. the active account header."},
 				"native_checked":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "boolean"}, "description": "Android: selector -> required checked state, verified before acting. Supports row scoping, e.g. 'Page name >> android.widget.RadioButton'. Requires Mobile 0.8.0+."},
 				"native_state":     map[string]any{"type": "boolean", "description": "native_select: desired checked state (default true). Already in that state returns native_value=unchanged without tapping."},
-				"native_container": map[string]any{"type": "string", "description": "native_scroll_to: the one scrollable list to swipe inside (resource id, text, description or class)."},
-				"max_swipes":       map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "native_scroll_to: swipe limit (default 8)."},
+				"native_container": map[string]any{"type": "string", "description": "native_scroll_to and native_read_list: the one scrollable list to swipe inside or read (resource id, text, description or class)."},
+				"max_swipes":       map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "description": "native_scroll_to: swipe limit 1-20 (default 8). native_read_list: 0-10 (default 0, the current screen only)."},
+				"native_rows":      map[string]any{"type": "string", "enum": []string{"items", "clickable", "text"}, "description": "native_read_list grouping: items (default; one row per list entry such as a feed post or profile section), clickable (one row per tappable row such as a search result or inbox row) or text (the whole list as one text in reading order, such as a profile)."},
+				"max_items":        map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "native_read_list: row limit (default 20)."},
 				"session_id":       map[string]any{"type": "string"},
 				"read_only":        map[string]any{"type": "boolean", "description": "Only for navigate: explicitly asserts this is a read-only GET. Browserbase may retry a transient network failure once in a fresh page in the same saved context. Never use for an uncertain Save, upload, submission or write; inspect instead."},
-				"action":           map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "native_select", "native_scroll_to", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal", "read_element", "video_frames"}},
+				"action":           map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "native_clear", "native_read", "native_read_list", "native_select", "native_scroll_to", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal", "read_element", "video_frames"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -2902,13 +2912,52 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				checked[key] = want
 			}
 		}
+		if action == "native_read_list" {
+			reader, ok := sess.comp.(interface {
+				NativeReadList(string, []string, map[string]string, mobile.ListReadOptions) (mobile.ListRead, error)
+			})
+			if !ok {
+				return nil, errors.New("native_read_list requires an Android Mobile session")
+			}
+			if stringArg(args, "native_target") != "" || stringArg(args, "text") != "" {
+				return nil, errors.New("native_read_list reads one native_container; it takes no native_target or text")
+			}
+			res, err := reader.NativeReadList(stringArg(args, "native_app"), stringSliceArg(args, "native_required"), values, mobile.ListReadOptions{
+				Container: stringArg(args, "native_container"),
+				Rows:      stringArg(args, "native_rows"),
+				MaxItems:  intArg(args, "max_items"),
+				MaxSwipes: intArg(args, "max_swipes"),
+				Direction: stringArg(args, "direction"),
+				Checked:   checked,
+			})
+			if err != nil {
+				return nil, err
+			}
+			out := map[string]any{"success": true, "session_id": id, "stopped": res.Stopped, "swipes": res.Swipes, "screens": res.Screens}
+			if stringArg(args, "native_rows") == "text" {
+				out["text"] = res.Text
+			} else {
+				rows := res.Rows
+				if rows == nil {
+					rows = []mobile.ListRow{}
+				}
+				out["rows"] = rows
+			}
+			if res.Detail != "" {
+				out["detail"] = res.Detail
+			}
+			return out, nil
+		}
+		if rawArgPresent(args, "native_rows") || rawArgPresent(args, "max_items") {
+			return nil, errors.New("native_rows and max_items are only valid for native_read_list")
+		}
 		opts := mobile.NativeOptions{Checked: checked}
 		if action == "native_scroll_to" {
 			opts.Container = stringArg(args, "native_container")
 			opts.Direction = stringArg(args, "direction")
 			opts.MaxSwipes = intArg(args, "max_swipes")
 		} else if rawArgPresent(args, "native_container") || rawArgPresent(args, "max_swipes") {
-			return nil, errors.New("native_container and max_swipes are only valid for native_scroll_to")
+			return nil, errors.New("native_container and max_swipes are only valid for native_scroll_to and native_read_list")
 		}
 		if raw, supplied := args["native_state"]; supplied && raw != nil {
 			state, ok := raw.(bool)

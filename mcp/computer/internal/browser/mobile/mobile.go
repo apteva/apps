@@ -341,7 +341,7 @@ func (c *Computer) Capabilities() api.Capabilities {
 		actions = append(actions, "native_type_secure")
 	}
 	if c.supportsSelectionState() {
-		actions = append(actions, "native_select", "native_scroll_to")
+		actions = append(actions, "native_select", "native_scroll_to", "native_read_list")
 	}
 	keys := []string{"home", "enter"}
 	if c.lease.Device.Platform == "android" {

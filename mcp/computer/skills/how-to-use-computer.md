@@ -106,6 +106,27 @@ only when needed and confirms the new state: `native_value` is `changed` or
 scrollable `native_container` until `native_target` is visible; it never taps
 and fails at the end of the list or after `max_swipes` (default 8).
 
+`native_read_list` (Mobile 0.8.0+) reads the visible text of one scrollable
+`native_container`, such as a feed, search results or a profile. It never
+taps. `native_rows` groups the rows: `items` (default, one row per list entry;
+single-child wrappers are skipped), `clickable` (one row per tappable row) or
+`text` (the whole list as one text in reading order, screens joined where they
+overlap). `max_items` 1-50 (default 20), `max_swipes` 0-10 (default 0, the
+current screen only), `direction` down or up. Each row is its visible text and
+labels in screen order without duplicates. A row cut off by the list's edge is
+reported, flagged `partial`, only when no later screen shows it whole.
+`stopped` says why reading ended: `end_of_list`, `max_items`, `max_swipes`,
+`time_limit` (about 25 s), `size_limit` (64 KB) or `screen_changed` (a screen
+marker or `native_values` guard stopped matching on a later screen; the rows
+read before are returned). Text-entry and password fields are never read.
+
+`native_type` types printable ASCII (no percent) up to 256 bytes.
+`native_replace` sets any text up to 4096 bytes without line breaks or control
+characters (tab allowed); Unicode or text over 256 bytes needs Mobile 0.11.0+.
+After typing, Computer confirms the focused field is the one it typed into and
+holds the new text, so a target found by its placeholder (`"Add a comment...
+>> android.widget.EditText"`) still verifies once the placeholder is gone.
+
 ## Browser downloads are a three-step lifecycle
 
 A click only dispatches the page action. When it starts a download,
