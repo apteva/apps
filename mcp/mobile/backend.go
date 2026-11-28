@@ -219,9 +219,11 @@ func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
 	switch driver {
 	case "adb":
+		// replace_text_resizable: a replaced field may wrap its text and change
+		// height; verification matches its shape and returns the new bounds.
 		// selection_state: UI source carries checkable/checked/selected/scrollable
 		// on both the bundled collector and the uiautomator dump fallback.
-		out = append(out, "keep_awake", "replace_text", "source_only", "secure_text", "selection_state", "long_press", "drag", "keycode", "wait_for", "health", "baseline")
+		out = append(out, "keep_awake", "replace_text", "replace_text_resizable", "source_only", "secure_text", "selection_state", "long_press", "drag", "keycode", "wait_for", "health", "baseline")
 	case "appium":
 		out = append(out, "structured", "elements", "contexts")
 	case driverXCTest:

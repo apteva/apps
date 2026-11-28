@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.0 — 2026-11-28
+
+- Text replacement no longer fails when the field wraps the new text and
+  changes height (long comments, LinkedIn's comment bar above the keyboard).
+  The check before typing still requires the exact box the caller saw. The
+  check afterwards matches a field with a resource ID by ID, class and text,
+  and accepts an anonymous field that keeps its left and right edges (within
+  2 px), has a positive height no taller than its window, and overlaps its old
+  vertical range, so boxes that grow down, up or both ways pass while focus
+  moving to another field still fails.
+- A verified replacement returns the field's new `bounds`.
+- New device capability `replace_text_resizable`, so Computer can tell this
+  Mobile accepts long replacements.
+
 ## 0.10.0 — 2026-11-27
 
 - Password references: `mobile_action action=secure_text` takes exactly one

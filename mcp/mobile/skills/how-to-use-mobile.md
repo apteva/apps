@@ -39,7 +39,9 @@
    certificates or provisioning profiles manually.
    ADB types printable ASCII. For Unicode or %, use text with replace=true: it
    sets the focused regular field's whole value through accessibility and
-   verifies it (not for password fields).
+   verifies it (not for password fields). Before typing, the field must match
+   expected_bounds exactly; afterwards it may have grown to wrap the text, and
+   the result's bounds field gives its new box (use it for later steps).
 6. `mobile_app` installs runner-local APK/IPA artifacts, launches/stops apps by
    package/bundle ID, and uninstalls only with confirm=true. Mobile does not build
    or sign artifacts. Files must be in the runner's configured artifact directory.
