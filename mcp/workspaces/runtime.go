@@ -121,7 +121,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		Purpose: strArg(args, "purpose"), Profile: profile, Image: image,
 		LifecycleStatus: statusProvisioning, ActivityStatus: activityIdle,
 		HostLabel: hostLabelFor(driver, instanceID), InstanceID: instanceID, Driver: driver, NetworkPolicy: "isolated-egress",
-		CPU: configFloat(app, "default_cpu", 2), MemoryMB: configInt(app, "default_memory_mb", 4096),
+		CPU: dockerCPU(app, driver), MemoryMB: dockerMemoryMB(app, driver),
 		ConsumerApp: consumerApp, ConsumerInstallID: consumerInstallID,
 		OwnerAgentID: ownerAgentID, OwnerThreadID: ownerThreadID, OwnerLabel: ownerLabel,
 		ResourceKind: strArg(args, "resource_kind"), ResourceID: strArg(args, "resource_id"),
@@ -680,4 +680,20 @@ func hostLabel(instanceID int64) string {
 		return fmt.Sprintf("Instance #%d", instanceID)
 	}
 	return "Local Docker"
+}
+
+// dockerCPU and dockerMemoryMB are the limits Containers enforces; the local
+// driver enforces none, so local workspaces store 0.
+func dockerCPU(app *sdk.AppCtx, driver string) float64 {
+	if driver == driverLocal {
+		return 0
+	}
+	return configFloat(app, "default_cpu", 2)
+}
+
+func dockerMemoryMB(app *sdk.AppCtx, driver string) int {
+	if driver == driverLocal {
+		return 0
+	}
+	return configInt(app, "default_memory_mb", 4096)
 }

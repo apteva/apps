@@ -37,42 +37,45 @@ type Workspace struct {
 	Sandbox         string       `json:"sandbox,omitempty"` // local driver only: seatbelt | bwrap | container
 	Capabilities    Capabilities `json:"capabilities"`
 	// Warnings is set only on the create response (not stored).
-	Warnings          []string `json:"warnings,omitempty"`
-	NetworkPolicy     string   `json:"network_policy"`
-	CPU               float64  `json:"cpu"`
-	MemoryMB          int      `json:"memory_mb"`
-	ConsumerApp       string   `json:"consumer_app"`
-	ConsumerInstallID int64    `json:"consumer_install_id,omitempty"`
-	OwnerAgentID      int64    `json:"owner_agent_id,omitempty"`
-	OwnerThreadID     string   `json:"owner_thread_id,omitempty"`
-	OwnerLabel        string   `json:"owner_label"`
-	ResourceKind      string   `json:"resource_kind,omitempty"`
-	ResourceID        string   `json:"resource_id,omitempty"`
-	RepoLabel         string   `json:"repo_label,omitempty"`
-	BranchLabel       string   `json:"branch_label,omitempty"`
-	OriginLabel       string   `json:"origin_label,omitempty"`
-	OriginHref        string   `json:"origin_href,omitempty"`
-	DirtyState        string   `json:"dirty_state"`
-	UnpushedState     string   `json:"unpushed_state"`
-	SourceDigest      string   `json:"source_digest,omitempty"`
-	SourceManifest    []string `json:"source_paths,omitempty"`
-	SourceSyncedAt    string   `json:"source_synced_at,omitempty"`
-	LastError         string   `json:"last_error"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
-	LastActivityAt    string   `json:"last_activity_at"`
-	ExpiresAt         string   `json:"expires_at"`
-	DeleteAt          string   `json:"delete_at"`
-	DestroyedAt       string   `json:"destroyed_at,omitempty"`
-	CurrentCommand    *Command `json:"current_command,omitempty"`
-	Preview           *Preview `json:"preview,omitempty"`
-	ActivityBuckets   []int    `json:"activity_buckets,omitempty"`
-	StorageBytes      int64    `json:"storage_bytes,omitempty"`
-	Kind              string   `json:"kind"`
-	NetworkMode       string   `json:"network_mode,omitempty"`
-	CacheVolumeID     string   `json:"cache_volume_id,omitempty"`
-	CacheKey          string   `json:"cache_key,omitempty"`
-	ResultsExportedAt string   `json:"results_exported_at,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+	// SharedResources is set for local workspaces: what they share with
+	// Apteva, since cpu and memory_mb are not enforced there (both 0).
+	SharedResources   *SharedResources `json:"shared_resources,omitempty"`
+	NetworkPolicy     string           `json:"network_policy"`
+	CPU               float64          `json:"cpu"`
+	MemoryMB          int              `json:"memory_mb"`
+	ConsumerApp       string           `json:"consumer_app"`
+	ConsumerInstallID int64            `json:"consumer_install_id,omitempty"`
+	OwnerAgentID      int64            `json:"owner_agent_id,omitempty"`
+	OwnerThreadID     string           `json:"owner_thread_id,omitempty"`
+	OwnerLabel        string           `json:"owner_label"`
+	ResourceKind      string           `json:"resource_kind,omitempty"`
+	ResourceID        string           `json:"resource_id,omitempty"`
+	RepoLabel         string           `json:"repo_label,omitempty"`
+	BranchLabel       string           `json:"branch_label,omitempty"`
+	OriginLabel       string           `json:"origin_label,omitempty"`
+	OriginHref        string           `json:"origin_href,omitempty"`
+	DirtyState        string           `json:"dirty_state"`
+	UnpushedState     string           `json:"unpushed_state"`
+	SourceDigest      string           `json:"source_digest,omitempty"`
+	SourceManifest    []string         `json:"source_paths,omitempty"`
+	SourceSyncedAt    string           `json:"source_synced_at,omitempty"`
+	LastError         string           `json:"last_error"`
+	CreatedAt         string           `json:"created_at"`
+	UpdatedAt         string           `json:"updated_at"`
+	LastActivityAt    string           `json:"last_activity_at"`
+	ExpiresAt         string           `json:"expires_at"`
+	DeleteAt          string           `json:"delete_at"`
+	DestroyedAt       string           `json:"destroyed_at,omitempty"`
+	CurrentCommand    *Command         `json:"current_command,omitempty"`
+	Preview           *Preview         `json:"preview,omitempty"`
+	ActivityBuckets   []int            `json:"activity_buckets,omitempty"`
+	StorageBytes      int64            `json:"storage_bytes,omitempty"`
+	Kind              string           `json:"kind"`
+	NetworkMode       string           `json:"network_mode,omitempty"`
+	CacheVolumeID     string           `json:"cache_volume_id,omitempty"`
+	CacheKey          string           `json:"cache_key,omitempty"`
+	ResultsExportedAt string           `json:"results_exported_at,omitempty"`
 }
 
 func (w *Workspace) deriveStatus() {
@@ -81,6 +84,13 @@ func (w *Workspace) deriveStatus() {
 		w.Driver = driverContainers
 	}
 	w.Capabilities = capabilitiesFor(w)
+	if w.Driver == driverLocal {
+		// No limit is enforced; rows created before 0.12.4 still store the
+		// Docker defaults, so clear them here rather than only at create.
+		w.CPU, w.MemoryMB = 0, 0
+		shared := sharedResources()
+		w.SharedResources = &shared
+	}
 	if w.LifecycleStatus == statusRunning && w.ActivityStatus == activityExecuting {
 		w.DisplayStatus = "busy"
 	}

@@ -42,6 +42,9 @@ type Capabilities struct {
 	Sessions bool   `json:"sessions"` // persistent shell between commands
 	Preview  bool   `json:"preview"`
 	Images   bool   `json:"images"` // runs any container image
+	// ResourceLimits says cpu and memory_mb are enforced. The local driver
+	// enforces none; its workspaces report shared_resources instead.
+	ResourceLimits bool `json:"resource_limits"`
 }
 
 func capabilitiesFor(w *Workspace) Capabilities {
@@ -53,9 +56,9 @@ func capabilitiesFor(w *Workspace) Capabilities {
 		}
 		return Capabilities{Isolation: "os_sandbox", Sandbox: w.Sandbox, Preview: true}
 	case w.InstanceID > 0:
-		return Capabilities{Isolation: "container", Hardened: true, Preview: true, Images: true}
+		return Capabilities{Isolation: "container", Hardened: true, Preview: true, Images: true, ResourceLimits: true}
 	default:
-		return Capabilities{Isolation: "container", Hardened: true, Sessions: true, Preview: true, Images: true}
+		return Capabilities{Isolation: "container", Hardened: true, Sessions: true, Preview: true, Images: true, ResourceLimits: true}
 	}
 }
 

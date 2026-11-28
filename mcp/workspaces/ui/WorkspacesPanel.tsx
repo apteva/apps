@@ -34,7 +34,8 @@ interface Workspace {
   driver?: string;
   instance_id?: number;
   sandbox?: string;
-  capabilities?: { isolation: string; sandbox?: string; hardened: boolean; sessions: boolean; preview: boolean; images: boolean };
+  capabilities?: { isolation: string; sandbox?: string; hardened: boolean; sessions: boolean; preview: boolean; images: boolean; resource_limits?: boolean };
+  shared_resources?: { cpu: number; memory_mb: number; source: string };
   network_policy: string;
   cpu: number;
   memory_mb: number;
@@ -148,6 +149,20 @@ function duration(command: Command): string {
   if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+// Local workspaces enforce no CPU or memory limit (capabilities.resource_limits
+// false); they share what the machine or Apteva's container has.
+function limitsEnforced(workspace: Workspace) {
+  return workspace.capabilities?.resource_limits !== false;
+}
+
+function sharedResourcesText(workspace: Workspace) {
+  const shared = workspace.shared_resources;
+  if (!shared) return "Shares the resources of the machine running Apteva";
+  const where = shared.source === "container" ? "this container" : "this machine";
+  const memory = shared.memory_mb >= 1024 ? `${Math.round((shared.memory_mb / 1024) * 10) / 10} GB` : `${shared.memory_mb} MB`;
+  return `Shares ${where}: ${shared.cpu} CPU · ${memory}`;
 }
 
 function formatBytes(value?: number): string {
@@ -376,7 +391,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
             <Summary label="Busy" value={summary.busy || 0} tone="blue" />
             <Summary label="Suspended" value={summary.suspended || 0} tone="amber" />
             <Summary label="Failed" value={summary.failed || 0} tone="red" />
-            <div className="ws-summary-resource"><span>Tracked capacity</span><b>{workspaces.reduce((sum, workspace) => sum + (workspace.cpu || 0), 0)} CPU · {Math.round(workspaces.reduce((sum, workspace) => sum + (workspace.memory_mb || 0), 0) / 1024)} GB</b></div>
+            <div className="ws-summary-resource"><span>Docker limits</span><b>{workspaces.filter(limitsEnforced).reduce((sum, workspace) => sum + (workspace.cpu || 0), 0)} CPU · {Math.round(workspaces.filter(limitsEnforced).reduce((sum, workspace) => sum + (workspace.memory_mb || 0), 0) / 1024)} GB</b></div>
           </section>
           <main className="ws-list-shell">
             <div className="ws-table ws-table-head">
@@ -528,7 +543,9 @@ function Overview({ workspace, runtime, runtimeError }: { workspace: Workspace; 
         <div className="ws-card-head"><div><h2>Safety and resources</h2><p>The applied runtime boundary, not raw Docker controls.</p></div></div>
         <dl className="ws-kv">
           <Row label="Runtime" value={runtime?.status || workspace.runtime_status || "Unknown"} sub={runtime?.health_status || workspace.health_status} />
-          <Row label="Limits" value={`${workspace.cpu} CPU · ${workspace.memory_mb} MB RAM`} />
+          {limitsEnforced(workspace)
+            ? <Row label="Limits" value={`${workspace.cpu} CPU · ${workspace.memory_mb} MB RAM`} />
+            : <Row label="Limits" value="Not enforced" sub={sharedResourcesText(workspace)} />}
           <Row label="Storage" value={formatBytes(workspace.storage_bytes)} sub="/workspace + /cache" />
           <Row label="Network" value={workspace.network_policy} sub="Outbound enabled · inbound ports explicit" />
           <Row label="Uncommitted" value={workspace.dirty_state} />
