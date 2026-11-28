@@ -67,8 +67,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.17.0
+version: 0.17.1
 description: |
+  v0.17.1 fixes repeated text in native_read_list native_rows=text: screens
+  are joined where they overlap even when a line shows on only one of them
+  (a control scrolled out at the edge, a label loaded late), so a block seen
+  on two screens is read once.
   v0.17.0 adds native_read_list (Android, Mobile 0.8.0+): reads the visible
   text of one named scrollable list as rows (items, clickable) or one text,
   optionally swiping 0-10 times, never tapping; guards are rechecked on every
@@ -337,7 +341,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: computer/v0.17.0
+    ref: computer/v0.17.1
     entry: mcp/computer
   port: 8080
   health_check: /health
