@@ -55,6 +55,13 @@ var audienceCapabilities = map[string]audienceCapability{
 		Operations: []string{"list", "get", "create", "update", "delete", "members_sync", "usage", "refresh"},
 		SyncModes:  []string{"add", "remove"}, Sources: []string{"storage", "crm_segment"},
 	},
+	// TikTok creates a customer list together with its first member file, so
+	// customer lists are discovered and targetable but not created or synced
+	// here yet. Lookalikes of a discovered list can be created.
+	"tiktok": {
+		Kinds:      []string{"customer_list", "lookalike"},
+		Operations: []string{"list", "get", "create", "update", "delete", "usage", "refresh"},
+	},
 }
 
 type audienceJob struct {
@@ -290,6 +297,19 @@ func (a *App) audienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		legacy["subtype"] = "CRM"
 		parsed, _ = platformAdapters[acct.Platform].AudienceCreateCustom(a, ctx, acct, def, legacy)
 		providerErr = mcpResultError(parsed)
+	case "tiktok":
+		if kind != "lookalike" {
+			return mcpError("TikTok customer lists are created with their first member file; this app creates TikTok lookalikes only"), nil
+		}
+		sourceID := int64(intArg(args, "source_audience_id", 0))
+		source, err := a.getResource(ctx, acct, sourceID)
+		if err != nil || source.Kind != resourceAudience || normalizedAudienceType(firstString(source.Metadata, "type")) == "lookalike" {
+			return mcpError("source_audience_id must reference a source audience in this ad account"), nil
+		}
+		legacy := cloneMap(args)
+		legacy["source_audience_id"] = source.NativeID
+		parsed, _ = platformAdapters[acct.Platform].AudienceCreateLookalike(a, ctx, acct, def, legacy)
+		providerErr = mcpResultError(parsed)
 	case "reddit":
 		if kind == "saved_targeting" {
 			parsed, providerErr = a.execIntegrationTool(ctx, acct, "create_saved_audience", map[string]any{"ad_account_id": acct.NativeAccountID, "data": map[string]any{"name": name, "description": stringArgAny(args, "description"), "targeting": args["targeting"]}})
@@ -372,6 +392,11 @@ func (a *App) toolAudienceUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		parsed, errOut = a.execIntegrationTool(ctx, acct, "data_manager_user_list_update", input)
 	case "x":
 		parsed, errOut = a.execIntegrationTool(ctx, acct, "update_custom_audience", map[string]any{"account_id": acct.NativeAccountID, "custom_audience_id": resource.NativeID, "name": name, "description": description})
+	case "tiktok":
+		if name == "" {
+			return mcpError("name required; TikTok audiences have no description"), nil
+		}
+		parsed, errOut = a.execIntegrationTool(ctx, acct, "custom_audience_update", map[string]any{"advertiser_id": acct.NativeAccountID, "custom_audience_id": resource.NativeID, "custom_audience_name": name})
 	case "reddit":
 		if resource.ProviderType != "reddit_saved_audience" {
 			return mcpError("Reddit customer-list metadata cannot be updated after creation"), nil
@@ -410,7 +435,7 @@ func (a *App) toolAudienceDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if len(resultRows(usage)) > 0 && !boolArg(args, "force") {
 		return mcpError("audience is used by active targeting; remove it first or set force=true"), nil
 	}
-	tool := map[string]string{"meta": "audience_delete", "google": "data_manager_user_list_delete", "x": "delete_custom_audience", "reddit": "delete_custom_audience"}[acct.Platform]
+	tool := map[string]string{"meta": "audience_delete", "google": "data_manager_user_list_delete", "x": "delete_custom_audience", "reddit": "delete_custom_audience", "tiktok": "custom_audience_delete"}[acct.Platform]
 	input := map[string]any{}
 	switch acct.Platform {
 	case "meta":
@@ -425,6 +450,8 @@ func (a *App) toolAudienceDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 		input["user_list_id"] = resource.NativeID
 	case "x":
 		input = map[string]any{"account_id": acct.NativeAccountID, "custom_audience_id": resource.NativeID}
+	case "tiktok":
+		input = map[string]any{"advertiser_id": acct.NativeAccountID, "custom_audience_ids": []any{resource.NativeID}}
 	case "reddit":
 		if resource.ProviderType == "reddit_saved_audience" {
 			tool = "delete_saved_audience"

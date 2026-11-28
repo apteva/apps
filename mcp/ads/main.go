@@ -234,6 +234,32 @@ var platforms = map[string]platformDef{
 		AudienceCreateLookalikeTool: "",
 		AccountIDInputField:         "ad_account_id",
 	},
+	"tiktok": {
+		Platform:                    "tiktok",
+		IntegrationSlug:             "tiktok-ads",
+		DisplayName:                 "TikTok Ads",
+		NativeIDFormat:              "numeric advertiser_id",
+		ListAccountsTool:            "list_advertisers",
+		CampaignCreateTool:          "campaign_create",
+		CampaignListTool:            "campaign_list",
+		CampaignUpdateTool:          "campaign_update",
+		CampaignDeleteTool:          "campaign_update_status",
+		AdSetCreateTool:             "adgroup_create",
+		AdSetListTool:               "adgroup_list",
+		AdSetUpdateTool:             "adgroup_update",
+		AdSetDeleteTool:             "adgroup_update_status",
+		AdCreateTool:                "ad_create",
+		AdListTool:                  "ad_list",
+		AdUpdateTool:                "ad_update",
+		AdDeleteTool:                "ad_delete",
+		CreativeUploadImageTool:     "image_upload",
+		CreativeUploadVideoTool:     "video_upload",
+		CreativeAssetStatusTool:     "video_info",
+		AudienceListTool:            "custom_audience_list",
+		AudienceCreateCustomTool:    "",
+		AudienceCreateLookalikeTool: "lookalike_create",
+		AccountIDInputField:         "advertiser_id",
+	},
 }
 
 type platformAdapter interface {
@@ -268,6 +294,7 @@ var platformAdapters = map[string]platformAdapter{
 	"google": googleAdapter{},
 	"x":      xRedditAdapter{},
 	"reddit": xRedditAdapter{},
+	"tiktok": tiktokAdapter{},
 }
 
 var globalCtx *sdk.AppCtx
@@ -457,7 +484,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "account_add",
 			Description: "Begin connecting an ads account. Returns authorize_url + pending_account_id; visit the URL to authorize. " +
 				"After OAuth completes, call account_list_pending_pages to pick a specific ad account, then account_finalize. " +
-				"Args: platform (meta|google|x|reddit), connection_id? (reuse a specific active integration connection), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
+				"Args: platform (meta|google|x|reddit|tiktok), connection_id? (reuse a specific active integration connection), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
 			InputSchema: schemaObject(map[string]any{
 				"platform":      map[string]any{"type": "string", "enum": platformKeys()},
 				"connection_id": map[string]any{"type": "integer", "description": "Active provider connection to reuse. Use when more than one connection exists for the platform."},
@@ -1151,16 +1178,28 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "ad_create",
 			Description: "Create an ad. Meta, X and Reddit reference an existing creative via creative_id. " +
+				"TikTok embeds the creative in the ad: pass format (video|image|carousel), primary_text, " +
+				"destination_url, call_to_action?, video_id or image_hash (ids from creative_upload), " +
+				"thumbnail_hash? (video cover) and identity_resource_id?. " +
 				"Google Ads embeds the ad format in the ad itself: pass headlines + descriptions + final_urls to " +
 				"build a Responsive Search Ad (Google has served RSA-only since 2022), or platform_options.ad for " +
 				"any other Google ad format. " +
 				"Args: ad_account_id, adset_id, name, creative_id (Meta/X/Reddit), headlines?, descriptions?, " +
 				"final_urls?, path1?, path2?, status? (PAUSED|ACTIVE), platform_options.",
 			InputSchema: schemaObject(map[string]any{
-				"ad_account_id": map[string]any{"type": "integer"},
-				"adset_id":      map[string]any{"type": "string"},
-				"name":          map[string]any{"type": "string"},
-				"creative_id":   map[string]any{"type": "string", "description": "Required by Meta, X and Reddit. Google embeds the format in the ad."},
+				"ad_account_id":        map[string]any{"type": "integer"},
+				"adset_id":             map[string]any{"type": "string"},
+				"name":                 map[string]any{"type": "string"},
+				"creative_id":          map[string]any{"type": "string", "description": "Required by Meta, X and Reddit. Google and TikTok embed the creative in the ad."},
+				"format":               map[string]any{"type": "string", "enum": []string{"video", "image", "carousel"}, "description": "TikTok only."},
+				"primary_text":         map[string]any{"type": "string", "description": "TikTok ad text."},
+				"destination_url":      map[string]any{"type": "string", "description": "TikTok landing page."},
+				"call_to_action":       map[string]any{"type": "string", "description": "TikTok call_to_action, e.g. LEARN_MORE or SHOP_NOW."},
+				"video_id":             map[string]any{"type": "string", "description": "TikTok video_id from creative_upload."},
+				"image_hash":           map[string]any{"type": "string", "description": "TikTok image_id from creative_upload."},
+				"thumbnail_hash":       map[string]any{"type": "string", "description": "TikTok image_id used as the video cover."},
+				"cards":                map[string]any{"type": "array", "description": "TikTok carousel: [{image_hash}]."},
+				"identity_resource_id": map[string]any{"type": "integer", "description": "TikTok identity to post as; defaults to the account's default identity."},
 				"headlines": map[string]any{
 					"type": "array", "minItems": rsaMinHeadlines, "maxItems": rsaMaxHeadlines,
 					"description": "Google RSA headlines (3-15). Each is {text, pinned_field?}; pinned_field is headline_1|headline_2|headline_3.",
@@ -2034,6 +2073,7 @@ var adsPlatformOptions = []adsPlatformOption{
 	{Platform: "google", DisplayName: "Google Ads", IntegrationSlug: "google-ads", Supported: true},
 	{Platform: "x", DisplayName: "X Ads", IntegrationSlug: "twitter-ads", Supported: true},
 	{Platform: "reddit", DisplayName: "Reddit Ads", IntegrationSlug: "reddit-ads", Supported: true},
+	{Platform: "tiktok", DisplayName: "TikTok Ads", IntegrationSlug: "tiktok-ads", Supported: true},
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
@@ -2181,6 +2221,9 @@ func (a *App) execIntegrationTool(ctx *sdk.AppCtx, acct *adAccount, tool string,
 
 func providerRateLimited(res *sdk.ExecuteResult, body string) bool {
 	if res != nil && res.Status == http.StatusTooManyRequests {
+		return true
+	}
+	if tiktokRateLimitedBody(body) {
 		return true
 	}
 	upper := strings.ToUpper(body)

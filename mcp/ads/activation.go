@@ -131,6 +131,9 @@ func (a *App) loadDeliveryEntity(
 	if acct.Platform == "x" || acct.Platform == "reddit" {
 		return a.loadXRedditDeliveryEntity(ctx, acct, campaignID, adSetID, adID, entity)
 	}
+	if acct.Platform == "tiktok" {
+		return a.loadTikTokDeliveryEntity(ctx, acct, campaignID, adSetID, adID, entity)
+	}
 	return a.loadMetaDeliveryEntity(ctx, acct, def, campaignID, adSetID, adID, entity)
 }
 
@@ -328,6 +331,10 @@ func (a *App) activateDeliveryEntity(
 		case "campaign":
 			tool, input = def.CampaignUpdateTool, map[string]any{"account_id": acct.NativeAccountID, "campaign_id": state.ID, "entity_status": "ACTIVE"}
 		}
+	} else if acct.Platform == "tiktok" {
+		tool = map[string]string{"ad": "ad_update_status", "adset": "adgroup_update_status", "campaign": "campaign_update_status"}[state.Entity]
+		field := map[string]string{"ad": "ad_ids", "adset": "adgroup_ids", "campaign": "campaign_ids"}[state.Entity]
+		input = map[string]any{"advertiser_id": acct.NativeAccountID, field: []any{state.ID}, "operation_status": "ENABLE"}
 	} else if acct.Platform == "reddit" {
 		switch state.Entity {
 		case "ad":
