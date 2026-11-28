@@ -60,14 +60,27 @@ func strategyPresets(symbols []string) []strategyPreset {
 	z := op("/", op("-", ref("ratio"), rules.Expr{Metric: "sma", Period: 60, Input: exprPtr(ref("ratio"))}), rules.Expr{Metric: "stddev", Period: 60, Input: exprPtr(ref("ratio"))})
 	flatKO := op("==", rules.Expr{Metric: "position_qty", Symbol: "KO"}, num(0))
 	half := rules.Sizing{Mode: "equity_pct", Amount: 0.45}
+	absZ := op("abs", ref("z"))
+	// A spread that keeps widening or never reverts is closed: past |z| 3.5 or
+	// after 60 bars in the trade. The pair then waits for the spread to come
+	// back inside ±0.5 before it may trade again.
+	stopped := op("or", op(">", absZ, num(3.5)), op(">=", ref("held"), num(60)))
+	canEnter := func(cond rules.Expr) *rules.Expr {
+		return exprPtr(op("and", cond, flatKO, op("==", ref("armed"), num(1))))
+	}
+	resetHeld := rules.Action{Kind: "set", Name: "held", Value: exprPtr(num(0))}
 	pairs := &rules.Program{Version: rules.Version, Symbols: []string{"KO", "PEP"}, Timeframe: "1d", Timezone: "America/New_York",
 		Calculations: map[string]rules.Expr{"ratio": ratio, "z": z},
+		Initial:      map[string]float64{"held": 0, "armed": 1},
 		Rules: []rules.Rule{
-			{ID: "short_ko", On: "bar.close", When: exprPtr(op("and", op(">", ref("z"), num(2)), flatKO)), Actions: []rules.Action{{Kind: "enter", Symbol: "KO", Side: "sell", Sizing: half}}},
-			{ID: "long_pep", On: "bar.close", When: exprPtr(op("and", op(">", ref("z"), num(2)), flatKO)), Actions: []rules.Action{{Kind: "enter", Symbol: "PEP", Side: "buy", Sizing: half}}},
-			{ID: "long_ko", On: "bar.close", When: exprPtr(op("and", op("<", ref("z"), num(-2)), flatKO)), Actions: []rules.Action{{Kind: "enter", Symbol: "KO", Side: "buy", Sizing: half}}},
-			{ID: "short_pep", On: "bar.close", When: exprPtr(op("and", op("<", ref("z"), num(-2)), flatKO)), Actions: []rules.Action{{Kind: "enter", Symbol: "PEP", Side: "sell", Sizing: half}}},
-			{ID: "exit", On: "bar.close", When: exprPtr(op("and", op("<", op("abs", ref("z")), num(0.5)), op("not", flatKO))), Actions: []rules.Action{{Kind: "flatten"}}},
+			{ID: "rearm", On: "bar.close", When: exprPtr(op("<", absZ, num(0.5))), Actions: []rules.Action{{Kind: "set", Name: "armed", Value: exprPtr(num(1))}}},
+			{ID: "count", On: "bar.close", When: exprPtr(op("not", flatKO)), Actions: []rules.Action{{Kind: "set", Name: "held", Value: exprPtr(op("+", ref("held"), num(1)))}}},
+			{ID: "stop", On: "bar.close", When: exprPtr(op("and", op("not", flatKO), op(">=", absZ, num(0.5)), stopped)), Actions: []rules.Action{{Kind: "set", Name: "armed", Value: exprPtr(num(0))}, {Kind: "flatten"}}},
+			{ID: "exit", On: "bar.close", When: exprPtr(op("and", op("<", absZ, num(0.5)), op("not", flatKO))), Actions: []rules.Action{{Kind: "flatten"}}},
+			{ID: "short_ko", On: "bar.close", When: canEnter(op(">", ref("z"), num(2))), Actions: []rules.Action{resetHeld, {Kind: "enter", Symbol: "KO", Side: "sell", Sizing: half}}},
+			{ID: "long_pep", On: "bar.close", When: canEnter(op(">", ref("z"), num(2))), Actions: []rules.Action{{Kind: "enter", Symbol: "PEP", Side: "buy", Sizing: half}}},
+			{ID: "long_ko", On: "bar.close", When: canEnter(op("<", ref("z"), num(-2))), Actions: []rules.Action{resetHeld, {Kind: "enter", Symbol: "KO", Side: "buy", Sizing: half}}},
+			{ID: "short_pep", On: "bar.close", When: canEnter(op("<", ref("z"), num(-2))), Actions: []rules.Action{{Kind: "enter", Symbol: "PEP", Side: "sell", Sizing: half}}},
 		}}
 	return []strategyPreset{
 		{ID: "trend_rotation", Name: "Trend rotation", Description: "Monthly: hold up to four symbols that are above their 200-day average, chosen by 6-month return, equal weight, 25% cap. Long only; runs live.",
@@ -85,7 +98,7 @@ func strategyPresets(symbols []string) []strategyPreset {
 			Description: "Daily long/short on an imported sentiment score (feature sentiment.score in [-1, 1]), dollar neutral. Each score's available_at must be before the close it trades on.",
 			Definition:  presetDefinition(&rules.Program{Version: rules.Version, Symbols: symbols, Timeframe: "1d", Timezone: "America/New_York", Rules: []rules.Rule{{ID: "sentiment", On: "bar.close", Actions: []rules.Action{target(sentiment, rules.Construct{Normalize: "legs", Gross: 1, MinTradePct: 0.5})}}}})},
 		{ID: "pairs_ko_pep", Name: "Pairs: KO / PEP", Shorts: true, Source: "Gatev, Goetzmann & Rouwenhorst (2006)",
-			Description: "Trade the KO/PEP price ratio: when its 60-day z-score passes ±2, short the rich leg and buy the cheap one; flatten when it returns inside ±0.5.",
+			Description: "Trade the KO/PEP price ratio: when its 60-day z-score passes ±2, short the rich leg and buy the cheap one; flatten when it returns inside ±0.5. Stops out past ±3.5 or after 60 bars, then waits for the spread to revert inside ±0.5 before trading again.",
 			Definition:  presetDefinition(pairs)},
 	}
 }

@@ -1,3 +1,12 @@
+# Strategies v0.3.3
+
+- The `pairs_ko_pep` preset stops out. It flattens when the spread's z-score
+  passes ±3.5 or after 60 bars in a trade, then waits for the spread to come
+  back inside ±0.5 before trading again. Before, it held a diverging spread
+  until it reverted. On 2 years of KO/PEP daily bars (10 bps fees, 5 bps
+  slippage) the preset went from -20.7% (max drawdown -22.6%) to -4.0%
+  (max drawdown -6.7%).
+
 # Strategies v0.3.2
 
 - `strategy_catalog` presets with shorts list only `{"shorts": ...}` under

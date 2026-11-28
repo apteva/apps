@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: strategies
 display_name: Strategies
-version: 0.3.2
+version: 0.3.3
 description: Rule-program strategies from single-instrument trade rules to 500-symbol long/short books, with one engine
   for event backtests, validation and live assignments, plus scheduling, research and performance attribution.
   Integrates with Trading for market data, authoritative portfolios and order execution.
@@ -183,7 +183,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: strategies/v0.3.2
+    ref: strategies/v0.3.3
     entry: mcp/strategies
   port: 8080
   health_check: /health

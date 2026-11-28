@@ -184,3 +184,65 @@ func TestCatalogJSONIsMinimal(t *testing.T) {
 		t.Fatalf("target definition echoes empty sizing: %s", out)
 	}
 }
+
+// A KO/PEP spread that diverges and keeps going is stopped out instead of
+// held, and the pair stays out until the spread reverts.
+func TestPairsPresetStopsOnDivergence(t *testing.T) {
+	var p strategyPreset
+	for _, each := range strategyPresets(nil) {
+		if each.ID == "pairs_ko_pep" {
+			p = each
+		}
+	}
+	program := p.Definition.Program
+	rng := rand.New(rand.NewSource(3))
+	start := time.Date(2025, 1, 1, 21, 0, 0, 0, time.UTC)
+	var tape []sim.Input
+	for d := 0; d < 200; d++ {
+		at := start.Add(time.Duration(d) * 24 * time.Hour)
+		ko := 100 * (1 + rng.NormFloat64()*0.002)
+		if d >= 100 {
+			ko *= math.Pow(1.02, float64(d-99)) // KO runs away from PEP and never comes back
+		}
+		for s, close := range map[string]float64{"KO": ko, "PEP": 100 * (1 + rng.NormFloat64()*0.002)} {
+			tape = append(tape,
+				sim.Input{ID: fmt.Sprintf("q/%s/%d", s, d), Type: "market.quote", Symbol: s, Source: "synthetic", EventTime: at, AvailableAt: at, Data: map[string]float64{"price": close, "volume": 1e6}},
+				sim.Input{ID: fmt.Sprintf("b/%s/%d", s, d), Type: "market.bar.close", Symbol: s, Source: "synthetic", EventTime: at, AvailableAt: at.Add(24 * time.Hour), Data: map[string]float64{"price": close, "open": close, "high": close * 1.001, "low": close * 0.999, "volume": 1e6}, Metadata: map[string]string{"timeframe": "1d"}})
+		}
+	}
+	config := sim.Config{Seed: 1, StartingCash: 1e5, Costs: sim.Costs{QtyStep: 1}, Shorts: sim.DefaultShorts()}
+	strategy, err := rules.Strategy(program, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs, err := rules.ScheduleInputs(program, tape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := sim.New(config, inputs, nil, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for !e.State.Finished {
+		if _, err := e.Advance(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runaway := start.Add(100 * 24 * time.Hour)
+	var late []string
+	for _, o := range e.State.Orders {
+		if o.Status == "filled" && !o.SubmittedAt.Before(runaway) {
+			late = append(late, o.Tag+"/"+o.Symbol)
+		}
+	}
+	// One short-KO/long-PEP entry into the runaway, both legs stopped, nothing after.
+	got := strings.Join(late, " ")
+	if len(late) != 4 || !strings.HasPrefix(got, "short_ko/KO long_pep/PEP") || strings.Count(got, "stop/") != 2 {
+		t.Fatalf("filled orders after the divergence = %q", got)
+	}
+	for symbol, pos := range e.State.Positions {
+		if pos.Qty != 0 {
+			t.Fatalf("still holding %s %v after the stop", symbol, pos.Qty)
+		}
+	}
+}
