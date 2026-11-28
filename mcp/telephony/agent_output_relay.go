@@ -121,12 +121,12 @@ func (l *agentCoreLink) deliverOutput(writer *agentRelayWriter) {
 		}
 		if len(m.metadata) > 0 {
 			if err := writer.Write(ws.OpText, m.metadata); err != nil {
-				l.event("local_renderer_write_error", 0)
+				l.rendererWriteFailed(err)
 				return
 			}
 		}
 		if err := writer.Write(m.message.op, m.message.data); err != nil {
-			l.event("local_renderer_write_error", 0)
+			l.rendererWriteFailed(err)
 			return
 		}
 		if n > 0 {
@@ -137,6 +137,14 @@ func (l *agentCoreLink) deliverOutput(writer *agentRelayWriter) {
 				l.event("core_media_resumed", 0)
 			}
 		}
+	}
+}
+
+// rendererWriteFailed notes a failed write to the bridge, unless the bridge
+// already closed its side and the output is simply no longer wanted.
+func (l *agentCoreLink) rendererWriteFailed(err error) {
+	if !errors.Is(err, errAgentRelayClosing) {
+		l.event("local_renderer_write_error", 0)
 	}
 }
 

@@ -165,6 +165,8 @@ test("installed headless client talks through real Telephony with host-owned UI"
       navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>{w.resolveMic=resolve;});
       w.cancelledTalk=w.callListener.startTalking();
     });
+    // The first press loads the capture module before it asks for the device.
+    await observer.waitForFunction(()=>typeof (window as any).resolveMic==="function");
     await observer.evaluate(async()=>{
       const w=window as any;w.callListener.stopTalking();const stream=await w.realMic();w.resolveMic(stream);await w.cancelledTalk;
       w.lateTrackStopped=stream.getTracks().every((t:MediaStreamTrack)=>t.readyState==='ended');

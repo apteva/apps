@@ -157,6 +157,13 @@ func (s *websocketCloseState) SetLeg(leg mediaCloseLeg, code ws.StatusCode, reas
 	s.reason = reason
 }
 
+// Explicit reports the close recorded by a failure, if any.
+func (s *websocketCloseState) Explicit() (ws.StatusCode, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.code, s.reason, s.set
+}
+
 func (s *websocketCloseState) Details() (ws.StatusCode, string) {
 	_, code, reason := s.Cause()
 	return code, reason

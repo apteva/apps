@@ -123,6 +123,8 @@ export class HeadlessSoftphone {
   private autoPrepared=false;
   private automaticAnswerStartedAt?:number;
   private observedOffers=new Map<string,Call>();
+  /** The call an answer is under way for, before its session arrives. */
+  private answeringCallId?: string;
   // One ring-time connection per idle tab, for one offered call.
   private standby?:{callId:string;ref:AudioRef;audio:AudioConnection;abort:AbortController;id?:string;ready?:boolean;claiming?:boolean};
   private standbyTried=new Set<string>();
@@ -292,7 +294,7 @@ export class HeadlessSoftphone {
       return placed.call_id;
     } catch (error) {
       if (placed && (this.current(generation) || !attached || this.disposed)) {
-        await this.recoverStartup(placed, generation, () => this.client.hangup(placed!.call_id));
+        await this.recoverStartup(placed, generation, async () => { await this.client.hangup(placed!.call_id); });
       }
       if (this.current(generation)) this.update({ detail: message(error) });
       throw error;
@@ -351,6 +353,11 @@ export class HeadlessSoftphone {
   }
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
     const clickedAt = new Date().toISOString();
+    this.answeringCallId = id;
+    try { return await this.answerCall(id, request, clickedAt); }
+    finally { if (this.answeringCallId === id) this.answeringCallId = undefined; }
+  }
+  private async answerCall(id: string, request: AnswerRequest, clickedAt: string): Promise<void> {
     if(!request.auto_answer_session)this.autoAnswer.cancel(id);
     // A ready ring-time connection for this call lets the answer skip setup.
     const standby=this.standby;
@@ -421,6 +428,7 @@ export class HeadlessSoftphone {
           : diagnostic.code ?? (attached ? "audio_attach_failed" : "answer_request_failed");
         void this.client.reportOfferEvent({
           ...offerEvidence, stage: "answer_failed", code, request_id: requestID ?? diagnostic.requestId,
+          session_generation: claimed?.session_generation,
         }).catch(() => {});
       }
       if (!attached && this.current(generation)) {
@@ -525,12 +533,23 @@ export class HeadlessSoftphone {
       this.runtime.cancelPreparation?.();
       return;
     }
+    // An inbound pick-up whose audio is not live yet gives the call back to
+    // routing instead of ending it for the caller.
+    const pickingUp = !this.outbound && !this.hasLiveAudio && Boolean(session.session_token);
     const generation = this.invalidate();
     this.stopAudio();
     this.update({ busy: true, audioState: "ended" });
     const pending = (async () => {
       try {
-        await this.client.hangup(session.call_id);
+        let released = false;
+        if (pickingUp) {
+          try { await this.client.release(session); released = true; }
+          catch (error) {
+            // 409: the call connected meanwhile, so it is hung up instead.
+            if ((error as { status?: number })?.status !== 409) throw error;
+          }
+        }
+        if (!released) await this.client.hangup(session.call_id, session.session_token);
         if (this.current(generation)) this.clearCall();
       } catch (error) {
         if (this.current(generation)) {
@@ -543,6 +562,22 @@ export class HeadlessSoftphone {
     this.hangingUp = pending;
     try { await pending; }
     finally { if (this.hangingUp === pending) this.hangingUp = undefined; }
+  }
+
+  /** One safe cancel for host apps, whatever the call's state. It declines
+   * this browser's ringing offers for the call, gives back a pick-up that is
+   * still connecting, and hangs up a connected call. It never ends a call that
+   * another tab or device is answering. */
+  async cancel(id?: string): Promise<void> {
+    this.assertOpen();
+    const session = this.session;
+    if (session && (!id || session.call_id === id)) return this.hangup();
+    if (!session && this.answeringCallId && (!id || this.answeringCallId === id)) return this.hangup();
+    if (!id) return;
+    this.autoAnswer.cancel(id);
+    const offers = this.observedOffers.get(id)?.ring_offers?.filter(offer => offer.kind === "browser") ?? [];
+    // An offer may have expired or moved on meanwhile; the call is unaffected.
+    await Promise.all(offers.map(offer => this.client.declineOffer(id, offer.id).catch(() => {})));
   }
 
   /** Call controls act on this controller's current call, never dial a new leg. */

@@ -89,6 +89,16 @@ this Telephony change does not alter the SDK's own module-loading policy.
   If placement is already in flight, the controller stays busy until its outcome
   is known and attempts to hang up any accepted leg. Local audio stops immediately
   when hanging up an identified call; failed hangup retains controls for retry.
+- During an inbound pick-up whose audio is not live yet, `hangup()` releases the
+  claim instead: the caller stays on the line and routing offers the call again.
+  Hang-ups carry the answer session's token. While a call is being picked up, the
+  server ignores any other hang-up, including one from another tab of the same
+  adviser.
+- `cancel(callId?)` is the one safe "stop this call on this browser" action for
+  host UIs: it declines this browser's ringing offers, releases a pick-up in
+  progress, and hangs up only a call this controller is connected to. It never
+  ends a call another browser is picking up. Prefer it over `hangup()` for
+  dismiss, close-panel and navigation handlers.
 - Reconnecting your own call uses `join(callId)` or `answer(callId,
   { rejoin: true })`; taking another user’s call requires `takeover(callId)` and
   explicit supervisor permission.

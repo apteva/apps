@@ -104,6 +104,64 @@ type agentCoreLink struct {
 	outputProgress chan struct{}
 	rejects        func(realtimeBridgeControl) bool
 	discarded      func(realtimeBridgeControl, int) []byte
+	// Why the link ends, sent to Core in its Close frame. The bridge's own
+	// Close wins; localClosed is closed when it has arrived.
+	closeMu        sync.Mutex
+	closeSet       bool
+	closeCode      ws.StatusCode
+	closeReason    string
+	localClosed    chan struct{}
+	localCloseOnce sync.Once
+	parent         context.Context
+}
+
+// endWith records why the link ends unless a reason is already known.
+func (l *agentCoreLink) endWith(code ws.StatusCode, reason string) {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+	if !l.closeSet {
+		l.closeSet, l.closeCode, l.closeReason = true, code, reason
+	}
+}
+
+// bridgeClosed records the Close the bridge sent, so Core receives its
+// code and reason.
+func (l *agentCoreLink) bridgeClosed(code ws.StatusCode, reason string) {
+	if code == ws.StatusNoStatusRcvd {
+		code = ws.StatusNormalClosure
+	}
+	l.endWith(code, reason)
+	l.localCloseOnce.Do(func() { close(l.localClosed) })
+}
+
+// closeStatus is the Close frame Core receives. A call that ended without
+// the bridge saying why is a normal end; a link that failed on its own is not.
+func (l *agentCoreLink) closeStatus() (ws.StatusCode, string) {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+	if l.closeSet {
+		return l.closeCode, l.closeReason
+	}
+	if l.parent.Err() != nil {
+		return ws.StatusNormalClosure, "call ended"
+	}
+	return ws.StatusInternalServerError, "telephony Core link failed"
+}
+
+// closeRemote ends a Core connection with a Close frame, so Core records why
+// the audio stopped instead of a transport error, and waits for Core's reply
+// up to the forced close timeout. ended carries the connection's reader result.
+func (l *agentCoreLink) closeRemote(writer *agentRelayWriter, ended <-chan error) {
+	code, reason := l.closeStatus()
+	if writer.writeClose(code, reason, websocketForcedCloseTimeout) != nil {
+		return
+	}
+	timer := time.NewTimer(websocketForcedCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-ended:
+	case <-timer.C:
+	}
 }
 
 func (l *agentCoreLink) snapshot() agentCoreLinkSnapshot {
@@ -114,7 +172,12 @@ func (l *agentCoreLink) snapshot() agentCoreLinkSnapshot {
 	v.Events = append([]agentCoreLinkEvent(nil), l.stats.Events...)
 	return v
 }
-func (l *agentCoreLink) Close() error { l.cancel(); _ = l.peer.Close(); return l.Conn.Close() }
+func (l *agentCoreLink) Close() error {
+	l.endWith(ws.StatusGoingAway, "telephony bridge closed")
+	l.cancel()
+	_ = l.peer.Close()
+	return l.Conn.Close()
+}
 func (l *agentCoreLink) discard(m agentLinkMessage) {
 	if m.op == ws.OpBinary {
 		l.mu.Lock()
@@ -203,6 +266,7 @@ func (l *agentCoreLink) sendReceipt(raw []byte) {
 	}
 	if err := l.sendControl(agentLinkMessage{op: ws.OpText, data: raw, at: time.Now()}); err != nil && l.ctx.Err() == nil {
 		l.event("core_control_exhausted", 0)
+		l.endWith(ws.StatusInternalServerError, "telephony control queue exhausted")
 		l.cancel()
 	}
 }
@@ -312,8 +376,10 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 
 func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl), options ...agentCoreLinkOptions) *agentCoreLink {
 	client, peer := net.Pipe()
-	ctx, cancel := context.WithCancel(parent)
-	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), controlReady: make(chan struct{}, 1), interrupt: interrupt}
+	// The call's end does not cut Core off: the link sends Core a Close frame
+	// first (closeRemote), naming the reason the bridge gave when it has one.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), controlReady: make(chan struct{}, 1), interrupt: interrupt, localClosed: make(chan struct{}), parent: parent}
 	l.output = make(chan agentRelayOutput, 64)
 	l.outputControl = make(chan agentRelayOutput, 16)
 	l.outputProgress = make(chan struct{}, 1)
@@ -329,9 +395,32 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 	l.maxOutputBytes = int64(l.mediaRate()/2) + l.maxBatchBytes
 	l.epoch.Store(1)
 	l.connected.Store(true)
-	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide, timeout: agentOutputDeliveryTimeout}
+	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide, timeout: agentOutputDeliveryTimeout, onPeerClose: l.bridgeClosed}
 	go l.deliverOutput(local)
-	go func() { <-ctx.Done(); _ = peer.Close(); _ = initial.Close() }()
+	go func() {
+		select {
+		case <-parent.Done():
+		case <-ctx.Done():
+			return
+		}
+		// The bridge closes its side as the call ends; wait briefly for that
+		// Close, which says why, before ending the link without it.
+		timer := time.NewTimer(websocketForcedCloseTimeout)
+		defer timer.Stop()
+		select {
+		case <-l.localClosed:
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		cancel()
+	}()
+	go func() {
+		<-ctx.Done()
+		_ = peer.Close()
+		// closeRemote ends the connection with a Close frame; this only bounds
+		// a Core connection that never answers it.
+		time.AfterFunc(2*websocketForcedCloseTimeout, func() { _ = initial.Close() })
+	}()
 	go func() {
 		defer cancel()
 		for {
@@ -363,6 +452,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				if err := l.sendControl(m); err != nil {
 					if ctx.Err() == nil {
 						l.event("core_control_exhausted", 0)
+						l.endWith(ws.StatusInternalServerError, "telephony control queue exhausted")
 					}
 					cancel()
 					return
@@ -370,6 +460,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 			} else if op == ws.OpBinary {
 				// Never allow a catch-up backlog or unbounded memory during recovery.
 				if len(raw) > l.mediaRate()*120/1000 || l.mediaRate() == 48000 && len(raw)%2 != 0 {
+					l.endWith(ws.StatusInternalServerError, "invalid telephony audio frame")
 					cancel()
 					return
 				}
@@ -556,6 +647,7 @@ func (l *agentCoreLink) relay(remote net.Conn, local *agentRelayWriter) error {
 	for {
 		select {
 		case <-l.ctx.Done():
+			l.closeRemote(writer, ended)
 			return l.ctx.Err()
 		case err := <-ended:
 			return err
@@ -565,6 +657,7 @@ func (l *agentCoreLink) relay(remote net.Conn, local *agentRelayWriter) error {
 		if !ok {
 			select {
 			case <-l.ctx.Done():
+				l.closeRemote(writer, ended)
 				return l.ctx.Err()
 			case err := <-ended:
 				return err

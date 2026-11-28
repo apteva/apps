@@ -662,7 +662,7 @@ func (a *App) finishTransfer(ctx *sdk.AppCtx, t *callTransfer, status, reason st
 	if live {
 		a.stopTransferMusic(ctx, t)
 		if t.Source == transferSourceAI && status == transferNoAnswer && t.NoAnswer == "hangup" && ctx != nil {
-			if _, message := a.hangupCall(ctx, t.CallID, 0, t.ProjectID, hangupActor{Initiator: terminationByTelephony, Principal: fmt.Sprintf("agent:%d", t.FromAgentID), Action: "transfer_no_answer"}); message != "" {
+			if _, message := a.hangupCall(ctx, t.CallID, 0, t.ProjectID, hangupActor{Initiator: terminationByTelephony, Principal: fmt.Sprintf("agent:%d", t.FromAgentID), Action: "transfer_no_answer", Path: "transfer"}); message != "" {
 				ctx.Logger().Warn("transfer no-answer hangup failed", "call", t.CallID, "error", message)
 			}
 		}

@@ -1964,7 +1964,7 @@ func (a *App) toolHangup(callerCtx context.Context, ctx *sdk.AppCtx, args map[st
 	if callID == "" {
 		return mcpError("call_id required"), nil
 	}
-	result, msg := a.hangupCall(ctx, callID, agentID, currentProject(ctx), hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "hangup_requested"})
+	result, msg := a.hangupCall(ctx, callID, agentID, currentProject(ctx), hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "hangup_requested", Path: "agent_tool"})
 	if msg != "" {
 		return mcpError(msg), nil
 	}
@@ -2557,7 +2557,7 @@ func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 		return map[string]any{"ok": true, "call_id": callID, "offer_declined": true}, nil
 	}
 	reason := strArg(args, "reason", "rejected by agent")
-	result, err := a.rejectPendingInboundCall(ctx, row, reason, hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "rejected"})
+	result, err := a.rejectPendingInboundCall(ctx, row, reason, hangupActor{Initiator: terminationByAgent, Principal: fmt.Sprintf("agent:%d", agentID), Action: "rejected", Path: "agent_tool"})
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -4012,6 +4012,11 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := globalCtx.WithProject(project)
+	// Older clients post no body; a browser picking up the call sends its token.
+	var body hangupRequest
+	if r.ContentLength != 0 {
+		_ = decodeJSONBody(r, &body)
+	}
 	unlock := a.softphones.lockClaim(parts[1])
 	defer unlock()
 	row, loadErr := a.db().findCall(parts[1])
@@ -4019,16 +4024,39 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load call: "+loadErr.Error(), http.StatusInternalServerError)
 		return
 	}
-	actor := hangupActor{Initiator: terminationByOperator, Action: "hangup_requested", RequestID: r.Header.Get("X-Request-ID")}
-	if p := phoneUserFrom(r); p != nil {
-		if row == nil || !a.phoneCallAllowed(p, row, true) {
+	actor := hangupActor{Initiator: terminationByOperator, Action: "hangup_requested", RequestID: r.Header.Get("X-Request-ID"), Path: "hangup"}
+	p := phoneUserFrom(r)
+	ownSession := false
+	if p != nil {
+		// An adviser whose browser is offered a ringing call may hang up on it
+		// too, which only declines that offer (phoneHangupBeforeAnswer).
+		offered := row != nil && row.ProjectID == p.Project && row.Status == "pending" && row.Direction == "inbound" && row.PeerKind == peerKindHuman && a.phoneOfferDestination(p, row, "") != ""
+		if row == nil || (!offered && !a.phoneCallAllowed(p, row, true)) {
 			http.Error(w, "call not found", 404)
 			return
 		}
 		actor.Initiator, actor.Principal = terminationByUser, p.Identity.key()
+		if body.SessionToken != "" {
+			reason, _, _, session := a.phoneMediaCheckState(row, body.SessionToken, true)
+			ownSession = reason == "" && a.phoneCallAllowed(p, row, false)
+			actor.Session = session.SessionID
+		}
 	}
 	if row != nil && row.ProjectID == project && row.PeerKind == peerKindHuman &&
 		row.Direction == "inbound" && (row.Status == "pending" || row.Status == "answering") {
+		// Before the answer, a phone user's hang-up declines their own ringing
+		// or is ignored; only the claiming session may end a connecting call.
+		if p != nil {
+			response, handled, err := a.phoneHangupBeforeAnswer(r, row, p, body.SessionToken != "", ownSession, actor)
+			if err != nil {
+				http.Error(w, "hangup unavailable: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if handled {
+				writeJSON(w, response)
+				return
+			}
+		}
 		actor.Action = "rejected"
 		result, err := a.rejectPendingInboundCall(ctx, row, "", actor)
 		if err != nil {

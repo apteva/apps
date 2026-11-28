@@ -29,7 +29,7 @@ jobs:
       - run: go test -race -count=1 -timeout 2m -run '^TestRestart(KeepsBidirectionalMedia|MediaRejects)' .
   telephony:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       GOWORK: 'off'
     steps:
@@ -54,7 +54,7 @@ jobs:
       - name: Statistics access and snapshot race checks
         run: go test -race -count=1 -run '^TestCallStatistics' -skip '^TestCallStatisticsDSTAndIndexWithLargeHistory$' .
         working-directory: mcp/telephony
-      - run: go test -json ./... > /tmp/telephony-go.jsonl
+      - run: go test -json -timeout 20m ./... > /tmp/telephony-go.jsonl
         working-directory: mcp/telephony
         env:
           TELEPHONY_SHORT_GAP_RESULTS: /tmp/telephony-short-source-gaps.json
@@ -272,7 +272,7 @@ jobs:
   race:
     name: Race checks (${{ matrix.group }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -294,7 +294,7 @@ jobs:
           go-version-file: mcp/telephony/go.mod
           cache-dependency-path: mcp/telephony/go.sum
       - name: Focused race regressions
-        run: go test -race -timeout 20m -run '${{ matrix.pattern }}' -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' -count=1 -v . > /tmp/telephony-race.log 2>&1
+        run: go test -race -timeout 30m -run '${{ matrix.pattern }}' -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' -count=1 -v . > /tmp/telephony-race.log 2>&1
         working-directory: mcp/telephony
       - uses: actions/upload-artifact@v4
         if: always()

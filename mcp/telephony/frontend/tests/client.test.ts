@@ -406,7 +406,10 @@ describe("softphone lifecycle races", () => {
     expect(f.phone.getSnapshot()).toMatchObject({ audioState: "idle", busy: false });
     gate.resolve(); await Bun.sleep(1);
     expect(f.phone.getSnapshot().callId).toBeUndefined();
-    expect(f.requests.filter(r => r.url.pathname.includes("/release/"))).toHaveLength(0);
+    // An inbound pick-up still connecting goes back to routing: one release,
+    // never a hang-up that would end the call for the caller.
+    expect(f.requests.filter(r => r.url.pathname.includes("/release/"))).toHaveLength(1);
+    expect(f.requests.filter(r => r.url.pathname.endsWith("/hangup"))).toHaveLength(0);
   });
   test("cancel a permission prompt without waiting for the user to answer it", async () => {
     const f = fixture(), gate = deferred();

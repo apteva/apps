@@ -143,6 +143,8 @@ type browserOfferEvent struct {
 	Focused    *bool  `json:"focused,omitempty"`
 	Code       string `json:"code,omitempty"`
 	RequestID  string `json:"request_id,omitempty"`
+	// SessionGeneration matches a failed pick-up to the claim it was issued.
+	SessionGeneration string `json:"session_generation,omitempty"`
 }
 
 func (e browserOfferEvent) validate(receipt bool) error {
@@ -171,6 +173,9 @@ func (e browserOfferEvent) validate(receipt bool) error {
 		if s != "" && !safeBrowserTelemetryID(s) {
 			return errors.New("invalid diagnostic label")
 		}
+	}
+	if e.SessionGeneration != "" && safeAudioDiagnosticID(e.SessionGeneration) == "" {
+		return errors.New("invalid session generation")
 	}
 	return nil
 }
@@ -246,7 +251,9 @@ func (a *App) storeBrowserTelemetry(r *http.Request, project, tab, session strin
 		if total >= 512 && duplicate == 0 {
 			return errBrowserTelemetryLimit
 		}
-		facts, _ := json.Marshal(map[string]any{"visibility": e.Visibility, "focused": e.Focused, "code": e.Code})
+		recorded := map[string]any{"visibility": e.Visibility, "focused": e.Focused, "code": e.Code}
+		addOptionalString(recorded, "session_generation", e.SessionGeneration)
+		facts, _ := json.Marshal(recorded)
 		_, err = tx.Exec(`INSERT INTO telephony_offer_browser_events(project_id,call_id,offer_id,principal,browser_tab_id,browser_session_id,event_id,stage,client_occurred_at,received_at,request_id,facts_json,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,principal,browser_session_id,event_id) DO NOTHING`, project, e.CallID, e.OfferID, principal, tab, session, e.EventID, e.Stage, e.OccurredAt, now, firstNonEmpty(e.RequestID, r.Header.Get("X-Request-ID")), string(facts), ringTime(time.Now().Add(7*24*time.Hour)))
 		if err != nil {
 			return err
