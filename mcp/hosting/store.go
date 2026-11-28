@@ -120,6 +120,33 @@ func (p *Profile) onDemand() OnDemandSettings {
 	return s
 }
 
+// PhoneSettings is the phone-pool part of a profile's settings.
+type PhoneSettings struct {
+	// RequireUnlockedHandover (default true): a rental starts or resumes
+	// only once Mobile woke the phone and no PIN, pattern or password
+	// stands in the way.
+	RequireUnlockedHandover *bool `json:"require_unlocked_handover,omitempty"`
+	// WipeMode is how a phone is reset between renters. Only deep_clean
+	// exists: Mobile has no throwaway-user sessions.
+	WipeMode string `json:"wipe_mode,omitempty"`
+	// ClearSystemApps are system apps whose data every clean clears, on top
+	// of the baseline's third-party apps. Mobile must list each one in its
+	// clean_system_apps setting, or the clean fails.
+	ClearSystemApps []string `json:"clear_system_apps,omitempty"`
+}
+
+func (p *Profile) phone() PhoneSettings {
+	var s PhoneSettings
+	if p != nil {
+		_ = json.Unmarshal(p.Settings, &s)
+	}
+	return s
+}
+
+func (s PhoneSettings) requireUnlocked() bool {
+	return s.RequireUnlockedHandover == nil || *s.RequireUnlockedHandover
+}
+
 func (p *Profile) isMachine() bool {
 	return p.Backend == BackendMachinePool || p.Backend == BackendMachineOnDemand
 }

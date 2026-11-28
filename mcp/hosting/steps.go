@@ -120,7 +120,7 @@ func (a *App) runStep(ctx *sdk.AppCtx, op *Operation, step string) error {
 		return a.stepInstallResetScripts(ctx, env)
 	case "wipe", "reinstall", "verify_clean":
 		return a.stepReset(ctx, env, step)
-	case "device_check", "device_open", "device_stop", "device_close", "device_baseline", "device_baseline_capture", "device_clean", "device_verify_clean":
+	case "device_check", "device_open", "device_stop", "device_close", "device_baseline", "device_baseline_capture", "device_clean", "device_verify_clean", "device_handover":
 		return a.runDeviceStep(ctx, env, step)
 	case "run_workload":
 		return a.stepRunWorkload(ctx, env)

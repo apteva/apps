@@ -375,10 +375,17 @@ func validateProfile(db *sql.DB, p *Profile) error {
 		if p.PoolKey == "" {
 			return errors.New("machine_pool profiles need pool_key")
 		}
-		if _, err := requirePool(db, p.PoolKey); err != nil {
+		pool, err := requirePool(db, p.PoolKey)
+		if err != nil {
+			return err
+		}
+		if err := validatePhoneSettings(p, pool); err != nil {
 			return err
 		}
 	case BackendMachineOnDemand:
+		if err := validatePhoneSettings(p, nil); err != nil {
+			return err
+		}
 		s := p.onDemand()
 		if s.Provider == "" || s.ServerType == "" {
 			return errors.New("machine_on_demand profiles need settings.provider and settings.server_type")

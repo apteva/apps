@@ -31,11 +31,19 @@ type fakeMobile struct {
 	apps      []string            // third-party apps a baseline records
 	cleans    []map[string]any
 	down      bool
+	lock      map[string]string   // device → keyguard now: none, swipe, secure, unknown
+	baseLock  map[string]string   // device → lock recorded at capture
+	users     map[string]int      // device → users on the phone (default 1)
+	coverage  int                 // baseline coverage recorded (default 2)
+	notUndone map[string][]string // device → what clean reports it cannot undo
+	system    map[string]bool     // Mobile's clean_system_apps
+	wakes     []string            // devices woken
 }
 
 func newFakeMobile(ids ...string) *fakeMobile {
 	f := &fakeMobile{devices: map[string]*mobileDeviceInfo{}, sessions: map[string]*fakeSession{}, baselines: map[string][]string{},
-		installed: map[string][]string{}, stuck: map[string]bool{}, uncleared: map[string]bool{}}
+		installed: map[string][]string{}, stuck: map[string]bool{}, uncleared: map[string]bool{}, lock: map[string]string{}, baseLock: map[string]string{},
+		users: map[string]int{}, coverage: 2, notUndone: map[string][]string{}, system: map[string]bool{}}
 	for _, id := range ids {
 		f.devices[id] = &mobileDeviceInfo{ID: id, Name: "Pixel " + id, Platform: "android", Driver: "adb", State: "ready"}
 	}
@@ -146,13 +154,22 @@ func (f *fakeMobile) handle(tool string, in map[string]any) (any, error) {
 				f.baselines[dev] = f.apps
 			}
 			f.installed[dev] = nil
-			return map[string]any{"baseline": map[string]any{"apps": f.baselines[dev]}}, nil
+			f.baseLock[dev] = firstNonEmpty(f.lock[dev], "none")
+			return map[string]any{"baseline": f.baselineView(dev)}, nil
 		case "baseline_get":
-			b, ok := f.baselines[dev]
-			if !ok {
+			if _, ok := f.baselines[dev]; !ok {
 				return nil, errors.New("not_found: no baseline for this phone; run baseline_capture first")
 			}
-			return map[string]any{"baseline": map[string]any{"apps": b}}, nil
+			return map[string]any{"baseline": f.baselineView(dev)}, nil
+		case "wake":
+			f.wakes = append(f.wakes, dev)
+			switch f.lock[dev] {
+			case "secure":
+				return nil, errors.New("the phone is locked with a PIN, pattern or password; a person must unlock it")
+			case "unknown":
+				return nil, errors.New("could not tell whether this phone has a PIN; wake refused")
+			}
+			return map[string]any{"ok": true, "screen_on": true, "keyguard": firstNonEmpty(f.lock[dev], "none"), "locked": false}, nil
 		case "clean":
 			if in["confirm"] != true {
 				return nil, errors.New("invalid_argument: pass confirm=true")
@@ -166,21 +183,45 @@ func (f *fakeMobile) handle(tool string, in map[string]any) (any, error) {
 			if len(list) > 50 {
 				return nil, errors.New("invalid_argument: clear_data takes at most 50 apps")
 			}
+			inBaseline := map[string]bool{}
+			for _, a := range f.baselines[dev] {
+				inBaseline[a] = true
+			}
+			for _, a := range list {
+				if !inBaseline[a] && !f.system[a] {
+					return nil, fmt.Errorf("%s is neither a third-party app in the baseline nor in clean_system_apps", a)
+				}
+			}
 			for _, a := range list {
 				if !f.uncleared[a] {
 					cleared = append(cleared, a)
 				}
 			}
-			return map[string]any{"uninstalled": []string{}, "data_cleared": cleared}, nil
+			left := f.notUndone[dev]
+			if left == nil {
+				left = []string{}
+			}
+			return map[string]any{"uninstalled": []string{}, "data_cleared": cleared, "clean": len(left) == 0, "not_undone": left}, nil
 		case "verify_clean":
 			var diff []map[string]any
 			for _, a := range f.installed[dev] {
 				diff = append(diff, map[string]any{"kind": "app_added", "value": a})
 			}
+			if now := firstNonEmpty(f.lock[dev], "none"); now != f.baseLock[dev] {
+				diff = append(diff, map[string]any{"kind": "lock_changed", "value": now})
+			}
 			return map[string]any{"clean": len(diff) == 0, "differences": diff}, nil
 		}
 	}
 	return nil, fmt.Errorf("unexpected mobile call %s %v", tool, in)
+}
+
+func (f *fakeMobile) baselineView(dev string) map[string]any {
+	users := f.users[dev]
+	if users == 0 {
+		users = 1
+	}
+	return map[string]any{"apps": f.baselines[dev], "coverage": f.coverage, "lock": f.baseLock[dev], "users": users}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────

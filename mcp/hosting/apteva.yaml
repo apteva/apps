@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 2.5.1
+version: 2.6.0
 description: |
   Tenants on containers and machines. Hosting gives each customer a
   container or a whole machine and runs its lifecycle: set up, grant SSH
@@ -44,8 +44,9 @@ requires:
       optional: true
       reason: pool machines and on-demand machines
     - name: mobile
+      version: ">=0.12.0"
       optional: true
-      reason: phone pools (managed_by mobile)
+      reason: phone pools (managed_by mobile); 0.12.0 for wake, lock state and the full baseline
 
 provides:
   http_routes:
@@ -108,7 +109,7 @@ provides:
     - name: hosting_machine_update
       description: "Update a machine's serial, management user, expected OS, name or customer endpoint (public_host/public_port win over Instances; an empty public_host hands it back). Setting validated needs confirm equal to the machine id."
     - name: hosting_machine_inspect
-      description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives. On a phone: record its baseline the first time (capture_baseline records it again) and verify it matches."
+      description: "Check a machine without a tenant: install Hosting's SSH profile and reset helpers, run preflight, and confirm no customer account survives. On a phone: record its baseline the first time (capture_baseline records it again) and verify it matches. A phone with a PIN, pattern or password, more than one user, or a baseline from before Mobile 0.12.0 is refused."
     - name: hosting_machine_clean
       description: "Erase a macOS machine (or clean a phone back to its baseline) without a tenant, verify it is clean and put it back on sale. Needs confirm equal to the machine id."
     - name: hosting_machine_set_maintenance
