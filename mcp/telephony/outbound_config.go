@@ -84,7 +84,7 @@ func (a *App) telnyxOutboundReadinessWithLoader(ctx *sdk.AppCtx, connectionID in
 	}
 	if err != nil {
 		view.Status = outboundConfigError
-		return view, fmt.Errorf("inspect Telnyx Call Control application: %w", err)
+		return view, telnyxApplicationReadError(view.ApplicationID, err)
 	}
 	response, err := telnyxResponse(raw)
 	if err != nil {
@@ -120,6 +120,18 @@ func (a *App) telnyxOutboundReadinessWithLoader(ctx *sdk.AppCtx, connectionID in
 		view.Message = "Choose which outbound calling profile this number should use."
 	}
 	return view, nil
+}
+
+// telnyxApplicationReadError keeps the cause, so a 429 stays temporary for
+// the previously-verified fallback, but says what happened.
+func telnyxApplicationReadError(id string, err error) error {
+	switch carrierErrorStatus(err) {
+	case 404:
+		return &carrierMessageError{message: fmt.Sprintf("Telnyx Call Control application %s no longer exists. Apply carrier routing to this number again.", id), err: err}
+	case 429:
+		return &carrierMessageError{message: "Telnyx rate-limited the Call Control application check, so outbound calling is not verified yet. Refresh in a moment.", err: err}
+	}
+	return fmt.Errorf("inspect Telnyx Call Control application: %w", err)
 }
 
 func listTelnyxOutboundProfiles(ctx *sdk.AppCtx, connectionID int64, requests ...context.Context) ([]outboundProfileOption, error) {

@@ -452,7 +452,42 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 	}
 
+	// Outbound transport per number, including routed numbers the carrier no
+	// longer lists; numbers that dial over direct SIP read no application.
+	transportByPhone := map[string]outboundTransportView{}
+	routeFor := func(number ownedNumber) *routeRow {
+		if route := routesByID[strings.TrimSpace(number.ProviderNumberID)]; route != nil {
+			return route
+		}
+		return routesByPhone[compactPhoneNumber(number.PhoneNumber)]
+	}
+	listedRoutes := make(map[string]bool, len(routes))
+	for _, n := range owned {
+		v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
+		if e != nil {
+			return nil, e
+		}
+		transportByPhone[n.PhoneNumber] = v
+		if route := routeFor(n); route != nil {
+			listedRoutes[route.ID] = true
+		}
+	}
+	for i := range routes {
+		if phone := routes[i].PhoneNumber; !listedRoutes[routes[i].ID] {
+			if _, ok := transportByPhone[phone]; !ok {
+				v, _, _, e := a.outboundTransport(projectID, provider.ConnID, phone)
+				if e != nil {
+					return nil, e
+				}
+				transportByPhone[phone] = v
+			}
+		}
+	}
+
 	if provider.Slug == "telnyx" {
+		// Prefetch exactly the applications read below: outbound readiness for
+		// numbers not dialing over direct SIP, and the webhook check of Call
+		// Control routes whose number is assigned to the route's application.
 		seen := map[string]bool{}
 		ids := []string{}
 		add := func(id string) {
@@ -462,16 +497,19 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			}
 		}
 		for _, n := range owned {
-			v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
-			if e != nil {
-				return nil, e
-			}
-			if v.Transport != inboundTransportSIPDirect {
+			if transportByPhone[n.PhoneNumber].Transport != inboundTransportSIPDirect {
 				add(telnyxRouteApplicationID(routesByPhone[compactPhoneNumber(n.PhoneNumber)], n.ConnectionID))
 			}
+			var config telnyxRouteConfig
+			if route := routeFor(n); route != nil && route.InboundTransport != inboundTransportSIPDirect &&
+				json.Unmarshal([]byte(route.PreviousVoiceURL), &config) == nil && config.ApplicationID != "" && n.ConnectionID == config.ApplicationID {
+				add(config.ApplicationID)
+			}
 		}
-		for _, r := range routes {
-			add(telnyxRouteApplicationID(&r, ""))
+		for i := range routes {
+			if !listedRoutes[routes[i].ID] && transportByPhone[routes[i].PhoneNumber].Transport != inboundTransportSIPDirect {
+				add(telnyxRouteApplicationID(&routes[i], ""))
+			}
 		}
 		loader.prefetchApplications(ids)
 	}
@@ -495,20 +533,9 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 	}
 
 	usedRoutes := make(map[string]bool, len(routes))
-	transportByPhone := map[string]outboundTransportView{}
-	for _, n := range owned {
-		v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
-		if e != nil {
-			return nil, e
-		}
-		transportByPhone[n.PhoneNumber] = v
-	}
 	numbers := make([]connectedNumberView, 0, len(owned)+len(routes))
 	for _, number := range owned {
-		route := routesByID[strings.TrimSpace(number.ProviderNumberID)]
-		if route == nil {
-			route = routesByPhone[compactPhoneNumber(number.PhoneNumber)]
-		}
+		route := routeFor(number)
 		view := a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName, loader)
 		if route != nil {
 			usedRoutes[route.ID] = true
@@ -1171,6 +1198,13 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 			return webhookMismatch, webhookMismatch, "The Telnyx number is assigned to a different voice application."
 		}
 		raw, err := read("get_call_control_application", map[string]any{"id": config.ApplicationID})
+		switch carrierErrorStatus(err) {
+		case 0:
+		case 404:
+			return webhookUnknown, webhookUnknown, fmt.Sprintf("Telnyx Call Control application %s no longer exists. Apply carrier routing to this number again.", config.ApplicationID)
+		case 429:
+			return webhookUnknown, webhookUnknown, "Telnyx rate-limited the application check, so routing is not verified yet. Refresh in a moment."
+		}
 		if err != nil {
 			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx application."
 		}

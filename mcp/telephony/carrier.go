@@ -245,7 +245,7 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 		return nil, fmt.Errorf("%s returned no response", tool)
 	}
 	if !res.Success {
-		return nil, &carrierHTTPError{status: res.Status, message: fmt.Sprintf("%s failed: status=%d body=%s", tool, res.Status, string(res.Data))}
+		return nil, &carrierHTTPError{status: res.Status, message: fmt.Sprintf("%s failed: status=%d body=%s", tool, res.Status, string(res.Data)), retryAfter: parseRetryAfter(res.Headers)}
 	}
 	return res.Data, nil
 }

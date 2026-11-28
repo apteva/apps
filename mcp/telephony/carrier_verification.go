@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,9 +28,55 @@ func carrierCredentialHash(creds *sdk.ConnectionCredentials) string {
 type carrierHTTPError struct {
 	status  int
 	message string
+	// retryAfter is the carrier's Retry-After hint, when it sent one.
+	retryAfter time.Duration
 }
 
 func (e *carrierHTTPError) Error() string { return e.message }
+
+func carrierErrorStatus(err error) int {
+	var carrier *carrierHTTPError
+	if errors.As(err, &carrier) {
+		return carrier.status
+	}
+	return 0
+}
+
+// carrierMessageError replaces a carrier's raw response text with a message
+// for people, and keeps the cause for status checks.
+type carrierMessageError struct {
+	message string
+	err     error
+}
+
+func (e *carrierMessageError) Error() string { return e.message }
+func (e *carrierMessageError) Unwrap() error { return e.err }
+
+// parseRetryAfter reads a Retry-After header in seconds or as an HTTP date.
+func parseRetryAfter(headers map[string]string) time.Duration {
+	value := ""
+	for key, v := range headers {
+		if strings.EqualFold(key, "Retry-After") {
+			value = strings.TrimSpace(v)
+			break
+		}
+	}
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		if wait := time.Until(at); wait > 0 {
+			return wait
+		}
+	}
+	return 0
+}
 
 func temporaryCarrierVerificationError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {

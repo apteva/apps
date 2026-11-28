@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,48 @@ type inventoryTestPlatform struct {
 	appStarted             chan struct{}
 	apps                   map[string]map[string]any
 	numbers                []map[string]any
+	// missing applications are absent from Telnyx: the list leaves them out
+	// and reading one answers 404.
+	missing map[string]bool
+	// listStatus fails list_call_control_applications with that status.
+	listStatus  int
+	listHeaders map[string]string
+	// getStatus fails get_call_control_application with that status.
+	getStatus int
+}
+
+func (p *inventoryTestPlatform) applicationCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for key, v := range p.counts {
+		if strings.Contains(key, ":list_call_control_applications:") || strings.Contains(key, ":get_call_control_application:") {
+			n += v
+		}
+	}
+	return n
+}
+
+func (p *inventoryTestPlatform) applicationPage(args map[string]any) []any {
+	ids := make([]string, 0, len(p.apps))
+	for id := range p.apps {
+		if !p.missing[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	size, page := intValue(args["page[size]"]), intValue(args["page[number]"])
+	if size <= 0 {
+		size = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
+	items := []any{}
+	for i := (page - 1) * size; i < len(ids) && i < page*size; i++ {
+		items = append(items, p.apps[ids[i]])
+	}
+	return items
 }
 
 func (p *inventoryTestPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
@@ -87,8 +130,19 @@ func (p *inventoryTestPlatform) ExecuteIntegrationToolContext(request context.Co
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if tool == "list_call_control_applications" && p.listStatus != 0 {
+		return &sdk.ExecuteResult{Success: false, Status: p.listStatus, Data: json.RawMessage(`{"errors":[{"code":"10011","title":"Too many requests"}]}`), Headers: p.listHeaders}, nil
+	}
+	if tool == "get_call_control_application" && p.getStatus != 0 {
+		return &sdk.ExecuteResult{Success: false, Status: p.getStatus, Data: json.RawMessage(`{"errors":[{"code":"10011"}]}`)}, nil
+	}
+	if tool == "get_call_control_application" && p.missing[id] {
+		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"errors":[{"code":"10005","title":"Resource not found"}]}`)}, nil
+	}
 	var value any
 	switch tool {
+	case "list_call_control_applications":
+		value = p.applicationPage(args)
 	case "list_phone_numbers":
 		value = p.numbers
 	case "list_outbound_voice_profiles":
@@ -220,8 +274,9 @@ func TestInventoryReadsDeduplicateAndPreserveChecks(t *testing.T) {
 	p.credentialReads = 0
 	p.mu.Unlock()
 	after := inventoryViews(t, a, ctx, context.Background())
-	if p.total() != 13 {
-		t.Fatalf("requests=%d want 13", p.total())
+	// Numbers, one application list and outbound profiles.
+	if p.total() != 3 {
+		t.Fatalf("requests=%d want 3", p.total())
 	}
 	if p.credentialReads != 1 {
 		t.Fatalf("credentials read %d times", p.credentialReads)
@@ -245,17 +300,20 @@ func TestInventoryReadsCacheFreshFailureAndCredentials(t *testing.T) {
 	a, ctx, p := inventoryFixture(t, 0)
 	first := inventoryViews(t, a, ctx, context.Background())
 	second := inventoryViews(t, a, ctx, context.Background())
-	if p.total() != 13 || !reflect.DeepEqual(first, second) {
+	if p.total() != 3 || !reflect.DeepEqual(first, second) {
 		t.Fatal("cached inventory changed or refetched")
 	}
 	p.mu.Lock()
-	p.failure = "application-03"
+	p.missing = map[string]bool{"application-03": true}
 	p.mu.Unlock()
 	failed := inventoryViews(t, a, ctx, inventoryFreshContext(context.Background(), true))
 	for _, v := range failed {
 		if v.Outbound.ApplicationID == "application-03" {
 			if v.Outbound.Status != outboundConfigError || v.RoutingHealth != "unverified" {
 				t.Fatalf("failure became healthy: %+v", v)
+			}
+			if !strings.Contains(v.Outbound.Message, "application-03 no longer exists") || !strings.Contains(v.HealthMessage, "application-03 no longer exists") {
+				t.Fatalf("missing application not explained: outbound=%q health=%q", v.Outbound.Message, v.HealthMessage)
 			}
 		} else if v.Outbound.Status != outboundReady {
 			t.Fatalf("other number affected: %+v", v)
@@ -269,7 +327,7 @@ func TestInventoryReadsCacheFreshFailureAndCredentials(t *testing.T) {
 		}
 	}
 	p.mu.Lock()
-	p.failure = ""
+	p.missing = nil
 	p.credentialsByID[10].Fields["public_key"] = "invalid"
 	p.mu.Unlock()
 	badKey := inventoryViews(t, a, ctx, context.Background())
@@ -281,6 +339,8 @@ func TestInventoryReadsCacheFreshFailureAndCredentials(t *testing.T) {
 }
 func TestInventoryReadsBoundConcurrencyAndCancellation(t *testing.T) {
 	a, ctx, p := inventoryFixture(t, 10*time.Millisecond)
+	// An unusable list falls back to bounded per-application reads.
+	p.listStatus = 403
 	inventoryViews(t, a, ctx, context.Background())
 	if p.peak != 4 {
 		t.Fatalf("peak=%d want 4", p.peak)
@@ -341,15 +401,15 @@ func TestInventoryReadsShareConcurrentRefresh(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := p.total(); got != 13 {
-		t.Fatalf("simultaneous requests=%d want 13", got)
+	if got := p.total(); got != 3 {
+		t.Fatalf("simultaneous requests=%d want 3", got)
 	}
 }
 func TestInventoryReadsScopeAndLocalChanges(t *testing.T) {
 	a, ctx, p := inventoryFixture(t, 0)
 	inventoryViews(t, a, ctx, context.Background())
 	other := inventoryViews(t, a, ctx.WithProject("project-b"), context.Background())
-	if p.total() != 26 {
+	if p.total() != 6 {
 		t.Fatal("cache crossed project")
 	}
 	for _, v := range other {
