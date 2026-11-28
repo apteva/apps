@@ -360,7 +360,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.12.4
+    ref: workspaces/v0.13.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health
