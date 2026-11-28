@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.13.0
+version: 0.13.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -103,6 +103,9 @@ description: |
   need a CORS preflight do not pass the platform yet. Previews started
   before 0.13.0 get a link when they are started again. Docker workspaces
   created without a preview port say so plainly.
+  v0.13.1 fixes the Workspaces widgets on hosts that style every svg (such
+  as Apteva Go): the status dot stays an 8px dot and the activity icons keep
+  their 14px size instead of growing into the text.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
@@ -361,23 +364,10 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.13.0
+    ref: workspaces/v0.13.1
     entry: mcp/workspaces
   port: 8080
   health_check: /health
-  artifacts:
-    linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.13.0/workspaces-v0.13.0-linux-amd64.tar.gz
-      sha256: 34fc2b7c5952d7b9aaee8a6bb2149da06ea1af6ff60fdd203a126fdd77e64ad2
-    linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.13.0/workspaces-v0.13.0-linux-arm64.tar.gz
-      sha256: 1581e076e29769ab162678ab003d8bfeb04bf8a3dc5461fdaed225f4e3826ae9
-    darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.13.0/workspaces-v0.13.0-darwin-arm64.tar.gz
-      sha256: c12098fcdd27d96770bbfcb20c5b2ca575fce1a8558f57059151f17dc91fc13b
-    darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/workspaces%2Fv0.13.0/workspaces-v0.13.0-darwin-amd64.tar.gz
-      sha256: ce9c5c6e2a22573181f18552c6f0e3f7f9b53eaad5f07ce48e9d2a8f29115653
 
 db:
   driver: sqlite
