@@ -1,8 +1,9 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 lets a replaced text field wrap its new text and change height (the check before typing still needs its exact box), returns the field's new bounds, and adds the replace_text_resizable capability.
   v0.10.0 adds password references: secure_text takes secret_ref, a name from the encrypted mobile_secrets setting bound to a package and optionally a field and device, so agents never see the password; allow_literal_secure_text=false refuses literal passwords.
   v0.9.1 restarts live video when its phone link breaks during a short USB drop, treats a new adb transport as a reconnect, and reports a stopped action as session_stopped.
   v0.9.0 adds an immediate stop for sessions, session/action/device events, phone health with automatic reconnect, live H.264 video with touch input, long-press, drag, any keycode, Unicode replace and wait_for, and baseline/clean for shared phones.
@@ -109,7 +110,7 @@ runtime:
   kind: source
   source:
     repo: https://github.com/apteva/apps.git
-    ref: mobile/v0.10.0
+    ref: mobile/v0.11.0
     entry: mcp/mobile
   port: 8080
   health_check: /health

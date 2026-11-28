@@ -503,6 +503,11 @@ Android inputs check the foreground package, exact markers and unique targets.
 Field value guards bind account identity; password fields are never read.
 ADB replacements verify the focused field and resulting text and accept printable
 ASCII only (excluding percent); unsupported bytes fail before clearing a field.
+Since v0.11.0 (`replace_text_resizable`), the check before typing still needs the
+exact field box, but the check afterwards lets the field wrap its new text: a
+field with a resource ID is matched by ID, class and text, and an anonymous one
+must keep its left and right edges (within 2 px), stay no taller than its window
+and overlap its old vertical range. The result includes the field's new `bounds`.
 No input is automatically retried by the Instagram Android operations.
 
 Passwords go through `secure_text`, preferably as `secret_ref`: a name from the
