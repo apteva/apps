@@ -84,7 +84,8 @@ func invocationStoragePolicy() storagePolicy {
 	summary := envInt("APTEVA_FUNCTIONS_INVOCATION_RETENTION_DAYS", 30, 1, 3650)
 	return storagePolicy{
 		SummaryDays: summary,
-		SuccessDays: envInt("APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS", min(7, summary), 1, summary),
+		// 0 keeps no details of successful calls: they are written as summaries.
+		SuccessDays: envInt("APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS", min(7, summary), 0, summary),
 		FailureDays: envInt("APTEVA_FUNCTIONS_FAILURE_DETAILS_DAYS", summary, 1, summary),
 		Batch:       envInt("APTEVA_FUNCTIONS_RETENTION_BATCH_ROWS", 32, 1, 128),
 		Pages:       envInt("APTEVA_FUNCTIONS_VACUUM_PAGES", 32, 0, 1024),
@@ -92,6 +93,10 @@ func invocationStoragePolicy() storagePolicy {
 	}
 }
 func retentionCutoff(now time.Time, days int) string {
+	if days <= 0 {
+		// Zero-day retention: everything finished before now is due.
+		return now.UTC().Format(time.RFC3339Nano)
+	}
 	// SQLite's oldest default timestamps have a space separator. Midnight UTC
 	// cutoffs avoid deleting a record on the cutoff day because of lexical order.
 	return now.UTC().Add(-time.Duration(days) * 24 * time.Hour).Format("2006-01-02")
@@ -105,7 +110,23 @@ type storageWork struct {
 	SummariesDeleted int64  `json:"summaries_deleted"`
 	PagesReclaimed   int64  `json:"pages_reclaimed"`
 	VacuumSkipped    string `json:"vacuum_skipped,omitempty"`
+	// Per-step wall time of the last run, so a spent budget names its cause.
+	StepMS map[string]int64 `json:"step_ms,omitempty"`
+	// BatchRows is the batch size the last run used (adaptive, see retainInvocations).
+	BatchRows int `json:"batch_rows,omitempty"`
+	// BudgetExhausted names the step that was running when the budget ran out.
+	BudgetExhausted string `json:"budget_exhausted,omitempty"`
 }
+
+// Step names used in storageWork.StepMS and maintenance errors.
+const (
+	stepSuccessDetails = "success_details"
+	stepFailureDetails = "failure_details"
+	stepSummaries      = "summaries"
+	stepReclaim        = "reclaim"
+)
+
+var storageStepNames = []string{stepSuccessDetails, stepFailureDetails, stepSummaries, stepReclaim}
 
 // Use a short-lived, separately configured connection: never change the SDK's
 // writer timeout or hold its sole connection while waiting for maintenance.
@@ -211,9 +232,18 @@ func maintainInvocationStorage(ctx context.Context, db *sql.DB, policy storagePo
 			return err
 		},
 	}
+	work.StepMS = map[string]int64{}
+	work.BatchRows = policy.Batch
 	for i := range phases {
-		if err := phases[(firstPhase+i)%len(phases)](); err != nil {
-			return work, err
+		k := (firstPhase + i) % len(phases)
+		started := time.Now()
+		err := phases[k]()
+		work.StepMS[storageStepNames[k]] = time.Since(started).Milliseconds()
+		if err != nil {
+			if ctx.Err() != nil {
+				work.BudgetExhausted = storageStepNames[k]
+			}
+			return work, fmt.Errorf("%s: %w", storageStepNames[k], err)
 		}
 	}
 	return work, nil
@@ -316,6 +346,7 @@ func checkpointStorage(ctx context.Context, conn *sql.Conn) (string, error) {
 
 func (p *pool) storageLoop() {
 	defer p.maintenanceWG.Done()
+	defer p.closeStorageMaintenance()
 	ticker := time.NewTicker(time.Duration(envInt("APTEVA_FUNCTIONS_STORAGE_INTERVAL_SECONDS", 5, 1, 3600)) * time.Second)
 	defer ticker.Stop()
 	for {
@@ -328,53 +359,158 @@ func (p *pool) storageLoop() {
 	}
 }
 
-func (p *pool) retainInvocations() {
-	policy := invocationStoragePolicy()
-	ctx, cancel := context.WithTimeout(p.life, time.Duration(policy.BudgetMS)*time.Millisecond)
+// storageMaintenanceDB returns the long-lived maintenance connection. It is
+// opened once, outside the per-run budget: resolving the path through the
+// shared read pool and opening the file used to spend most of the 100 ms
+// budget before any cleanup started, and to fail whenever history readers
+// held every read connection.
+func (p *pool) storageMaintenanceDB() (*sql.DB, error) {
+	p.mu.Lock()
+	db := p.storageDB
+	p.mu.Unlock()
+	if db != nil {
+		return db, nil
+	}
+	ctx, cancel := context.WithTimeout(p.life, 5*time.Second)
 	defer cancel()
 	path, err := storageDatabasePath(ctx, p.ctx.AppReadDB())
 	if err != nil {
-		p.mu.Lock()
-		p.storageLastError = err.Error()
-		p.mu.Unlock()
-		return
+		return nil, fmt.Errorf("resolve database path: %w", err)
 	}
 	if path == "" {
-		return
-	} // in-memory test contexts have no disk to reclaim
-	db, err := openStorageMaintenance(path)
+		return nil, nil // in-memory test contexts have no disk to reclaim
+	}
+	db, err = openStorageMaintenance(path)
 	if err != nil {
-		p.ctx.Logger().Warn("storage maintenance unavailable", "err", err)
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.storageDB != nil {
+		_ = db.Close()
+		return p.storageDB, nil
+	}
+	p.storageDB = db
+	return db, nil
+}
+
+func (p *pool) closeStorageMaintenance() {
+	p.mu.Lock()
+	db := p.storageDB
+	p.storageDB = nil
+	p.mu.Unlock()
+	if db != nil {
+		_ = db.Close()
+	}
+}
+
+// Cleanup is "failing" once no run has completed every step for this long.
+const storageFailingAfter = 10 * time.Minute
+
+func (p *pool) retainInvocations() {
+	policy := invocationStoragePolicy()
+	db, err := p.storageMaintenanceDB()
+	if err != nil {
+		p.recordStorageRun(storageWork{}, err, policy)
 		return
 	}
-	defer db.Close()
+	if db == nil {
+		return
+	}
 	p.mu.Lock()
 	idle := p.activeWork == 0 && !p.draining && !p.closed
 	firstPhase := p.storageNextPhase
 	p.storageNextPhase = (p.storageNextPhase + 1) % 4
-	p.mu.Unlock()
-	work, err := maintainInvocationStorage(ctx, db, policy, time.Now(), idle, firstPhase)
-	if err != nil {
-		// A busy database or spent budget is retried on the next tick. Avoid noisy
-		// per-tick warnings; report failures with the hourly storage health sample.
-		p.mu.Lock()
-		p.storageLastError = err.Error()
-		p.mu.Unlock()
-	} else {
-		p.mu.Lock()
-		p.storageLastError = ""
-		p.mu.Unlock()
+	// Adaptive batch: a run that spends its budget halves the batch, a
+	// clean fast run grows it back towards the configured size.
+	if p.storageBatch <= 0 || p.storageBatch > policy.Batch {
+		p.storageBatch = policy.Batch
 	}
+	policy.Batch = p.storageBatch
+	p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(p.life, time.Duration(policy.BudgetMS)*time.Millisecond)
+	started := time.Now()
+	work, err := maintainInvocationStorage(ctx, db, policy, time.Now(), idle, firstPhase)
+	elapsed := time.Since(started)
+	cancel()
+	p.mu.Lock()
+	switch {
+	case work.BudgetExhausted != "":
+		p.storageBatch = max(1, p.storageBatch/2)
+	case err == nil && elapsed < time.Duration(policy.BudgetMS)*time.Millisecond/2:
+		p.storageBatch = min(invocationStoragePolicy().Batch, p.storageBatch*2)
+	}
+	p.mu.Unlock()
+	p.recordStorageRun(work, err, policy)
+}
+
+// recordStorageRun keeps the last run's outcome, raises or clears the
+// cleanup_failing alert, and runs the hourly health report.
+func (p *pool) recordStorageRun(work storageWork, err error, policy storagePolicy) {
+	now := time.Now()
 	p.mu.Lock()
 	p.storageLastWork = work
-	due := time.Since(p.lastStorageReport) >= time.Hour
-	if due {
-		p.lastStorageReport = time.Now()
+	if err != nil {
+		// A busy database or spent budget is retried on the next tick.
+		p.storageLastError = err.Error()
+		p.storageFailStreak++
+	} else {
+		p.storageLastError = ""
+		p.storageFailStreak = 0
+		p.storageLastComplete = now
 	}
+	if p.storageLastComplete.IsZero() {
+		p.storageLastComplete = now // grace period starts at the first run
+	}
+	failing := now.Sub(p.storageLastComplete) >= storageFailingAfter
+	streak, lastErr := p.storageFailStreak, p.storageLastError
+	due := now.Sub(p.lastStorageReport) >= time.Hour
+	if due {
+		p.lastStorageReport = now
+	}
+	db := p.storageDB
 	p.mu.Unlock()
-	if due {
-		p.reportStorageHealth(db)
+	if failing {
+		p.raiseStorageAlert(storageAlert{"cleanup_failing", fmt.Sprintf("Invocation cleanup has not completed for %d runs (over %s); last error: %s", streak, storageFailingAfter, lastErr)}, map[string]any{"failed_runs": streak, "last_error": lastErr, "step_ms": work.StepMS, "batch_rows": work.BatchRows})
+	} else {
+		p.clearStorageAlert("cleanup_failing")
 	}
+	if due && db != nil {
+		p.reportStorageHealth(db, policy)
+	}
+}
+
+// raiseStorageAlert emits storage.alert once when an alert starts; the
+// condition is logged on every hourly report while it lasts.
+func (p *pool) raiseStorageAlert(a storageAlert, details map[string]any) {
+	p.mu.Lock()
+	if p.storageAlerts == nil {
+		p.storageAlerts = map[string]storageAlert{}
+	}
+	_, active := p.storageAlerts[a.Code]
+	p.storageAlerts[a.Code] = a
+	p.mu.Unlock()
+	if active {
+		return
+	}
+	p.ctx.Logger().Warn("functions storage alert", "code", a.Code, "message", a.Message)
+	payload := map[string]any{"code": a.Code, "message": a.Message}
+	for k, v := range details {
+		payload[k] = v
+	}
+	p.ctx.Emit("storage.alert", payload)
+}
+
+func (p *pool) clearStorageAlert(code string) {
+	p.mu.Lock()
+	_, active := p.storageAlerts[code]
+	delete(p.storageAlerts, code)
+	p.mu.Unlock()
+	if !active {
+		return
+	}
+	p.ctx.Logger().Info("functions storage alert cleared", "code", code)
+	p.ctx.Emit("storage.alert_cleared", map[string]any{"code": code})
 }
 
 type storageAlert struct {
@@ -396,6 +532,11 @@ type storageReport struct {
 	Alerts         []storageAlert `json:"alerts"`
 	LastWork       storageWork    `json:"last_maintenance"`
 	LastError      string         `json:"last_maintenance_error,omitempty"`
+	// FailedRuns counts consecutive cleanup runs that did not finish.
+	FailedRuns int `json:"failed_maintenance_runs"`
+	// CleanupLagSeconds is how far past its cutoff the oldest record still
+	// due for cleanup is (0 when nothing is overdue).
+	CleanupLagSeconds int64 `json:"cleanup_lag_seconds"`
 }
 
 // Physical file metrics are installation-wide; record age/backlog are project
@@ -466,6 +607,19 @@ func readStorageReport(ctx context.Context, db *sql.DB, pid string, policy stora
 		// Rows older than summary retention are counted only in the first branch.
 		// Detail branches below are separately restricted to the summary window.
 		out.CleanupBacklog += count
+		if count == 0 {
+			continue
+		}
+		var due string
+		if err = db.QueryRowContext(ctx, `SELECT started_at FROM function_invocations WHERE `+where+phase.predicate+` AND started_at < ?`+lower+` ORDER BY started_at LIMIT 1`, a[:len(a)-1]...).Scan(&due); err != nil && err != sql.ErrNoRows {
+			return out, err
+		}
+		if at, ok := parseStoredTime(due); ok {
+			cutoff, _ := parseStoredTime(retentionCutoff(now, phase.days))
+			if lag := int64(cutoff.Sub(at).Seconds()); lag > out.CleanupLagSeconds {
+				out.CleanupLagSeconds = lag
+			}
+		}
 	}
 	out.BacklogCapped = out.CleanupBacklog > 1000
 	if mode == 0 {
@@ -483,31 +637,53 @@ func readStorageReport(ctx context.Context, db *sql.DB, pid string, policy stora
 	if out.WALBytes >= 512*1024*1024 {
 		out.Alerts = append(out.Alerts, storageAlert{"large_wal", "WAL exceeds 512 MiB; check for long-running readers or checkpoint pressure."})
 	}
+	if out.CleanupLagSeconds >= int64(storageBehindAfter.Seconds()) {
+		out.Alerts = append(out.Alerts, storageAlert{"cleanup_behind", fmt.Sprintf("Invocation cleanup is %s behind its retention policy.", (time.Duration(out.CleanupLagSeconds) * time.Second).Round(time.Minute))})
+	}
 	if out.BacklogCapped {
 		out.Alerts = append(out.Alerts, storageAlert{"cleanup_backlog", "More than 1000 expired invocation records await cleanup."})
 	}
 	return out, nil
 }
-func (p *pool) reportStorageHealth(db *sql.DB) {
-	ctx, cancel := context.WithTimeout(p.life, 100*time.Millisecond)
+
+// Cleanup is "behind" when the oldest record due for cleanup is this late.
+const storageBehindAfter = 24 * time.Hour
+
+func (p *pool) reportStorageHealth(db *sql.DB, policy storagePolicy) {
+	// Hourly and off the request path: a wider budget than one cleanup run.
+	ctx, cancel := context.WithTimeout(p.life, 2*time.Second)
 	defer cancel()
-	report, err := readStorageReport(ctx, db, "", invocationStoragePolicy(), time.Now())
+	report, err := readStorageReport(ctx, db, "", policy, time.Now())
 	if err != nil {
 		p.ctx.Logger().Warn("storage health unavailable", "err", err)
 		return
 	}
 	p.addStorageRuntimeStatus(&report)
+	raised := map[string]bool{}
 	for _, a := range report.Alerts {
-		p.ctx.Logger().Warn("functions storage alert", "code", a.Code, "message", a.Message, "database_bytes", report.DatabaseBytes, "wal_bytes", report.WALBytes, "reusable_bytes", report.ReusableBytes, "cleanup_backlog", report.CleanupBacklog)
+		p.ctx.Logger().Warn("functions storage alert", "code", a.Code, "message", a.Message, "database_bytes", report.DatabaseBytes, "wal_bytes", report.WALBytes, "reusable_bytes", report.ReusableBytes, "cleanup_backlog", report.CleanupBacklog, "cleanup_lag_seconds", report.CleanupLagSeconds)
+		if a.Code == "cleanup_behind" || a.Code == "cleanup_backlog" {
+			raised[a.Code] = true
+			p.raiseStorageAlert(a, map[string]any{"cleanup_backlog": report.CleanupBacklog, "backlog_capped": report.BacklogCapped, "cleanup_lag_seconds": report.CleanupLagSeconds})
+		}
+	}
+	for _, code := range []string{"cleanup_behind", "cleanup_backlog"} {
+		if !raised[code] {
+			p.clearStorageAlert(code)
+		}
 	}
 	if report.LastError != "" {
-		p.ctx.Logger().Warn("functions storage maintenance deferred", "err", report.LastError)
+		p.ctx.Logger().Warn("functions storage maintenance deferred", "err", report.LastError, "step_ms", report.LastWork.StepMS, "batch_rows", report.LastWork.BatchRows)
 	}
 }
 func (p *pool) addStorageRuntimeStatus(report *storageReport) {
 	p.mu.Lock()
 	report.LastWork = p.storageLastWork
 	report.LastError = p.storageLastError
+	report.FailedRuns = p.storageFailStreak
+	if a, ok := p.storageAlerts["cleanup_failing"]; ok {
+		report.Alerts = append(report.Alerts, a)
+	}
 	p.mu.Unlock()
 	if report.LastWork.VacuumSkipped == "checkpoint_deferred" {
 		report.Alerts = append(report.Alerts, storageAlert{"checkpoint_deferred", "More than 8 MiB of WAL frames await checkpointing; physical shrinkage is deferred. Check reader/checkpoint pressure and plan maintenance if it persists."})
@@ -552,4 +728,15 @@ func storageTool() sdk.Tool {
 		}
 		return projectStorageReport(context.Background(), pid)
 	}}
+}
+
+// parseStoredTime reads invocation timestamps (RFC3339Nano, SQLite's
+// "YYYY-MM-DD HH:MM:SS" default, or a bare cutoff date).
+func parseStoredTime(v string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

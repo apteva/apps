@@ -1,6 +1,8 @@
-# Functions 1.23.0
+# Functions 1.24.0
 
-**New in 1.23.0:** authenticated invocations and Function URLs can run a stage. **1.22.0:** named stages. See [Stages (1.22.0)](#stages-1220).
+**New in 1.24.0:** invocation history privacy. See [Stored responses and log access (1.24.0)](#stored-responses-and-log-access-1240).
+
+**1.23.0:** authenticated invocations and Function URLs can run a stage. **1.22.0:** named stages. See [Stages (1.22.0)](#stages-1220).
 
 **New in 1.20.0:** snapshot restore. When an Apteva runtime is restored from a
 snapshot, the app SDK moves every `project_id` to the new runtime before
@@ -50,6 +52,35 @@ immutable, built **version** served by a pool of **warm worker
 processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
+
+## Stored responses and log access (1.24.0)
+
+- **Authenticated calls** (`functions_invoke_authenticated`) no longer keep
+  their response body in invocation history, just as their request was
+  already omitted. The record keeps status, `response_bytes` and timings, and
+  `response_omitted` says why the body is missing. The caller always receives
+  the full response.
+- **`store_responses`** per function (`functions_create` / `functions_update`,
+  panel settings): `auto` (default: unauthenticated bodies kept, authenticated
+  not), `never`, `errors_only` (failed calls only) or `always`. Bodies stored
+  for authenticated calls or under `errors_only` have anything that looks
+  like a key or token (credential-named fields, Bearer/Basic values, common
+  key and JWT shapes) replaced with `[redacted]`. This is a best-effort
+  filter: a secret with no recognizable name or shape is kept, so use `never`
+  for functions that return secrets. Console output and error text of
+  authenticated calls get the same filter.
+- **Retention:** `APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS=0` keeps summaries
+  only for successful calls. Cleanup timings, adaptive batching and the
+  `storage.alert` event are described in
+  [STORAGE_MANAGEMENT.md](STORAGE_MANAGEMENT.md#cleanup-budget-1240).
+- **`logs.read` permission:** `functions_logs` (request, return value,
+  console output, error, caller identity) requires it. Invocation lists
+  (`functions_invocations`, `GET /invocations`) no longer include caller
+  identity; performance and slow-call tools were already summary-level. Grants apply to agents and app callers; the dashboard's
+  invocation detail view is unchanged. With the platform's default allow
+  policy nothing changes until an agent's grants deny `logs.read` or its
+  installation defaults to deny.
+- Migration 013 only adds columns (no rewrite, no maintenance window).
 
 ## Stages (1.22.0)
 

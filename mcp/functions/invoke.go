@@ -182,8 +182,26 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		res.DurationMS = time.Since(started).Milliseconds()
 		res.Stderr = redactSecrets(res.Stderr, fn.Env)
 		res.Error = redactSecrets(res.Error, fn.Env)
-		logs := res.Stderr
-		_, err := ctx.AppDB().Exec(`UPDATE function_invocations SET finished_at=?,duration_ms=?,status=?,exit_code=?,response_body=?,stderr=?,error=?,truncated=?,build_ms=?,queue_ms=?,cold_start_ms=?,execution_ms=? WHERE id=? AND project_id=? AND started_at=?`, time.Now().UTC().Format(time.RFC3339Nano), res.DurationMS, res.Status, res.ExitCode, truncate(redactSecrets(res.Response, fn.Env), stdoutCap), truncate(logs, stderrCap), truncate(res.Error, stderrCap), inv.Truncated || len(res.Response) > stdoutCap, timings.build.Milliseconds(), timings.queue.Milliseconds(), timings.cold.Milliseconds(), timings.execution.Milliseconds(), id, fn.ProjectID, inv.StartedAt)
+		// Stored copies only; the caller's result above is never altered.
+		authenticated := security.Principal != nil
+		ok := res.Status == "ok"
+		logs, storedError := res.Stderr, res.Error
+		if authenticated {
+			logs, storedError = redactTokens(logs), redactTokens(storedError)
+		}
+		successDays := invocationStoragePolicy().SuccessDays
+		storedResponse, omitted := responseStorage(fn.StoreResponses, authenticated, ok, successDays, redactSecrets(res.Response, fn.Env))
+		err := finishInvocationRecord(ctx.AppDB(), invocationFinish{
+			ID: id, ProjectID: fn.ProjectID, StartedAt: inv.StartedAt,
+			FinishedAt: time.Now().UTC().Format(time.RFC3339Nano), DurationMS: res.DurationMS,
+			Status: res.Status, ExitCode: res.ExitCode,
+			Response: truncate(storedResponse, stdoutCap), ResponseBytes: int64(len(res.Response)), ResponseOmitted: omitted,
+			Stderr: truncate(logs, stderrCap), Error: truncate(storedError, stderrCap),
+			Truncated: inv.Truncated || len(storedResponse) > stdoutCap,
+			BuildMS:   timings.build.Milliseconds(), QueueMS: timings.queue.Milliseconds(), ColdStartMS: timings.cold.Milliseconds(), ExecutionMS: timings.execution.Milliseconds(),
+			// success_details_days=0: a successful call keeps its summary only.
+			ExpireDetails: ok && successDays == 0,
+		})
 		if err != nil {
 			ctx.Logger().Warn("finalize invocation", "id", id, "err", err)
 		}

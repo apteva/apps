@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,6 +99,11 @@ type pool struct {
 	storageNextPhase                                         int
 	lastStorageReport                                        time.Time
 	storageLastError                                         string
+	storageDB                                                *sql.DB
+	storageBatch                                             int
+	storageFailStreak                                        int
+	storageLastComplete                                      time.Time
+	storageAlerts                                            map[string]storageAlert
 	storageLastWork                                          storageWork
 }
 type fnPool struct {

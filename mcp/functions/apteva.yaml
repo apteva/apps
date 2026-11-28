@@ -2,8 +2,18 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.23.0
+version: 1.24.0
 description: |
+  v1.24.0 Invocation history no longer keeps the response bodies of
+  authenticated calls; it records status, size and timing. A per-function
+  store_responses setting (auto, never, errors_only, always) chooses what is
+  kept, and stored authenticated or failed-call bodies have keys and tokens
+  replaced. APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS can be 0. Cleanup keeps its
+  connection between runs, adapts its batch to the time budget, reports
+  per-step timings, and raises storage.alert when it fails for 10 minutes or
+  falls a day behind. functions_logs requires the new logs.read permission.
+  Migration 013 only adds columns.
+
   v1.23.0 Authenticated invocations (functions_invoke_authenticated) and
   public Function URLs can run a stage: pass stage (or a pinned version) to
   the authenticated call, or set function_url.stage. Admission stays by
@@ -151,6 +161,9 @@ provides:
     - prefix: /
     - prefix: /url/
       no_auth: true
+  permissions:
+    - name: logs.read
+      description: Read one invocation's details with functions_logs (request, return value, console output, error and caller identity). Without it, agents see invocation summaries only (status, size and timing).
   mcp_tools:
     - name: functions_storage
       description: "Inspect database/WAL size, reusable space, reclamation mode, project retention backlog and storage alerts."
@@ -178,9 +191,10 @@ provides:
     - name: functions_invoke
       description: "Synchronously invoke a function. Args: name (or id), event (any JSON), stage? or version? (mutually exclusive; neither runs the active version). Returns {status, response, duration_ms, exit_code, invocation_id, version_id, stage}."
     - name: functions_invocations
-      description: "Recent invocations for a function. Args: id (or name), limit (default 50, max 200)."
+      description: "Recent invocation summaries for a function (status, size, timing; no bodies or caller identity). Args: id (or name), limit (default 50, max 200)."
     - name: functions_logs
-      description: "Inspect output, status, total duration, timing breakdown and resource/downstream-call measurements of a single invocation. Args: invocation_id."
+      description: "Inspect output, status, total duration, timing breakdown and resource/downstream-call measurements of a single invocation. Args: invocation_id. Requires logs.read."
+      requires: logs.read
     - name: functions_deploy
       description: "Deploy a new immutable version. Args: id (or name), source OR (repo_id+repo_path), package_json?, activate? (default true; false builds without going live). Never moves a stage; identical content reuses its version."
     - name: functions_rollback
@@ -235,7 +249,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.23.0
+    ref: functions/v1.24.0
     entry: mcp/functions
   port: 8080
   health_check: /health

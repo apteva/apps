@@ -60,6 +60,15 @@ it. The detail panel explains when bodies/logs have expired. Expiry cannot be
 undone by lengthening retention. To preserve the previous detail policy, set
 both detail retention settings equal to summary retention **before upgrading**.
 
+`APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS=0` (1.24.0) keeps no detail of successful
+calls: they are written as summaries (`details_expired`, no request, response,
+logs, resources or identity), and the sweep clears any older successful detail
+on its next runs. Failed calls keep failure retention.
+
+Response bodies also follow each function's `store_responses` setting (1.24.0;
+see the README). `response_bytes` is recorded for every call and
+`response_omitted` names why a body was not stored.
+
 Cutoffs use midnight UTC to compare both legacy SQLite timestamp strings and
 RFC3339 timestamps safely. Consequently records can survive up to one extra day
 beyond the configured duration. Partial indexes remove already-expired rows
@@ -69,9 +78,9 @@ old cleared payloads. Running rows that finish later become eligible normally.
 | Environment variable | Default | Accepted values |
 | --- | ---: | --- |
 | `APTEVA_FUNCTIONS_INVOCATION_RETENTION_DAYS` | 30 | 1–3650 |
-| `APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS` | min(7, summary days) | 1–summary days |
+| `APTEVA_FUNCTIONS_SUCCESS_DETAILS_DAYS` | min(7, summary days) | 0–summary days; 0 keeps no successful-call detail |
 | `APTEVA_FUNCTIONS_FAILURE_DETAILS_DAYS` | summary days | 1–summary days |
-| `APTEVA_FUNCTIONS_RETENTION_BATCH_ROWS` | 32 | 1–128 per phase |
+| `APTEVA_FUNCTIONS_RETENTION_BATCH_ROWS` | 32 | 1–128 per phase; the effective batch halves after a run that spends its budget and grows back after fast runs |
 | `APTEVA_FUNCTIONS_VACUUM_PAGES` | 32 | 0–1024; 0 disables incremental reclamation |
 | `APTEVA_FUNCTIONS_STORAGE_BUDGET_MS` | 100 | 10–1000 |
 | `APTEVA_FUNCTIONS_STORAGE_INTERVAL_SECONDS` | 5 | 1–3600 |
@@ -162,6 +171,25 @@ installations), and the panel's **Storage and retention** section expose:
   UI displays `1000+` instead of performing an unbounded exact count.
 - Last maintenance counts/skip reason and last maintenance error, shared across
   the installation. They describe this process, not durable lifetime totals.
+- Since 1.24.0, `last_maintenance.step_ms` (wall time of each step:
+  `success_details`, `failure_details`, `summaries`, `reclaim`),
+  `last_maintenance.batch_rows` (effective batch), `budget_exhausted` (the step
+  running when the budget ran out), `failed_maintenance_runs` (consecutive runs
+  that did not finish) and `cleanup_lag_seconds` (how far past its cutoff the
+  oldest record still due for cleanup is). Errors are prefixed with their step.
+
+### Cleanup budget (1.24.0)
+
+Each run has one budget (`APTEVA_FUNCTIONS_STORAGE_BUDGET_MS`, 100 ms) for all
+four steps; a step that runs out stops the run, and the next run starts at the
+next step. Before 1.24.0 every run also resolved the database path through the
+shared read pool and opened a new connection inside that budget, so a run
+could time out ("context deadline exceeded") before any cleanup when history
+readers held the read connections or the file open was slow. The maintenance
+connection is now opened once and kept. Use `step_ms` and `budget_exhausted`
+to see which step spends the budget; a slow `success_details` or
+`failure_details` step is usually large bodies being cleared, and the adaptive
+batch reduces that automatically.
 
 Structured warnings are logged at most hourly for disabled conversion,
 configuration-disabled incremental reclamation, DB+WAL over the configured
@@ -170,6 +198,16 @@ threshold, at least 256 MiB and 20% reusable pages, WAL over 512 MiB, or more th
 hourly log sample. The panel refreshes once a minute while expanded. Connect the
 existing log-monitoring system to `functions storage alert` and its `code` field
 for notifications; the app does not send email/messages itself.
+
+Since 1.24.0 the app also emits a `storage.alert` event (`code`, `message` and
+details) when a cleanup alert starts, and `storage.alert_cleared` when it ends,
+so a workflow or notification app can subscribe:
+
+- `cleanup_failing`: no cleanup run has completed every step for 10 minutes
+  (checked every run; also listed in the health response).
+- `cleanup_behind`: the oldest record due for cleanup is more than a day past
+  its cutoff (checked with the hourly health report).
+- `cleanup_backlog`: more than 1000 expired records await cleanup (hourly).
 
 The warning threshold is not a disk quota and does not forecast exhaustion.
 Monitor host free disk alongside these metrics. Shortening retention without

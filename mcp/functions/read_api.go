@@ -59,6 +59,7 @@ func invocationPage(rows []*Invocation, limit int) map[string]any {
 		c.EventJSON = ""
 		c.ResponseBody = ""
 		c.Stderr = ""
+		c.Identity = nil // caller identity is an invocation detail (functions_logs)
 		out = append(out, &c)
 	}
 	return map[string]any{"invocations": out, "next_cursor": cursor}

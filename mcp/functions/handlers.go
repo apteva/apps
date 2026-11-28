@@ -1250,6 +1250,7 @@ func buildAndCreateFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid 
 	fn := &Function{
 		ProjectID:       pid,
 		WorkerIsolation: strArg(args, "worker_isolation"),
+		StoreResponses:  strArg(args, "store_responses"),
 		Name:            strArg(args, "name"),
 		Runtime:         strArg(args, "runtime"),
 		SourceKind:      strArg(args, "source_kind"),

@@ -519,6 +519,7 @@ func TestStageMigrationOnExistingDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	apply("012_stages.sql")
+	apply("013_response_storage.sql")
 
 	inv, err := dbGetInvocation(db, "p", 1)
 	if err != nil || inv == nil || inv.ResponseBody != "kept" || inv.Stage != "" {

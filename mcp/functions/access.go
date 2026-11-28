@@ -65,6 +65,11 @@ func validateFunctionArgs(args map[string]any, create bool) error {
 			return err
 		}
 	}
+	if raw, has := args["store_responses"]; has {
+		if err := validateStoreResponses(raw); err != nil {
+			return err
+		}
+	}
 	if raw, has := args["invocation_policy"]; has {
 		if _, err := parseInvocationPolicy(raw); err != nil {
 			return err

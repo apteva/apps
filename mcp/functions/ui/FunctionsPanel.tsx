@@ -94,8 +94,10 @@ type BuildStatus = "pending" | "building" | "ready" | "failed";
 
 interface RuntimeReadiness {state:"preparing"|"prepared"|"ready"|"failed"|"inactive";error?:string;build_ms:number;worker_start_ms:number;boot_validated:boolean;warm_workers:number}
 type WorkerIsolation = "function_version" | "invocation" | "authenticated_invocation";
+type StoreResponses = "auto" | "never" | "errors_only" | "always";
 interface FunctionRow {
  worker_isolation?: WorkerIsolation;
+ store_responses?: StoreResponses;
  limits?: Record<string,any>;
  runtime_readiness?:RuntimeReadiness;
   id: number;
@@ -167,6 +169,8 @@ interface Invocation {
   trigger_kind: string;
   event_json?: string;
   response_body?: string;
+  response_bytes?: number;
+  response_omitted?: string;
   stderr?: string;
   error?: string;
 }
@@ -902,6 +906,7 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
         </div>
       )}
       {inv.details_expired && <p className="text-xs text-text-muted">Detailed logs and payloads expired under the storage retention policy. Execution summary is retained.</p>}
+      {inv.response_omitted && <p className="text-xs text-text-muted">Return value not stored ({({authenticated:"authenticated call",policy_never:"function stores no responses",errors_only:"function stores failed calls only",success_details_disabled:"successful-call details are off"} as Record<string,string>)[inv.response_omitted] ?? inv.response_omitted}){inv.response_bytes ? `, ${inv.response_bytes} bytes` : ""}.</p>}
       {inv.response_body && (
         <div>
           <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Return value</div>
@@ -1524,8 +1529,9 @@ function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:(
  const [limits,setLimits]=useState<Record<string,any>>(fn.limits||{});
  const [access,setAccess]=useState(JSON.stringify(fn.access??null,null,2));
  const [workerIsolation,setWorkerIsolation]=useState(fn.worker_isolation);
+ const [storeResponses,setStoreResponses]=useState(fn.store_responses);
  const [error,setError]=useState(""),[saving,setSaving]=useState(false);
- const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,limits,access:JSON.parse(access),worker_isolation:workerIsolation});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
+ const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,limits,access:JSON.parse(access),worker_isolation:workerIsolation,...(storeResponses?{store_responses:storeResponses}:{})});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
  return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Hard worker memory limit (MiB)<input type="number" min={16} max={65536} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Capacity class<select value={limits.class||"interactive"} onChange={e=>setLimits({...limits,class:e.target.value})} className={inputCls}><option value="interactive">Interactive</option><option value="background">Background</option></select></label>
  {fn.worker_isolation && <label>
    Worker isolation
@@ -1535,6 +1541,16 @@ function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:(
      <option value="authenticated_invocation">Fresh worker for authenticated calls</option>
    </select>
    <span className="block text-text-muted">Reused workers keep process state. Keep caller data in the request handler.</span>
+ </label>}
+ {fn.store_responses && <label>
+   Stored responses
+   <select value={storeResponses ?? fn.store_responses} onChange={e=>setStoreResponses(e.target.value as StoreResponses)} className={inputCls}>
+     <option value="auto">Unauthenticated calls only</option>
+     <option value="never">Never</option>
+     <option value="errors_only">Failed calls only</option>
+     <option value="always">Always</option>
+   </select>
+   <span className="block text-text-muted">What invocation history keeps of each response. Status, size and timing are always kept. Authenticated and failed-call bodies are stored with keys and tokens replaced.</span>
  </label>}
  {[["concurrency","Concurrent workers",1024],["max_idle_workers","Maximum idle workers",1024],["warm_workers","Proactive warm workers (default 0)",1024],["idle_timeout_ms","Idle lifetime (ms)",600000],["queue_timeout_ms","Capacity wait (ms)",600000],["app_timeout_ms","App call timeout (ms)",600000],["integration_timeout_ms","Integration timeout (ms)",600000]].map(([key,label,max])=><label key={String(key)}>{label}<input type="number" min={0} max={Number(max)} placeholder="Default" value={limits[String(key)]??""} onChange={e=>setLimits({...limits,[String(key)]:e.target.value===""?undefined:Number(e.target.value)})} className={inputCls}/></label>)}<label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
 }
