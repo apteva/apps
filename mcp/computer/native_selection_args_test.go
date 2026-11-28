@@ -71,3 +71,50 @@ func TestComputerUseNativeSelectionArgs(t *testing.T) {
 		t.Fatal("more than 12 checked guards must be rejected")
 	}
 }
+
+type nativeListComp struct {
+	*nativeSelectionComp
+	opts   mobile.ListReadOptions
+	values map[string]string
+}
+
+func (n *nativeListComp) NativeReadList(_ string, _ []string, values map[string]string, opts mobile.ListReadOptions) (mobile.ListRead, error) {
+	n.opts, n.values = opts, values
+	return mobile.ListRead{Rows: []mobile.ListRow{{Texts: []string{"Ana", "Hello"}}}, Stopped: mobile.ListStopEnd, Swipes: 2, Screens: 3}, nil
+}
+
+func TestComputerUseNativeReadListArgs(t *testing.T) {
+	comp := &nativeListComp{nativeSelectionComp: &nativeSelectionComp{fakeComp: &fakeComp{display: backends.DisplaySize{Width: 100, Height: 200}}}}
+	app := appWithSession("br_list", comp, "mobile")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	base := func(extra map[string]any) map[string]any {
+		args := map[string]any{"session_id": "br_list", "native_app": "com.example", "native_required": []any{"Home"}, "native_values": map[string]any{"account": "me"}}
+		for k, v := range extra {
+			args[k] = v
+		}
+		return args
+	}
+	out, err := app.toolComputerUse(ctx, base(map[string]any{
+		"action": "native_read_list", "native_container": "feed", "native_rows": "clickable", "max_items": 7, "max_swipes": 0, "direction": "up",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	rows, _ := m["rows"].([]mobile.ListRow)
+	if m["stopped"] != mobile.ListStopEnd || len(rows) != 1 || rows[0].Texts[1] != "Hello" || m["swipes"] != 2 {
+		t.Fatalf("out = %#v", m)
+	}
+	if comp.opts.Container != "feed" || comp.opts.Rows != "clickable" || comp.opts.MaxItems != 7 || comp.opts.MaxSwipes != 0 || comp.opts.Direction != "up" || comp.values["account"] != "me" {
+		t.Fatalf("opts = %#v values = %#v", comp.opts, comp.values)
+	}
+	for name, extra := range map[string]map[string]any{
+		"target":          {"action": "native_read_list", "native_container": "feed", "native_target": "x"},
+		"rows elsewhere":  {"action": "native_tap", "native_target": "x", "native_rows": "items"},
+		"items elsewhere": {"action": "native_read", "native_target": "x", "max_items": 3},
+	} {
+		if _, err := app.toolComputerUse(ctx, base(extra)); err == nil {
+			t.Fatalf("%s: expected rejection", name)
+		}
+	}
+}

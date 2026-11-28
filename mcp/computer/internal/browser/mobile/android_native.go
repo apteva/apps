@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // NativeOptions carries the Android selection guards and list-scroll
@@ -413,16 +414,8 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 		return "", errors.New("native action requires one exact target")
 	}
 	if typing {
-		if (!clearing && len(text) == 0) || len(text) > 256 {
-			return "", errors.New("native input requires 1-256 bytes")
-		}
-		for _, r := range text {
-			if r < 32 || r > 126 || r == '%' {
-				return "", errors.New("ADB native input requires printable ASCII excluding percent")
-			}
-		}
-		if (action == "native_replace" || clearing) && !slices.Contains(c.lease.Device.Capabilities, "replace_text") {
-			return "", errors.New("Mobile does not support verified text replacement")
+		if err := checkAndroidInput(action, text, c.lease.Device.Capabilities); err != nil {
+			return "", err
 		}
 	} else if text != "" {
 		return "", errors.New("native read/tap/select/scroll does not accept input text")
@@ -526,21 +519,128 @@ func (c *Computer) androidNative(action, app string, required []string, target, 
 	if err = c.invoke(c.ctx(), "mobile_action", args, &out); err != nil {
 		return "", err
 	}
-	// A guard on the edited field is a precondition; verify the new value
-	// afterward while retaining all other account guards.
-	if _, guarded := values[target]; guarded {
-		next := make(map[string]string, len(values))
-		for field, value := range values {
-			next[field] = value
+	// Confirm the text landed in the field that was typed into. Its selector
+	// may no longer match (a placeholder such as "Add a comment..." disappears
+	// once text is in), so find the focused field instead and check it is the
+	// same one. A guard on the edited field was a precondition; every other
+	// marker and account guard is rechecked.
+	rest := make(map[string]string, len(values))
+	for field, value := range values {
+		if field != target {
+			rest[field] = value
 		}
-		next[target] = text
-		values = next
 	}
-	changed, err := observe()
-	if err != nil || changed.value != text {
+	source, err := c.nativeSource()
+	if err != nil {
+		return "", errors.New("native field value was not confirmed after input")
+	}
+	nodes, err := androidTree(source, app, c.display.Width, c.display.Height)
+	if err != nil {
+		return "", errors.New("native field value was not confirmed after input")
+	}
+	// A marker naming the edited field itself (often its placeholder) is
+	// replaced by the focused-field check below.
+	row, _, scoped := strings.Cut(target, " >> ")
+	markers := make([]string, 0, len(required))
+	for _, marker := range required {
+		if marker == target || (scoped && marker == strings.TrimSpace(row)) || (focused.value != "" && marker == focused.value) {
+			continue
+		}
+		markers = append(markers, marker)
+	}
+	if _, err := matchAndroidChecked(nodes, markers, "", false, false, rest, nil); err != nil {
+		return "", fmt.Errorf("native screen changed after input; inspect before retrying: %w", err)
+	}
+	if !sameFocusedField(nodes, focused, text) {
 		return "", errors.New("native field value was not confirmed after input")
 	}
 	return "", nil
+}
+
+// maxReplaceBytes matches Mobile's replacement limit.
+const maxReplaceBytes = 4096
+
+// checkAndroidInput validates text for native_type, native_replace and
+// native_clear. ADB's built-in text input types only printable ASCII without
+// percent, so native_type keeps that 256-byte limit. Replacement sets the
+// field through Mobile's verified path, which accepts any text up to 4096
+// bytes except control characters (tab allowed); line breaks are rejected.
+func checkAndroidInput(action, text string, caps []string) error {
+	clearing := action == "native_clear"
+	if action == "native_type" {
+		if len(text) == 0 || len(text) > 256 {
+			return errors.New("native_type requires 1-256 bytes; use native_replace for longer or non-ASCII text")
+		}
+		if !plainASCII(text) {
+			return errors.New("native_type accepts printable ASCII excluding percent; use native_replace for other text")
+		}
+		return nil
+	}
+	if !slices.Contains(caps, "replace_text") {
+		return errors.New("Mobile does not support verified text replacement")
+	}
+	if (!clearing && len(text) == 0) || len(text) > maxReplaceBytes {
+		return fmt.Errorf("native_replace requires 1-%d bytes", maxReplaceBytes)
+	}
+	if !utf8.ValidString(text) {
+		return errors.New("native_replace text must be valid UTF-8")
+	}
+	for _, r := range text {
+		if (r < 32 && r != '\t') || r == 0x7f {
+			return errors.New("native_replace text cannot contain line breaks or control characters")
+		}
+	}
+	// Long or non-ASCII text may wrap and resize the field; older Mobile
+	// rejected a resized field after a correct replacement.
+	if (len(text) > 256 || !plainASCII(text)) && !slices.Contains(caps, "replace_text_resizable") {
+		return errors.New("native_replace with Unicode or text over 256 bytes requires Mobile 0.11.0 or later (replace_text_resizable)")
+	}
+	return nil
+}
+
+func plainASCII(text string) bool {
+	for _, r := range text {
+		if r < 32 || r > 126 || r == '%' {
+			return false
+		}
+	}
+	return true
+}
+
+// sameFocusedField reports whether exactly one focused field holds text and
+// is the field typed into: same class, same resource ID when it has one, and
+// otherwise the same left and right edges with an overlapping vertical range
+// (the field may wrap the new text and grow up or down).
+func sameFocusedField(nodes []androidNode, was androidNode, text string) bool {
+	match := 0
+	for _, n := range nodes {
+		if !n.focused {
+			continue
+		}
+		match++
+		if match > 1 || n.password || !n.visible || n.kind != was.kind || n.value != text || !strings.HasSuffix(n.kind, "EditText") {
+			return false
+		}
+		if was.id != "" {
+			if n.id != was.id {
+				return false
+			}
+			continue
+		}
+		abs := func(v int) int {
+			if v < 0 {
+				return -v
+			}
+			return v
+		}
+		if n.id != "" || abs(n.x-was.x) > 2 || abs((n.x+n.w)-(was.x+was.w)) > 2 {
+			return false
+		}
+		if !(n.y < was.y+was.h && was.y < n.y+n.h) {
+			return false
+		}
+	}
+	return match == 1
 }
 
 // androidScrollTo swipes inside one scrollable container until the target is
