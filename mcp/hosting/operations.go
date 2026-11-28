@@ -40,10 +40,11 @@ var stepTimeouts = map[string]time.Duration{
 	"wait_ready":   2 * time.Hour,
 	"wait_access":  15 * time.Minute,
 	// A phone that stays offline, or that someone else keeps holding.
-	"device_check": 15 * time.Minute,
-	"device_open":  15 * time.Minute,
-	"device_stop":  15 * time.Minute,
-	"device_close": 15 * time.Minute,
+	"device_check":    15 * time.Minute,
+	"device_open":     15 * time.Minute,
+	"device_handover": 5 * time.Minute,
+	"device_stop":     15 * time.Minute,
+	"device_close":    15 * time.Minute,
 }
 
 // errPending means the step has not finished yet and should be polled again.
@@ -290,6 +291,10 @@ func (a *App) failOperation(ctx *sdk.AppCtx, op *Operation, token, step string, 
 	}
 	ctx.Logger().Warn("hosting operation failed", "operation_id", op.ID, "kind", op.Kind, "step", step, "err", cause)
 	ctx.Emit("hosting.operation.failed", map[string]any{"operation_id": op.ID, "kind": op.Kind, "tenant_id": op.TenantID, "machine_id": op.MachineID, "step": step, "error": msg})
+	var he *handoverError
+	if errors.As(cause, &he) && op.TenantID != "" && op.MachineID > 0 {
+		a.handoverFailed(ctx, op, he)
+	}
 }
 
 // finishOperation applies the run's outcome to the tenant and machine.

@@ -119,7 +119,11 @@ hosting_machine_add         pool_key=phones, device_ref=<id from mobile_devices>
 hosting_machine_update      validated=true, confirm=<machine id>
 hosting_machine_inspect     records the baseline the first time, verifies it
 hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-access
+                            settings (optional): require_unlocked_handover,
+                            clear_system_apps, wipe_mode
 ```
+
+Phone pools need Mobile 0.12.0 or later.
 
 - **Lock**: renting a phone opens an exclusive Mobile session (caller_ref
   `hosting-tenant:<tenant id>`, one hour) that Hosting renews every minute.
@@ -133,17 +137,38 @@ hosting_profile_upsert      backend machine_pool, pool_key=phones, product ssh-a
   was away past Mobile's offline grace), Hosting opens a new one and emits
   `hosting.tenant.access_updated` with `reason: session_reopened`: read the
   tenant again for the new id.
+- **Handover**: on create and resume, after opening the session, Hosting
+  calls Mobile's `wake`. A phone with a PIN, pattern or password
+  (`phone_locked`), or whose lock state Mobile cannot read
+  (`lock_unknown`), is not handed over: its session is stopped, the phone
+  is quarantined, and the tenant moves to another free phone in the pool.
+  With none free the run fails: a new rental goes `failed`, a resume goes
+  back to `suspended`. Either way `hosting.tenant.handover_failed` fires
+  (`reason`, `moved`, `to_machine_id`). Remove the lock and retry the
+  failed run (`hosting_operation_retry`, reviewed=true). Profile setting
+  `require_unlocked_handover: false` skips the check.
 - **Suspend** stops the session; **resume** opens a new one. Restart,
   reinstall and SSH keys do not apply to phones.
 - **Release** (and `hosting_machine_clean`): stop the session, open a new
   one, run Mobile's `clean` with `clear_data` = every third-party app in the
-  baseline (in batches of 50, Mobile's limit), then `verify_clean`.
-  `verify_clean` cannot see app data, so the release fails, and the phone is
-  quarantined, if Mobile does not report every baseline app's data cleared. A phone that still differs from its baseline
-  is quarantined with the differences; otherwise it goes back on sale.
+  baseline plus the system apps in the pool's profiles' `clear_system_apps`
+  (in batches of 50, Mobile's limit), then `verify_clean`. Each system app
+  must also be in Mobile's `clean_system_apps` operator setting; Mobile
+  refuses any other, and the release fails. `verify_clean` cannot see app
+  data, so the release fails if Mobile does not report every app's data
+  cleared, and also if `clean` lists anything in `not_undone` (a PIN or a
+  Bluetooth pairing the renter added, which Mobile cannot remove). A failed
+  release quarantines the phone; a phone that still differs from its
+  baseline (including `lock_changed`) is quarantined with the differences;
+  otherwise it goes back on sale.
 - **Inspect** records the baseline only when the phone has none. Pass
   `capture_baseline: true` to record it again, and only on a phone set up
-  exactly as it should be sold: the baseline is what "clean" means.
+  exactly as it should be sold: the baseline is what "clean" means. Inspect
+  refuses a phone whose baseline has a PIN, pattern or password
+  (`lock: secure`), more than one user, or that Mobile recorded before
+  0.12.0 (coverage below 2: run inspect with `capture_baseline: true`).
+- **Wipe mode**: `deep_clean` (the default and only mode). Mobile has no
+  throwaway-user sessions, so `wipe_mode: ephemeral_user` is refused.
 - **Health**: every minute Hosting reads `mobile_devices`. A phone Mobile does
   not list as ready, configured or busy is offline and not sold. When Mobile
   cannot be reached, phones go off sale without alerts.
@@ -243,9 +268,10 @@ chat message. Nothing needs polling.
 |---|---|
 | `hosting.operation.failed` | a run failed (step and error included); its machine is quarantined |
 | `hosting.machine.offline` / `hosting.machine.online` | the minute refresh sees a machine drop off or come back. Not sent while the machine is being erased (state `cleaning`): that run reports its own failure |
-| `hosting.machine.quarantined` | a run failed on a machine, or a phone was swapped away from its tenant |
+| `hosting.machine.quarantined` | a run failed on a machine (a phone that failed its handover included), or a phone was swapped away from its tenant |
 | `hosting.tenant.degraded` / `hosting.tenant.recovered` | a rented phone is offline longer than `degraded_after_minutes`, or held by someone else; and when that is over |
 | `hosting.tenant.swapped` | `hosting_tenant_swap` moved a tenant to another phone (`from_device_ref`, `device_ref`) |
+| `hosting.tenant.handover_failed` | a phone could not be handed over on create or resume (`reason`: `phone_locked` or `lock_unknown`); `moved` says whether the tenant went to another phone (`to_machine_id`, `to_device_ref`) or the run failed (`not_moved_reason`) |
 | `hosting.tenant.stuck` | once per situation: a waiting tenant past its `due_at` (`reason: presale_due`), or a tenant still provisioning, suspending, resuming or releasing after `stuck_after_minutes` (default 180; `reason: status:<status>`) |
 
 `presale_ready_days` on a pool profile is the promise made to customers who
@@ -271,6 +297,25 @@ reinstall, swap phone, release, run log), machines (pools, phone pools,
 execution switch, add, inspect, validate, maintenance, quarantine, clean,
 remove, reviewed retry, resolve a stuck tenant)
 and profiles (with availability).
+
+## Upgrading to 2.6.0
+
+Phone pools now need Mobile 0.12.0. No migration.
+
+- Create and resume check that the phone is usable (Mobile's `wake`) and
+  move the tenant to another free phone when it is locked
+  (`hosting.tenant.handover_failed`). Opt out per profile with
+  `require_unlocked_handover: false`.
+- Phones already on sale keep their baseline only if Mobile 0.12.0
+  recorded it: the next inspect of a phone with an older baseline fails
+  and asks for `capture_baseline: true`. Rentals and releases do not
+  re-check the baseline coverage.
+- Inspect refuses phones with a PIN, pattern or password, or more than one
+  user.
+- Profiles take `clear_system_apps`; list the same apps in Mobile's
+  `clean_system_apps` setting first, or releases fail and quarantine the
+  phone.
+- A release fails when Mobile's clean reports anything it could not undo.
 
 ## Upgrading to 2.5.1
 

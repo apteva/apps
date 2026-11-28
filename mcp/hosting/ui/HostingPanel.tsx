@@ -695,7 +695,11 @@ export default function HostingPanel(_props: NativePanelProps) {
                       <td className="py-2 pr-2"><div className="font-medium">{p.name || p.key}</div><div className="text-text-dim font-mono">{p.key}</div></td>
                       <td className="py-2 pr-2">{BACKEND_LABEL[p.backend] || p.backend}</td>
                       <td className="py-2 pr-2">{p.product_key}</td>
-                      <td className="py-2 pr-2">{size}</td>
+                      <td className="py-2 pr-2">
+                        {size}
+                        {p.backend === "machine_pool" && (p.settings as Record<string, unknown> | null)?.require_unlocked_handover === false && <div className="text-text-dim">Handover lock check off</div>}
+                        {p.backend === "machine_pool" && Array.isArray((p.settings as Record<string, unknown> | null)?.clear_system_apps) && <div className="text-text-dim">Clears {((p.settings as Record<string, unknown>).clear_system_apps as unknown[]).length} system app(s)</div>}
+                      </td>
                       <td className="py-2">
                         {av && <Badge value={av.for_sale ? "available" : "maintenance"} />}
                         {av?.machines != null && <span className="text-text-dim"> {av.machines} free</span>}
